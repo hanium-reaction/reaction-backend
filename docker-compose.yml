@@ -1,0 +1,16 @@
+services:
+  backend:
+    build:
+      context: .
+      target: dev
+    container_name: reaction-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_ENV: local
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped
