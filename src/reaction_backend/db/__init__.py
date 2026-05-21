@@ -6,6 +6,7 @@ ORM 모델은 `from reaction_backend.db.base import Base, TimestampMixin, SoftDe
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from reaction_backend.db import models
 from reaction_backend.db.base import Base, SoftDeleteMixin, TimestampMixin
 from reaction_backend.db.session import (
     dispose_engine,
@@ -24,5 +25,6 @@ __all__ = [
     "get_db",
     "get_engine",
     "get_sessionmaker",
+    "models",
     "normalize_async_url",
 ]
