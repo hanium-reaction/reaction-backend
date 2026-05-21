@@ -78,11 +78,6 @@ jobs:
       - name: Show current revision (before)
         run: uv run alembic current
 
-      - name: Drift check (sanity)
-        # 모델 ↔ 마이그레이션 일치 한 번 더 확인.
-        # 실패 시 CD 중단 — staging 에 잘못된 schema 적용 방지.
-        run: uv run alembic check
-
       - name: Print upgrade plan (dry-run)
         # 어떤 revision 들이 적용될지 로그로 남김.
         run: |
@@ -97,6 +92,12 @@ jobs:
           TARGET="${{ inputs.target_revision || 'head' }}"
           echo "applying to ${TARGET}..."
           uv run alembic upgrade "${TARGET}"
+
+      - name: Drift check (post-upgrade sanity)
+        # 모델 ↔ 마이그레이션 일치 검증.
+        # upgrade 후 실행 — staging 에 적용된 schema 가 모델과 sync 되었는지 확인.
+        # (PR CI 에서 이미 검증하지만 2중 안전.)
+        run: uv run alembic check
 
       - name: Show current revision (after)
         run: uv run alembic current
