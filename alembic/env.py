@@ -26,11 +26,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from reaction_backend.config import get_settings  # noqa: E402
+from reaction_backend.db import models  # noqa: E402, F401  ← Base.metadata 등록
 from reaction_backend.db.base import Base  # noqa: E402
 from reaction_backend.db.session import normalize_async_url  # noqa: E402
 
-# 후속 모델 추가 시: 모델을 import 해야 Base.metadata 에 등록됨.
-# 예: from reaction_backend.db import models  # noqa: F401
+_ = models  # mypy/ruff 비활성 import 가드
 
 config = context.config
 
