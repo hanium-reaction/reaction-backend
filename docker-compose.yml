@@ -1,4 +1,23 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: reaction-postgres
+    environment:
+      POSTGRES_USER: reaction
+      POSTGRES_PASSWORD: reaction
+      POSTGRES_DB: reaction
+      TZ: Asia/Seoul
+    ports:
+      - "5432:5432"
+    volumes:
+      - reaction-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reaction -d reaction"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   backend:
     build:
       context: .
@@ -11,6 +30,14 @@ services:
         required: false
     environment:
       APP_ENV: local
+      # 로컬 docker postgres 사용 시 default. .env 에 DATABASE_URL 있으면 그게 우선.
+      DATABASE_URL: ${DATABASE_URL:-postgresql://reaction:reaction@postgres:5432/reaction}
     volumes:
       - ./src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  reaction-pg-data:

@@ -50,11 +50,27 @@ class ErrorResponse(BaseModel):
     server_time: datetime = Field(default_factory=now_kst)
 
 
-class HealthResponse(BaseModel):
-    """`GET /health` 응답."""
+class DbStatus(BaseModel):
+    """DB 헬스 정보 (health 응답에 포함)."""
 
-    status: str = Field(default="ok", description="고정값")
+    ok: bool
+    latency_ms: int | None = None
+    error: str | None = None
+
+
+class HealthResponse(BaseModel):
+    """`GET /health` 응답.
+
+    `status`:
+      - `"ok"`     — 앱 + DB 모두 정상
+      - `"degraded"` — 앱은 살아있으나 의존성(DB) 비정상
+    HTTP status는 항상 200 (앱 자체는 응답 가능). 503 분기는 readiness 엔드포인트로
+    분리할 때 도입.
+    """
+
+    status: str = Field(description="ok or degraded")
     app: str
     version: str
     env: str
     server_time: datetime = Field(default_factory=now_kst)
+    db: DbStatus

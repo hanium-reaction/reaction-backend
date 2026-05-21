@@ -5,14 +5,24 @@ from reaction_backend.main import app
 client = TestClient(app)
 
 
-def test_health_returns_ok():
+def test_health_returns_response():
+    """앱이 살아있으면 200. DB 가용성과 무관하게 응답 자체는 보장."""
     response = client.get("/health")
     assert response.status_code == 200
 
     body = response.json()
-    assert body["status"] == "ok"
+    # DB 연결 여부에 따라 ok 또는 degraded
+    assert body["status"] in {"ok", "degraded"}
     assert body["app"] == "reaction-backend"
     assert "server_time" in body
+    assert "db" in body
+    assert isinstance(body["db"]["ok"], bool)
+    # DB OK이면 latency_ms 양수
+    if body["db"]["ok"]:
+        assert body["db"]["latency_ms"] is not None and body["db"]["latency_ms"] >= 0
+    else:
+        # 실패 시 error 메시지가 있어야 디버깅 가능
+        assert body["db"]["error"]
 
 
 def test_cors_preflight_allows_frontend_origin():
