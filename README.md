@@ -36,14 +36,16 @@ uv run uvicorn reaction_backend.main:app --reload
 # → http://localhost:8000/docs  (Swagger UI)
 ```
 
-### Docker Compose
+### Docker Compose (backend + 로컬 postgres)
 
 ```bash
 docker compose up --build
-# → http://localhost:8000/health
+# → http://localhost:8000/health   (DB ping 포함)
+# → postgres on localhost:5432 (user/db: reaction, pass: reaction)
 ```
 
 소스 (`src/`) 가 마운트되어 hot reload 됨.
+`.env` 에 `DATABASE_URL` 이 있으면 Supabase 등 외부 DB 우선, 없으면 docker compose 내부 postgres 사용.
 
 ---
 
@@ -59,7 +61,12 @@ docker compose up --build
 | 포맷 검사 | `uv run ruff format --check .` |
 | 타입 검사 | `uv run mypy src` |
 | 테스트 | `uv run pytest -v` |
+| **Alembic 현재 버전** | `uv run alembic current` |
+| **새 마이그레이션** | `uv run alembic revision --autogenerate -m "..."` |
+| **마이그레이션 적용** | `uv run alembic upgrade head` |
+| **한 단계 되돌리기** | `uv run alembic downgrade -1` |
 | Docker 빌드 | `docker compose build` |
+| Docker (postgres 포함) | `docker compose up` |
 
 ---
 
@@ -115,12 +122,48 @@ reaction-backend/
 
 ---
 
+## 데이터베이스 (Issue #2)
+
+**진실 소스:** `Reaction_DB_설계서_v0.7.1` + `Reaction_DB_시나리오별_상세분석.md`.
+**스택:** Supabase PostgreSQL (호스팅된 표준 PG) + SQLAlchemy(async) + asyncpg + Alembic.
+**전략:** Supabase 부가 서비스(Auth/Storage/Realtime/Edge)는 미사용 — vendor-neutral 코드 유지. AWS 이전 시 DB는 `pg_dump | psql` 로 매끄럽게.
+
+### 첫 셋업
+
+1. Supabase 프로젝트 생성 → **Session pooler URL** 복사
+2. `.env` 만들고 `DATABASE_URL=postgresql://postgres.<ref>:<pw>@aws-X-ap-northeast-2.pooler.supabase.com:5432/postgres`
+   (코드가 자동으로 `postgresql+asyncpg://` 로 변환)
+3. `uv run alembic current` 로 연결 확인 (PR 2-A 시점)
+
+### 로컬 Postgres (Supabase 없이)
+
+`.env` 에서 `DATABASE_URL` 비우거나 빼면 `docker compose` 의 내부 postgres 사용:
+```
+DATABASE_URL=postgresql://reaction:reaction@localhost:5432/reaction
+```
+
+### 모델/마이그레이션 위치
+
+- ORM 모델: `src/reaction_backend/db/models/` (Issue #2 후속 PR에서 채워짐)
+- 마이그레이션: `alembic/versions/`
+- 모델 변경 시: 모델 수정 → `alembic revision --autogenerate -m "..."` → 생성된 파일 리뷰 → `alembic upgrade head`
+
+### DB reset / seed (PR 2-D 에서 추가 예정)
+
+- `make db.reset` 또는 `uv run python scripts/db_reset.py` — 모든 테이블 drop + 최신 마이그레이션
+- `make db.seed` — demo user / demo flow 데이터 삽입
+
+---
+
 ## 후속 이슈와의 연결
 
 | 이슈 | 채워질 영역 |
 | --- | --- |
 | #1 follow-up | Auth / Onboarding / Interview 핵심 (`agents/interview_agent.py`, `orchestrator/interview.py`) |
-| #2 DB Schema v0.7 | `db/`, `repositories/`, alembic |
+| **#2-A** (이 PR) | `db/{session,base}.py`, `alembic/`, docker compose postgres, `/health` DB ping |
+| #2-B | User · InterviewSession · FixedSchedule · TimePolicy 모델 + 1차 마이그레이션 |
+| #2-C | Goal · Habit · InboxItem · ActionItem · Execution 모델 |
+| #2-D | FailureReason · RecoveryAttempt · PolicySnapshot · LlmRun + seed/reset 스크립트 + ERD diff 문서 |
 | #3 Backend API Contract v0 | 도메인 라우터 실제 구현 |
 | #5 LLM Infrastructure | `llm/`, `prompts/`, `safety/`, `agents/` 본 구현 |
 | #6 Deep Interview + Analysis Confirm | 인터뷰 흐름 통합 (`orchestrator/interview.py` 완성 + S03 commit 트랜잭션) |
