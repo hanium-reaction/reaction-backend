@@ -148,10 +148,25 @@ DATABASE_URL=postgresql://reaction:reaction@localhost:5432/reaction
 - 마이그레이션: `alembic/versions/`
 - 모델 변경 시: 모델 수정 → `alembic revision --autogenerate -m "..."` → 생성된 파일 리뷰 → `alembic upgrade head`
 
-### DB reset / seed (PR 2-D 에서 추가 예정)
+### DB reset / seed
 
-- `make db.reset` 또는 `uv run python scripts/db_reset.py` — 모든 테이블 drop + 최신 마이그레이션
-- `make db.seed` — demo user / demo flow 데이터 삽입
+| 목적 | 명령 |
+| --- | --- |
+| 전체 drop + 재생성 + 마스터 seed | `uv run python -m scripts.db_reset` |
+| Demo user 1명 + 부속 데이터 | `uv run python -m scripts.db_seed_demo` |
+
+`db_reset` 은 `app_env=prod` 에서는 거부됨. `yes` 입력 확인 단계 있음.
+**마스터 데이터** (13 failure tags + 9 recovery strategies) 는 `alembic upgrade head` 만으로 자동 seed 됨 (마이그레이션 `a96678e9ffe5`).
+
+### ERD ↔ 코드 매핑
+
+[`docs/erd-diff.md`](docs/erd-diff.md) — 29개 도메인 테이블 / 29개 ENUM / 마스터 데이터 / 의도적 누락 모두 한눈에.
+
+### CI/CD
+
+- **CI** (`.github/workflows/ci.yml`): PR 마다 lint / typecheck / test / docker build + **alembic check (drift 감지) + downgrade smoke**
+- **CD** (`.github/workflows/migrate.yml`): main 머지 시 **staging Supabase 에 alembic 자동 적용** (GitHub Secrets `STAGING_DATABASE_URL` 필요)
+- 가이드: [`docs/cicd.md`](docs/cicd.md) — Supabase staging 생성 + Secrets 등록 + manual approval 옵션
 
 ---
 
@@ -160,10 +175,11 @@ DATABASE_URL=postgresql://reaction:reaction@localhost:5432/reaction
 | 이슈 | 채워질 영역 |
 | --- | --- |
 | #1 follow-up | Auth / Onboarding / Interview 핵심 (`agents/interview_agent.py`, `orchestrator/interview.py`) |
-| **#2-A** (이 PR) | `db/{session,base}.py`, `alembic/`, docker compose postgres, `/health` DB ping |
-| #2-B | User · InterviewSession · FixedSchedule · TimePolicy 모델 + 1차 마이그레이션 |
-| #2-C | Goal · Habit · InboxItem · ActionItem · Execution 모델 |
-| #2-D | FailureReason · RecoveryAttempt · PolicySnapshot · LlmRun + seed/reset 스크립트 + ERD diff 문서 |
+| **#2-A** | `db/{session,base}.py`, `alembic/`, docker compose postgres, `/health` DB ping |
+| **#2-B** | 사용자/온보딩 8 모델 (users, interview, behavioral, interaction, notification, calendar, fixed_schedule) |
+| **#2-C** | 계획 9 모델 (time_policies, goals, goal_nodes, habits, habit_instances, inbox_items, action_items, scheduled_blocks, dependency_links) |
+| **#2-D** | 실행/회복 7 모델 (execution_events, interruption_events, context_snapshots, failure_reason_tags, execution_failure_tags, recovery_strategy_catalog, recovery_attempts) |
+| **#2-E** | 집계/시스템 5 모델 (period_summaries, daily_briefs, policy_snapshots, llm_runs, idempotency_keys) + 마스터 seed + reset 스크립트 + ERD diff |
 | #3 Backend API Contract v0 | 도메인 라우터 실제 구현 |
 | #5 LLM Infrastructure | `llm/`, `prompts/`, `safety/`, `agents/` 본 구현 |
 | #6 Deep Interview + Analysis Confirm | 인터뷰 흐름 통합 (`orchestrator/interview.py` 완성 + S03 commit 트랜잭션) |

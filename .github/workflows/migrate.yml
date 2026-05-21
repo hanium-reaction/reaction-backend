@@ -1,0 +1,114 @@
+name: Migrate (staging)
+
+# main 머지 시 staging Supabase 에 alembic 마이그레이션 자동 적용.
+#
+# 사전 조건:
+# 1. Supabase staging 프로젝트가 생성되어 있어야 함
+# 2. GitHub repository secrets 에 다음 등록:
+#    - STAGING_DATABASE_URL: Supabase staging Session pooler URL
+#      형태: postgresql://postgres.<ref>:<password>@aws-X-ap-northeast-2.pooler.supabase.com:5432/postgres
+#
+# 안전 장치:
+# - main 에 push 된 경우에만 실행 (PR / fork 에서는 안 됨)
+# - environment: staging 설정 가능 (필요 시 manual approval 추가)
+# - alembic check 로 drift 한 번 더 검증 후 적용
+# - upgrade head 실패 시 즉시 종료, 다음 단계 안 함
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "alembic/**"
+      - "src/reaction_backend/db/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/migrate.yml"
+  workflow_dispatch:
+    inputs:
+      target_revision:
+        description: "Target alembic revision (default: head)"
+        required: false
+        default: "head"
+
+concurrency:
+  # 같은 main 에 대해 동시 실행 1개만 — DB 충돌 방지
+  group: migrate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  migrate-staging:
+    name: alembic upgrade → staging Supabase
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # GitHub Environments — 필요 시 manual approval 추가 가능
+    # (Settings → Environments → staging → Required reviewers)
+    environment:
+      name: staging
+
+    env:
+      DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+      APP_ENV: staging
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate secret presence
+        # STAGING_DATABASE_URL 이 비어 있으면 fail-fast — 모르고 실행되는 일 방지.
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::STAGING_DATABASE_URL secret is not set. Configure it in repo Settings → Secrets → Actions."
+            exit 1
+          fi
+          # 키만 마스크하고 호스트는 표시 — 디버깅 용도
+          echo "target host: $(echo "$DATABASE_URL" | sed -E 's|.+@([^:/]+).+|\1|')"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.9.18"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Show current revision (before)
+        run: uv run alembic current
+
+      - name: Drift check (sanity)
+        # 모델 ↔ 마이그레이션 일치 한 번 더 확인.
+        # 실패 시 CD 중단 — staging 에 잘못된 schema 적용 방지.
+        run: uv run alembic check
+
+      - name: Print upgrade plan (dry-run)
+        # 어떤 revision 들이 적용될지 로그로 남김.
+        run: |
+          echo "=== upgrade plan ==="
+          uv run alembic history --indicate-current
+          echo ""
+          echo "=== target ==="
+          uv run alembic heads
+
+      - name: Apply migrations
+        run: |
+          TARGET="${{ inputs.target_revision || 'head' }}"
+          echo "applying to ${TARGET}..."
+          uv run alembic upgrade "${TARGET}"
+
+      - name: Show current revision (after)
+        run: uv run alembic current
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Migration Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Current revision:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          uv run alembic current >> $GITHUB_STEP_SUMMARY 2>&1 || true
+          echo '```' >> $GITHUB_STEP_SUMMARY

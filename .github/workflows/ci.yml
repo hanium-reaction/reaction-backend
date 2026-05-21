@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ci:
+  lint-test:
     name: lint · typecheck · test
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -41,6 +41,80 @@ jobs:
 
       - name: Pytest
         run: uv run pytest -v
+
+  migration:
+    name: alembic check · upgrade · dry-run
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: reaction
+          POSTGRES_PASSWORD: reaction
+          POSTGRES_DB: reaction
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U reaction"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # 격리된 임시 PostgreSQL — 실제 Supabase 와 무관, 안전.
+      DATABASE_URL: postgresql://reaction:reaction@localhost:5432/reaction
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.9.18"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Wait for postgres
+        run: |
+          for i in {1..15}; do
+            if pg_isready -h localhost -U reaction; then
+              echo "postgres is ready"; break
+            fi
+            sleep 2
+          done
+
+      - name: Apply all migrations
+        run: uv run alembic upgrade head
+
+      - name: Drift check — model vs migrations
+        # alembic check 는 모델과 현재 DB metadata 가 다르면 exit 1.
+        # PR 에 모델만 바꾸고 마이그레이션 안 만들면 여기서 잡힘.
+        run: uv run alembic check
+
+      - name: Generate offline SQL preview (dry-run, artifact)
+        # offline mode 로 SQL 만 출력 — 어떤 ALTER 가 적용될지 미리 볼 수 있음.
+        run: |
+          uv run alembic upgrade head --sql > migration-preview.sql || true
+          echo "=== migration-preview.sql (head, offline SQL) ==="
+          head -200 migration-preview.sql
+
+      - name: Upload SQL preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-preview
+          path: migration-preview.sql
+          retention-days: 7
+
+      - name: Downgrade smoke test
+        # 모든 마이그레이션을 base 까지 되돌릴 수 있는지 확인 — downgrade 깨짐 방지.
+        run: uv run alembic downgrade base
 
   docker:
     name: docker build
