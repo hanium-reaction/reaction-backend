@@ -39,3 +39,7 @@ DEMO_USER = DemoUser(
     tone_mode="gentle",
     created_at=datetime(2026, 5, 1, 9, 0, tzinfo=KST),
 )
+
+# 데모 인증 토큰 — 가짜 불투명 문자열. 실제 JWT 발급·검증은 #16 (Auth).
+DEMO_ACCESS_TOKEN = "demo-access-token-stub"
+DEMO_REFRESH_TOKEN = "demo-refresh-token-stub"

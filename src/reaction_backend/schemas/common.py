@@ -13,7 +13,8 @@ from datetime import UTC, datetime
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, Field, PlainSerializer, WithJsonSchema
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, WithJsonSchema
+from pydantic.alias_generators import to_camel
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -41,6 +42,16 @@ KstDatetime = Annotated[
     PlainSerializer(_serialize_kst, return_type=str, when_used="json"),
     WithJsonSchema({"type": "string", "format": "date-time"}),
 ]
+
+
+class CamelModel(BaseModel):
+    """도메인 요청/응답 스키마 베이스 — 필드를 camelCase 로 입출력 (api-contract §1.9).
+
+    Python 코드는 snake_case 로 쓰고, JSON 직렬화·역직렬화는 camelCase 로 한다.
+    `ErrorResponse` 등 공통 메타 응답은 본 베이스를 쓰지 않고 기존 필드명을 유지한다.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class ErrorResponse(BaseModel):

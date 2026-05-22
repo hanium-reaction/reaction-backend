@@ -20,7 +20,8 @@ def test_not_found_returns_error_response(client: TestClient) -> None:
 
 
 def test_placeholder_route_error_is_error_response(client: TestClient) -> None:
-    resp = client.post("/auth/google")
+    # 아직 미구현인 placeholder 라우트 (planning 은 #3-E 에서 구현 예정)
+    resp = client.post("/plans/generate")
     assert resp.status_code == 501
     body = resp.json()
     assert set(body) == _ERROR_KEYS

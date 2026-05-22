@@ -7,6 +7,14 @@
 
 ---
 
+## v0.5 — 2026-05-22 (#3-B, partially addresses #3)
+
+- Auth(§2)·Onboarding(§3)·Interview(§4) mock/stub 응답 구현 — 11 endpoint
+- 도메인 응답 스키마 camelCase 확정 — `CamelModel` 베이스 추가 (api-contract §1.9)
+- §4 `slot-catalog` 필드명 정정: `id → slotKey`, `type → answerType`
+- 에러 코드 추가: `AUTH_INVALID_TOKEN`·`AUTH_INVALID_ID_TOKEN`·`INTERVIEW_SESSION_EXISTS`·`INTERVIEW_SESSION_NOT_FOUND`·`INTERVIEW_SLOT_LOCKED`
+- ⚠️ 슬롯 카탈로그 — DevBaseline §6.2.2 원문 표 20행 vs 요약 "19" 불일치. 현재 20 슬롯으로 구현, 베타 전 PM 재검토 필요.
+
 ## v0.4 — 2026-05-22 (#3-A, partially addresses #3)
 
 - [ADR-0002](decisions/0002-api-contract-freeze.md) 로 응답 계약 **동결**:

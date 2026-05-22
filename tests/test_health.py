@@ -38,11 +38,8 @@ def test_cors_preflight_allows_frontend_origin():
 
 
 def test_placeholder_routes_return_501():
-    """16 도메인 라우터 중 health 외에는 모두 501."""
+    """아직 미구현인 도메인 라우터는 501 (auth·onboarding·interview 는 #3-B 에서 구현)."""
     for path in (
-        "/auth/google",
-        "/onboarding/status",
-        "/interview/sessions",
         "/time-policies",
         "/goals",
         "/habits",
@@ -60,7 +57,6 @@ def test_placeholder_routes_return_501():
             "get"
             if path
             in {
-                "/onboarding/status",
                 "/time-policies",
                 "/goals",
                 "/habits",
