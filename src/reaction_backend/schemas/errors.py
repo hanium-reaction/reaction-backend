@@ -1,0 +1,65 @@
+"""에러 코드 레지스트리 + `ApiError` 예외.
+
+re:action API 에러 규약 (ADR-0002 §2.2 / api-contract.md §1.3):
+
+- 모든 4xx/5xx 응답은 `schemas.common.ErrorResponse` 한 형태로 직렬화된다.
+- 에러 코드는 **도메인 prefix + UPPER_SNAKE_CASE**.
+- 도메인 코드는 본 `ErrorCode` 의 해당 도메인 구역에 **append-only** 로 추가한다.
+  (다른 도메인 구역은 수정하지 않는다 — PR 간 머지 충돌 방지.)
+- 라우터·서비스는 `raise ApiError(ErrorCode.X, "메시지")` 로 던지고,
+  전역 핸들러(`api/exception_handlers.py`)가 `ErrorResponse` 로 변환한다.
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from http import HTTPStatus
+
+
+class ErrorCode(StrEnum):
+    """API 에러 코드. 도메인 prefix + UPPER_SNAKE_CASE.
+
+    #3-A 는 공통(`COMMON_`)·Idempotency(`IDEMPOTENCY_`) 구역만 정의한다.
+    도메인 코드(`AUTH_*`, `INTERVIEW_*` …)는 #3-B~#3-H 에서 도메인 구역에 추가한다.
+    """
+
+    # ── 공통 (COMMON_) — #3-A ──
+    COMMON_VALIDATION_ERROR = "COMMON_VALIDATION_ERROR"
+    COMMON_NOT_FOUND = "COMMON_NOT_FOUND"
+    COMMON_METHOD_NOT_ALLOWED = "COMMON_METHOD_NOT_ALLOWED"
+    COMMON_NOT_IMPLEMENTED = "COMMON_NOT_IMPLEMENTED"
+    COMMON_INTERNAL_ERROR = "COMMON_INTERNAL_ERROR"
+
+    # ── Idempotency (IDEMPOTENCY_) — #3-A ──
+    IDEMPOTENCY_KEY_REQUIRED = "IDEMPOTENCY_KEY_REQUIRED"
+    IDEMPOTENCY_KEY_MISMATCH = "IDEMPOTENCY_KEY_MISMATCH"
+
+    # ── 도메인 코드는 아래에 도메인별 구역으로 append (#3-B~#3-H) ──
+    # 예) AUTH_INVALID_TOKEN = "AUTH_INVALID_TOKEN"
+
+
+class ApiError(Exception):
+    """도메인 코드가 던지는 표준 에러.
+
+    전역 핸들러가 `ErrorResponse{code, message, field, server_time}` 로 변환한다.
+
+    Args:
+        code: `ErrorCode` 레지스트리의 코드.
+        message: 사용자 노출 가능한 한국어 메시지.
+        http_status: HTTP 상태 코드 (기본 400).
+        field: 입력 검증 에러일 때 해당 필드명.
+    """
+
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        http_status: HTTPStatus | int = HTTPStatus.BAD_REQUEST,
+        field: str | None = None,
+    ) -> None:
+        self.code: ErrorCode = code
+        self.message = message
+        self.http_status = int(http_status)
+        self.field = field
+        super().__init__(f"{code.value}: {message}")

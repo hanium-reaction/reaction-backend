@@ -72,7 +72,9 @@ def test_placeholder_routes_return_501():
             }
             else "post"
         )
-        resp = getattr(client, method)(path)
+        # Idempotency-Key 필수 경로(/reflection/batch 등)도 placeholder 501 에 닿도록
+        # 헤더를 항상 동봉한다. 그 외 경로에서는 무시된다.
+        resp = getattr(client, method)(path, headers={"Idempotency-Key": f"placeholder-{path}"})
         assert resp.status_code == 501, (
             f"{method.upper()} {path} should be 501, got {resp.status_code}"
         )

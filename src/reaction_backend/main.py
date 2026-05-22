@@ -12,6 +12,8 @@ re:action backend는 16개 도메인 라우터로 구성된다 (docs/api-contrac
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from reaction_backend.api.exception_handlers import register_exception_handlers
+from reaction_backend.api.middleware.idempotency import IdempotencyMiddleware
 from reaction_backend.api.routes import (
     auth,
     calendar,
@@ -45,6 +47,13 @@ def create_app() -> FastAPI:
             "에이전트 아키텍처는 docs/architecture.md 참고."
         ),
     )
+
+    # 전역 예외 핸들러 — 모든 에러를 ErrorResponse 로 직렬화 (ADR-0002 §2.2)
+    register_exception_handlers(app)
+
+    # Idempotency-Key 미들웨어 (ADR-0002 §2.3) — CORS 안쪽에 두어
+    # 캐시/에러 응답에도 CORS 헤더가 적용되도록 한다.
+    app.add_middleware(IdempotencyMiddleware)
 
     app.add_middleware(
         CORSMiddleware,
