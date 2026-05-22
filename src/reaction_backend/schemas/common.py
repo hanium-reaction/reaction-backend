@@ -9,10 +9,11 @@ re:action 응답 규약 (api-contract.md 진실 소스):
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PlainSerializer, WithJsonSchema
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -20,6 +21,26 @@ KST = ZoneInfo("Asia/Seoul")
 def now_kst() -> datetime:
     """현재 시각을 KST(+09:00) 기준 aware datetime으로 반환."""
     return datetime.now(KST)
+
+
+def to_kst(dt: datetime) -> datetime:
+    """datetime 을 KST(+09:00) aware 로 변환. naive 는 UTC 로 간주 (ADR-0002 §2.4)."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(KST)
+
+
+def _serialize_kst(dt: datetime) -> str:
+    return to_kst(dt).isoformat()
+
+
+# 응답 datetime 필드용 타입. JSON 직렬화 시 KST(+09:00) ISO 8601 로 자동 변환된다.
+# 서버 내부 저장은 UTC — 응답 스키마의 datetime 필드는 모두 이 타입을 쓴다 (ADR-0002 §2.4).
+KstDatetime = Annotated[
+    datetime,
+    PlainSerializer(_serialize_kst, return_type=str, when_used="json"),
+    WithJsonSchema({"type": "string", "format": "date-time"}),
+]
 
 
 class ErrorResponse(BaseModel):
@@ -47,7 +68,7 @@ class ErrorResponse(BaseModel):
         default=None,
         description="입력 검증 에러일 때 해당 필드명, 그 외 null",
     )
-    server_time: datetime = Field(default_factory=now_kst)
+    server_time: KstDatetime = Field(default_factory=now_kst)
 
 
 class DbStatus(BaseModel):
@@ -72,5 +93,5 @@ class HealthResponse(BaseModel):
     app: str
     version: str
     env: str
-    server_time: datetime = Field(default_factory=now_kst)
+    server_time: KstDatetime = Field(default_factory=now_kst)
     db: DbStatus

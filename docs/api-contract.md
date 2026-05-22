@@ -1,8 +1,9 @@
-# re:action API Contract v0.3
+# re:action API Contract v0.4
 
 > 진실 소스. 모든 endpoint 변경은 이 문서 PR과 동반된다.
 > 기준 문서: `Reaction_DB_설계서_v0.7.1` + `Reaction_DevBaseline_v1.0_2026-05-15`
-> 이전 swagger.yaml v0.2.0은 **폐기**.
+> 응답·에러·Idempotency·시간 규약은 [ADR-0002](decisions/0002-api-contract-freeze.md) 로 동결됨.
+> 변경 이력은 [`api-change-log.md`](api-change-log.md). 이전 swagger.yaml v0.2.0은 **폐기**.
 
 ---
 
@@ -56,8 +57,11 @@
 | `RECOVERY_*` | 회복 옵션 |
 | `REVIEW_*` | 주간 리뷰 |
 | `NOTIF_*` | 알림 |
+| `INBOX_*` | Life Inbox |
+| `FIXED_SCHEDULE_*` | 고정 일정 |
 | `LLM_*` | LLM 호출 (timeout, fallback used 등) |
 | `IDEMPOTENCY_*` | 멱등 키 충돌 |
+| `COMMON_*` | 공통 (검증 실패·미구현·내부 오류) |
 
 ### 1.5 시간 / 타임존
 
@@ -86,6 +90,11 @@
 ### 1.8 ID 표기
 
 - 문자열, 도메인 prefix 권장: `user_*`, `goal_*`, `action_*`, `block_*`, `exec_*`, `interview_*`, `recovery_*`, `policy_*`, `inbox_*` …
+
+### 1.9 필드 네이밍
+
+- 응답 도메인 객체 필드는 **camelCase** (`goalId`, `ambiguityScore`, `weekStart` …)
+- `ErrorResponse`(§1.3) · `HealthResponse`(§17) 등 공통 메타 응답은 정의된 필드명을 그대로 사용 (`server_time` 등)
 
 ---
 
@@ -365,9 +374,43 @@ PARK       → PARK_DEFAULT
 
 ---
 
-## 18. 변경 절차
+## 18. Inbox (`/inbox`) — S24, S25
 
-1. 변경 PR에 본 문서 수정 포함
+자연어 1줄 캡처 + AI 백그라운드 분류. DB: `inbox_items`.
+
+| Method | Path | 설명 |
+| --- | --- | --- |
+| GET | `/inbox` | 내 inbox 항목. `?status=captured\|classified\|archived\|promoted` 필터 |
+| POST | `/inbox` | 1줄 캡처 — `{ rawText }`. AI 카테고리 추정은 백그라운드 |
+| PATCH | `/inbox/{id}` | `userCategory` override 또는 `status` 변경 |
+| POST | `/inbox/{id}/promote` | Goal 으로 승격 → `goals` 생성, inbox `status=promoted` |
+| DELETE | `/inbox/{id}` | soft delete (`archived_at`) |
+
+- `status`: `captured` / `classified` / `archived` / `promoted`
+- 원문(`rawText`)은 at-rest 암호화 대상 (`raw_text_encrypted`)
+
+---
+
+## 19. Fixed Schedules (`/fixed-schedules`) — S05
+
+캘린더 미연결 사용자의 수업·알바·정기 약속. DB: `fixed_schedules`.
+
+| Method | Path | 설명 |
+| --- | --- | --- |
+| GET | `/fixed-schedules` | 내 고정 일정 전체 |
+| POST | `/fixed-schedules` | 신규 — `{ title, daysOfWeek, startTime, endTime }` |
+| PATCH | `/fixed-schedules/{id}` | 부분 수정 |
+| DELETE | `/fixed-schedules/{id}` | soft delete (`archived_at`) |
+
+- `daysOfWeek`: `["mon","tue",…]` 배열. `startTime`/`endTime`: `HH:MM`
+- 같은 요일 시간 겹치면 409 `FIXED_SCHEDULE_OVERLAP`. 온보딩 진행에 최소 1개 필요
+
+---
+
+## 20. 변경 절차
+
+1. 변경 PR에 본 문서 수정 포함 + [`api-change-log.md`](api-change-log.md) 항목 추가
 2. FE/BE 리뷰어 모두 지정
 3. 기존 endpoint의 호환 깨는 변경은 `/v2/` prefix 신설 후 단계 deprecate
 4. 에러 코드 신설 시 §1.4 표 갱신
+5. 응답 envelope·에러·Idempotency·시간 규약 변경은 [ADR-0002](decisions/0002-api-contract-freeze.md) 수정 PR 경유
