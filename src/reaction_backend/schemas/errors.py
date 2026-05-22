@@ -45,6 +45,20 @@ class ErrorCode(StrEnum):
     INTERVIEW_SESSION_NOT_FOUND = "INTERVIEW_SESSION_NOT_FOUND"
     INTERVIEW_SLOT_LOCKED = "INTERVIEW_SLOT_LOCKED"
 
+    # ── Time Policies (POLICY_) — #3-C ──
+    POLICY_NOT_FOUND = "POLICY_NOT_FOUND"
+
+    # ── Calendar (CALENDAR_) — #3-C ──
+    CALENDAR_NOT_CONNECTED = "CALENDAR_NOT_CONNECTED"
+    CALENDAR_CONFLICT = "CALENDAR_CONFLICT"
+
+    # ── Fixed Schedules (FIXED_SCHEDULE_) — #3-C ──
+    FIXED_SCHEDULE_NOT_FOUND = "FIXED_SCHEDULE_NOT_FOUND"
+    FIXED_SCHEDULE_OVERLAP = "FIXED_SCHEDULE_OVERLAP"
+
+    # ── Notifications (NOTIF_) — #3-C ──
+    NOTIF_TIME_RANGE = "NOTIF_TIME_RANGE"
+
 
 class ApiError(Exception):
     """도메인 코드가 던지는 표준 에러.

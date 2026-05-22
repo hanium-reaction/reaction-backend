@@ -40,30 +40,25 @@ def test_cors_preflight_allows_frontend_origin():
 def test_placeholder_routes_return_501():
     """아직 미구현인 도메인 라우터는 501 (auth·onboarding·interview 는 #3-B 에서 구현)."""
     for path in (
-        "/time-policies",
         "/goals",
         "/habits",
         "/plans/generate",
-        "/calendar/connect",
         "/today/agenda",
         "/reflection/batch",
         "/recovery/proposals/generate",
         "/reviews/weekly",
         "/policy-snapshot/current",
-        "/notifications/settings",
         "/settings",
     ):
         method = (
             "get"
             if path
             in {
-                "/time-policies",
                 "/goals",
                 "/habits",
                 "/today/agenda",
                 "/reviews/weekly",
                 "/policy-snapshot/current",
-                "/notifications/settings",
                 "/settings",
             }
             else "post"

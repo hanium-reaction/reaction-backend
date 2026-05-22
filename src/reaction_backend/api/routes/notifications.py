@@ -1,36 +1,76 @@
-"""Notifications — S08 + 알림 예산 enforce.
+"""Notifications — 알림 설정 + Web Push 구독 (S08, api-contract §15).
 
-3 알림 클래스 (DevBaseline 잠금):
-- morning_brief (기본 08:00, 06~10시 제한)
-- evening_reflection (기본 21:00, 19~23시 제한)
-- pre_card (카드 시작 2분 전, 옵트인)
-
-규칙:
-- 주 ≤ 3건 (Notification Tool 레이어가 enforce)
-- 23~07시 자동 푸시 금지 (시간대 가드)
-- 같은 클래스 24h 내 중복 발송 X
-- push_subscription은 Web Push 표준 객체 그대로 저장
-
-DB: notification_settings (user_id UNIQUE)
-
-예정 endpoint:
-- GET   /notifications/settings           — 내 알림 설정
-- PATCH /notifications/settings           — 시간/토글 수정
-- POST  /notifications/subscribe          — push subscription 등록
-- DELETE /notifications/subscribe         — 구독 해제
-
-구현 위치: integrations/web_push/ + scheduler/notification_dispatcher.py
+#3-C 단계는 **mock 스텁**: demo 알림 설정을 반환한다.
+실제 푸시 발송·스케줄러·주 3건 예산 enforce·야간 차단은 후속 (scheduler).
+시간 가드: 모닝 브리프 06~10시, 저녁 정리 19~23시.
 """
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, status
+
+from reaction_backend.api.mock.notifications import DEMO_NOTIFICATION_SETTINGS
+from reaction_backend.schemas.errors import ApiError, ErrorCode
+from reaction_backend.schemas.notifications import (
+    NotificationSettings,
+    NotificationSettingsUpdateRequest,
+    PushSubscribeRequest,
+)
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 
-@router.get("/settings", status_code=status.HTTP_501_NOT_IMPLEMENTED)
-async def get_notification_settings() -> None:
-    """내 알림 설정."""
-    raise HTTPException(
-        status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Defined in api-contract.md §15 — to be implemented in a follow-up.",
+def _demo_settings(*, push_subscribed: bool | None = None) -> NotificationSettings:
+    demo = DEMO_NOTIFICATION_SETTINGS
+    return NotificationSettings(
+        morning_brief_time=demo.morning_brief_time,
+        evening_reflection_time=demo.evening_reflection_time,
+        pre_card_enabled=demo.pre_card_enabled,
+        push_subscribed=demo.push_subscribed if push_subscribed is None else push_subscribed,
     )
+
+
+@router.get("/settings")
+async def get_settings() -> NotificationSettings:
+    """[stub] 내 알림 설정."""
+    return _demo_settings()
+
+
+@router.patch("/settings")
+async def update_settings(body: NotificationSettingsUpdateRequest) -> NotificationSettings:
+    """[stub] 알림 시간·토글 수정. 모닝 06~10시·저녁 19~23시 범위 검증."""
+    demo = DEMO_NOTIFICATION_SETTINGS
+    morning = body.morning_brief_time or demo.morning_brief_time
+    evening = body.evening_reflection_time or demo.evening_reflection_time
+    if not 6 <= int(morning[:2]) <= 10:
+        raise ApiError(
+            ErrorCode.NOTIF_TIME_RANGE,
+            "모닝 브리프는 06~10시 사이로 설정할 수 있어요.",
+            http_status=422,
+            field="morningBriefTime",
+        )
+    if not 19 <= int(evening[:2]) <= 23:
+        raise ApiError(
+            ErrorCode.NOTIF_TIME_RANGE,
+            "저녁 정리는 19~23시 사이로 설정할 수 있어요.",
+            http_status=422,
+            field="eveningReflectionTime",
+        )
+    return NotificationSettings(
+        morning_brief_time=morning,
+        evening_reflection_time=evening,
+        pre_card_enabled=(
+            body.pre_card_enabled if body.pre_card_enabled is not None else demo.pre_card_enabled
+        ),
+        push_subscribed=demo.push_subscribed,
+    )
+
+
+@router.post("/subscribe", status_code=status.HTTP_201_CREATED)
+async def subscribe(body: PushSubscribeRequest) -> NotificationSettings:
+    """[stub] Web Push 구독 등록."""
+    return _demo_settings(push_subscribed=True)
+
+
+@router.delete("/subscribe", status_code=status.HTTP_204_NO_CONTENT)
+async def unsubscribe() -> None:
+    """[stub] Web Push 구독 해제."""
+    return None

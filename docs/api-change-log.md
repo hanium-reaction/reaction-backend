@@ -7,6 +7,13 @@
 
 ---
 
+## v0.6 — 2026-05-22 (#3-C, partially addresses #3)
+
+- Time Policies(§5)·Calendar(§9)·Notifications(§15)·Fixed Schedules(§19) mock/stub 응답 구현 — 18 endpoint
+- `fixed_schedules` 라우터 신설 + `main.py` 등록 (도메인 라우터 17개)
+- 에러 코드 추가: `POLICY_NOT_FOUND` · `CALENDAR_NOT_CONNECTED` · `CALENDAR_CONFLICT` · `FIXED_SCHEDULE_NOT_FOUND` · `FIXED_SCHEDULE_OVERLAP` · `NOTIF_TIME_RANGE`
+- Notifications PATCH 시간 범위 검증 — 모닝 06~10시·저녁 19~23시 위반 시 `NOTIF_TIME_RANGE`
+
 ## v0.5 — 2026-05-22 (#3-B, partially addresses #3)
 
 - Auth(§2)·Onboarding(§3)·Interview(§4) mock/stub 응답 구현 — 11 endpoint
