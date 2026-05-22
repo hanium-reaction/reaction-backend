@@ -2,7 +2,7 @@
 
 | 항목 | 값 |
 | --- | --- |
-| 상태 | **Proposed** — PR #3-A 리뷰에서 확정 (PM·FE 사인오프 필요) |
+| 상태 | **Accepted** (2026-05-22, PM·FE 사인오프 완료) |
 | 작성일 | 2026-05-22 |
 | 작성자 | claude code (#3-A, Person 1) |
 | 관련 이슈 | #3 (Backend API Contract v0 + Mock/Stub Responses) |
@@ -119,11 +119,11 @@ Issue #3 본문 "API 공통 응답 형식" 절은 `ApiResponse<T> { ok, data?, e
 
 ## 5. 결정 기록
 
-리뷰어가 사인오프 후 `상태`를 **Accepted** 로 갱신:
+PM·FE 사인오프 완료 (2026-05-22) — `상태`: **Accepted**.
 
 | # | 사안 | 결정 | 사인오프 |
 | --- | --- | --- | --- |
-| 2.1 | 성공 응답 envelope 없음 | Accepted (v0.3 추인) | ⬜ PM ⬜ FE |
-| 2.2 | `ErrorResponse` 단일 에러 형태 | Accepted | ⬜ PM ⬜ FE |
-| 2.3 | Idempotency-Key (5 endpoint, 24h) | Accepted | ⬜ PM |
-| 2.4 | 저장 UTC / 응답 KST(+09:00) | Accepted | ⬜ PM ⬜ FE |
+| 2.1 | 성공 응답 envelope 없음 | Accepted (v0.3 추인) | ✅ PM ✅ FE |
+| 2.2 | `ErrorResponse` 단일 에러 형태 | Accepted | ✅ PM ✅ FE |
+| 2.3 | Idempotency-Key (5 endpoint, 24h) | Accepted | ✅ PM |
+| 2.4 | 저장 UTC / 응답 KST(+09:00) | Accepted | ✅ PM ✅ FE |
