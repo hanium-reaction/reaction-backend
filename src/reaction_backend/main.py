@@ -1,12 +1,13 @@
 """FastAPI 앱 진입점.
 
-re:action backend는 16개 도메인 라우터로 구성된다 (docs/api-contract.md §1):
-  health · auth · onboarding · interview · time_policies · goals · habits
-  · planning · calendar · today · reflection · recovery · review · policy
-  · notifications · settings
+re:action backend는 17개 도메인 라우터로 구성된다 (docs/api-contract.md):
+  health · auth · onboarding · interview · time_policies · fixed_schedules
+  · calendar · notifications · goals · habits · planning · today
+  · reflection · recovery · review · policy · settings
 
-이 walking skeleton 단계에서는 /health 만 실제 구현되어 있고,
-나머지는 501 placeholder다. 후속 이슈에서 도메인별로 채워진다.
+도메인 라우터는 Issue #3 에서 도메인별 mock/stub 으로 채워지는 중이다.
+auth·onboarding·interview(#3-B), time_policies·calendar·fixed_schedules·notifications(#3-C)
+구현 완료, 나머지는 placeholder 501.
 """
 
 from fastapi import FastAPI
@@ -17,6 +18,7 @@ from reaction_backend.api.middleware.idempotency import IdempotencyMiddleware
 from reaction_backend.api.routes import (
     auth,
     calendar,
+    fixed_schedules,
     goals,
     habits,
     health,
@@ -76,6 +78,7 @@ def create_app() -> FastAPI:
         habits.router,
         planning.router,
         calendar.router,
+        fixed_schedules.router,
         today.router,
         reflection.router,
         recovery.router,
