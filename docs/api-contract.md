@@ -1,4 +1,4 @@
-# re:action API Contract v0.4
+# re:action API Contract v0.5
 
 > 진실 소스. 모든 endpoint 변경은 이 문서 PR과 동반된다.
 > 기준 문서: `Reaction_DB_설계서_v0.7.1` + `Reaction_DevBaseline_v1.0_2026-05-15`
@@ -136,7 +136,7 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | POST | `/interview/sessions/{id}/answers` | 슬롯 답 UPSERT — `{ slotKey, value, clientTurn }` |
 | POST | `/interview/sessions/{id}/next-question` | 다음 질문 요청 (LLM 호출, 4초 이상 시 typing 안내) |
 | POST | `/interview/sessions/{id}/finish` | 조기 종료 `[충분해요]` |
-| GET | `/interview/slot-catalog` | 19 슬롯 정의 (id, label, type, isRequired, category) |
+| GET | `/interview/slot-catalog` | 슬롯 카탈로그 — `slotKey·label·answerType·isRequired·category` |
 
 응답 예: `GET /interview/sessions/{id}`
 ```json
