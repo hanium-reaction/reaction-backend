@@ -1,4 +1,4 @@
-# re:action API Contract v0.6
+# re:action API Contract v0.7
 
 > 진실 소스. 모든 endpoint 변경은 이 문서 PR과 동반된다.
 > 기준 문서: `Reaction_DB_설계서_v0.7.1` + `Reaction_DevBaseline_v1.0_2026-05-15`

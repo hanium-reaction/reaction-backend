@@ -7,6 +7,15 @@
 
 ---
 
+## v0.7 — 2026-05-23 (#3-D, partially addresses #3)
+
+- Goals(§6)·Habits(§7)·Inbox(§18) mock/stub 응답 구현 — 17 endpoint
+- `inbox` 라우터 신설 + `main.py`·`api/routes/__init__.py` 등록 (도메인 라우터 18개)
+- `habits.py` 에 두 라우터 export — `router(/habits)` + `router_instances(/habit-instances)`
+- 에러 코드 추가: `GOAL_NOT_FOUND`·`GOAL_FOCUS_LIMIT`·`GOAL_MAINTAIN_LIMIT`, `HABIT_NOT_FOUND`, `INBOX_NOT_FOUND`·`INBOX_ALREADY_PROMOTED`
+- §6 Goals decompose 응답에 `parentId` 필드 (예시 일치)
+- Person 1 arc 완료 (#3-B·C·D) — 18개 도메인 라우터 중 11개(health 포함) 구현 완료
+
 ## v0.6 — 2026-05-22 (#3-C, partially addresses #3)
 
 - Time Policies(§5)·Calendar(§9)·Notifications(§15)·Fixed Schedules(§19) mock/stub 응답 구현 — 18 endpoint
