@@ -36,9 +36,10 @@ class ErrorCode(StrEnum):
 
     # ── 도메인 코드는 아래에 도메인별 구역으로 append (#3-B~#3-H) ──
 
-    # ── Auth (AUTH_) — #3-B ──
+    # ── Auth (AUTH_) — #3-B / #16 ──
     AUTH_INVALID_ID_TOKEN = "AUTH_INVALID_ID_TOKEN"
     AUTH_INVALID_TOKEN = "AUTH_INVALID_TOKEN"
+    AUTH_TOKEN_EXPIRED = "AUTH_TOKEN_EXPIRED"
 
     # ── Interview (INTERVIEW_) — #3-B ──
     INTERVIEW_SESSION_EXISTS = "INTERVIEW_SESSION_EXISTS"
