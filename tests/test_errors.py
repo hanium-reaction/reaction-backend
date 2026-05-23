@@ -20,8 +20,9 @@ def test_not_found_returns_error_response(client: TestClient) -> None:
 
 
 def test_placeholder_route_error_is_error_response(client: TestClient) -> None:
-    # 아직 미구현인 placeholder 라우트 (planning 은 #3-E 에서 구현 예정)
-    resp = client.post("/plans/generate")
+    # 아직 미구현인 placeholder 라우트 — 501 응답도 같은 envelope 형태인지.
+    # (`/plans/generate` 는 #18 에서 실구현됐으므로 여전히 placeholder 인 endpoint 로 교체.)
+    resp = client.post("/recovery/proposals/generate")
     assert resp.status_code == 501
     body = resp.json()
     assert set(body) == _ERROR_KEYS

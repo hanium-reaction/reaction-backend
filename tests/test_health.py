@@ -39,10 +39,10 @@ def test_cors_preflight_allows_frontend_origin():
 
 def test_placeholder_routes_return_501():
     """아직 미구현인 도메인 라우터는 501 (auth·onboarding·interview 는 #3-B 에서 구현)."""
+    # `/plans/generate` 은 #18 에서 실제 구현됨 — 501 placeholder 목록에서 제외.
     for path in (
         "/goals",
         "/habits",
-        "/plans/generate",
         "/today/agenda",
         "/reflection/batch",
         "/recovery/proposals/generate",

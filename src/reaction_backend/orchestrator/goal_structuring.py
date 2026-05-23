@@ -77,32 +77,59 @@ _TIME_PREFERENCE_WINDOWS: dict[str, tuple[time, time]] = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TimePolicyLike(Protocol):
-    """`db.models.time_policy.TimePolicy` 의 스케줄링에 필요한 부분."""
+# 읽기 전용 Protocol — frozen dataclass 어댑터와 ORM 모델 모두를 구조적으로 만족시킨다.
+# 오케스트레이터는 입력을 절대 변형하지 않으므로 read-only 가 정확한 계약이다.
 
-    policy_type: str
-    payload: Mapping[str, Any]
-    is_active: bool
+
+class TimePolicyLike(Protocol):
+    """`db.models.time_policy.TimePolicy` 의 스케줄링에 필요한 부분 (read-only)."""
+
+    @property
+    def policy_type(self) -> str: ...
+
+    @property
+    def payload(self) -> Mapping[str, Any]: ...
+
+    @property
+    def is_active(self) -> bool: ...
 
 
 class FixedScheduleLike(Protocol):
-    """`db.models.fixed_schedule.FixedSchedule` 의 스케줄링에 필요한 부분."""
+    """`db.models.fixed_schedule.FixedSchedule` 의 스케줄링에 필요한 부분 (read-only)."""
 
-    title: str
-    days_of_week: Sequence[str]
-    start_time: time
-    end_time: time
+    @property
+    def title(self) -> str: ...
+
+    @property
+    def days_of_week(self) -> Sequence[str]: ...
+
+    @property
+    def start_time(self) -> time: ...
+
+    @property
+    def end_time(self) -> time: ...
 
 
 class HabitLike(Protocol):
-    """`db.models.habit.Habit` 의 스케줄링에 필요한 부분."""
+    """`db.models.habit.Habit` 의 스케줄링에 필요한 부분 (read-only)."""
 
-    id: uuid.UUID
-    title: str
-    category: str
-    minutes_per_session: int
-    time_preference: str
-    priority_level: int
+    @property
+    def id(self) -> uuid.UUID: ...
+
+    @property
+    def title(self) -> str: ...
+
+    @property
+    def category(self) -> str: ...
+
+    @property
+    def minutes_per_session(self) -> int: ...
+
+    @property
+    def time_preference(self) -> str: ...
+
+    @property
+    def priority_level(self) -> int: ...
 
 
 class SupportsTransaction(Protocol):

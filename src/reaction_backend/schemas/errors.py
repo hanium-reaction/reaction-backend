@@ -59,6 +59,10 @@ class ErrorCode(StrEnum):
     # ── Notifications (NOTIF_) — #3-C ──
     NOTIF_TIME_RANGE = "NOTIF_TIME_RANGE"
 
+    # ── Planning (PLANNING_) — #18 ──
+    PLANNING_VALIDATION_ERROR = "PLANNING_VALIDATION_ERROR"
+    PLANNING_POLICY_VIOLATION = "PLANNING_POLICY_VIOLATION"
+
 
 class ApiError(Exception):
     """도메인 코드가 던지는 표준 에러.
