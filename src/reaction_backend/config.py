@@ -38,6 +38,25 @@ class Settings(BaseSettings):
     database_url: str = ""
     db_echo: bool = False
 
+    # ── LLM (Issue #5 / ADR-0003) ──
+    # Gemini API key. 비어있으면 Tool Executor 가 항상 fallback 으로 분기.
+    gemini_api_key: str = ""
+    # 호출 모델. Flash 무료 티어 기본.
+    llm_model: str = "gemini-2.0-flash-exp"
+    # 단일 호출 timeout (초). ADR-0003 §1 동결값.
+    llm_timeout_seconds: float = 8.0
+    # 재시도 횟수 (지수 backoff). Tool Executor §1.
+    llm_max_retries: int = 3
+    # 일일 토큰 예산 (in + out 합산, 사용자당). 0 이면 무제한.
+    llm_daily_token_budget: int = 200_000
+    # 1K 입력/출력 토큰당 USD ¢. Flash 무료 티어 기본 0, 유료 환산용.
+    llm_cost_per_1k_input_cents: float = 0.0
+    llm_cost_per_1k_output_cents: float = 0.0
+
+    # ── 보안 (Issue #5 §3) ──
+    # 32-byte AES-GCM 키 (urlsafe base64 인코딩). 비어있으면 암호화 함수가 명시 에러.
+    column_encryption_key: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:
