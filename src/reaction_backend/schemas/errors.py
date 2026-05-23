@@ -59,6 +59,18 @@ class ErrorCode(StrEnum):
     # ── Notifications (NOTIF_) — #3-C ──
     NOTIF_TIME_RANGE = "NOTIF_TIME_RANGE"
 
+    # ── Goals (GOAL_) — #3-D ──
+    GOAL_NOT_FOUND = "GOAL_NOT_FOUND"
+    GOAL_FOCUS_LIMIT = "GOAL_FOCUS_LIMIT"
+    GOAL_MAINTAIN_LIMIT = "GOAL_MAINTAIN_LIMIT"
+
+    # ── Habits (HABIT_) — #3-D ──
+    HABIT_NOT_FOUND = "HABIT_NOT_FOUND"
+
+    # ── Inbox (INBOX_) — #3-D ──
+    INBOX_NOT_FOUND = "INBOX_NOT_FOUND"
+    INBOX_ALREADY_PROMOTED = "INBOX_ALREADY_PROMOTED"
+
 
 class ApiError(Exception):
     """도메인 코드가 던지는 표준 에러.
