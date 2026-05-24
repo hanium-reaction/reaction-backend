@@ -158,36 +158,107 @@ def build_interview_graph() -> StateGraph:
 
 ```python
 # src/reaction_backend/orchestrator/recovery/graph.py
+from typing import TypedDict
+from uuid import UUID
+
 from langgraph.graph import StateGraph, END
 
-async def diagnose_failure(state):
-    """LLM ⑤ Failure Diagnosis. fallback: 룰 (failure_tag → strategy)"""
-    ...
+from reaction_backend.llm.tool_executor import aiClient
+from reaction_backend.schemas.recovery import FailureDiagnosis, RecoveryProposalSet
 
-async def generate_proposals(state):
-    """LLM ⑥ Recovery Coach. fallback: 룰 3종 (PR #30 재사용)"""
-    ...
 
-async def heuristic_fallback(state):
-    """베이스라인 §부록 C — plan_too_big → downscope 등 룰 매핑."""
-    ...
+class RecoveryState(TypedDict):
+    """recovery_attempts 작성 직전까지 누적되는 short-lived state."""
+    user_id: UUID
+    execution_id: UUID
+    failure_tags: list[str]          # S18 0~2개
+    context_snapshot: dict           # v0.6 14필드
+    diagnosis: FailureDiagnosis | None
+    proposals: RecoveryProposalSet | None
+    used_fallback: bool
 
-def should_use_fallback(state) -> str:
-    """8s timeout 또는 LLM 실패 시 룰 분기."""
-    return "heuristic_fallback" if state.get("llm_failed") else "generate_proposals"
 
-def build_recovery_graph() -> StateGraph:
+async def diagnose_failure(state: RecoveryState, config: dict) -> RecoveryState:
+    """LLM ⑤ — failure_tags + context → failure_type + confidence.
+
+    fallback: 룰 (failure_tag 1순위 사유 → strategy 매핑, 베이스라인 §부록 C).
+    """
+    result = await aiClient.run(
+        module="recovery",
+        schema=FailureDiagnosis,
+        prompt_id="failure_diagnosis/classify",
+        fallback=lambda: heuristic_diagnosis(state["failure_tags"]),
+        timeout=8.0,
+        variables={
+            "tags": ",".join(state["failure_tags"]),
+            "context": str(state["context_snapshot"]),
+        },
+        session=config["configurable"]["session"],
+    )
+    return {**state, "diagnosis": result.value, "used_fallback": result.fell_back}
+
+
+async def generate_proposals(state: RecoveryState, config: dict) -> RecoveryState:
+    """LLM ⑥ — diagnosis → if-then 후보 2~4개.
+
+    fallback: 룰 3종 (베이스라인 §부록 C):
+      - plan_too_big / hard_to_start  → DOWNSCOPE (NANO_STEP)
+      - time_shortage / overrun       → RESCHEDULE (tomorrow)
+      - fatigue / low_energy          → CARRY_OVER + 휴식
+    """
+    result = await aiClient.run(
+        module="recovery",
+        schema=RecoveryProposalSet,
+        prompt_id="recovery/if_then_proposal",
+        fallback=lambda: heuristic_recovery_proposals(state["diagnosis"]),
+        timeout=8.0,
+        session=config["configurable"]["session"],
+    )
+    return {
+        **state,
+        "proposals": result.value,
+        "used_fallback": state["used_fallback"] or result.fell_back,
+    }
+
+
+async def heuristic_recovery(state: RecoveryState, config: dict) -> RecoveryState:
+    """LLM 0회 — 베이스라인 §부록 C 룰 매핑만으로 후보 생성.
+
+    diagnose_failure 가 fallback 됐거나 confidence < 0.5 일 때 진입.
+    """
+    proposals = heuristic_recovery_proposals(state["diagnosis"])
+    return {**state, "proposals": proposals, "used_fallback": True}
+
+
+def should_use_heuristic(state: RecoveryState) -> str:
+    """diagnose_failure 결과를 보고 LLM 진단이 신뢰 가능한지 분기."""
+    if state["diagnosis"] is None:
+        return "heuristic_recovery"          # 진단 자체 실패
+    if state["used_fallback"]:
+        return "heuristic_recovery"          # 진단이 룰 fallback → 회복도 룰
+    if state["diagnosis"].confidence < 0.5:
+        return "heuristic_recovery"          # 신뢰 낮음 → 룰
+    return "generate_proposals"
+
+
+def build_recovery_graph():
     graph = StateGraph(RecoveryState)
     graph.add_node("diagnose_failure", diagnose_failure)
     graph.add_node("generate_proposals", generate_proposals)
-    graph.add_node("heuristic_fallback", heuristic_fallback)
+    graph.add_node("heuristic_recovery", heuristic_recovery)
 
     graph.set_entry_point("diagnose_failure")
-    graph.add_conditional_edges("diagnose_failure", should_use_fallback)
+    graph.add_conditional_edges("diagnose_failure", should_use_heuristic)
     graph.add_edge("generate_proposals", END)
-    graph.add_edge("heuristic_fallback", END)
+    graph.add_edge("heuristic_recovery", END)
     return graph.compile()
 ```
+
+**핵심 패턴**:
+- Conditional Edge 는 `should_use_heuristic` 같은 **순수 함수** (LLM 호출 X)
+- LLM 진단·LLM 회복 둘 다 fallback 가능. 신뢰도 < 0.5 도 fallback 트리거
+- `used_fallback` 플래그는 state 에 누적 — 라우터가 응답에 `ai_source: "rule"` 표시 (§7.2 참조)
+- 원본 `action_item.status` 변경 X (AGENTS.md §2) — `proposals` 만 만들고 사용자 [수락] 후에 새 카드 생성
 
 ---
 
@@ -281,7 +352,131 @@ dependencies = [
 
 ---
 
-## 7. 변경 절차
+## 7. Implementation Notes (팀원 작성용)
+
+ADR 적용 시 자주 묻게 될 3가지 패턴.
+
+### 7.1 SQLAlchemy session 전달
+
+LangGraph state 는 **직렬화 가능**해야 한다 (`langgraph.checkpoint` 호환 + 디버깅 시 dump). 따라서 `AsyncSession` 같은 비직렬화 객체는 **state 에 절대 넣지 않는다**. 대신 `graph.ainvoke(initial, config=...)` 의 **`config["configurable"]`** 채널로 전달.
+
+```python
+# api/routes/recovery.py
+from typing import Annotated
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from reaction_backend.api.deps import CurrentUser
+from reaction_backend.db.session import get_db
+from reaction_backend.orchestrator.recovery.graph import build_recovery_graph
+
+router = APIRouter(prefix="/recovery", tags=["recovery"])
+
+
+@router.post("/proposals/generate")
+async def generate_recovery_proposals(
+    body: RecoveryRequest,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> RecoveryProposalResponse:
+    graph = build_recovery_graph()
+
+    initial: RecoveryState = {
+        "user_id": user.id,
+        "execution_id": body.execution_id,
+        "failure_tags": body.failure_tags,
+        "context_snapshot": await load_context_snapshot(session, body.execution_id),
+        "diagnosis": None,
+        "proposals": None,
+        "used_fallback": False,
+    }
+
+    # session 은 state 가 아닌 config["configurable"] 로 — 직렬화 안전.
+    final = await graph.ainvoke(
+        initial,
+        config={"configurable": {"session": session, "user_id": user.id}},
+    )
+
+    return RecoveryProposalResponse(
+        is_draft=True,
+        ai_source="rule" if final["used_fallback"] else "llm",
+        proposals=final["proposals"].items,
+    )
+```
+
+각 Node 시그니처는 `async def node(state, config)` — 두 번째 인자로 config 받음. `aiClient.run(session=config["configurable"]["session"], ...)` 로 PR #33 의 budget 모듈에 session 주입.
+
+### 7.2 HITL 게이트 enforce 위치 (베이스라인 §1.4 잠금 결정)
+
+**모든 AI 출력은 Draft Layer + 3버튼** (§1.4). 책임 분리:
+
+| 누가 | 무엇을 |
+| --- | --- |
+| Orchestrator Node | `state["used_fallback"]` 만 정확히 유지. `is_draft` 자체는 신경 X |
+| **라우터 함수** | 응답 schema 빌드 시 **`is_draft=True`** + **`ai_source="llm"\|"rule"`** 강제 |
+| FE | `is_draft=True` 응답 받으면 점선 테두리 + [수락]/[수정]/[거절] 3버튼 강제 렌더 (Frontend PR #1 `Draft` 컴포넌트) |
+
+`is_draft=False` 로 응답해도 되는 endpoint 는 **사용자 명시 승인 후만**:
+- `POST /recovery/decisions` — 사용자 [수락] 후 `recovery_attempts.applied_at` 저장 → 응답 `is_draft=False`
+- `POST /plans/{id}/approve` 동일
+- `POST /replan/{execution_id}/approve` 동일
+- 그 외 모든 `generate` / `proposals` / `preview` 응답 → 항상 `is_draft=True`
+
+```python
+# schemas/common.py 에 mixin 추가 (PR #33 의 ErrorResponse 옆)
+class DraftMixin(BaseModel):
+    is_draft: bool = True
+    ai_source: Literal["llm", "rule"] = "llm"
+```
+
+AI 응답 schema 가 `DraftMixin` 을 상속하면 default 가 draft. **`is_draft=False` 는 명시 set 만**.
+
+### 7.3 Test 패턴
+
+LangGraph Node 는 일반 async 함수라 직접 pytest 가능. **`aiClient.run` 만 mock**:
+
+```python
+import pytest
+from unittest.mock import AsyncMock
+
+@pytest.mark.asyncio
+async def test_recovery_graph_uses_fallback_on_low_confidence(monkeypatch):
+    """diagnose confidence < 0.5 → heuristic_recovery 로 분기, LLM proposal 호출 0."""
+    proposal_call_count = 0
+
+    async def stub_run(module, schema, prompt_id, fallback, **kwargs):
+        nonlocal proposal_call_count
+        if prompt_id == "failure_diagnosis/classify":
+            return RunResult(
+                value=FailureDiagnosis(failure_type="HARD_TO_START", confidence=0.3),
+                fell_back=False, reason=None,
+                prompt_id=prompt_id, prompt_version="v1",
+            )
+        if prompt_id == "recovery/if_then_proposal":
+            proposal_call_count += 1
+        return RunResult(value=..., fell_back=False, ...)
+
+    monkeypatch.setattr(
+        "reaction_backend.orchestrator.recovery.graph.aiClient.run", stub_run
+    )
+
+    graph = build_recovery_graph()
+    final = await graph.ainvoke(initial_state, config={"configurable": {"session": fake_session}})
+
+    assert final["used_fallback"] is True
+    assert final["proposals"] is not None
+    assert proposal_call_count == 0   # LLM proposal 호출 X (룰만)
+```
+
+**각 Agent 의 test 최소 셋**:
+1. 정상 LLM path (모든 Node LLM 성공)
+2. Fallback path (LLM timeout 또는 confidence 낮음 → 룰)
+3. 종료 조건 (Interview 는 추가로 `ambiguity=0` / `total_turns=15` / `early_finish` 3종)
+
+---
+
+## 8. 변경 절차
 
 본 ADR 의 결정을 바꾸려면:
 1. 새 ADR (0006+) 발행
