@@ -25,9 +25,11 @@ services:
     container_name: reaction-backend
     ports:
       - "8000:8000"
+    # .env 파일 필수 — 없으면 `cp .env.example .env` 로 생성.
+    # 단순 string 형식 (Docker Compose v1.x+ 호환). 객체 형식 (`path:` + `required:`) 은
+    # Compose v2.24+ 에서만 지원되어 CI/구버전 환경에서 unmarshal 에러 발생.
     env_file:
-      - path: .env
-        required: false
+      - .env
     environment:
       APP_ENV: local
       # 로컬 docker postgres 사용 시 default. .env 에 DATABASE_URL 있으면 그게 우선.
