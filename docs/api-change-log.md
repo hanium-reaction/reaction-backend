@@ -7,6 +7,17 @@
 
 ---
 
+## v0.8 — 2026-05-23 (#16)
+
+- Auth(§2) 실구현 — Google id_token 검증(`google-auth`) + 자체 JWT(HS256, access 60m / refresh 14d) 발급, refresh 회전 X
+- `/auth/logout` — refresh `jti` revoke set 등록 (in-memory MVP, 추후 DB 테이블 이전)
+- 인증 미들웨어 신설 (`api/deps.get_current_user`) — health/auth/onboarding 외 15개 라우터에 router-level `Depends` 적용
+- §3 Onboarding `/status` 실구현 — `CurrentUser.onboarding_state` 기반 → `suggestedNextScreen` 매핑 표 추가
+- 에러 코드 추가: `AUTH_TOKEN_EXPIRED` (만료 vs 무효 분기)
+- CORS — `cors_allow_origin_regex` 옵션 추가 (Vercel preview URL 패턴 매칭)
+- 환경변수 추가: `GOOGLE_OAUTH_CLIENT_ID/_SECRET`, `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_ACCESS_TOKEN_TTL_MINUTES`, `JWT_REFRESH_TOKEN_TTL_DAYS`, `AUTH_STUB_MODE`
+- ⚠️ Google OAuth client_id 는 PM 발급 대기 — 로컬은 `AUTH_STUB_MODE=true` 로 우회 가능 (고정 demo 클레임)
+
 ## v0.7 — 2026-05-23 (#3-D, partially addresses #3)
 
 - Goals(§6)·Habits(§7)·Inbox(§18) mock/stub 응답 구현 — 17 endpoint
