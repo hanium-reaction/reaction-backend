@@ -260,6 +260,194 @@ def build_recovery_graph():
 - `used_fallback` 플래그는 state 에 누적 — 라우터가 응답에 `ai_source: "rule"` 표시 (§7.2 참조)
 - 원본 `action_item.status` 변경 X (AGENTS.md §2) — `proposals` 만 만들고 사용자 [수락] 후에 새 카드 생성
 
+### 2.5 5개 Agent 시각화 (Mermaid)
+
+LangGraph 가 `graph.get_graph().draw_mermaid()` 로 자동 생성하는 것과 동일한 수준의 흐름도. GitHub 이 codefence 를 자동 렌더링하므로 본 ADR 페이지에서 그대로 보임. 시연 자료·발표 슬라이드에 그대로 캡처 사용 가능.
+
+#### 2.5.1 Planning — Goal Structuring Orchestrator (가장 복잡, LLM 4회)
+
+```mermaid
+flowchart TD
+  Start([👤 사용자 목표 입력]) --> V[STATE: VALIDATING]
+
+  V -->|invoke| VA[/🔍 Validation Agent/]
+  VA --> VL[LLM Call ①<br/>입력 완전성 + 명확성 판단<br/>→ missing_fields 반환]
+  VL --> VMF{missing<br/>fields?}
+  VMF -->|goal_text 누락| RG[🔴 목표 텍스트<br/>재입력 UI]
+  VMF -->|deadline 누락| RD[📅 마감일<br/>날짜 피커]
+  VMF -->|goal 모호| RC[🟠 모호한 목표<br/>카테고리 선지]
+  VMF -->|available_time 누락| RT[🟢 가용 시간<br/>시간대 선택]
+  VMF -->|복수 누락| RM[🔵 복수 누락<br/>단계적 입력 폼]
+  VMF -->|모두 충족| P[STATE: PLANNING]
+
+  RG --> VA
+  RD --> VA
+  RC --> VA
+  RT --> VA
+  RM --> VA
+
+  P -->|invoke| PA[/📋 Planning Agent/]
+  PA --> PC[컨텍스트 조립<br/>PolicySnapshot + 캘린더 busy]
+  PC --> PL2[LLM Call ②<br/>Goal 분해<br/>phases · milestones]
+  PL2 --> PL3[LLM Call ③<br/>ActionItem 생성<br/>tiny_first_step + dependency]
+  PL3 --> GP[GoalPlan]
+
+  GP --> SA[/📐 Scheduler Agent · Rule-based only/]
+  SA --> S1[① 우선순위 정렬<br/>② 의존성 보장<br/>③ 20% 버퍼 확보<br/>④ no_touch_zone 제외]
+  S1 --> SP[ScheduledPlan]
+
+  SP --> R[STATE: REVIEWING]
+  R -->|invoke| RA[/✅ Review Agent/]
+  RA --> RL[LLM Call ④<br/>플랜 품질 독립 검토<br/>실현 가능성 · 부하 분산 · PRD 원칙]
+  RL --> RD2{approved?}
+  RD2 -->|피드백| FB[feedback<br/>이슈 목록 반환]
+  FB -->|재계획 요청| PA
+  RD2 -->|승인| H[STATE: HITL]
+
+  H -->|invoke| HITL[/👤 Human-in-the-Loop/]
+  HITL --> HUI[플랜 미리보기<br/>타임라인 UI]
+  HUI --> HC{수락 / 수정 / 거절}
+  HC -->|수정| R
+  HC -->|거절| Start
+  HC -->|수락| SAVE[STATE: SAVING]
+
+  SAVE -->|invoke| DB[/💾 DB Agent · 단일 트랜잭션/]
+  DB --> D1[① goals INSERT]
+  D1 --> D2[② goal_nodes INSERT]
+  D2 --> D3[③ action_items INSERT]
+  D3 --> D4[④ scheduled_blocks INSERT]
+  D4 --> D5[⑤ llm_runs INSERT]
+  D5 --> DC{성공?}
+  DC -->|❌| Roll[트랜잭션 롤백<br/>재시도]
+  DC -->|✅| End([✅ 목표 플랜 활성화 완료])
+  Roll --> SAVE
+```
+
+**핵심**: Validation 의 5종 missing 분기 → 각각 재입력 UI → Validation 재호출. Planning 의 LLM ② → ③ 직렬. Scheduler 는 **룰만 (LLM 호출 0)**. Review feedback → Planning 재호출 (cycle). HITL 거절 → 처음으로 reset. DB 5단계 트랜잭션 + 롤백 재시도.
+
+---
+
+#### 2.5.2 Interview — Cyclic StateGraph (모호함 0 까지 루프, Issue #6)
+
+```mermaid
+flowchart TD
+  Start([👤 사용자 인터뷰 시작]) --> Init[STATE: INIT<br/>session 생성<br/>ambiguity_score = N]
+
+  Init --> Ask[ask_next_slot<br/>LLM Call · 다음 질문 생성<br/>+ 룰 fallback]
+  Ask --> ShowQ[FE 질문 표시<br/>chip + 자유입력]
+  ShowQ --> Receive[receive_answer<br/>사용자 응답 수신<br/>slot_answer UPSERT]
+  Receive --> Update[update_ambiguity<br/>LLM Call · clarity 채점<br/>답 정규화 + 공감 1줄<br/>+ heuristic fallback]
+  Update --> Filter[safety/banned_words<br/>금지어 후처리]
+  Filter --> Cond{종료 조건?}
+
+  Cond -->|ambiguity = 0| Done1([✅ 모호함 0<br/>S03 Confirm 진입])
+  Cond -->|total_turns ≥ 15| Done2([⏱️ 최대 턴 도달<br/>현재 슬롯으로 진행])
+  Cond -->|early_finish 탭| Done3([🙋 충분해요<br/>빈 슬롯 default 채움])
+  Cond -->|계속| Ask
+```
+
+**핵심**: ask_next_slot → receive_answer → update_ambiguity 의 **3-Node cycle**. 종료 조건 3종 (`ambiguity=0` / `total_turns≥15` / `early_finish`). 매 cycle 마다 LLM 2회 (질문 생성 + clarity 채점). 룰 fallback 항상 준비. 베이스라인 §2.5 핵심.
+
+---
+
+#### 2.5.3 Recovery — Conditional StateGraph (Issue #20)
+
+```mermaid
+flowchart TD
+  Start([👤 S17 회고 미회고 카드 진입]) --> Load[load_context<br/>execution_events<br/>context_snapshot 14필드]
+  Load --> DF[diagnose_failure<br/>LLM Call ⑤<br/>failure_type + confidence<br/>+ 룰 fallback]
+  DF --> Cond{진단 신뢰?}
+
+  Cond -->|confidence < 0.5<br/>또는 fallback| HR[heuristic_recovery<br/>§부록 C 룰만<br/>LLM 호출 0]
+  Cond -->|confidence ≥ 0.5| GP[generate_proposals<br/>LLM Call ⑥<br/>if-then 후보 2~4개<br/>+ 룰 3종 fallback]
+
+  GP --> Filter1[safety/banned_words<br/>금지어 후처리]
+  HR --> Filter2[safety/banned_words<br/>금지어 후처리]
+  Filter1 --> Resp([🎴 회복 후보 응답<br/>is_draft=true · ai_source=llm])
+  Filter2 --> Resp2([🎴 회복 후보 응답<br/>is_draft=true · ai_source=rule])
+
+  Resp --> HITL{HITL<br/>수락 / 수정 / 거절}
+  Resp2 --> HITL
+  HITL -->|수락| Apply[recovery_attempts INSERT<br/>새 action_item 생성<br/>parent_id 추적<br/>원본 status 변경 X]
+  HITL -->|수정| GP
+  HITL -->|거절| Skip([⏭️ 추후 다시])
+  Apply --> End([✅ 회복 적용 완료])
+```
+
+**핵심**: confidence 분기 → LLM 또는 룰. `used_fallback` 누적 → 응답 `ai_source` 결정. **원본 `action_item.status` 절대 변경 X** (AGENTS.md §2). 새 action_item 의 `parent_action_item_id` 로 혈통 추적 → Resilience 지표 보존.
+
+---
+
+#### 2.5.4 Brief — Sequential (Morning Brief, cron 트리거)
+
+```mermaid
+flowchart TD
+  Start([🌅 매일 06:00 KST<br/>daily_brief_precompute cron]) --> Load[load_context<br/>어제 execution_events<br/>오늘 action_items<br/>+ behavioral_profile<br/>+ 이번 주 period_summary]
+  Load --> LLM[generate_brief<br/>LLM Call · 한 줄 헤드라인<br/>+ adjustment_hints<br/>+ 룰 fallback]
+  LLM --> Filter[safety/banned_words<br/>금지어 후처리]
+  Filter --> Save[daily_briefs INSERT<br/>idempotent · 같은 날 재실행 skip]
+  Save --> End([📨 morning_brief 알림 큐])
+```
+
+**핵심**: 1 Node LLM + 1 Node 룰 후처리. cron idempotent 보장. 베이스라인 §1.4 알림 주 ≤ 3건 / 23-07 금지는 알림 큐 단계에서 enforce (본 Agent 책임 외).
+
+---
+
+#### 2.5.5 Inbox Parser — Sequential (가장 가벼움)
+
+```mermaid
+flowchart TD
+  Start([📥 POST /inbox · 사용자 캡처]) --> Normalize[normalize_text<br/>공백 · 특수문자 정리]
+  Normalize --> LLM[classify_category<br/>LLM Call · 카테고리 추정<br/>+ 룰 fallback]
+  LLM --> Filter[safety/banned_words<br/>금지어 후처리]
+  Filter --> Save[inbox_items UPDATE<br/>category set · status=triaged_pending]
+  Save --> End([✅ S25 Triage 대기])
+```
+
+**핵심**: 가장 단순. LLM 1회 + 룰 fallback. Inbox Parser 는 일 호출 한도 **무제한** (베이스라인 §12.4 — 룰 fallback 풍부하므로).
+
+---
+
+#### 2.5.6 전체 5 Agent 한 눈에
+
+```mermaid
+graph LR
+  subgraph 트리거
+    T1[👤 사용자 인터뷰 시작]
+    T2[👤 사용자 목표 입력]
+    T3[🌅 06:00 cron]
+    T4[👤 S17 회고]
+    T5[📥 Inbox 캡처]
+  end
+
+  subgraph Agents
+    A1[Interview<br/>⭕ Cyclic<br/>LLM 2/cycle]
+    A2[Planning<br/>➡️ Sequential + 룰<br/>LLM 4회]
+    A3[Brief<br/>➡️ Sequential<br/>LLM 1회]
+    A4[Recovery<br/>⤴️ Conditional<br/>LLM 2회·룰 fallback]
+    A5[Inbox Parser<br/>➡️ Sequential<br/>LLM 1회]
+  end
+
+  subgraph 결과
+    R1[interview_sessions<br/>+ 19 slot_answers]
+    R2[goals · goal_nodes<br/>· action_items<br/>· scheduled_blocks]
+    R3[daily_briefs]
+    R4[recovery_attempts<br/>+ 새 action_item]
+    R5[inbox_items<br/>category set]
+  end
+
+  T1 --> A1 --> R1
+  T2 --> A2 --> R2
+  T3 --> A3 --> R3
+  T4 --> A4 --> R4
+  T5 --> A5 --> R5
+
+  R1 -.인터뷰 결과 → 첫 계획 입력.-> A2
+  R2 -.action_items → Today 표시 → 회고.-> A4
+```
+
+**5 Agent 의 관계**: Interview (#6) → Planning (#32) → 사용자 매일 사용 → Recovery (#20) 가 핵심 가치 사이클. Brief (#19) 와 Inbox Parser (#22) 는 보조.
+
 ---
 
 ## 3. Consequences
