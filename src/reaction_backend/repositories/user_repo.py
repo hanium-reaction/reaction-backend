@@ -69,6 +69,27 @@ class UserRepo:
         await self._session.refresh(user)
         return user
 
+    async def advance_onboarding(
+        self,
+        user: User,
+        expected_from: str | tuple[str, ...],
+        to: str,
+    ) -> bool:
+        """안전한 onboarding 상태 전이 (Issue #17).
+
+        현재 상태가 `expected_from` 집합에 있을 때만 `to` 로 전이한다.
+        이미 더 진행된 상태(예: ACTIVE)면 no-op — 같은 endpoint 두 번 호출해도 멱등.
+
+        Returns:
+            전이가 일어났는지 (true=advanced, false=no-op).
+        """
+        expected = (expected_from,) if isinstance(expected_from, str) else expected_from
+        if user.onboarding_state in expected:
+            user.onboarding_state = to
+            await self._session.flush()
+            return True
+        return False
+
 
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 
