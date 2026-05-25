@@ -31,6 +31,10 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )
 
+    # Vercel preview URL 등 패턴 매칭이 필요할 때 사용 (CORSMiddleware allow_origin_regex).
+    # 예: ^https://reaction-frontend-.*\.vercel\.app$
+    cors_allow_origin_regex: str | None = None
+
     # ── DB ──
     # 형식: postgresql://user:pass@host:port/db
     # SQLAlchemy 사용 시 코드가 자동으로 postgresql+asyncpg:// 로 변환.
@@ -56,6 +60,23 @@ class Settings(BaseSettings):
     # ── 보안 (Issue #5 §3) ──
     # 32-byte AES-GCM 키 (urlsafe base64 인코딩). 비어있으면 암호화 함수가 명시 에러.
     column_encryption_key: str = ""
+
+    # ── Auth (Issue #16) ──
+    # Google OAuth client (Google Cloud Console 발급). FE/BE가 같은 client_id를 공유.
+    # 비어있으면 /auth/google 호출 시 명확한 503 에러로 surface (auth_stub_mode=False 일 때).
+    google_oauth_client_id: str = ""
+    # SPA + id_token 흐름에서는 BE가 사용하지 않음. server-side code flow 대비 자리만 둠.
+    google_oauth_client_secret: str = ""
+
+    # JWT — HS256. JWT_SECRET 은 32+ bytes 권장 (python -c "import secrets; print(secrets.token_hex(32))").
+    jwt_secret: str = ""
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_ttl_minutes: int = 60
+    jwt_refresh_token_ttl_days: int = 14
+
+    # Local 개발에서 Google id_token 검증을 우회하고 고정 demo user 를 발급한다.
+    # staging/prod 는 반드시 False. True 일 때 GOOGLE_OAUTH_CLIENT_ID 가 비어도 부팅 가능.
+    auth_stub_mode: bool = False
 
 
 @lru_cache

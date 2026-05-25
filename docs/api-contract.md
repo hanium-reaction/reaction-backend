@@ -123,6 +123,19 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | --- | --- | --- |
 | GET | `/onboarding/status` | `{ currentState, suggestedNextScreen }` |
 
+`suggestedNextScreen` 매핑 (DevBaseline §5 화면 흐름):
+
+| `onboarding_state` | 다음 화면 |
+| --- | --- |
+| WELCOME · ONBOARDING_INTERVIEW | S02 |
+| ONBOARDING_CONFIRM | S03 |
+| ONBOARDING_CALENDAR | S04 |
+| ONBOARDING_MANUAL_SCHEDULE | S05 |
+| ONBOARDING_POLICIES | S07 |
+| ONBOARDING_FIRST_PLAN | S06 |
+| ONBOARDING_NOTIFICATIONS | S08 |
+| ACTIVE | S10 |
+
 진행 자체는 각 도메인 라우터가 자기 단계 완료 시 `users.onboarding_state` 를 전이.
 
 ---

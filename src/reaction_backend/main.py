@@ -10,9 +10,10 @@ auth·onboarding·interview(#3-B), time_policies·calendar·fixed_schedules·not
 goals·habits·inbox(#3-D) 구현 완료. 나머지는 placeholder 501.
 """
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from reaction_backend.api.deps import get_current_user
 from reaction_backend.api.exception_handlers import register_exception_handlers
 from reaction_backend.api.middleware.idempotency import IdempotencyMiddleware
 from reaction_backend.api.routes import (
@@ -61,18 +62,22 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cfg.cors_allow_origins,
+        allow_origin_regex=cfg.cors_allow_origin_regex,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # health는 prefix 없이 루트 경로
+    # health는 prefix 없이 루트 경로 (인증 X — readiness 신호)
     app.include_router(health.router)
 
-    # 도메인 라우터 — 각 라우터가 자신의 prefix를 가짐
+    # 인증 불필요 도메인 — auth는 자체 발급, onboarding/status 는 함수에서 CurrentUser 의존
+    app.include_router(auth.router)
+    app.include_router(onboarding.router)
+
+    # 인증 필수 도메인 — 모든 endpoint 에 Depends(get_current_user) (#16 DoD)
+    authed = [Depends(get_current_user)]
     for r in (
-        auth.router,
-        onboarding.router,
         interview.router,
         time_policies.router,
         goals.router,
@@ -90,7 +95,7 @@ def create_app() -> FastAPI:
         notifications.router,
         settings.router,
     ):
-        app.include_router(r)
+        app.include_router(r, dependencies=authed)
 
     return app
 

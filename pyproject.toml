@@ -17,6 +17,9 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "cryptography>=48.0.0",
     "google-genai>=2.6.0",
+    "google-auth>=2.53.0",
+    "pyjwt>=2.13.0",
+    "requests>=2.34.2",
 ]
 
 [dependency-groups]
@@ -67,6 +70,15 @@ exclude = ["tests/"]
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+# google-auth 패키지군은 py.typed 미배포. Issue #16 Google id_token 검증 도입.
+[[tool.mypy.overrides]]
+module = "google.auth.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "google.oauth2.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
