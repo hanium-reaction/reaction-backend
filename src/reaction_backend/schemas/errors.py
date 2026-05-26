@@ -60,10 +60,12 @@ class ErrorCode(StrEnum):
     # ── Notifications (NOTIF_) — #3-C ──
     NOTIF_TIME_RANGE = "NOTIF_TIME_RANGE"
 
-    # ── Goals (GOAL_) — #3-D ──
+    # ── Goals (GOAL_) — #3-D / #22 ──
     GOAL_NOT_FOUND = "GOAL_NOT_FOUND"
     GOAL_FOCUS_LIMIT = "GOAL_FOCUS_LIMIT"
     GOAL_MAINTAIN_LIMIT = "GOAL_MAINTAIN_LIMIT"
+    # Issue #22 + ADR-0005 §2.5.1 — Focus≤3 / Maintain≤5 단일 422 코드 (위 둘은 deprecated, 잔존)
+    GOAL_TIER_LIMIT_EXCEEDED = "GOAL_TIER_LIMIT_EXCEEDED"
 
     # ── Habits (HABIT_) — #3-D ──
     HABIT_NOT_FOUND = "HABIT_NOT_FOUND"
