@@ -21,19 +21,23 @@ from fastapi.testclient import TestClient
 
 from reaction_backend.api.deps import get_current_user
 from reaction_backend.auth.revoke import get_revoke_store
+from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.fixed_schedule import FixedSchedule
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.habit import Habit
 from reaction_backend.db.models.habit_instance import HabitInstance
+from reaction_backend.db.models.inbox_item import InboxItem
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.time_policy import TimePolicy
 from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
 from reaction_backend.main import create_app
+from reaction_backend.repositories.action_item_repo import get_action_item_repo
 from reaction_backend.repositories.fixed_schedule_repo import get_fixed_schedule_repo
 from reaction_backend.repositories.goal_repo import get_goal_repo
 from reaction_backend.repositories.habit_instance_repo import get_habit_instance_repo
 from reaction_backend.repositories.habit_repo import get_habit_repo
+from reaction_backend.repositories.inbox_repo import get_inbox_repo
 from reaction_backend.repositories.notification_repo import get_notification_repo
 from reaction_backend.repositories.time_policy_repo import get_time_policy_repo
 from reaction_backend.repositories.user_repo import GoogleProfile, get_user_repo
@@ -66,17 +70,29 @@ def _reset_process_singletons() -> None:
 
 @pytest.fixture(autouse=True)
 def _ensure_test_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """테스트 환경 settings — JWT_SECRET / AUTH_STUB_MODE 자동 적용."""
+    """테스트 환경 settings — JWT_SECRET / AUTH_STUB_MODE / COLUMN_ENCRYPTION_KEY 자동.
+
+    Inbox raw_text 암호화에 `COLUMN_ENCRYPTION_KEY` 필요 (Issue #22-B). 32-byte 고정 키.
+    LLM 은 `GEMINI_API_KEY` 빈 상태 → `ProviderUnavailable` → 자동 fallback 분기.
+    """
     monkeypatch.setenv(
         "JWT_SECRET",
         "test-jwt-secret-which-is-long-enough-for-hs256-aaaaaaaa",
     )
     monkeypatch.setenv("AUTH_STUB_MODE", "true")
+    # urlsafe base64 of 32 zero-bytes → AES-256 키.
+    monkeypatch.setenv(
+        "COLUMN_ENCRYPTION_KEY",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    )
     from reaction_backend.config import get_settings
+    from reaction_backend.safety.encryption import get_cipher
 
     get_settings.cache_clear()
+    get_cipher.cache_clear()
     yield
     get_settings.cache_clear()
+    get_cipher.cache_clear()
 
 
 # ───── 가짜 세션 + 결과 ─────
@@ -98,6 +114,10 @@ class _FakeResult:
         return self._rows[0] if self._rows else None
 
     def scalar_one(self) -> Any:
+        # SQLAlchemy aggregate(SUM) 쿼리는 항상 1행 반환 — fake 에선 0 default.
+        # `llm_budget.check` 가 `SELECT SUM(tokens)` 호출 → 빈 결과여도 0.
+        if not self._rows:
+            return 0
         return self._rows[0]
 
 
@@ -452,6 +472,101 @@ class FakeHabitInstanceRepo:
         return instance
 
 
+class FakeInboxRepo:
+    """in-memory InboxRepo — Issue #22-B."""
+
+    def __init__(self) -> None:
+        self._items: dict[UUID, InboxItem] = {}
+
+    async def list_by_status(self, user_id: UUID, status: str | None = None) -> list[InboxItem]:
+        items = [i for i in self._items.values() if i.user_id == user_id and i.archived_at is None]
+        if status is not None:
+            items = [i for i in items if i.status == status]
+        return sorted(items, key=lambda i: i.id, reverse=True)
+
+    async def get_by_id(self, user_id: UUID, inbox_id: UUID) -> InboxItem | None:
+        i = self._items.get(inbox_id)
+        if i is None or i.user_id != user_id or i.archived_at is not None:
+            return None
+        return i
+
+    async def create(
+        self,
+        user_id: UUID,
+        raw_text_encrypted: str,
+        ai_category_guess: str | None = None,
+        status: str = "captured",
+    ) -> InboxItem:
+        i = InboxItem()
+        i.id = uuid4()
+        i.user_id = user_id
+        i.raw_text_encrypted = raw_text_encrypted
+        i.ai_category_guess = ai_category_guess
+        i.user_category = None
+        i.status = status
+        i.promoted_goal_id = None
+        i.archived_at = None
+        self._items[i.id] = i
+        return i
+
+    async def update(
+        self,
+        item: InboxItem,
+        *,
+        user_category: str | None = None,
+        status: str | None = None,
+        ai_category_guess: str | None = None,
+    ) -> InboxItem:
+        if user_category is not None:
+            item.user_category = user_category
+        if status is not None:
+            item.status = status
+        if ai_category_guess is not None:
+            item.ai_category_guess = ai_category_guess
+        return item
+
+    async def mark_promoted_to_goal(self, item: InboxItem, goal_id: UUID) -> InboxItem:
+        item.status = "promoted"
+        item.promoted_goal_id = goal_id
+        return item
+
+    async def mark_promoted_to_action(self, item: InboxItem) -> InboxItem:
+        item.status = "promoted"
+        return item
+
+    async def soft_delete(self, item: InboxItem) -> None:
+        item.archived_at = datetime.now(UTC)
+        item.status = "archived"
+
+
+class FakeActionItemRepo:
+    """in-memory ActionItemRepo — Issue #22-B 부분 (create_from_inbox 만)."""
+
+    def __init__(self) -> None:
+        self._items: dict[UUID, ActionItem] = {}
+
+    async def create_from_inbox(
+        self,
+        user_id: UUID,
+        inbox_item_id: UUID,
+        title: str,
+        category: str,
+        target_date: date,
+    ) -> ActionItem:
+        a = ActionItem()
+        a.id = uuid4()
+        a.user_id = user_id
+        a.title = title
+        a.target_date = target_date
+        a.category = category
+        a.source = "inbox"
+        a.inbox_item_id = inbox_item_id
+        a.status = "planned"
+        a.archived_at = None
+        self._items[a.id] = a
+        return a
+
+
 class FakeUserRepo:
     """in-memory UserRepo. /auth 흐름 + 상태 전이 헬퍼 둘 다 지원."""
 
@@ -544,6 +659,16 @@ def fake_habit_instance_repo() -> FakeHabitInstanceRepo:
 
 
 @pytest.fixture
+def fake_inbox_repo() -> FakeInboxRepo:
+    return FakeInboxRepo()
+
+
+@pytest.fixture
+def fake_action_item_repo() -> FakeActionItemRepo:
+    return FakeActionItemRepo()
+
+
+@pytest.fixture
 def client(
     demo_user_orm: User,
     fake_time_policy_repo: FakeTimePolicyRepo,
@@ -553,8 +678,10 @@ def client(
     fake_goal_repo: FakeGoalRepo,
     fake_habit_repo: FakeHabitRepo,
     fake_habit_instance_repo: FakeHabitInstanceRepo,
+    fake_inbox_repo: FakeInboxRepo,
+    fake_action_item_repo: FakeActionItemRepo,
 ) -> Iterator[TestClient]:
-    """기본 client — 인증된 demo user + 7 도메인 fake repo + fake session."""
+    """기본 client — 인증된 demo user + 9 도메인 fake repo + fake session."""
     _reset_process_singletons()
     fake_user_repo.register(demo_user_orm)
     app = create_app()
@@ -571,6 +698,8 @@ def client(
     app.dependency_overrides[get_goal_repo] = lambda: fake_goal_repo
     app.dependency_overrides[get_habit_repo] = lambda: fake_habit_repo
     app.dependency_overrides[get_habit_instance_repo] = lambda: fake_habit_instance_repo
+    app.dependency_overrides[get_inbox_repo] = lambda: fake_inbox_repo
+    app.dependency_overrides[get_action_item_repo] = lambda: fake_action_item_repo
     with TestClient(app) as test_client:
         yield test_client
 
@@ -637,20 +766,24 @@ def issue_helper_token(
 
 __all__ = [
     "DEMO_USER_UUID",
+    "FakeActionItemRepo",
     "FakeFixedScheduleRepo",
     "FakeGoalRepo",
     "FakeHabitInstanceRepo",
     "FakeHabitRepo",
+    "FakeInboxRepo",
     "FakeNotificationRepo",
     "FakeTimePolicyRepo",
     "FakeUserRepo",
     "auth_client",
     "client",
     "demo_user_orm",
+    "fake_action_item_repo",
     "fake_fixed_schedule_repo",
     "fake_goal_repo",
     "fake_habit_instance_repo",
     "fake_habit_repo",
+    "fake_inbox_repo",
     "fake_notification_repo",
     "fake_time_policy_repo",
     "fake_user_repo",

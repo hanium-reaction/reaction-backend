@@ -318,7 +318,8 @@ class LLMToolExecutor:
         _log.warning(
             "llm_fallback",
             extra={
-                "module": module,
+                # 'module' 은 logging.LogRecord reserved 라 rename (Python 3.12 검증 강함).
+                "llm_module": module,
                 "prompt_id": prompt_id,
                 "prompt_version": prompt_version,
                 "reason": reason,
