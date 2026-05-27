@@ -200,11 +200,13 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | Method | Path | 설명 |
 | --- | --- | --- |
 | GET | `/goals` | tier별 그룹 (`focus`/`maintain`/`parked`) |
-| POST | `/goals` | 신규. Focus 최대 3, Maintain 최대 5 |
-| PATCH | `/goals/{id}` | 제목/마감/우선순위/tier 변경 |
-| POST | `/goals/{id}/decompose` | Goal Structuring Agent → `goal_nodes` 생성 |
+| POST | `/goals` | 신규. Focus ≤ 3 / Maintain ≤ 5 (초과 시 422 `GOAL_TIER_LIMIT_EXCEEDED`). Parked 한도 X |
+| PATCH | `/goals/{id}` | 제목/마감/우선순위/tier 변경. tier 변경 시 한도 재검사 |
+| POST | `/goals/{id}/decompose` | Goal Structuring Agent → `goal_nodes` 생성 (Issue #22 본 PR 은 mock stub; LLM 통합은 PR #33 + ADR-0005 §4 단계 5 후속) |
 | POST | `/goals/{id}/park` | Focus → Parked |
 | DELETE | `/goals/{id}` | soft delete |
+
+응답 ID 형식: `goal_<uuid>` (§1.8). category enum 9종 (`study`/`project`/`health`/`routine`/`schedule`/`career`/`relationship`/`self_dev`/`other`).
 
 응답 예 `POST /goals/{id}/decompose`:
 ```json
@@ -221,7 +223,9 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 ---
 
-## 7. Habits (`/habits`) — S27
+## 7. Habits (`/habits`, `/habit-instances`) — S27
+
+`POST /habits` 시 **이번 주 `habit_instances` 자동 생성** (cron 도입 전 임시; Issue #24 cron 후속). `frequencyPerWeek` 변경 시 `target_count` 동기화. `weekStart` 누락 시 이번 주 KST 월요일.
 
 | Method | Path | 설명 |
 | --- | --- | --- |

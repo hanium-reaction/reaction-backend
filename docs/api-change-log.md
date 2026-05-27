@@ -7,6 +7,19 @@
 
 ---
 
+## v1.0 — 2026-05-26 (#22 part 1 — Goals + Habits)
+
+- Goals(§6) · Habits(§7) — mock → **실 DB 구현**
+- Goals tier 한도 enforce — Focus ≤ 3 / Maintain ≤ 5 (422 `GOAL_TIER_LIMIT_EXCEEDED`, ADR-0005 §2.5.1). Parked 자유
+- Goals `goalId` prefix `goal_<uuid>`, `categoryEnum` 검증 (9종), tier 변경 시 한도 재검사, soft delete (`archived_at` + `status=archived`)
+- Goals `POST /goals/{id}/decompose` — mock 룰 stub 유지 (LLM 통합은 PR #33 인프라 + ADR-0005 §4 단계 5 후속 PR)
+- Habits CRUD — `habitId` prefix `habit_<uuid>`, `frequencyPerWeek` 1~7 (Pydantic + DB CheckConstraint), 빈도 변경 시 `target_count` 동기화
+- `POST /habits` 시 이번 주 `habit_instances` **자동 생성** (cron 도입 전 임시; Issue #24 cron 후속)
+- Habit instances — `GET /habit-instances?weekStart=YYYY-MM-DD` (누락 시 KST 월요일), `POST /habit-instances/{id}/check` done_count++. `instanceId` prefix `hinst_<uuid>`
+- 신설 repo 3개: `goal_repo` · `habit_repo` · `habit_instance_repo`
+- 에러 코드 추가: `GOAL_TIER_LIMIT_EXCEEDED` (`GOAL_FOCUS_LIMIT` / `GOAL_MAINTAIN_LIMIT` 은 deprecated, enum 잔존)
+- ⚠️ **Inbox(§18) 는 본 PR 미포함** — PR #33 (LLM Infra) 머지된 main 위에서 후속 PR (`#22-B`) — `aiClient.run("inbox/classify.v1")` 통합 + `safety/encryption` 으로 `raw_text_encrypted` 실 암호화 + `convert-to-action`/`convert-to-goal`/`archive` 새 endpoint
+
 ## v0.9 — 2026-05-25 (#17)
 
 - Time Policies(§5) · Fixed Schedules(§19) · Notifications settings(§15) — mock → **실 DB 구현**

@@ -12,7 +12,7 @@ Issue #17 이후 4 도메인(time_policies / fixed_schedules / notifications) �
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -22,12 +22,18 @@ from fastapi.testclient import TestClient
 from reaction_backend.api.deps import get_current_user
 from reaction_backend.auth.revoke import get_revoke_store
 from reaction_backend.db.models.fixed_schedule import FixedSchedule
+from reaction_backend.db.models.goal import Goal
+from reaction_backend.db.models.habit import Habit
+from reaction_backend.db.models.habit_instance import HabitInstance
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.time_policy import TimePolicy
 from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
 from reaction_backend.main import create_app
 from reaction_backend.repositories.fixed_schedule_repo import get_fixed_schedule_repo
+from reaction_backend.repositories.goal_repo import get_goal_repo
+from reaction_backend.repositories.habit_instance_repo import get_habit_instance_repo
+from reaction_backend.repositories.habit_repo import get_habit_repo
 from reaction_backend.repositories.notification_repo import get_notification_repo
 from reaction_backend.repositories.time_policy_repo import get_time_policy_repo
 from reaction_backend.repositories.user_repo import GoogleProfile, get_user_repo
@@ -267,6 +273,185 @@ class FakeNotificationRepo:
         return setting
 
 
+class FakeGoalRepo:
+    """in-memory GoalRepo — Issue #22."""
+
+    def __init__(self) -> None:
+        self._items: dict[UUID, Goal] = {}
+
+    async def list_active(self, user_id: UUID) -> list[Goal]:
+        return [g for g in self._items.values() if g.user_id == user_id and g.archived_at is None]
+
+    async def get_by_id(self, user_id: UUID, goal_id: UUID) -> Goal | None:
+        g = self._items.get(goal_id)
+        if g is None or g.user_id != user_id or g.archived_at is not None:
+            return None
+        return g
+
+    async def count_by_tier(self, user_id: UUID, tier: str) -> int:
+        return sum(
+            1
+            for g in self._items.values()
+            if g.user_id == user_id and g.archived_at is None and g.goal_tier == tier
+        )
+
+    async def create(
+        self,
+        user_id: UUID,
+        title: str,
+        category: str,
+        goal_tier: str,
+        priority_level: int,
+        deadline: date | None = None,
+        estimated_minutes: int | None = None,
+    ) -> Goal:
+        g = Goal()
+        g.id = uuid4()
+        g.user_id = user_id
+        g.title = title
+        g.category = category
+        g.goal_tier = goal_tier
+        g.priority_level = priority_level
+        g.deadline = deadline
+        g.estimated_minutes = estimated_minutes
+        g.status = "active"
+        g.archived_at = None
+        self._items[g.id] = g
+        return g
+
+    async def update(
+        self,
+        goal: Goal,
+        *,
+        title: str | None = None,
+        deadline: date | None = None,
+        priority_level: int | None = None,
+        goal_tier: str | None = None,
+    ) -> Goal:
+        if title is not None:
+            goal.title = title
+        if deadline is not None:
+            goal.deadline = deadline
+        if priority_level is not None:
+            goal.priority_level = priority_level
+        if goal_tier is not None:
+            goal.goal_tier = goal_tier
+        return goal
+
+    async def park(self, goal: Goal) -> Goal:
+        goal.goal_tier = "parked"
+        return goal
+
+    async def soft_delete(self, goal: Goal) -> None:
+        goal.archived_at = datetime.now(UTC)
+        goal.status = "archived"
+
+
+class FakeHabitRepo:
+    """in-memory HabitRepo — Issue #22."""
+
+    def __init__(self) -> None:
+        self._items: dict[UUID, Habit] = {}
+
+    async def list_active(self, user_id: UUID) -> list[Habit]:
+        return [h for h in self._items.values() if h.user_id == user_id and h.archived_at is None]
+
+    async def get_by_id(self, user_id: UUID, habit_id: UUID) -> Habit | None:
+        h = self._items.get(habit_id)
+        if h is None or h.user_id != user_id or h.archived_at is not None:
+            return None
+        return h
+
+    async def create(
+        self,
+        user_id: UUID,
+        title: str,
+        category: str,
+        frequency_per_week: int,
+        minutes_per_session: int,
+        time_preference: str,
+        priority_level: int,
+    ) -> Habit:
+        h = Habit()
+        h.id = uuid4()
+        h.user_id = user_id
+        h.title = title
+        h.category = category
+        h.frequency_per_week = frequency_per_week
+        h.target_count = frequency_per_week
+        h.minutes_per_session = minutes_per_session
+        h.time_preference = time_preference
+        h.priority_level = priority_level
+        h.archived_at = None
+        h.consecutive_miss_weeks = 0
+        h.last_penalty_evaluated_at = None
+        h.last_penalty_decision = None
+        self._items[h.id] = h
+        return h
+
+    async def update(
+        self,
+        habit: Habit,
+        *,
+        title: str | None = None,
+        frequency_per_week: int | None = None,
+    ) -> Habit:
+        if title is not None:
+            habit.title = title
+        if frequency_per_week is not None:
+            habit.frequency_per_week = frequency_per_week
+            habit.target_count = frequency_per_week
+        return habit
+
+    async def soft_delete(self, habit: Habit) -> None:
+        habit.archived_at = datetime.now(UTC)
+
+    async def count_active(self, user_id: UUID) -> int:
+        return len(await self.list_active(user_id))
+
+
+class FakeHabitInstanceRepo:
+    """in-memory HabitInstanceRepo — Issue #22.
+
+    user scope 는 단순화 — 같은 week_start 의 모든 instance 반환. 테스트가 사용자별 habit 를
+    섞어 쓰지 않으므로 충분.
+    """
+
+    def __init__(self) -> None:
+        self._items: dict[UUID, HabitInstance] = {}
+        self._by_habit_week: dict[tuple[UUID, date], UUID] = {}
+
+    async def list_for_user_week(self, user_id: UUID, week_start: date) -> list[HabitInstance]:
+        return [i for i in self._items.values() if i.week_start == week_start]
+
+    async def get_for_user(self, user_id: UUID, instance_id: UUID) -> HabitInstance | None:
+        return self._items.get(instance_id)
+
+    async def get_for_week(self, habit_id: UUID, week_start: date) -> HabitInstance | None:
+        iid = self._by_habit_week.get((habit_id, week_start))
+        return self._items.get(iid) if iid is not None else None
+
+    async def create_or_get_for_week(
+        self, habit_id: UUID, week_start: date, target_count: int
+    ) -> HabitInstance:
+        existing = await self.get_for_week(habit_id, week_start)
+        if existing is not None:
+            return existing
+        i = HabitInstance()
+        i.id = uuid4()
+        i.habit_id = habit_id
+        i.week_start = week_start
+        i.target_count = target_count
+        i.done_count = 0
+        self._items[i.id] = i
+        self._by_habit_week[(habit_id, week_start)] = i.id
+        return i
+
+    async def increment_done(self, instance: HabitInstance) -> HabitInstance:
+        instance.done_count = instance.done_count + 1
+        return instance
+
+
 class FakeUserRepo:
     """in-memory UserRepo. /auth 흐름 + 상태 전이 헬퍼 둘 다 지원."""
 
@@ -344,14 +529,32 @@ def fake_user_repo() -> FakeUserRepo:
 
 
 @pytest.fixture
+def fake_goal_repo() -> FakeGoalRepo:
+    return FakeGoalRepo()
+
+
+@pytest.fixture
+def fake_habit_repo() -> FakeHabitRepo:
+    return FakeHabitRepo()
+
+
+@pytest.fixture
+def fake_habit_instance_repo() -> FakeHabitInstanceRepo:
+    return FakeHabitInstanceRepo()
+
+
+@pytest.fixture
 def client(
     demo_user_orm: User,
     fake_time_policy_repo: FakeTimePolicyRepo,
     fake_fixed_schedule_repo: FakeFixedScheduleRepo,
     fake_notification_repo: FakeNotificationRepo,
     fake_user_repo: FakeUserRepo,
+    fake_goal_repo: FakeGoalRepo,
+    fake_habit_repo: FakeHabitRepo,
+    fake_habit_instance_repo: FakeHabitInstanceRepo,
 ) -> Iterator[TestClient]:
-    """기본 client — 인증된 demo user + 4 도메인 fake repo + fake session."""
+    """기본 client — 인증된 demo user + 7 도메인 fake repo + fake session."""
     _reset_process_singletons()
     fake_user_repo.register(demo_user_orm)
     app = create_app()
@@ -365,6 +568,9 @@ def client(
     app.dependency_overrides[get_fixed_schedule_repo] = lambda: fake_fixed_schedule_repo
     app.dependency_overrides[get_notification_repo] = lambda: fake_notification_repo
     app.dependency_overrides[get_user_repo] = lambda: fake_user_repo
+    app.dependency_overrides[get_goal_repo] = lambda: fake_goal_repo
+    app.dependency_overrides[get_habit_repo] = lambda: fake_habit_repo
+    app.dependency_overrides[get_habit_instance_repo] = lambda: fake_habit_instance_repo
     with TestClient(app) as test_client:
         yield test_client
 
@@ -432,6 +638,9 @@ def issue_helper_token(
 __all__ = [
     "DEMO_USER_UUID",
     "FakeFixedScheduleRepo",
+    "FakeGoalRepo",
+    "FakeHabitInstanceRepo",
+    "FakeHabitRepo",
     "FakeNotificationRepo",
     "FakeTimePolicyRepo",
     "FakeUserRepo",
@@ -439,6 +648,9 @@ __all__ = [
     "client",
     "demo_user_orm",
     "fake_fixed_schedule_repo",
+    "fake_goal_repo",
+    "fake_habit_instance_repo",
+    "fake_habit_repo",
     "fake_notification_repo",
     "fake_time_policy_repo",
     "fake_user_repo",
