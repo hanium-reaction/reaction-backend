@@ -1,16 +1,19 @@
 """Calendar — Google Calendar 연동 (S04, api-contract §9).
 
-#3-C 단계는 **mock 스텁**: 고정 freebusy·연결 상태를 반환한다.
-실제 OAuth 토큰 교환·freebusy 조회·events.insert 는 후속 (integrations/google_calendar).
-MVP 스코프는 read-only freebusy.
+Issue #17 (Alpha MVP): **캘린더 OAuth 자체를 P1 로 미룬다 (PM 결정, 이슈 본문)**.
+S04 는 skip 경로만 활성화 — FE 는 "수동 입력으로 시작" 권장. `connect`/`disconnect` 는 501.
+
+freebusy / sync-preview / approve-insert 는 #18 First Plan 흐름에서 다시 다룬다.
+현재는 mock 응답 유지 (#3-C).
 """
 
 from datetime import datetime
+from http import HTTPStatus
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query
 
-from reaction_backend.api.mock.calendar import DEMO_CALENDAR_PROVIDER, DEMO_FREEBUSY
+from reaction_backend.api.mock.calendar import DEMO_FREEBUSY
 from reaction_backend.schemas.calendar import (
     ApproveInsertResult,
     BusyInterval,
@@ -21,22 +24,32 @@ from reaction_backend.schemas.calendar import (
     SyncPreview,
 )
 from reaction_backend.schemas.common import KST
+from reaction_backend.schemas.errors import ApiError, ErrorCode
 
 router = APIRouter(prefix="/calendar", tags=["calendar"])
 
-_SCOPES = ["calendar.readonly", "calendar.events"]
 
-
-@router.post("/connect", status_code=status.HTTP_201_CREATED)
+@router.post("/connect")
 async def connect_calendar(body: CalendarConnectRequest) -> CalendarConnection:
-    """[stub] OAuth code → 캘린더 연결. 실제 토큰 교환·암호화 저장은 후속."""
-    return CalendarConnection(provider=DEMO_CALENDAR_PROVIDER, connected=True, scopes=_SCOPES)
+    """Google Calendar 연결 — **베타 이후 지원 (P1)**.
+
+    Issue #17 MVP 결정: 캘린더 OAuth 는 P1 로 미룸. FE 는 S05 수동 입력으로 진행.
+    """
+    raise ApiError(
+        ErrorCode.COMMON_NOT_IMPLEMENTED,
+        "Google Calendar 연결은 베타 이후 지원돼요. 지금은 '수동 입력으로 시작'을 눌러주세요.",
+        http_status=HTTPStatus.NOT_IMPLEMENTED,
+    )
 
 
-@router.delete("/connect", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/connect")
 async def disconnect_calendar() -> None:
-    """[stub] 캘린더 연결 해제 (토큰 폐기)."""
-    return None
+    """Google Calendar 연결 해제 — **베타 이후 지원 (P1)**."""
+    raise ApiError(
+        ErrorCode.COMMON_NOT_IMPLEMENTED,
+        "Google Calendar 연결 해제는 베타 이후 지원돼요.",
+        http_status=HTTPStatus.NOT_IMPLEMENTED,
+    )
 
 
 @router.get("/freebusy")
