@@ -7,6 +7,20 @@
 
 ---
 
+## v0.9 — 2026-05-25 (#17)
+
+- Time Policies(§5) · Fixed Schedules(§19) · Notifications settings(§15) — mock → **실 DB 구현**
+- §3 Onboarding `users.onboarding_state` 자동 전이 트리거 표 추가:
+  - `POST /fixed-schedules` → CALENDAR/MANUAL_SCHEDULE → POLICIES
+  - `POST /time-policies` → POLICIES → FIRST_PLAN
+  - `PATCH /notifications/settings` → NOTIFICATIONS → ACTIVE
+  - 각 트리거 멱등 (이미 더 진행된 상태면 no-op)
+- §5 `POST /time-policies/prefill-from-interview` — `InterviewSlotAnswer` 룰 매칭 + default 후보. 응답 `policyId` 는 prefill 임시 ID(`policy_prefill_N`), DB 미저장
+- §9 Calendar `/connect` (POST/DELETE) → **501 P1** (PM Alpha MVP 결정). freebusy / sync-preview / approve-insert 는 Issue #18 까지 mock 유지
+- §15 Notifications `/settings` (GET/PATCH) — `notification_settings` 테이블, 사용자당 1행, `get_or_create` 패턴. subscribe/unsubscribe 는 Issue #25 (PWA) 까지 mock
+- §19 Fixed Schedules CRUD — `days_of_week` 검증 (mon/tue/wed/thu/fri/sat/sun), `start < end` 검증
+- 신설 repo 3개: `time_policy_repo` · `fixed_schedule_repo` · `notification_repo`. `user_repo.advance_onboarding` 헬퍼 추가
+
 ## v0.8 — 2026-05-23 (#16)
 
 - Auth(§2) 실구현 — Google id_token 검증(`google-auth`) + 자체 JWT(HS256, access 60m / refresh 14d) 발급, refresh 회전 X

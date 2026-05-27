@@ -138,6 +138,16 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 진행 자체는 각 도메인 라우터가 자기 단계 완료 시 `users.onboarding_state` 를 전이.
 
+`users.onboarding_state` 자동 전이 트리거 (Issue #17 실구현):
+
+| 트리거 endpoint | from | to |
+| --- | --- | --- |
+| `POST /fixed-schedules` | `ONBOARDING_CALENDAR` / `ONBOARDING_MANUAL_SCHEDULE` | `ONBOARDING_POLICIES` |
+| `POST /time-policies` | `ONBOARDING_POLICIES` | `ONBOARDING_FIRST_PLAN` |
+| `PATCH /notifications/settings` | `ONBOARDING_NOTIFICATIONS` | `ACTIVE` |
+
+각 트리거는 `expected_from` 에 해당할 때만 전이 (멱등). 이미 더 진행된 상태(예: `ACTIVE`)면 no-op — 같은 endpoint 두 번 호출해도 안전. `ONBOARDING_FIRST_PLAN → ONBOARDING_NOTIFICATIONS` 전이는 Issue #18 (First Plan) 에서.
+
 ---
 
 ## 4. Interview (`/interview`) — S02 딥 인터뷰
@@ -256,6 +266,8 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 ---
 
 ## 9. Calendar (`/calendar`) — S04
+
+> ⚠️ Issue #17 Alpha MVP 결정 (PM): **Google Calendar OAuth 자체를 P1 로 미룸**. `/calendar/connect` 와 `/calendar/connect` (DELETE) 는 `501 COMMON_NOT_IMPLEMENTED` 반환. FE 는 S04 에서 "수동 입력으로 시작" 경로로 안내 (`POST /fixed-schedules`). freebusy / sync-preview / approve-insert 는 Issue #18 (First Plan) 에서 실구현.
 
 | Method | Path | 설명 |
 | --- | --- | --- |
