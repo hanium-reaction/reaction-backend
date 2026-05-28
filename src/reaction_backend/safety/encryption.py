@@ -123,6 +123,7 @@ def decrypt(token: str, *, associated_data: bytes | None = None) -> str:
 _AD_OAUTH = b"reaction:oauth-token"
 _AD_MEMO = b"reaction:failure-memo"
 _AD_LLM = b"reaction:llm-payload"
+_AD_INBOX = b"reaction:inbox-text"
 
 
 def encrypt_oauth_token(plaintext: str) -> str:
@@ -150,6 +151,15 @@ def encrypt_llm_payload(plaintext: str) -> str:
 
 def decrypt_llm_payload(token: str) -> str:
     return decrypt(token, associated_data=_AD_LLM)
+
+
+def encrypt_inbox_text(plaintext: str) -> str:
+    """`inbox_items.raw_text_encrypted` 용 (Issue #22-B)."""
+    return encrypt(plaintext, associated_data=_AD_INBOX)
+
+
+def decrypt_inbox_text(token: str) -> str:
+    return decrypt(token, associated_data=_AD_INBOX)
 
 
 def generate_key() -> str:

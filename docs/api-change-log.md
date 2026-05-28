@@ -7,6 +7,21 @@
 
 ---
 
+## v1.1 — 2026-05-27 (#22 part 2 — Inbox)
+
+- Inbox(§18) — mock → **실 DB 구현** + AI 분류 + Triage 변환
+- `POST /inbox` — `aiClient.run("inbox/classify")` Sequential Parser (Tool Executor 단일 게이트, ADR-0003 / ADR-0005 §4 단계 5)
+  - LLM 실패 시 룰 fallback (키워드 매칭, `confidence=0`, `needsUserOverride=true`)
+  - `raw_text` AES-256-GCM 암호화 저장 (`raw_text_encrypted`, `safety.encrypt_inbox_text` 새 헬퍼)
+  - 응답 시 ai_category_guess 채워지면 `status=classified` 자동
+- `POST /inbox/{id}/convert-to-goal` — Goal 생성 + Maintain 한도 enforce + inbox `status=promoted`
+- `POST /inbox/{id}/convert-to-action` — ActionItem(`source=inbox`) 생성 + inbox `status=promoted`
+- `POST /inbox/{id}/archive` — soft delete (`status=archived`)
+- ⚠️ **endpoint 변경** — 기존 `POST /inbox/{id}/promote` → `POST /convert-to-goal` 로 rename, `DELETE /inbox/{id}` → `POST /archive` 로 rename
+- 신설 repo: `inbox_repo` + `action_item_repo` (후자는 `create_from_inbox` 단일 진입점; 본격 CRUD 는 Issue #19/#20 후속)
+- `userCategory` 6종 enum 강제 (`study/project/health/routine/schedule/other`)
+- ⚠️ `aiSource` / `isDraft` 등 LLM 메타 응답 노출 (ADR-0005 §7.2 권장) 은 본 PR 미포함 — 후속 chore PR 로 분리
+
 ## v1.0 — 2026-05-26 (#22 part 1 — Goals + Habits)
 
 - Goals(§6) · Habits(§7) — mock → **실 DB 구현**

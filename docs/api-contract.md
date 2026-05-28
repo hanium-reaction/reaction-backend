@@ -405,18 +405,22 @@ PARK       → PARK_DEFAULT
 
 ## 18. Inbox (`/inbox`) — S24, S25
 
-자연어 1줄 캡처 + AI 백그라운드 분류. DB: `inbox_items`.
+자연어 1줄 캡처 + AI 분류(Sequential Agent) + Triage 변환. DB: `inbox_items`.
 
 | Method | Path | 설명 |
 | --- | --- | --- |
 | GET | `/inbox` | 내 inbox 항목. `?status=captured\|classified\|archived\|promoted` 필터 |
-| POST | `/inbox` | 1줄 캡처 — `{ rawText }`. AI 카테고리 추정은 백그라운드 |
-| PATCH | `/inbox/{id}` | `userCategory` override 또는 `status` 변경 |
-| POST | `/inbox/{id}/promote` | Goal 으로 승격 → `goals` 생성, inbox `status=promoted` |
-| DELETE | `/inbox/{id}` | soft delete (`archived_at`) |
+| POST | `/inbox` | 1줄 캡처 — `{ rawText }`. `aiClient.run("inbox/classify")` 동기 호출(8s timeout) + 룰 fallback. 응답 시 `aiCategoryGuess` 채워짐 (`status=classified`) |
+| PATCH | `/inbox/{id}` | `userCategory` override (6종 enum) 또는 `status` 변경 |
+| POST | `/inbox/{id}/convert-to-goal` | Goal 생성 (tier=`maintain`, 한도 enforce → 422 `GOAL_TIER_LIMIT_EXCEEDED`) + inbox `status=promoted` + `promotedGoalId` 연결 |
+| POST | `/inbox/{id}/convert-to-action` | ActionItem 생성 (`source=inbox`, `targetDate=today`) + inbox `status=promoted` |
+| POST | `/inbox/{id}/archive` | soft delete (`archived_at` + `status=archived`) |
 
 - `status`: `captured` / `classified` / `archived` / `promoted`
-- 원문(`rawText`)은 at-rest 암호화 대상 (`raw_text_encrypted`)
+- `category` enum (6종): `study` / `project` / `health` / `routine` / `schedule` / `other` (Goal/Action 9종의 subset)
+- **원문(`rawText`)은 at-rest AES-256-GCM 암호화** (`raw_text_encrypted`, `safety.encrypt_inbox_text`). 응답에는 복호화된 평문
+- `aiCategoryGuess` 는 LLM 호출 또는 룰 fallback 결과. `userCategory` 가 우선 (override). 둘 다 없으면 `other`
+- ID prefix: `inbox_<uuid>`
 
 ---
 
