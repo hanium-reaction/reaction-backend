@@ -10,7 +10,7 @@ re:action 응답 규약 (api-contract.md 진실 소스):
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, WithJsonSchema
@@ -52,6 +52,23 @@ class CamelModel(BaseModel):
     """
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class DraftMixin(CamelModel):
+    """AI 산출물 응답 mixin — HITL Draft Layer 표기 (ADR-0005 §7.2, DevBaseline §1.4 잠금).
+
+    AGENTS.md §1.4: "AI 출력 = Draft Layer + [수락/수정/거절] 3버튼. 자동 적용 금지."
+    AI 가 생성한 모든 응답(`generate`/`proposals`/`preview`)은 사용자 명시 승인 전까지
+    `is_draft=True` 로 반환된다. `is_draft=False` 는 명시 승인 endpoint
+    (`/plans/{id}/approve`, `/recovery/decisions` 등)에서만 set 한다 (ADR-0005 §7.2).
+
+    책임 분리:
+    - Orchestrator Node 는 `used_fallback` 만 정확히 유지 (is_draft 는 신경 X).
+    - 라우터 함수가 응답 빌드 시 `is_draft=True` + `ai_source` 강제.
+    """
+
+    is_draft: bool = True
+    ai_source: Literal["llm", "rule"] = "llm"
 
 
 class ErrorResponse(BaseModel):

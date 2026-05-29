@@ -1,0 +1,125 @@
+"""Planning 도메인 스키마 (api-contract §8) — First Plan / Goal Structuring (#32).
+
+두 종류:
+1. **LLM Structured Output 스키마** (`GoalDecomposition` 등) — `aiClient.run(schema=...)` 강제
+   검증. `prompts/planning/goal_decompose.v1.md` 의 JSON 출력 형식과 1:1 대응.
+   룰 fallback (`orchestrator/goal_structuring.py`) 도 동일 schema 로 환원된다.
+2. **경계/응답 스키마** — Deep Interview(#6) 의 `InterviewOutcome` 을 입력으로 받아
+   First Plan 오케스트레이터를 실행하고, Draft Layer 로 미리보기를 반환한다.
+
+모든 AI 산출 응답은 `DraftMixin` 을 상속 → 사용자 [수락] 전까지 `is_draft=True`
+(AGENTS.md §1.4 잠금, ADR-0005 §7.2). 실제 영속화는 `/plans/{id}/approve` 이후.
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import Field
+
+from reaction_backend.schemas.common import CamelModel, DraftMixin, KstDatetime
+from reaction_backend.schemas.interview import InterviewOutcome
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM Structured Output (LLM ②③) — goal_decompose.v1.md 출력 형식과 1:1 대응.
+# node_id 는 LLM 이 만드는 temp_uuid (DB UUID 아님). SAVING 단계에서 실제 UUID 로 치환.
+# ─────────────────────────────────────────────────────────────────────────────
+
+GoalNodeType = Literal["root", "branch", "leaf"]
+
+
+class GoalNodeDraft(CamelModel):
+    """분해된 goal_node 한 개 (root → branch → leaf 트리)."""
+
+    node_id: str  # temp_uuid (LLM 생성, SAVING 에서 실 UUID 치환)
+    parent_id: str | None
+    title: str
+    node_type: GoalNodeType
+    order_index: int = Field(ge=0)
+    is_leaf: bool
+
+
+class ActionItemDraft(CamelModel):
+    """leaf 노드에 매달리는 실행 항목 — SMART + tiny_first_step."""
+
+    node_id: str  # 소속 leaf 의 temp_uuid
+    title: str
+    estimated_minutes: int = Field(gt=0, le=60)  # leaf 는 60분 이내 (goal_decompose 규칙)
+    category: str
+    first_step: str  # 5분 내 시작 가능한 tiny first step
+
+
+class PolicyViolation(CamelModel):
+    """정책 위반으로 제외된 노드 + 사유 (cap / 충돌 등)."""
+
+    node_id: str
+    reason: str  # cap_exceeded | conflict | ...
+
+
+class GoalDecomposition(CamelModel):
+    """LLM ②③ 통합 결과 — goal_node 트리 + action_item + 정책 위반 목록.
+
+    `prompts/planning/goal_decompose.v1.md` Structured Output 형식.
+    """
+
+    goal_nodes: list[GoalNodeDraft] = Field(min_length=1)
+    action_items: list[ActionItemDraft] = Field(default_factory=list)
+    policy_violations: list[PolicyViolation] = Field(default_factory=list)
+
+
+class PlanReview(CamelModel):
+    """LLM ④ — `prompts/planning/plan_quality` 독립 검토 결과."""
+
+    approved: bool
+    feedback: list[str] = Field(default_factory=list)  # 미승인 시 재계획 이슈 목록
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 경계 입력 — First Plan 트리거 요청.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class FirstPlanGenerateRequest(CamelModel):
+    """POST /plans/generate (첫 계획) 요청.
+
+    `interview_session_id` 로 확정된 `InterviewOutcome` 을 참조하거나(서버가 로드),
+    온보딩 흐름에서 outcome 을 인라인 전달할 수 있다(`outcome`). 둘 중 하나는 필수 —
+    검증은 라우터/오케스트레이터 VALIDATING 단계에서 수행.
+    """
+
+    interview_session_id: str | None = None
+    outcome: InterviewOutcome | None = None
+    target_date: str | None = None  # "YYYY-MM-DD" — 미지정 시 오늘(KST) 기준
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 응답 — Draft Layer 미리보기 (DraftMixin: is_draft / ai_source 강제).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class ScheduledBlockPreview(CamelModel):
+    """미리보기용 스케줄 블록 — DB scheduled_blocks 대응(미영속). 시각은 KST 응답."""
+
+    start: KstDatetime
+    end: KstDatetime
+    title: str
+    category: str
+    origin: Literal["habit", "goal"]
+    origin_id: str | None = None
+
+
+class FirstPlanResponse(DraftMixin):
+    """First Plan 미리보기 응답 — 항상 Draft (사용자 [수락] 전).
+
+    `is_draft=True` 고정, `ai_source` 는 오케스트레이터 `used_fallback` 에 따라 라우터가 set.
+    """
+
+    plan_id: str  # draft plan 식별자 (승인 시 /plans/{plan_id}/approve)
+    target_date: str  # "YYYY-MM-DD"
+    horizon: str | None
+    goal_nodes: list[GoalNodeDraft]
+    action_items: list[ActionItemDraft]
+    blocks: list[ScheduledBlockPreview]
+    warnings: list[str] = Field(default_factory=list)
+    policy_violations: list[PolicyViolation] = Field(default_factory=list)
+    generated_at: KstDatetime
