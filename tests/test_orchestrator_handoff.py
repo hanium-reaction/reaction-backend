@@ -23,6 +23,7 @@ from reaction_backend.orchestrator import (
 from reaction_backend.schemas.interview import (
     AmbiguityUpdate,
     InterviewOutcome,
+    InterviewSummary,
     NextQuestionSchema,
 )
 from reaction_backend.schemas.planning import GoalDecomposition, PlanReview
@@ -179,6 +180,14 @@ def _stub_factory(new_ambiguity: float, *, fell_back: bool = False):
         elif schema is AmbiguityUpdate:
             value = AmbiguityUpdate(
                 slot_key="goals.list", clarity_score=0.9, new_ambiguity=new_ambiguity
+            )
+        elif schema is InterviewSummary:
+            value = InterviewSummary(
+                headline="요약",
+                goal_summary="목표 요약",
+                time_summary="시간 요약",
+                preference_summary="선호 요약",
+                confirm_question="이대로 계획을 세워볼까요?",
             )
         elif schema is GoalDecomposition:
             value = GoalDecomposition(

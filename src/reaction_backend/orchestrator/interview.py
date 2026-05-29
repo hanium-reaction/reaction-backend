@@ -1,24 +1,33 @@
-"""Deep Interview Orchestrator (#6) — Cyclic StateGraph (ADR-0005 §2.3 canonical).
+"""Deep Interview Orchestrator (#6) — Rule-based Slot FSM + LLM Nodes.
 
-흐름 (베이스라인 §6 "슬롯 채우기 + 모호함 0 까지 cycle"):
+흐름 (베이스라인 §6 "필수 슬롯 채우기 → 모호함 0 까지 cycle"):
 
-    ask_next_slot → receive_answer → update_ambiguity ─┐
-         ▲                                             │ should_continue
-         └──────────────── continue ───────────────────┤
-                                              finish ───┴→ finalize_outcome → END
+    ask_question → receive_answer → validate_answer ─┐
+         ▲                                           │ should_continue
+         └──────────────── continue ─────────────────┤
+                            finish → summarize_interview → finalize_outcome → END
 
-- LLM 호출은 Node 안에서 `aiClient.run(...)` 만 (AGENTS.md §2, ADR-0005 §2 #3).
-  Gemini SDK 직접 import 금지. 8s timeout / rate limit 시 룰 fallback.
+설계 원칙 (요청 규칙 엄수):
+- **Rule-based Slot FSM**: 다음에 물을 슬롯 선택·종료 판단은 LLM 0회의 순수 규칙
+  (`_next_required_slot` / `_terminal_reason`). 룰이 흐름을 운전하고 LLM 은 문장 생성·
+  채점에만 쓴다 — 8s timeout/rate limit 이 와도 인터뷰가 끊기지 않는다.
+- **모든 LLM 호출은 `aiClient.run(...)` 단일 게이트만** (AGENTS.md §2). Gemini SDK 직접
+  import 금지. 각 노드는 timeout=8.0 + 같은 schema 로 환원하는 룰 `fallback=` 을 넘긴다.
+- **Envelope-less**: 터미널은 껍데기 없이 도메인 객체 `InterviewOutcome` 를 빌드(LLM 0회).
+  요약 확인 카드(`InterviewSummary`)는 표현 계층으로 state 에만 싣는다.
 - State 는 직렬화 가능해야 한다 → `AsyncSession` 은 넣지 않고
   `config["configurable"]["session"]` 채널로 전달 (ADR-0005 §7.1).
-- 터미널에서 LLM 0회로 `InterviewOutcome`(경계 계약)을 빌드 → First Plan(#32) 시드.
 
-종료 조건 4종 (ADR-0005 §2.5.2):
-  ambiguity ≤ 0.2 / total_turns ≥ 15 / early_finish / 3턴 연속 정체.
+종료 조건 5종 (ADR-0005 §2.5.2 + FSM 완료):
+  필수 슬롯 전부 충족 / ambiguity ≤ 0.2 / total_turns ≥ 15 / early_finish / 3턴 연속 정체.
+
+라우터는 보통 그래프를 한 번에 `ainvoke` 하지 않고 `interview_runner` 로 턴 단위 구동한다
+(사용자 답이 HTTP 요청으로 외부에서 들어오기 때문 — `receive_answer` 가 no-op 인 이유).
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, TypedDict
 from uuid import UUID
 
@@ -32,20 +41,31 @@ from reaction_backend.schemas.interview import (
     AmbiguityUpdate,
     InterviewEndReason,
     InterviewOutcome,
+    InterviewSummary,
     NextQuestionSchema,
 )
 
 __all__ = [
     "InterviewState",
+    "ask_question",
     "build_interview_graph",
+    "finalize_outcome",
     "initial_state",
+    "receive_answer",
     "should_continue",
+    "summarize_interview",
+    "validate_answer",
 ]
 
-# ── 종료 임계값 (ADR-0005 §2.5.2) ─────────────────────────────────────────────
-AMBIGUITY_DONE_THRESHOLD = 0.2  # 모호함 ≤ 0.2 ("0 까지"는 보장 어려워 실용 임계값
+# ── 종료/판정 임계값 (ADR-0005 §2.5.2) ────────────────────────────────────────
+AMBIGUITY_DONE_THRESHOLD = 0.2  # 모호함 ≤ 0.2 ("0 까지"는 보장 어려워 실용 임계값)
 MAX_TURNS = 15  # 베이스라인 §6 최대 15턴
 STALL_LIMIT = 3  # 3턴 연속 모호함 감소 0 → 정체 종료
+STORE_CLARITY_MIN = 0.4  # clarity 가 이 미만이면 답을 채우지 않고 같은 슬롯 재질문
+
+# Rule-based FSM 이 순서대로 채워가는 필수 슬롯 (interview_adapter 와 동일 진실 소스).
+# 핵심 목표(goals.*) / 가용 시간(time.*) / 선호 방식(recovery.*) 그룹을 모두 포함.
+REQUIRED_SLOT_SEQUENCE: tuple[str, ...] = interview_adapter.REQUIRED_SLOT_KEYS
 
 
 class InterviewState(TypedDict):
@@ -64,6 +84,8 @@ class InterviewState(TypedDict):
     end_reason: InterviewEndReason | None
 
     # 턴 단위
+    next_slot_key: str | None  # FSM 이 이번 턴에 물은 필수 슬롯
+    last_slot_key: str | None  # 직전 답이 속한 슬롯 (라우터가 주입)
     last_answer: dict[str, Any] | None  # interview_slot_answers.value 형태
     next_question: NextQuestionSchema | None
     used_fallback: bool  # 어느 턴이든 룰 정규화면 True → outcome.analysis_source
@@ -72,7 +94,8 @@ class InterviewState(TypedDict):
     slot_answers: dict[str, dict[str, Any] | None]
 
     # 터미널 산출물
-    outcome: InterviewOutcome | None
+    summary: InterviewSummary | None  # 요약 확인 카드 (표현 계층)
+    outcome: InterviewOutcome | None  # 경계 계약 (First Plan 시드)
 
 
 def initial_state(*, session_id: UUID, user_id: UUID) -> InterviewState:
@@ -85,12 +108,35 @@ def initial_state(*, session_id: UUID, user_id: UUID) -> InterviewState:
         stall_count=0,
         early_finish=False,
         end_reason=None,
+        next_slot_key=None,
+        last_slot_key=None,
         last_answer=None,
         next_question=None,
         used_fallback=False,
         slot_answers={},
+        summary=None,
         outcome=None,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rule-based FSM helpers — 순수 함수 (LLM 호출 X). 흐름은 룰이 운전한다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _is_filled(value: dict[str, Any] | None) -> bool:
+    """슬롯 값이 실질적으로 채워졌는지 (빈 dict/None 제외)."""
+    return bool(value)
+
+
+def _next_required_slot(state: InterviewState) -> str | None:
+    """아직 안 채운 첫 필수 슬롯 키. 모두 채웠으면 None (FSM 완료 신호)."""
+    answers = state["slot_answers"]
+    return next((k for k in REQUIRED_SLOT_SEQUENCE if not _is_filled(answers.get(k))), None)
+
+
+def _all_required_filled(state: InterviewState) -> bool:
+    return _next_required_slot(state) is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,20 +144,40 @@ def initial_state(*, session_id: UUID, user_id: UUID) -> InterviewState:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _rule_next_question(state: InterviewState) -> NextQuestionSchema:
+def _rule_next_question(state: InterviewState, slot_key: str) -> NextQuestionSchema:
+    """카탈로그 기본 질문으로 회귀 — LLM 죽어도 인터뷰가 끊기지 않는다."""
     return NextQuestionSchema(
-        question="조금만 더 구체적으로 알려주실 수 있을까요?",
+        question=_DEFAULT_SLOT_QUESTIONS.get(
+            slot_key, "조금만 더 구체적으로 알려주실 수 있을까요?"
+        ),
         clarity_score=0.5,
         normalized_value=None,
         empathy_one_liner="천천히 알려주셔도 괜찮아요.",
     )
 
 
-def _rule_ambiguity_update(state: InterviewState) -> AmbiguityUpdate:
-    # 답이 있으면 모호함을 소폭 감소시키는 단순 휴리스틱.
-    answered = state["last_answer"] is not None
+def _rule_ambiguity_update(state: InterviewState, slot_key: str) -> AmbiguityUpdate:
+    """답이 있으면 모호함을 소폭 감소시키는 단순 휴리스틱."""
+    answered = _has_answer_text(state)
     new_score = max(0.0, state["ambiguity_score"] - (0.15 if answered else 0.0))
-    return AmbiguityUpdate(slot_key="", clarity_score=0.5, new_ambiguity=new_score)
+    return AmbiguityUpdate(
+        slot_key=slot_key,
+        clarity_score=0.5 if answered else 0.0,
+        new_ambiguity=new_score,
+    )
+
+
+def _rule_summary(state: InterviewState) -> InterviewSummary:
+    """슬롯에서 결정적으로 빌드한 룰 요약 — LLM 실패 시 그대로 노출."""
+    v = _summary_variables(state)
+    goals = v["goals"] or "아직 정하지 않음"
+    return InterviewSummary(
+        headline=f"{v['identity']} · 핵심 목표 {goals}",
+        goal_summary=f"가장 무겁게 느끼는 일은 '{v['heaviest']}' 이고, 정리한 목표는 {goals} 예요.",
+        time_summary=f"활동 시간대는 {v['time_window']}, 집중은 {v['peak_window']} 가 좋다고 하셨어요.",
+        preference_summary=f"못 한 날엔 '{v['tone']}' 톤을 선호하세요.",
+        confirm_question="이대로 계획을 세워볼까요?",
+    )
 
 
 def _session(config: RunnableConfig) -> Any:
@@ -124,18 +190,22 @@ def _session(config: RunnableConfig) -> Any:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def ask_next_slot(state: InterviewState, config: RunnableConfig) -> InterviewState:
-    """LLM ① — 모호함이 가장 큰 슬롯에서 다음 질문 1개 생성."""
+async def ask_question(state: InterviewState, config: RunnableConfig) -> InterviewState:
+    """LLM ① — FSM 이 고른 다음 필수 슬롯에 대한 질문 1개 생성.
+
+    슬롯 선택은 룰(`_next_required_slot`), 문장만 LLM. timeout 시 카탈로그 기본 질문.
+    """
+    slot_key = _next_required_slot(state) or ""
     result = await aiClient.run(
         module="interview",
         schema=NextQuestionSchema,
         prompt_id="interview/next_question",
-        fallback=lambda: _rule_next_question(state),
+        fallback=lambda: _rule_next_question(state, slot_key),
         timeout=8.0,
         variables={
             "goal_title": _heaviest_goal_hint(state),
             "turn_index": str(state["total_turns"]),
-            "ambiguous_slot": "",
+            "ambiguous_slot": slot_key,
             "last_answer": _last_answer_text(state),
         },
         user_id=state["user_id"],
@@ -144,36 +214,79 @@ async def ask_next_slot(state: InterviewState, config: RunnableConfig) -> Interv
     return {
         **state,
         "next_question": result.value,
+        "next_slot_key": slot_key,
         "total_turns": state["total_turns"] + 1,
         "used_fallback": state["used_fallback"] or result.fell_back,
     }
 
 
 async def receive_answer(state: InterviewState, config: RunnableConfig) -> InterviewState:
-    """사용자 답 수신 노드 — 외부 트리거(POST .../answers)로 진입. DB UPSERT 는 라우터."""
+    """사용자 답 수신 노드 — 외부 트리거(POST .../answers)로 진입.
+
+    실제 답 주입·DB UPSERT 는 라우터(`interview_runner.submit_and_advance`)가 한다.
+    그래프 자체를 batch `ainvoke` 할 때는 답이 없으므로 no-op (state passthrough).
+    """
     return state
 
 
-async def update_ambiguity(state: InterviewState, config: RunnableConfig) -> InterviewState:
-    """LLM ② — 직전 답 정규화 + clarity 채점 → 모호함 지표 갱신."""
-    prev = state["ambiguity_score"]
+async def validate_answer(state: InterviewState, config: RunnableConfig) -> InterviewState:
+    """LLM ② — 직전 답을 채점·정규화하고, 충분하면 슬롯에 채운 뒤 모호함 갱신.
+
+    - clarity ≥ STORE_CLARITY_MIN → 정규화해 `slot_answers[slot]` 에 저장(슬롯 충족).
+    - clarity 미달 → 저장 안 함 → FSM 이 같은 슬롯을 한 번 더 묻는다 (재질문).
+    - 새 슬롯이 안 채워진 턴이면 stall_count 증가(진척 없음), 채워지면 리셋 (정체 감지).
+    """
+    slot_key = state.get("last_slot_key") or state.get("next_slot_key") or ""
+
     result = await aiClient.run(
         module="interview",
         schema=AmbiguityUpdate,
         prompt_id="interview/ambiguity_score",
-        fallback=lambda: _rule_ambiguity_update(state),
+        fallback=lambda: _rule_ambiguity_update(state, slot_key),
         timeout=8.0,
-        variables={"answer": _last_answer_text(state)},
+        variables={"slot_key": slot_key, "answer": _last_answer_text(state)},
         user_id=state["user_id"],
         session=_session(config),
     )
-    new_score = result.value.new_ambiguity
-    # 정체 감지: 모호함이 줄지 않으면 stall_count 증가, 줄면 리셋.
-    stall = state["stall_count"] + 1 if new_score >= prev else 0
+    update = result.value
+
+    slot_answers = dict(state["slot_answers"])
+    last_answer = state["last_answer"]
+    filled_now = (
+        bool(slot_key) and last_answer is not None and update.clarity_score >= STORE_CLARITY_MIN
+    )
+    if filled_now and last_answer is not None:  # 2번째 조건은 mypy 내로잉용 (filled_now 에 포함)
+        slot_answers[slot_key] = _normalize_for_store(slot_key, last_answer)
+
+    new_score = update.new_ambiguity
+    stall = 0 if filled_now else state["stall_count"] + 1
     return {
         **state,
+        "slot_answers": slot_answers,
         "ambiguity_score": new_score,
         "stall_count": stall,
+        "last_answer": None,  # 소비 완료 — 다음 턴 답과 섞이지 않게
+        "last_slot_key": None,
+        "used_fallback": state["used_fallback"] or result.fell_back,
+    }
+
+
+async def summarize_interview(state: InterviewState, config: RunnableConfig) -> InterviewState:
+    """LLM ③ — 모은 슬롯을 요약 확인 카드로. timeout 시 슬롯에서 룰 요약."""
+    v = _summary_variables(state)
+    result = await aiClient.run(
+        module="interview",
+        schema=InterviewSummary,
+        prompt_id="interview/summary",
+        fallback=lambda: _rule_summary(state),
+        timeout=8.0,
+        variables=v,
+        user_id=state["user_id"],
+        session=_session(config),
+    )
+    return {
+        **state,
+        "summary": result.value,
         "used_fallback": state["used_fallback"] or result.fell_back,
     }
 
@@ -197,13 +310,15 @@ async def finalize_outcome(state: InterviewState, config: RunnableConfig) -> Int
 
 
 def _terminal_reason(state: InterviewState) -> InterviewEndReason | None:
-    """종료 조건 4종 평가. 종료면 DB enum 사유, 아니면 None.
+    """종료 조건 평가. 종료면 DB enum 사유, 아니면 None.
 
-    정체(stall)는 현재 슬롯으로 마감 가능하므로 `completed` 로 환원한다
-    (interview_end_reason enum 에 stall 없음).
+    필수 슬롯 완료(FSM)·모호함 임계·정체(stall)는 모두 현재 슬롯으로 마감 가능하므로
+    `completed` 로 환원한다 (interview_end_reason enum 에 stall/slots_full 없음).
     """
     if state["early_finish"]:
         return "early_user"
+    if _all_required_filled(state):
+        return "completed"
     if state["ambiguity_score"] <= AMBIGUITY_DONE_THRESHOLD:
         return "completed"
     if state["total_turns"] >= MAX_TURNS:
@@ -214,13 +329,32 @@ def _terminal_reason(state: InterviewState) -> InterviewEndReason | None:
 
 
 def should_continue(state: InterviewState) -> Literal["continue", "finish"]:
-    """Cycle 종료 조건. 종료면 finalize_outcome, 아니면 ask_next_slot 재진입."""
+    """Cycle 종료 조건. 종료면 summarize_interview, 아니면 ask_question 재진입."""
     return "finish" if _terminal_reason(state) is not None else "continue"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 프롬프트 변수 보조
+# 답 정규화 / 프롬프트 변수 보조
 # ─────────────────────────────────────────────────────────────────────────────
+
+_TEXT_SPLIT_RE = re.compile(r"[,、，\n]")
+
+
+def _normalize_for_store(slot_key: str, answer: dict[str, Any]) -> dict[str, Any]:
+    """저장 직전 룰 정규화 — text 답은 항목 리스트(`normalized`)를 채워 어댑터가 쓰기 쉽게.
+
+    chip/range 는 그대로 둔다. 이미 normalized 가 있으면 보존.
+    """
+    if answer.get("type") == "text" and "normalized" not in answer:
+        raw = str(answer.get("raw", ""))
+        parts = [p.strip() for p in _TEXT_SPLIT_RE.split(raw) if p.strip()]
+        if parts:
+            return {**answer, "normalized": parts}
+    return answer
+
+
+def _has_answer_text(state: InterviewState) -> bool:
+    return bool(_last_answer_text(state))
 
 
 def _last_answer_text(state: InterviewState) -> str:
@@ -238,29 +372,112 @@ def _last_answer_text(state: InterviewState) -> str:
 
 
 def _heaviest_goal_hint(state: InterviewState) -> str:
-    goals = state["slot_answers"].get("goals.heaviest")
-    if goals and goals.get("type") == "text":
-        return str(goals.get("raw", "")) or "당신의 목표"
-    return "당신의 목표"
+    heaviest = state["slot_answers"].get("goals.heaviest")
+    text = _slot_text(heaviest) or _slot_first_chip(heaviest)
+    if text:
+        return text
+    goals = state["slot_answers"].get("goals.list")
+    items = _slot_items(goals)
+    return items[0] if items else "당신의 목표"
+
+
+def _summary_variables(state: InterviewState) -> dict[str, str]:
+    """요약 프롬프트 변수 — 슬롯에서 사람이 읽을 문자열로 추출 (룰)."""
+    answers = state["slot_answers"]
+    role = _slot_first_chip(answers.get("identity.role")) or "미상"
+    season = _slot_first_chip(answers.get("identity.season")) or ""
+    goals = ", ".join(_slot_items(answers.get("goals.list"))) or "아직 정하지 않음"
+    heaviest = (
+        _slot_text(answers.get("goals.heaviest"))
+        or _slot_first_chip(answers.get("goals.heaviest"))
+        or "아직 정하지 않음"
+    )
+    window = answers.get("time.activity_window")
+    time_window = (
+        f"{window.get('start')}~{window.get('end')}"
+        if window and window.get("type") == "range"
+        else "아직 정하지 않음"
+    )
+    peak = ", ".join(_slot_chips(answers.get("time.peak_window"))) or "아직 정하지 않음"
+    tone = _slot_first_chip(answers.get("recovery.tone")) or "담백"
+    identity = f"{role} {season}".strip()
+    return {
+        "identity": identity,
+        "goals": goals,
+        "heaviest": heaviest,
+        "time_window": time_window,
+        "peak_window": peak,
+        "tone": tone,
+    }
+
+
+def _slot_chips(value: dict[str, Any] | None) -> list[str]:
+    if not value or value.get("type") != "chip":
+        return []
+    raw = value.get("values") or []
+    return [str(v) for v in raw] if isinstance(raw, list) else []
+
+
+def _slot_first_chip(value: dict[str, Any] | None) -> str | None:
+    chips = _slot_chips(value)
+    return chips[0] if chips else None
+
+
+def _slot_text(value: dict[str, Any] | None) -> str | None:
+    if not value or value.get("type") != "text":
+        return None
+    raw = value.get("raw")
+    return str(raw) if isinstance(raw, str) and raw.strip() else None
+
+
+def _slot_items(value: dict[str, Any] | None) -> list[str]:
+    if not value or value.get("type") != "text":
+        return []
+    norm = value.get("normalized")
+    if isinstance(norm, list):
+        return [str(v) for v in norm if str(v).strip()]
+    raw = value.get("raw")
+    return [str(raw)] if isinstance(raw, str) and raw.strip() else []
+
+
+# 카탈로그 기본 질문 (LLM 죽었을 때 회귀) — mock.interview.SLOT_CATALOG 라벨 기반.
+_DEFAULT_SLOT_QUESTIONS: dict[str, str] = {
+    "identity.role": "어떤 학년/시기예요?",
+    "identity.season": "지금 학기 중이에요, 방학이에요?",
+    "goals.list": "지금 머릿속에 있는 일들을 편하게 알려주세요.",
+    "goals.heaviest": "그중 가장 무겁게 느끼는 건 어떤 거예요?",
+    "goals.deadlines": "마감일이 정해진 게 있어요?",
+    "goals.success_image": "이번 주 끝에 어떤 모습이면 좋을까요?",
+    "time.activity_window": "보통 몇 시부터 몇 시까지 활동해요?",
+    "time.fixed_blocks": "매주 고정으로 비워야 하는 시간 있어요?",
+    "time.peak_window": "가장 잘 집중되는 시간대는요?",
+    "time.no_touch": "절대 일정 잡으면 안 되는 시간은요?",
+    "recovery.tone": "못 한 날 어떤 톤이 좋아요?",
+    "recovery.rest_ok": "쉬는 게 어때요 하는 제안을 받을 의향 있어요?",
+    "recovery.downscope_unit": "5분짜리로 줄어든 일도 의미 있게 느껴지나요?",
+}
 
 
 def build_interview_graph() -> CompiledStateGraph[
     InterviewState, Any, InterviewState, InterviewState
 ]:
-    """Cyclic StateGraph 컴파일. 라우터는 `await graph.ainvoke(initial, config=...)`."""
+    """Cyclic StateGraph 컴파일. 라우터는 보통 `interview_runner` 로 턴 단위 구동하고,
+    batch 시뮬레이션/테스트는 `await graph.ainvoke(initial, config=...)`."""
     graph = StateGraph(InterviewState)
-    graph.add_node("ask_next_slot", ask_next_slot)
+    graph.add_node("ask_question", ask_question)
     graph.add_node("receive_answer", receive_answer)
-    graph.add_node("update_ambiguity", update_ambiguity)
+    graph.add_node("validate_answer", validate_answer)
+    graph.add_node("summarize_interview", summarize_interview)
     graph.add_node("finalize_outcome", finalize_outcome)
 
-    graph.set_entry_point("ask_next_slot")
-    graph.add_edge("ask_next_slot", "receive_answer")
-    graph.add_edge("receive_answer", "update_ambiguity")
+    graph.set_entry_point("ask_question")
+    graph.add_edge("ask_question", "receive_answer")
+    graph.add_edge("receive_answer", "validate_answer")
     graph.add_conditional_edges(
-        "update_ambiguity",
+        "validate_answer",
         should_continue,
-        {"continue": "ask_next_slot", "finish": "finalize_outcome"},
+        {"continue": "ask_question", "finish": "summarize_interview"},
     )
+    graph.add_edge("summarize_interview", "finalize_outcome")
     graph.add_edge("finalize_outcome", END)
     return graph.compile()

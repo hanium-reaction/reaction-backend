@@ -79,6 +79,22 @@ class AmbiguityUpdate(CamelModel):
     new_ambiguity: float = Field(ge=0.0, le=1.0)
 
 
+class InterviewSummary(CamelModel):
+    """LLM ③ — `interview/summary` 응답. Analysis Confirm(S03) 요약 확인 카드.
+
+    필수 슬롯이 모두 채워진 뒤 `summarize_interview` 노드가 1회 생성한다.
+    사람이 [이대로 진행/수정] 을 고르는 화면에 그대로 노출되는 표현 계층일 뿐,
+    First Plan 의 입력 시드는 어디까지나 `InterviewOutcome` 이다(요약은 시드 아님).
+    8s timeout / rate limit 시 슬롯에서 결정적으로 빌드한 룰 요약으로 fallback.
+    """
+
+    headline: str
+    goal_summary: str
+    time_summary: str
+    preference_summary: str
+    confirm_question: str
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 경계 계약 — InterviewOutcome (Deep Interview #6 → First Plan #32)
 #
