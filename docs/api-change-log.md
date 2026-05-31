@@ -7,6 +7,18 @@
 
 ---
 
+## v1.2 — 2026-05-31 (#6 — Deep Interview 실배선)
+
+- Interview(§4) — mock 스텁 → **LangGraph 인터뷰 엔진 + DB 영속화** 연결
+- `POST /interview/sessions` — 실제 세션 생성(`interview_sessions` 행) + FSM 첫 질문 (LLM 1회, 룰 fallback)
+- `POST /interview/sessions/{id}/answers` — 답 채점·정규화·UPSERT(`interview_slot_answers`) 후 다음 질문, 종료 시 요약+outcome
+- `POST /interview/sessions/{id}/finish` — 조기 종료(`early_user`) + outcome 빌드
+- `sessionId` 는 이제 **UUID**(과거 고정 `interview_demo_0001` 폐기)
+- ⚠️ `ambiguityScore`(int) 의미 = **남은 미해결 필수 슬롯 수**(진행될수록 감소)
+- `GET /interview/slot-catalog` 항목에 **`options`**(chip/select 보기) 추가. text/date/range 는 빈 배열
+- `InterviewSession` 응답에 종료 턴 한정 **`summary`**(S03 확인 카드) + **`outcome`**(First Plan 시드) 추가 (진행 중엔 null)
+- ⚠️ 미해결(후속): 단일 활성 세션 enforce·동시성 lock(ADR-0005 §7.6)·재조립 시 transient 상태 리셋
+
 ## v1.1 — 2026-05-27 (#22 part 2 — Inbox)
 
 - Inbox(§18) — mock → **실 DB 구현** + AI 분류 + Triage 변환

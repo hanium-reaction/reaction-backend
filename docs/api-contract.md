@@ -154,12 +154,12 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 | Method | Path | 설명 |
 | --- | --- | --- |
-| POST | `/interview/sessions` | 신규 세션. 이미 진행 중이면 409 `INTERVIEW_SESSION_EXISTS` |
-| GET | `/interview/sessions/{id}` | 진행 상태 — `ambiguityScore`, `totalTurns`, `currentQuestion` |
-| POST | `/interview/sessions/{id}/answers` | 슬롯 답 UPSERT — `{ slotKey, value, clientTurn }` |
-| POST | `/interview/sessions/{id}/next-question` | 다음 질문 요청 (LLM 호출, 4초 이상 시 typing 안내) |
-| POST | `/interview/sessions/{id}/finish` | 조기 종료 `[충분해요]` |
-| GET | `/interview/slot-catalog` | 슬롯 카탈로그 — `slotKey·label·answerType·isRequired·category` |
+| POST | `/interview/sessions` | 신규 세션 + FSM 첫 질문. `sessionId` 는 UUID |
+| GET | `/interview/sessions/{id}` | 진행 상태 — `ambiguityScore`, `totalTurns`, `currentQuestion`. 종료 세션이면 `outcome` 동봉 |
+| POST | `/interview/sessions/{id}/answers` | 슬롯 답 UPSERT — `{ slotKey, value, clientTurn }`. 종료 시 `summary`+`outcome` |
+| POST | `/interview/sessions/{id}/next-question` | 현재 슬롯 질문 재생성 (resume용, LLM 호출) |
+| POST | `/interview/sessions/{id}/finish` | 조기 종료 `[충분해요]` → `endReason=early_user` + `outcome` |
+| GET | `/interview/slot-catalog` | 슬롯 카탈로그 — `slotKey·label·answerType·isRequired·category·options` |
 
 응답 예: `GET /interview/sessions/{id}`
 ```json
@@ -173,9 +173,16 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
     "text": "마감일이 정해진 게 있어요?",
     "answerType": "date_picker",
     "options": []
-  }
+  },
+  "summary": null,
+  "outcome": null
 }
 ```
+
+- `ambiguityScore`(int) = **남은 미해결 필수 슬롯 수** (진행될수록 감소, 0 이면 충분).
+- `currentQuestion.options` = chip/select 보기 (카탈로그 기반). `goals.heaviest` 는 `goals.list` 응답에서 동적 생성. text/date/range 는 `[]`.
+- 종료 턴(`endReason` 채워지고 `currentQuestion=null`)에만 `summary`(S03 확인 카드) + `outcome`(First Plan 시드, `InterviewOutcome`)이 채워진다.
+- 구현 상태(#6): 엔진+영속화 배선 완료. **후속**: 단일 활성 세션 enforce(409 `INTERVIEW_SESSION_EXISTS`)·동시성 lock·transient 상태 영속.
 
 ---
 
