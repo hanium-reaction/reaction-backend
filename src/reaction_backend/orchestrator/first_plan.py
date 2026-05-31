@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal, TypedDict
 from uuid import UUID
 
@@ -170,15 +171,51 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
     return state
 
 
+def _review_variables(state: FirstPlanState) -> dict[str, str]:
+    """`planning/plan_quality` 프롬프트 변수 계약 (PR #44).
+
+    goal_plan(분해 결과) + planning_context(요약) + policy_violations(충돌)를 프롬프트가
+    요구하는 4종 문자열로 평탄화한다. 누락 시 render 실패 → 룰 fallback 으로 빠지므로
+    리뷰 LLM 이 실제로 돌게 하려면 4종 모두 채워야 한다.
+    """
+    prompt_vars = state["planning_context"].get("prompt_vars", {})
+    time_policy_summary = str(prompt_vars.get("time_policy_summary", ""))
+    gp = state["goal_plan"]
+    if gp is None:
+        return {
+            "goal_nodes_json": "[]",
+            "action_items_json": "[]",
+            "time_policy_summary": time_policy_summary,
+            "conflict_report": "분해 결과 없음",
+        }
+    conflicts = (
+        "; ".join(f"{v.node_id}: {v.reason}" for v in gp.policy_violations)
+        if gp.policy_violations
+        else "충돌 없음"
+    )
+    return {
+        "goal_nodes_json": json.dumps([n.model_dump() for n in gp.goal_nodes], ensure_ascii=False),
+        "action_items_json": json.dumps(
+            [a.model_dump() for a in gp.action_items], ensure_ascii=False
+        ),
+        "time_policy_summary": time_policy_summary,
+        "conflict_report": conflicts,
+    }
+
+
 async def review_plan(state: FirstPlanState, config: RunnableConfig) -> FirstPlanState:
-    """REVIEWING (LLM ④) — 플랜 품질 독립 검토. 미승인 시 재계획 cycle."""
+    """REVIEWING (LLM ④) — 플랜 품질 독립 검토. 미승인 시 재계획 cycle.
+
+    `planning/plan_quality` 변수 계약을 `_review_variables` 로 채운다 → 리뷰 LLM 실제 실행
+    (과거 `variables={}` 는 render 실패로 항상 룰 승인 fallback 이었다).
+    """
     result = await aiClient.run(
         module="planning",
         schema=PlanReview,
         prompt_id="planning/plan_quality",
         fallback=lambda: _rule_review(state),
         timeout=8.0,
-        variables={},
+        variables=_review_variables(state),
         user_id=state["user_id"],
         session=_session(config),
     )

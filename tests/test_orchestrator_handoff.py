@@ -262,3 +262,53 @@ async def test_first_plan_graph_runs_to_approval(monkeypatch: pytest.MonkeyPatch
     assert final["review"].approved is True
     assert final["missing_fields"] == []  # 모든 필수 슬롯 충족
     assert final["used_fallback"] is False
+
+
+async def test_review_plan_wires_prompt_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    """review_plan 이 planning/plan_quality 변수 4종을 채워 LLM 을 실제 호출 (#32, PR #44).
+
+    과거 variables={} 는 render 실패 → 항상 룰 승인 fallback 이었다.
+    """
+    captured: dict[str, Any] = {}
+
+    async def fake_run(**kwargs: Any) -> RunResult[Any]:
+        if kwargs["schema"] is PlanReview:
+            captured.update(kwargs["variables"])
+            return RunResult(
+                value=PlanReview(approved=True, feedback=[]),
+                fell_back=False,
+                reason=None,
+                prompt_id=kwargs["prompt_id"],
+                prompt_version="v1",
+            )
+        # decompose(goal_decompose) 는 룰 분해로 환원
+        return RunResult(
+            value=kwargs["fallback"](),
+            fell_back=True,
+            reason=None,
+            prompt_id=kwargs["prompt_id"],
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", fake_run)
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_6",
+        slot_answers=SLOT_ANSWERS,
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    cfg: Any = {"configurable": {}}
+    state = first_plan.initial_state(user_id=uuid4(), outcome=outcome, target_date="2026-06-01")
+    state = await first_plan.validate_inputs(state, cfg)
+    state = await first_plan.decompose_goal(state, cfg)
+    await first_plan.review_plan(state, cfg)
+
+    assert set(captured) >= {
+        "goal_nodes_json",
+        "action_items_json",
+        "time_policy_summary",
+        "conflict_report",
+    }
+    assert captured["goal_nodes_json"] != "[]"  # 실제 노드 직렬화됨
+    assert captured["conflict_report"]  # 비어있지 않음
