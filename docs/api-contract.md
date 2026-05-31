@@ -296,16 +296,21 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 ## 10. Today / Execution (`/today`) — S10~S13
 
-| Method | Path | 설명 |
-| --- | --- | --- |
-| GET | `/today/agenda` | 어젠다 단일 조회 (daily_brief + cards + habits + fixed) |
-| GET | `/today/actions/{actionItemId}` | 카드 상세 (S11) |
-| POST | `/today/actions/{actionItemId}/start` | [▶ 시작] → `execution_events` 생성 |
-| POST | `/today/focus/{executionId}/pause` | [⏸] + `interruption_events` INSERT |
-| POST | `/today/focus/{executionId}/resume` | [▶ 계속] |
-| POST | `/today/check-ins` | Quick Check-in 4칩 + context_snapshot 자동 캡처 |
+| Method | Path | 설명 | 상태 |
+| --- | --- | --- | --- |
+| GET | `/today/agenda` | 어젠다 단일 조회 (`date` + `brief` + `cards` + `habits` + `fixedSchedules`) | ✅ #19-A |
+| GET | `/today/actions/{actionItemId}` | 카드 상세 (S11) | ✅ #19-A |
+| POST | `/today/actions/{actionItemId}/start` | [▶ 시작] → `execution_events` 생성 | 🔴 #19-B (scheduled_blocks 의존) |
+| POST | `/today/focus/{executionId}/pause` | [⏸] + `interruption_events` INSERT | 🔴 #19-B |
+| POST | `/today/focus/{executionId}/resume` | [▶ 계속] | 🔴 #19-B |
+| POST | `/today/check-ins` | Quick Check-in 4칩 + context_snapshot 자동 캡처 | 🔴 #19-B |
 
 `completion_status`: `done` / `partial_done` / `failed` / `over_done`
+
+**#19-A 조회 (구현)**:
+- `GET /today/agenda` — KST 오늘 기준. `brief`(daily_briefs, Morning Brief cron #19-C 가 채움; 없으면 null), `cards`(action_items, 오늘 target_date, priority 오름차순), `habits`(이번 주 habit_instances 진행), `fixedSchedules`(오늘 요일에 걸린 것). ID prefix `action_`/`hinst_`/`habit_`/`fixed_`
+- `GET /today/actions/{id}` — `action_<uuid>`. 없으면 404 `COMMON_NOT_FOUND`
+- ⚠️ Focus 실행 로깅(start/pause/resume/check-ins)은 **#19-B** — `execution_events.scheduled_block_id` NOT NULL 이라 First Plan(#18/#32) scheduled_blocks 필요
 
 ---
 

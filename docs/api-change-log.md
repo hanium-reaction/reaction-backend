@@ -7,6 +7,15 @@
 
 ---
 
+## v1.3 — 2026-06-01 (#19-A — Today 조회)
+
+- Today(§10) 조회 2 endpoint 실구현 — `GET /today/agenda` + `GET /today/actions/{id}` (조회 전용, 쓰기 없음)
+- `agenda` = KST 오늘 기준 `brief`(daily_briefs) + `cards`(action_items target_date) + `habits`(이번 주 instance) + `fixedSchedules`(오늘 요일)
+- 신설 `daily_brief_repo`(get_by_date). `action_item_repo` 에 `list_by_date`·`get_by_id` 추가 (status 변경 메서드는 추가 X — 원본 status 보존, AGENTS.md §2)
+- ⚠️ Focus 실행 로깅(start/pause/resume/check-ins)은 **#19-B** 로 분리 — `execution_events.scheduled_block_id` NOT NULL → First Plan(#18/#32) scheduled_blocks 의존
+- ⚠️ Morning Brief 생성 cron(daily_briefs INSERT, 룰+LLM)은 **#19-C** — 본 PR 은 조회만. brief 없으면 `agenda.brief=null`
+- `agenda.habits[].title` 은 현재 빈 문자열 (habit 본체 join 은 FE 또는 후속) — 진행 카운트(target/done)만 제공
+
 ## v1.2 — 2026-05-31 (#6 — Deep Interview 실배선)
 
 - Interview(§4) — mock 스텁 → **LangGraph 인터뷰 엔진 + DB 영속화** 연결

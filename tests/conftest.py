@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from reaction_backend.api.deps import get_current_user
 from reaction_backend.auth.revoke import get_revoke_store
 from reaction_backend.db.models.action_item import ActionItem
+from reaction_backend.db.models.daily_brief import DailyBrief
 from reaction_backend.db.models.fixed_schedule import FixedSchedule
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.habit import Habit
@@ -35,6 +36,7 @@ from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
 from reaction_backend.main import create_app
 from reaction_backend.repositories.action_item_repo import get_action_item_repo
+from reaction_backend.repositories.daily_brief_repo import get_daily_brief_repo
 from reaction_backend.repositories.fixed_schedule_repo import get_fixed_schedule_repo
 from reaction_backend.repositories.goal_repo import get_goal_repo
 from reaction_backend.repositories.habit_instance_repo import get_habit_instance_repo
@@ -543,10 +545,24 @@ class FakeInboxRepo:
 
 
 class FakeActionItemRepo:
-    """in-memory ActionItemRepo — Issue #22-B 부분 (create_from_inbox 만)."""
+    """in-memory ActionItemRepo — Issue #22-B(create) + #19-A(read by date/id)."""
 
     def __init__(self) -> None:
         self._items: dict[UUID, ActionItem] = {}
+
+    async def list_by_date(self, user_id: UUID, target_date: date) -> list[ActionItem]:
+        items = [
+            a
+            for a in self._items.values()
+            if a.user_id == user_id and a.target_date == target_date and a.archived_at is None
+        ]
+        return sorted(items, key=lambda a: a.priority)
+
+    async def get_by_id(self, user_id: UUID, action_id: UUID) -> ActionItem | None:
+        a = self._items.get(action_id)
+        if a is None or a.user_id != user_id or a.archived_at is not None:
+            return None
+        return a
 
     async def create_from_inbox(
         self,
@@ -565,9 +581,31 @@ class FakeActionItemRepo:
         a.source = "inbox"
         a.inbox_item_id = inbox_item_id
         a.status = "planned"
+        a.priority = 3
+        a.estimated_minutes = 30
+        a.why_now = None
+        a.first_step = None
+        a.goal_id = None
         a.archived_at = None
         self._items[a.id] = a
         return a
+
+    def seed(self, action: ActionItem) -> None:
+        """테스트 보조 — 카드 직접 주입 (First Plan/manual 카드 시뮬레이션)."""
+        self._items[action.id] = action
+
+
+class FakeDailyBriefRepo:
+    """in-memory DailyBriefRepo — Issue #19-A (조회만)."""
+
+    def __init__(self) -> None:
+        self._items: dict[tuple[UUID, date], DailyBrief] = {}
+
+    async def get_by_date(self, user_id: UUID, brief_date: date) -> DailyBrief | None:
+        return self._items.get((user_id, brief_date))
+
+    def seed(self, brief: DailyBrief) -> None:
+        self._items[(brief.user_id, brief.brief_date)] = brief
 
 
 class FakeInterviewRepo:
@@ -751,6 +789,11 @@ def fake_interview_repo() -> FakeInterviewRepo:
 
 
 @pytest.fixture
+def fake_daily_brief_repo() -> FakeDailyBriefRepo:
+    return FakeDailyBriefRepo()
+
+
+@pytest.fixture
 def client(
     demo_user_orm: User,
     fake_time_policy_repo: FakeTimePolicyRepo,
@@ -763,6 +806,7 @@ def client(
     fake_inbox_repo: FakeInboxRepo,
     fake_action_item_repo: FakeActionItemRepo,
     fake_interview_repo: FakeInterviewRepo,
+    fake_daily_brief_repo: FakeDailyBriefRepo,
 ) -> Iterator[TestClient]:
     """기본 client — 인증된 demo user + 도메인 fake repo + fake session."""
     _reset_process_singletons()
@@ -784,6 +828,7 @@ def client(
     app.dependency_overrides[get_inbox_repo] = lambda: fake_inbox_repo
     app.dependency_overrides[get_action_item_repo] = lambda: fake_action_item_repo
     app.dependency_overrides[get_interview_repo] = lambda: fake_interview_repo
+    app.dependency_overrides[get_daily_brief_repo] = lambda: fake_daily_brief_repo
     with TestClient(app) as test_client:
         yield test_client
 
@@ -851,6 +896,7 @@ def issue_helper_token(
 __all__ = [
     "DEMO_USER_UUID",
     "FakeActionItemRepo",
+    "FakeDailyBriefRepo",
     "FakeFixedScheduleRepo",
     "FakeGoalRepo",
     "FakeHabitInstanceRepo",
@@ -863,6 +909,7 @@ __all__ = [
     "client",
     "demo_user_orm",
     "fake_action_item_repo",
+    "fake_daily_brief_repo",
     "fake_fixed_schedule_repo",
     "fake_goal_repo",
     "fake_habit_instance_repo",
