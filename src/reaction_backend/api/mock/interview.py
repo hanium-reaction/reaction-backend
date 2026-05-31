@@ -23,17 +23,34 @@ class InterviewSlot:
     answer_type: str
     is_required: bool
     category: str
+    # chip/select 보기. text/date_picker/time_range 는 (). goals.heaviest 는 런타임 동적 생성.
+    options: tuple[str, ...] = ()
 
 
 SLOT_CATALOG: tuple[InterviewSlot, ...] = (
     # [A] 정체성
-    InterviewSlot("identity.role", "어떤 학년/시기예요?", "chip", True, "identity"),
-    InterviewSlot("identity.season", "지금 학기 중이에요, 방학이에요?", "chip", True, "identity"),
+    InterviewSlot(
+        "identity.role",
+        "어떤 학년/시기예요?",
+        "chip",
+        True,
+        "identity",
+        options=("1학년", "2학년", "3학년", "4학년", "졸업유예", "대학원", "기타"),
+    ),
+    InterviewSlot(
+        "identity.season",
+        "지금 학기 중이에요, 방학이에요?",
+        "chip",
+        True,
+        "identity",
+        options=("학기 중", "방학", "계절학기"),
+    ),
     InterviewSlot("identity.major", "어떤 전공이에요?", "text", False, "identity"),
     # [B] 목표
     InterviewSlot(
         "goals.list", "지금 머릿속에 있는 일들을 편하게 알려주세요", "text", True, "goals"
     ),
+    # goals.heaviest 보기는 goals.list 응답에서 런타임 동적 생성 (라우터 _question_options).
     InterviewSlot(
         "goals.heaviest", "그중 가장 무겁게 느끼는 건 어떤 거예요?", "select", True, "goals"
     ),
@@ -51,20 +68,63 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
     InterviewSlot(
         "time.fixed_blocks", "매주 고정으로 비워야 하는 시간 있어요?", "text", True, "time"
     ),
-    InterviewSlot("time.peak_window", "가장 잘 집중되는 시간대는요?", "chip", True, "time"),
-    InterviewSlot("time.no_touch", "절대 일정 잡으면 안 되는 시간은요?", "chip", True, "time"),
+    InterviewSlot(
+        "time.peak_window",
+        "가장 잘 집중되는 시간대는요?",
+        "chip",
+        True,
+        "time",
+        options=("오전", "오후", "저녁", "심야", "변동"),
+    ),
+    InterviewSlot(
+        "time.no_touch",
+        "절대 일정 잡으면 안 되는 시간은요?",
+        "chip",
+        True,
+        "time",
+        options=("수면", "식사", "통학·이동", "아르바이트", "가족 시간", "없음"),
+    ),
     # [D] 패턴 & 에너지
     InterviewSlot(
-        "energy.focus_duration", "한 번에 집중할 수 있는 시간은요?", "chip", False, "energy"
+        "energy.focus_duration",
+        "한 번에 집중할 수 있는 시간은요?",
+        "chip",
+        False,
+        "energy",
+        options=("25분", "50분", "90분", "2시간 이상"),
     ),
     InterviewSlot(
-        "energy.break_pattern", "작업 사이 쉬는 시간은 어떻게 가져요?", "chip", False, "energy"
+        "energy.break_pattern",
+        "작업 사이 쉬는 시간은 어떻게 가져요?",
+        "chip",
+        False,
+        "energy",
+        options=("짧게 자주", "길게 가끔", "거의 안 쉼"),
     ),
-    InterviewSlot("energy.weekly_drain", "이번 주 컨디션은 어때요?", "chip", False, "energy"),
+    InterviewSlot(
+        "energy.weekly_drain",
+        "이번 주 컨디션은 어때요?",
+        "chip",
+        False,
+        "energy",
+        options=("좋음", "보통", "지친 편", "많이 지침"),
+    ),
     # [E] 회복 선호
-    InterviewSlot("recovery.tone", "못 한 날 어떤 톤이 좋아요?", "chip", True, "recovery"),
     InterviewSlot(
-        "recovery.rest_ok", "쉬는 게 어때요 하는 제안을 받을 의향 있어요?", "chip", True, "recovery"
+        "recovery.tone",
+        "못 한 날 어떤 톤이 좋아요?",
+        "chip",
+        True,
+        "recovery",
+        options=("담백", "따뜻", "유머", "코치처럼"),
+    ),
+    InterviewSlot(
+        "recovery.rest_ok",
+        "쉬는 게 어때요 하는 제안을 받을 의향 있어요?",
+        "chip",
+        True,
+        "recovery",
+        options=("네", "아니오"),
     ),
     InterviewSlot(
         "recovery.downscope_unit",
@@ -72,6 +132,7 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
         "chip",
         True,
         "recovery",
+        options=("네", "아니오"),
     ),
     # [F] 외부 제약
     InterviewSlot(
@@ -83,6 +144,7 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
         "chip",
         False,
         "constraints",
+        options=("없음", "학업", "대인관계", "건강", "경제", "기타"),
     ),
 )
 

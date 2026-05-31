@@ -27,6 +27,7 @@ class SlotCatalogEntry(CamelModel):
     answer_type: str
     is_required: bool
     category: str
+    options: list[str] = Field(default_factory=list)  # chip/select 보기 (text 등은 빈 배열)
 
 
 class Question(CamelModel):
@@ -39,13 +40,20 @@ class Question(CamelModel):
 
 
 class InterviewSession(CamelModel):
-    """인터뷰 세션 상태 — sessions·answers·next-question·finish 공통 응답."""
+    """인터뷰 세션 상태 — sessions·answers·next-question·finish 공통 응답.
+
+    `ambiguity_score` 는 남은 미해결 필수 슬롯 수(정수). 진행될수록 감소 → 0 이면 충분.
+    종료 턴(`end_reason` 채워지고 `current_question=None`)에는 `summary`(S03 확인 카드)와
+    `outcome`(First Plan 시드)이 함께 실린다. 진행 중에는 둘 다 null.
+    """
 
     session_id: str
     ambiguity_score: int
     total_turns: int
     end_reason: str | None
     current_question: Question | None
+    summary: InterviewSummary | None = None
+    outcome: InterviewOutcome | None = None
 
 
 class SlotAnswerRequest(CamelModel):
@@ -192,3 +200,8 @@ class InterviewOutcome(CamelModel):
     preferences: PreferenceProfile  # 선호 방식
     horizon: str | None = None  # 파생: max(core_goals.deadline) "YYYY-MM-DD"
     unresolved_slots: list[str] = Field(default_factory=list)  # default 처리된 필수 슬롯 키
+
+
+# InterviewSession 이 InterviewSummary/InterviewOutcome 보다 먼저 정의되므로
+# (forward ref) 모두 정의된 뒤 재빌드해 응답 직렬화를 보장한다.
+InterviewSession.model_rebuild()

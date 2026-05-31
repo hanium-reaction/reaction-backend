@@ -27,6 +27,8 @@ from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.habit import Habit
 from reaction_backend.db.models.habit_instance import HabitInstance
 from reaction_backend.db.models.inbox_item import InboxItem
+from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionModel
+from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.time_policy import TimePolicy
 from reaction_backend.db.models.user import User
@@ -38,6 +40,7 @@ from reaction_backend.repositories.goal_repo import get_goal_repo
 from reaction_backend.repositories.habit_instance_repo import get_habit_instance_repo
 from reaction_backend.repositories.habit_repo import get_habit_repo
 from reaction_backend.repositories.inbox_repo import get_inbox_repo
+from reaction_backend.repositories.interview_repo import get_interview_repo
 from reaction_backend.repositories.notification_repo import get_notification_repo
 from reaction_backend.repositories.time_policy_repo import get_time_policy_repo
 from reaction_backend.repositories.user_repo import GoogleProfile, get_user_repo
@@ -567,6 +570,80 @@ class FakeActionItemRepo:
         return a
 
 
+class FakeInterviewRepo:
+    """in-memory InterviewRepo — #6 배선. 세션 + 슬롯답 정규화 저장 미러."""
+
+    def __init__(self) -> None:
+        self._sessions: dict[UUID, InterviewSessionModel] = {}
+        self._answers: dict[UUID, dict[str, InterviewSlotAnswer]] = {}
+
+    async def create_session(self, user_id: UUID, llm_model: str) -> InterviewSessionModel:
+        s = InterviewSessionModel()
+        s.id = uuid4()
+        s.user_id = user_id
+        s.llm_model = llm_model
+        s.total_turns = 0
+        s.ambiguity_final = None
+        s.end_reason = None
+        s.ended_at = None
+        self._sessions[s.id] = s
+        self._answers[s.id] = {}
+        return s
+
+    async def get_active(self, user_id: UUID, session_id: UUID) -> InterviewSessionModel | None:
+        s = self._sessions.get(session_id)
+        if s is None or s.user_id != user_id:
+            return None
+        return s
+
+    async def list_slot_answers(self, session_id: UUID) -> list[InterviewSlotAnswer]:
+        return list(self._answers.get(session_id, {}).values())
+
+    async def upsert_slot_answer(
+        self,
+        session_id: UUID,
+        slot_key: str,
+        value: dict[str, Any] | None,
+        *,
+        is_required: bool,
+        clarity_score: float | None = None,
+    ) -> None:
+        bucket = self._answers.setdefault(session_id, {})
+        existing = bucket.get(slot_key)
+        if existing is None:
+            a = InterviewSlotAnswer()
+            a.id = uuid4()
+            a.session_id = session_id
+            a.slot_key = slot_key
+            a.value = value
+            a.clarity_score = clarity_score
+            a.is_required = is_required
+            bucket[slot_key] = a
+        else:
+            existing.value = value
+            if clarity_score is not None:
+                existing.clarity_score = clarity_score
+
+    async def save_progress(
+        self, session: InterviewSessionModel, *, total_turns: int, ambiguity_final: float
+    ) -> None:
+        session.total_turns = total_turns
+        session.ambiguity_final = ambiguity_final
+
+    async def finalize(
+        self,
+        session: InterviewSessionModel,
+        *,
+        end_reason: str,
+        total_turns: int,
+        ambiguity_final: float,
+    ) -> None:
+        session.end_reason = end_reason
+        session.total_turns = total_turns
+        session.ambiguity_final = ambiguity_final
+        session.ended_at = datetime.now(UTC)
+
+
 class FakeUserRepo:
     """in-memory UserRepo. /auth 흐름 + 상태 전이 헬퍼 둘 다 지원."""
 
@@ -669,6 +746,11 @@ def fake_action_item_repo() -> FakeActionItemRepo:
 
 
 @pytest.fixture
+def fake_interview_repo() -> FakeInterviewRepo:
+    return FakeInterviewRepo()
+
+
+@pytest.fixture
 def client(
     demo_user_orm: User,
     fake_time_policy_repo: FakeTimePolicyRepo,
@@ -680,8 +762,9 @@ def client(
     fake_habit_instance_repo: FakeHabitInstanceRepo,
     fake_inbox_repo: FakeInboxRepo,
     fake_action_item_repo: FakeActionItemRepo,
+    fake_interview_repo: FakeInterviewRepo,
 ) -> Iterator[TestClient]:
-    """기본 client — 인증된 demo user + 9 도메인 fake repo + fake session."""
+    """기본 client — 인증된 demo user + 도메인 fake repo + fake session."""
     _reset_process_singletons()
     fake_user_repo.register(demo_user_orm)
     app = create_app()
@@ -700,6 +783,7 @@ def client(
     app.dependency_overrides[get_habit_instance_repo] = lambda: fake_habit_instance_repo
     app.dependency_overrides[get_inbox_repo] = lambda: fake_inbox_repo
     app.dependency_overrides[get_action_item_repo] = lambda: fake_action_item_repo
+    app.dependency_overrides[get_interview_repo] = lambda: fake_interview_repo
     with TestClient(app) as test_client:
         yield test_client
 
