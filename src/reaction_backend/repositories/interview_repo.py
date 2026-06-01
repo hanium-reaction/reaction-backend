@@ -36,6 +36,23 @@ class InterviewRepo:
         await self._session.refresh(row)
         return row
 
+    async def get_active_session(self, user_id: UUID) -> InterviewSession | None:
+        """user 의 진행 중(end_reason IS NULL) 세션 1개. 단일 활성 세션 enforce 용.
+
+        정상 흐름이면 advisory lock(ADR-0005 §7.6) 덕에 최대 1개지만, 방어적으로 limit(1).
+        """
+        stmt = (
+            select(InterviewSession)
+            .where(
+                InterviewSession.user_id == user_id,
+                InterviewSession.end_reason.is_(None),
+            )
+            .order_by(InterviewSession.started_at.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def get_active(self, user_id: UUID, session_id: UUID) -> InterviewSession | None:
         """user 소유 세션 1개. 종료 여부는 호출자가 end_reason 으로 판단."""
         stmt = select(InterviewSession).where(

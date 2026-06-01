@@ -129,7 +129,13 @@ class _FakeSession:
 
     repo 들이 모두 dependency_override 로 fake 로 교체되므로 session 은 직접 query 수행 X.
     `time_policies` prefill 의 inline select 만 fake — 항상 빈 결과 (interview 답 없음).
+
+    `lock_acquired` 는 advisory lock(ADR-0005 §7.6) 의 `pg_try_advisory_lock` 결과를 흉내낸다
+    (default True = 획득 성공). False 로 두면 동시 진입(409) 분기를 테스트할 수 있다.
     """
+
+    def __init__(self, *, lock_acquired: bool = True) -> None:
+        self.lock_acquired = lock_acquired
 
     async def commit(self) -> None:
         return None
@@ -137,9 +143,13 @@ class _FakeSession:
     async def rollback(self) -> None:
         return None
 
-    async def execute(self, stmt: Any) -> _FakeResult:  # noqa: ARG002
-        # prefill 의 inline select 만 도달 — interview 답이 없는 default 시나리오 반환.
+    async def execute(self, stmt: Any, params: Any = None) -> _FakeResult:  # noqa: ARG002
+        # prefill 의 inline select / advisory unlock 만 도달 — 빈 결과 반환.
         return _FakeResult([])
+
+    async def scalar(self, stmt: Any, params: Any = None) -> Any:  # noqa: ARG002
+        # user_agent_lock 의 `SELECT pg_try_advisory_lock(...)` 만 도달.
+        return self.lock_acquired
 
     async def flush(self) -> None:
         return None
@@ -589,6 +599,12 @@ class FakeInterviewRepo:
         self._sessions[s.id] = s
         self._answers[s.id] = {}
         return s
+
+    async def get_active_session(self, user_id: UUID) -> InterviewSessionModel | None:
+        for s in self._sessions.values():
+            if s.user_id == user_id and s.end_reason is None:
+                return s
+        return None
 
     async def get_active(self, user_id: UUID, session_id: UUID) -> InterviewSessionModel | None:
         s = self._sessions.get(session_id)

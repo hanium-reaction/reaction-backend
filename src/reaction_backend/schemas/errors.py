@@ -74,6 +74,10 @@ class ErrorCode(StrEnum):
     INBOX_NOT_FOUND = "INBOX_NOT_FOUND"
     INBOX_ALREADY_PROMOTED = "INBOX_ALREADY_PROMOTED"
 
+    # ── Agent 동시성 (AGENT_) — ADR-0005 §7.6 ──
+    # user_id × agent advisory lock 미획득 (다른 디바이스에서 진행 중). Interview/Planning/Recovery 공용.
+    AGENT_CONCURRENT_ACCESS = "AGENT_CONCURRENT_ACCESS"
+
 
 class ApiError(Exception):
     """도메인 코드가 던지는 표준 에러.

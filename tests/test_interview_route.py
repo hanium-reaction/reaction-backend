@@ -135,3 +135,46 @@ def test_unknown_session_returns_404(client: TestClient, monkeypatch: Any) -> No
         json={"slotKey": "identity.role", "value": ["3학년"], "clientTurn": 1},
     )
     assert res.status_code == 404
+
+
+def test_start_with_active_session_returns_409(client: TestClient, monkeypatch: Any) -> None:
+    """단일 활성 세션 enforce — 진행 중 세션이 있는데 또 시작하면 409."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+
+    first = client.post("/interview/sessions")
+    assert first.status_code == 201  # 첫 세션은 생성
+
+    second = client.post("/interview/sessions")  # 진행 중 세션 존재
+    assert second.status_code == 409
+    assert second.json()["code"] == "INTERVIEW_SESSION_EXISTS"
+
+
+def test_start_after_finish_is_allowed(client: TestClient, monkeypatch: Any) -> None:
+    """종료(end_reason 채워짐)된 세션은 활성으로 치지 않음 — 새 세션 시작 가능."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+
+    sid = client.post("/interview/sessions").json()["sessionId"]
+    assert client.post(f"/interview/sessions/{sid}/finish").status_code == 200
+
+    again = client.post("/interview/sessions")  # 이전 세션 종료됨 → 충돌 없음
+    assert again.status_code == 201
+
+
+def test_concurrent_access_returns_409(client: TestClient, monkeypatch: Any) -> None:
+    """동시성 lock — advisory lock 미획득 시 409 AGENT_CONCURRENT_ACCESS (ADR-0005 §7.6)."""
+    from collections.abc import AsyncIterator
+
+    from reaction_backend.db.session import get_db
+    from tests.conftest import _FakeSession  # noqa: PLC0415
+
+    monkeypatch.setattr(aiClient, "run", _stub())
+
+    async def _locked_session() -> AsyncIterator[_FakeSession]:
+        # 다른 디바이스가 lock 보유 중 → pg_try_advisory_lock 이 False.
+        yield _FakeSession(lock_acquired=False)
+
+    client.app.dependency_overrides[get_db] = _locked_session  # type: ignore[attr-defined]
+
+    res = client.post("/interview/sessions")
+    assert res.status_code == 409
+    assert res.json()["code"] == "AGENT_CONCURRENT_ACCESS"
