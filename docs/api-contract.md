@@ -60,6 +60,7 @@
 | `INBOX_*` | Life Inbox |
 | `FIXED_SCHEDULE_*` | 고정 일정 |
 | `LLM_*` | LLM 호출 (timeout, fallback used 등) |
+| `AGENT_*` | Agent 동시성 (advisory lock 미획득 등, ADR-0005 §7.6) |
 | `IDEMPOTENCY_*` | 멱등 키 충돌 |
 | `COMMON_*` | 공통 (검증 실패·미구현·내부 오류) |
 
@@ -182,7 +183,9 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 - `ambiguityScore`(int) = **남은 미해결 필수 슬롯 수** (진행될수록 감소, 0 이면 충분).
 - `currentQuestion.options` = chip/select 보기 (카탈로그 기반). `goals.heaviest` 는 `goals.list` 응답에서 동적 생성. text/date/range 는 `[]`.
 - 종료 턴(`endReason` 채워지고 `currentQuestion=null`)에만 `summary`(S03 확인 카드) + `outcome`(First Plan 시드, `InterviewOutcome`)이 채워진다.
-- 구현 상태(#6): 엔진+영속화 배선 완료. **후속**: 단일 활성 세션 enforce(409 `INTERVIEW_SESSION_EXISTS`)·동시성 lock·transient 상태 영속.
+- 단일 활성 세션 enforce: 진행 중(`endReason=null`) 세션이 있는데 `POST /interview/sessions` 재호출 시 409 `INTERVIEW_SESSION_EXISTS`. 종료된 세션은 활성으로 치지 않는다.
+- 동시성 lock(ADR-0005 §7.6): 모든 mutating 진입점(`sessions`·`answers`·`next-question`·`finish`)은 `user_id × interview` advisory lock 으로 보호. 다른 디바이스가 점유 중이면 409 `AGENT_CONCURRENT_ACCESS` 즉시 fail.
+- 구현 상태(#6): 엔진+영속화 배선 + 단일 활성 세션 enforce + 동시성 lock 완료. **후속**: 재조립 시 transient 상태(stall_count·used_fallback) 영속.
 
 ---
 
