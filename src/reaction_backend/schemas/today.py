@@ -61,6 +61,19 @@ class TodayAgenda(CamelModel):
     fixed_schedules: list[AgendaFixedSchedule]
 
 
+class MorningBriefDraft(CamelModel):
+    """LLM Structured Output — `aiClient.run("brief/morning_brief")` 응답 (#19-C cron).
+
+    Sequential brief agent. 룰 fallback 도 동일 schema 로 반환. snake↔camel: prompt 는
+    `headline_ko` 등 snake 로 출력하나 CamelModel populate_by_name 으로 흡수.
+    """
+
+    headline_ko: str
+    first_step: str = ""
+    reason_why_now: str = ""
+    adjustment_hints: list[str] = []
+
+
 class ActionDetail(CamelModel):
     """GET /today/actions/{id} 응답 — S11 카드 상세."""
 
