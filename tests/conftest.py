@@ -614,6 +614,29 @@ class FakeDailyBriefRepo:
     async def get_by_date(self, user_id: UUID, brief_date: date) -> DailyBrief | None:
         return self._items.get((user_id, brief_date))
 
+    async def create(
+        self,
+        user_id: UUID,
+        brief_date: date,
+        *,
+        headline_text: str,
+        expires_at: datetime,
+        big_rock_action_item_id: UUID | None = None,
+        adjustment_hints: list[dict[str, Any]] | None = None,
+        fallback_used: bool = False,
+    ) -> DailyBrief:
+        b = DailyBrief()
+        b.id = uuid4()
+        b.user_id = user_id
+        b.brief_date = brief_date
+        b.headline_text = headline_text
+        b.big_rock_action_item_id = big_rock_action_item_id
+        b.adjustment_hints = adjustment_hints or []
+        b.fallback_used = fallback_used
+        b.expires_at = expires_at
+        self._items[(user_id, brief_date)] = b
+        return b
+
     def seed(self, brief: DailyBrief) -> None:
         self._items[(brief.user_id, brief.brief_date)] = brief
 

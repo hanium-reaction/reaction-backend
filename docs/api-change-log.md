@@ -7,6 +7,15 @@
 
 ---
 
+## v1.4 — 2026-06-02 (#19-C — cron job 로직)
+
+- `scheduler/morning_brief.py` — `run_morning_brief_for_user` job: 룰 헤드라인 + `aiClient.run("brief/morning_brief")` fallback → `daily_briefs` INSERT. **idempotent**(같은 user+date 이미 있으면 skip). big_rock = priority 최상위 카드
+- `scheduler/interruption_resolver.py` — `run_interruption_resolver` job: `resumed_after_interrupt IS NULL` & 6h 경과 → `false`. idempotent (NULL 만 대상)
+- 신설 `interruption_event_repo`. `daily_brief_repo` 에 `create` 추가
+- `MorningBriefDraft` LLM Structured Output schema (`schemas/today.py`)
+- ⚠️ **API endpoint 변경 없음** (cron 내부 로직). 스케줄 트리거(매일 06:00 / 6h)는 **#24 운영준비**에서 APScheduler 등록 — 본 PR 은 job 함수 + 테스트만
+- scheduler README 에 구현 상태 표 추가
+
 ## v1.3 — 2026-06-01 (#19-A — Today 조회)
 
 - Today(§10) 조회 2 endpoint 실구현 — `GET /today/agenda` + `GET /today/actions/{id}` (조회 전용, 쓰기 없음)
