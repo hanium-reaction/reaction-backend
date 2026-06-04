@@ -755,6 +755,10 @@ class FakeUserRepo:
         self._by_id[u.id] = u
         return u
 
+    async def set_tone_mode(self, user: User, tone_mode: str) -> User:
+        user.tone_mode = tone_mode
+        return user
+
     async def advance_onboarding(
         self,
         user: User,

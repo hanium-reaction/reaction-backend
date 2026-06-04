@@ -1,32 +1,129 @@
-"""Settings / Privacy — S23, S28.
+"""Settings / Privacy — S23, S28 (api-contract §16, Issue #23).
 
-규칙:
-- 90일 비활성 자동 익명화 (cron 04:00 KST). last_active_at 기준.
-- 사용자가 명시 익명화 요청 가능 (S28). 즉시 처리.
-- 데이터 익명화 = 식별 가능 필드(이름/이메일)는 hash, 통계 집계용 행 보존.
-- 데이터 export (S29)는 Phase 2로 미룸 (DevBaseline §5.2).
+#23-A (본 PR) — S23 Settings 실구현:
+- GET   /settings            — tone, language(ko 고정), timezone, 알림 요약
+- PATCH /settings/tone-mode  — gentle / strict / encouraging
 
-DB: users (anonymized_at 컬럼), behavioral_profiles, interaction_styles
+#23-B (후속) — S28 Privacy, 아래는 501 스텁 유지:
+- POST  /settings/anonymize  — 즉시 익명화 (2단계 확인 토큰 + `_encrypted` 필드 마스킹)
+- GET   /privacy/consent     — 동의 기록 (append-only `user_consents` 테이블 → 마이그레이션 동반)
+- POST  /privacy/consent     — 신규 동의 (마케팅/연구 토글)
 
-예정 endpoint:
-- GET   /settings                  — 내 설정 메타
-- PATCH /settings/tone-mode        — gentle/strict/encouraging 톤 변경
-- POST  /settings/anonymize        — 즉시 익명화 요청 (확인 2단계)
-- GET   /privacy/consent           — 동의 기록
-- POST  /privacy/consent           — 신규 동의
+톤 prefix(`llm/prompt_compose.py`)의 `aiClient.run()` 배선은 ADR-0003 §1 동결 시그니처
+변경 + LangGraph state(tone_mode) 전달을 수반 → 후속 PR(ADR-0003 addendum). 본 PR 은
+톤 모드 영속화(PATCH)와 prefix 헬퍼까지.
 
-구현 위치: domain/users/ + scheduler/anonymize_cron.py
+자동 익명화(90일 비활성, 04:00 KST cron)는 Issue #15 범위.
 """
 
-from fastapi import APIRouter, HTTPException, status
+from __future__ import annotations
+
+from http import HTTPStatus
+from typing import Annotated
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from reaction_backend.api.deps import CurrentUser
+from reaction_backend.db.models.notification_setting import NotificationSetting
+from reaction_backend.db.models.user import User
+from reaction_backend.db.session import get_db
+from reaction_backend.repositories.notification_repo import (
+    NotificationRepo,
+    get_notification_repo,
+)
+from reaction_backend.repositories.user_repo import UserRepo, get_user_repo
+from reaction_backend.schemas.errors import ApiError, ErrorCode
+from reaction_backend.schemas.settings import (
+    NotificationSummary,
+    SettingsResponse,
+    ToneModeUpdateRequest,
+)
 
 router = APIRouter(prefix="/settings", tags=["settings"])
+router_privacy = APIRouter(prefix="/privacy", tags=["privacy"])
+
+NotifRepoDep = Annotated[NotificationRepo, Depends(get_notification_repo)]
+UserRepoDep = Annotated[UserRepo, Depends(get_user_repo)]
+SessionDep = Annotated[AsyncSession, Depends(get_db)]
 
 
-@router.get("", status_code=status.HTTP_501_NOT_IMPLEMENTED)
-async def get_settings() -> None:
-    """내 설정 메타."""
-    raise HTTPException(
-        status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Defined in api-contract.md §16 — to be implemented in a follow-up.",
+def _notif_summary(setting: NotificationSetting | None) -> NotificationSummary | None:
+    if setting is None:
+        return None
+    return NotificationSummary(
+        morning_brief_time=setting.morning_brief_time.strftime("%H:%M"),
+        evening_reflection_time=setting.evening_reflection_time.strftime("%H:%M"),
+        pre_card_enabled=setting.pre_card_enabled,
+    )
+
+
+def _to_settings(user: User, setting: NotificationSetting | None) -> SettingsResponse:
+    # language 는 스키마 default("ko") — MVP 한국어 잠금 (DevBaseline §1.4).
+    return SettingsResponse(
+        tone_mode=user.tone_mode,  # type: ignore[arg-type]
+        timezone=user.timezone,
+        notifications=_notif_summary(setting),
+    )
+
+
+@router.get("")
+async def get_settings(user: CurrentUser, notif_repo: NotifRepoDep) -> SettingsResponse:
+    """내 설정 메타 — tone / language / timezone + 알림 요약.
+
+    읽기 전용 — 알림 설정 행이 없으면 `notifications=null` (행을 생성하지 않는다).
+    """
+    setting = await notif_repo.get_by_user(user.id)
+    return _to_settings(user, setting)
+
+
+@router.patch("/tone-mode")
+async def update_tone_mode(
+    body: ToneModeUpdateRequest,
+    user: CurrentUser,
+    user_repo: UserRepoDep,
+    notif_repo: NotifRepoDep,
+    session: SessionDep,
+) -> SettingsResponse:
+    """톤 모드 변경 — gentle / strict / encouraging.
+
+    값 검증은 스키마 Literal (그 외 값 → 422 `COMMON_VALIDATION_ERROR`).
+    onboarding 상태 전이는 없다 (톤은 설정 화면에서 자유 변경).
+    """
+    await user_repo.set_tone_mode(user, body.tone_mode)
+    setting = await notif_repo.get_by_user(user.id)
+    await session.commit()
+    return _to_settings(user, setting)
+
+
+# ───── S28 Privacy — Issue #23-B 범위. 501 스텁 유지. ─────
+
+
+@router.post("/anonymize")
+async def anonymize() -> None:
+    """[#23-B] 즉시 익명화 — 2단계 확인 토큰 + `_encrypted` 필드 마스킹."""
+    raise ApiError(
+        ErrorCode.COMMON_NOT_IMPLEMENTED,
+        "즉시 익명화는 곧 제공돼요 (Issue #23-B).",
+        http_status=HTTPStatus.NOT_IMPLEMENTED,
+    )
+
+
+@router_privacy.get("/consent")
+async def get_consent() -> None:
+    """[#23-B] 동의 기록 — append-only `user_consents` 테이블 (마이그레이션 동반)."""
+    raise ApiError(
+        ErrorCode.COMMON_NOT_IMPLEMENTED,
+        "동의 기록 조회는 곧 제공돼요 (Issue #23-B).",
+        http_status=HTTPStatus.NOT_IMPLEMENTED,
+    )
+
+
+@router_privacy.post("/consent")
+async def create_consent() -> None:
+    """[#23-B] 신규 동의 (마케팅/연구 토글)."""
+    raise ApiError(
+        ErrorCode.COMMON_NOT_IMPLEMENTED,
+        "동의 등록은 곧 제공돼요 (Issue #23-B).",
+        http_status=HTTPStatus.NOT_IMPLEMENTED,
     )
