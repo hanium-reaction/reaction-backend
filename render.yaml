@@ -1,0 +1,65 @@
+# Render Blueprint — reaction-backend (Issue #24 운영준비)
+# 스펙: https://render.com/docs/blueprint-spec
+#
+# 사용법: Render 대시보드 → New → Blueprint → 이 repo 연결 → render.yaml 자동 감지.
+#   sync:false 인 env 는 배포 후 대시보드 Environment 에서 직접 입력(시크릿).
+#   전체 절차·시크릿 생성법: docs/DEPLOY.md
+#
+# ⚠️ DB 마이그레이션은 본 서비스가 아니라 기존 CD(.github/workflows/migrate.yml)가
+#    Supabase 에 `alembic upgrade head` 로 적용한다 (runtime 이미지엔 alembic/ 미포함).
+
+services:
+  - type: web
+    name: reaction-backend
+    runtime: docker
+    repo: https://github.com/hanium-reaction/reaction-backend
+    branch: main
+    dockerfilePath: ./Dockerfile # 멀티스테이지 마지막 = runtime(prod uvicorn)
+    dockerContext: .
+    region: singapore # Render 리전 중 한국에 가장 가까움
+    plan: free # 데모용. ⚠️ 콜드스타트 있음 — 시연일엔 starter 권장 (DEPLOY.md)
+    healthCheckPath: /health
+    autoDeploy: true # main push 시 자동 배포
+    envVars:
+      # ── 비밀 아님 (blueprint 고정) ──
+      - key: APP_ENV
+        value: prod
+      - key: DB_ECHO
+        value: "false"
+      - key: AUTH_STUB_MODE
+        value: "false" # prod 는 반드시 false — Google id_token 실검증
+      - key: LLM_MODEL
+        value: gemini-2.0-flash-exp
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_ACCESS_TOKEN_TTL_MINUTES
+        value: "60"
+      - key: JWT_REFRESH_TOKEN_TTL_DAYS
+        value: "14"
+      - key: CORS_ALLOW_ORIGIN_REGEX
+        value: ^https://reaction-frontend-.*\.vercel\.app$ # Vercel preview 허용
+      # ── 시크릿 (대시보드에서 입력, sync:false) ──
+      - key: DATABASE_URL
+        sync: false # Supabase prod Session pooler URL (ap-northeast-2)
+      - key: JWT_SECRET
+        sync: false # python -c "import secrets; print(secrets.token_hex(32))"
+      - key: GEMINI_API_KEY
+        sync: false # Google AI Studio
+      - key: COLUMN_ENCRYPTION_KEY
+        sync: false # python -m reaction_backend.safety.encryption
+      - key: GOOGLE_OAUTH_CLIENT_ID
+        sync: false # FE 와 동일 client_id (id_token.aud 검증)
+      - key: CORS_ALLOW_ORIGINS
+        sync: false # prod FE 도메인 JSON 배열, 예: ["https://reaction-frontend.vercel.app"]
+# ── 일일 cron (후속) ───────────────────────────────────────────────────────────
+# Morning Brief(06:00)·interruption(6h)·90일 익명화(04:00) job 함수는 구현됨
+# (scheduler/*.py) 이나 트리거 진입점(CLI/엔트리)이 아직 없다. 진입 스크립트 추가 후
+# 아래 cron 서비스로 등록한다. (#24 잔여 — DEPLOY.md "남은 작업" 참조)
+#
+#  - type: cron
+#    name: reaction-anonymize-daily
+#    runtime: docker
+#    dockerfilePath: ./Dockerfile
+#    schedule: "0 19 * * *"        # 04:00 KST = 19:00 UTC (전날)
+#    dockerCommand: python -m reaction_backend.scheduler.run anonymize
+#    envVars: [ ... web 와 동일 시크릿 ... ]
