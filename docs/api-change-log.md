@@ -7,6 +7,15 @@
 
 ---
 
+## v1.5 — 2026-06-04 (#23-A — Settings 코어)
+
+- Settings(§16) S23 실구현 — `GET /settings` + `PATCH /settings/tone-mode` (501 스텁 → 실 endpoint)
+- `GET /settings` = `toneMode`(User) + `language`(="ko" 잠금) + `timezone`(User) + `notifications` 요약(§15 `get_by_user`, 미설정 시 null). **읽기 전용 — 알림 행 미생성**(notifications GET 의 get_or_create 와 구분)
+- `PATCH /settings/tone-mode` — `gentle`/`strict`/`encouraging` Pydantic Literal 검증, 그 외 422 `COMMON_VALIDATION_ERROR`. onboarding 상태 전이 없음. `user_repo.set_tone_mode` 헬퍼 추가
+- 신설 `llm/prompt_compose.py` — 톤 prefix 1줄 분기 **순수 헬퍼**(테스트됨). ⚠️ `aiClient.run()` 배선은 **미포함** — ADR-0003 §1 동결 시그니처 변경 + LangGraph state(tone_mode) 전달 수반 → 후속 PR(ADR-0003 addendum)
+- `/privacy` 라우터 신설 + `main.py` 등록. ⚠️ **S28 Privacy(anonymize·consent)는 #23-B** — `POST /settings/anonymize`·`GET/POST /privacy/consent` 는 501 `COMMON_NOT_IMPLEMENTED` 스텁. consent 저장은 append-only `user_consents` 테이블(마이그레이션 동반) 예정
+- 새 에러 코드 없음 / DB 마이그레이션 없음 (기존 `users` 컬럼만 사용)
+
 ## v1.4 — 2026-06-02 (#19-C — cron job 로직)
 
 - `scheduler/morning_brief.py` — `run_morning_brief_for_user` job: 룰 헤드라인 + `aiClient.run("brief/morning_brief")` fallback → `daily_briefs` INSERT. **idempotent**(같은 user+date 이미 있으면 skip). big_rock = priority 최상위 카드

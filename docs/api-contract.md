@@ -398,15 +398,33 @@ PARK       → PARK_DEFAULT
 
 ## 16. Settings / Privacy (`/settings`, `/privacy`) — S23, S28
 
-| Method | Path | 설명 |
-| --- | --- | --- |
-| GET | `/settings` | 내 설정 메타 (tone, language, timezone) |
-| PATCH | `/settings/tone-mode` | `gentle` / `strict` / `encouraging` |
-| POST | `/settings/anonymize` | 즉시 익명화 (2단계 확인 토큰 필수) |
-| GET | `/privacy/consent` | 동의 기록 |
-| POST | `/privacy/consent` | 신규 동의 (마케팅/연구 등) |
+| Method | Path | 설명 | 상태 |
+| --- | --- | --- | --- |
+| GET | `/settings` | 내 설정 메타 (tone, language, timezone, 알림 요약) | ✅ #23-A |
+| PATCH | `/settings/tone-mode` | `gentle` / `strict` / `encouraging` | ✅ #23-A |
+| POST | `/settings/anonymize` | 즉시 익명화 (2단계 확인 토큰 필수) | 🚧 501 → #23-B |
+| GET | `/privacy/consent` | 동의 기록 | 🚧 501 → #23-B |
+| POST | `/privacy/consent` | 신규 동의 (마케팅/연구 등) | 🚧 501 → #23-B |
 
-자동 익명화: `last_active_at < now()-90d` 매일 04:00 KST.
+`GET /settings` 응답:
+
+```json
+{
+  "toneMode": "gentle",          // gentle|strict|encouraging|null (인터뷰 전 null)
+  "language": "ko",              // MVP 잠금 (한국어 only, DevBaseline §1.4)
+  "timezone": "Asia/Seoul",
+  "notifications": {             // §15 알림 설정 요약. 미설정 시 null (GET 은 행 미생성)
+    "morningBriefTime": "08:00",
+    "eveningReflectionTime": "21:00",
+    "preCardEnabled": false
+  }
+}
+```
+
+- `PATCH /settings/tone-mode` 요청 `{ "toneMode": "strict" }` → 갱신된 `GET /settings` 형태 반환. 그 외 값은 422 `COMMON_VALIDATION_ERROR`. onboarding 상태 전이 없음.
+- 톤모드 적용: 시스템 프롬프트 prefix 1줄 분기는 `llm/prompt_compose.py` 에 잠금. `aiClient.run()` 배선(ADR-0003 동결 시그니처 + LangGraph state)은 후속 PR.
+- S28 Privacy(anonymize·consent)는 #23-B — consent 는 append-only `user_consents` 테이블(마이그레이션 동반).
+- 자동 익명화: `last_active_at < now()-90d` 매일 04:00 KST → Issue #15.
 
 ---
 

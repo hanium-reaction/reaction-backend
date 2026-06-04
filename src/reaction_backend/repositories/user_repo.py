@@ -69,6 +69,15 @@ class UserRepo:
         await self._session.refresh(user)
         return user
 
+    async def set_tone_mode(self, user: User, tone_mode: str) -> User:
+        """톤 모드 변경 (S23 설정, Issue #23).
+
+        사용자 명시 설정 변경 — onboarding 상태 전이는 없다. commit 은 호출자 책임.
+        """
+        user.tone_mode = tone_mode
+        await self._session.flush()
+        return user
+
     async def advance_onboarding(
         self,
         user: User,

@@ -94,6 +94,7 @@ def create_app() -> FastAPI:
         policy.router,
         notifications.router,
         settings.router,
+        settings.router_privacy,
     ):
         app.include_router(r, dependencies=authed)
 
