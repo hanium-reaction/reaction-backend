@@ -6,7 +6,14 @@ resume/check-ins)은 #19-B (scheduled_blocks 의존).
 
 from __future__ import annotations
 
-from reaction_backend.schemas.common import CamelModel
+from typing import Literal
+
+from pydantic import Field
+
+from reaction_backend.schemas.common import CamelModel, KstDatetime
+
+# Quick Check-in 4칩 (S13) — execution_events.completion_status 의 종결값 4종
+ExecutionCompletion = Literal["done", "partial_done", "failed", "over_done"]
 
 
 class MorningBrief(CamelModel):
@@ -88,3 +95,34 @@ class ActionDetail(CamelModel):
     why_now: str | None
     first_step: str | None
     goal_id: str | None
+
+
+class ExecutionStartResponse(CamelModel):
+    """POST /today/actions/{id}/start 응답 — [▶ 시작] (#19-B).
+
+    scheduled_block 이 없으면 즉석(ad-hoc) 블록을 생성해 연결한다 (source='user_edit').
+    """
+
+    execution_id: str
+    action_id: str
+    completion_status: str  # in_progress
+    actual_start_at: KstDatetime
+
+
+class CheckInRequest(CamelModel):
+    """POST /today/check-ins 요청 — Quick Check-in 4칩 (S13/S17)."""
+
+    execution_id: str
+    completion_status: ExecutionCompletion
+    user_rating: int | None = Field(default=None, ge=1, le=5)
+    user_feedback: str | None = Field(default=None, max_length=500)
+
+
+class CheckInResponse(CamelModel):
+    """체크인 결과. `needs_failure_tags=True` 면 FE 는 S18(실패 사유)로 이동."""
+
+    execution_id: str
+    action_id: str
+    completion_status: str
+    actual_duration_minutes: int | None
+    needs_failure_tags: bool

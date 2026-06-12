@@ -303,28 +303,35 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | --- | --- | --- | --- |
 | GET | `/today/agenda` | 어젠다 단일 조회 (`date` + `brief` + `cards` + `habits` + `fixedSchedules`) | ✅ #19-A |
 | GET | `/today/actions/{actionItemId}` | 카드 상세 (S11) | ✅ #19-A |
-| POST | `/today/actions/{actionItemId}/start` | [▶ 시작] → `execution_events` 생성 | 🔴 #19-B (scheduled_blocks 의존) |
-| POST | `/today/focus/{executionId}/pause` | [⏸] + `interruption_events` INSERT | 🔴 #19-B |
-| POST | `/today/focus/{executionId}/resume` | [▶ 계속] | 🔴 #19-B |
-| POST | `/today/check-ins` | Quick Check-in 4칩 + context_snapshot 자동 캡처 | 🔴 #19-B |
+| POST | `/today/actions/{actionItemId}/start` | [▶ 시작] → `execution_events` 생성 | ✅ #19-B |
+| POST | `/today/focus/{executionId}/pause` | [⏸] + `interruption_events` INSERT | 🚧 #19-B-2 |
+| POST | `/today/focus/{executionId}/resume` | [▶ 계속] | 🚧 #19-B-2 |
+| POST | `/today/check-ins` | Quick Check-in 4칩 | ✅ #19-B (context_snapshot 캡처는 #19-B-2) |
 
 `completion_status`: `done` / `partial_done` / `failed` / `over_done`
 
 **#19-A 조회 (구현)**:
 - `GET /today/agenda` — KST 오늘 기준. `brief`(daily_briefs, Morning Brief cron #19-C 가 채움; 없으면 null), `cards`(action_items, 오늘 target_date, priority 오름차순), `habits`(이번 주 habit_instances 진행), `fixedSchedules`(오늘 요일에 걸린 것). ID prefix `action_`/`hinst_`/`habit_`/`fixed_`
 - `GET /today/actions/{id}` — `action_<uuid>`. 없으면 404 `COMMON_NOT_FOUND`
-- ⚠️ Focus 실행 로깅(start/pause/resume/check-ins)은 **#19-B** — `execution_events.scheduled_block_id` NOT NULL 이라 First Plan(#18/#32) scheduled_blocks 필요
+**#19-B 실행 쓰기 (구현)**:
+- `POST /today/actions/{id}/start` — 미종결 scheduled_block 있으면 사용, 없으면 **즉석(ad-hoc) 블록 생성**(source=`user_edit`, §5.10)으로 NOT NULL 의존 해소. 같은 카드 in_progress 중복 시 409 `TODAY_EXECUTION_ALREADY_ACTIVE`. 응답 `{ executionId, actionId, completionStatus, actualStartAt }` (201)
+- `POST /today/check-ins` — `{ executionId, completionStatus(4칩), userRating?, userFeedback? }`. execution 종결(actual_end_at·duration) + 블록 finished + **`action_item.status` 전이**(execution 레이어의 합의된 유일 지점). feedback 은 at-rest 암호화. 재체크인 409 `TODAY_ALREADY_CHECKED_IN`. 응답 `needsFailureTags=true`(failed/partial_done) → S18 → §11 태깅 → §12 Recovery 로 연결
+- pause/resume(interruption_events) + context_snapshot 캡처는 #19-B-2 후속
 
 ---
 
 ## 11. Reflection (`/reflection`) — S17, S18
 
-| Method | Path | 설명 |
-| --- | --- | --- |
-| GET | `/reflection/pending` | 오늘+어제+그제 미체크 카드 (3일 누적) |
-| POST | `/reflection/batch` | 일괄 처리 (Idempotency-Key 필수). 트랜잭션 |
-| GET | `/reflection/failure-tags` | 13종 마스터 (`is_active=true`) |
-| POST | `/reflection/failure-tags/{executionId}` | 0~2개 태깅 + `memoEncrypted` |
+| Method | Path | 설명 | 상태 |
+| --- | --- | --- | --- |
+| GET | `/reflection/pending` | 오늘+어제+그제 미체크 카드 (3일 누적) | 🔴 후속 |
+| POST | `/reflection/batch` | 일괄 처리 (Idempotency-Key 필수). 트랜잭션 | 🚧 501 |
+| GET | `/reflection/failure-tags` | 13종 마스터 (`is_active=true`) | ✅ #19-B |
+| POST | `/reflection/failure-tags/{executionId}` | 0~2개 태깅 + `memoEncrypted` | ✅ #19-B |
+
+#19-B 태깅 메모: failed/partial_done 실행만 허용 (422 `REFLECT_NOT_FAILED`), 무효 코드 422
+`REFLECT_INVALID_TAG`, 재태깅 409 `REFLECT_ALREADY_TAGGED` (hard delete 회피), memo 는
+`encrypt_memo` at-rest 암호화. 이 태그가 §12 Recovery 룰 엔진의 입력이 된다.
 
 13종 enum: `TIME_SHORTAGE` / `LOW_ENERGY` / `HARD_TO_START` / `PRIORITY_SHIFT`
 / `PLAN_TOO_BIG` / `FATIGUE` / `AMBIGUITY` / `CONFLICT` / `OVERRUN` / `AVOIDANCE`

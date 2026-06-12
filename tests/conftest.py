@@ -24,6 +24,7 @@ from reaction_backend.auth.revoke import get_revoke_store
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.daily_brief import DailyBrief
 from reaction_backend.db.models.execution_event import ExecutionEvent
+from reaction_backend.db.models.failure_reason_tag import FailureReasonTag
 from reaction_backend.db.models.fixed_schedule import FixedSchedule
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.habit import Habit
@@ -34,12 +35,14 @@ from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.recovery_attempt import RecoveryAttempt
 from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
+from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.time_policy import TimePolicy
 from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
 from reaction_backend.main import create_app
 from reaction_backend.repositories.action_item_repo import get_action_item_repo
 from reaction_backend.repositories.daily_brief_repo import get_daily_brief_repo
+from reaction_backend.repositories.execution_repo import get_execution_repo
 from reaction_backend.repositories.fixed_schedule_repo import get_fixed_schedule_repo
 from reaction_backend.repositories.goal_repo import get_goal_repo
 from reaction_backend.repositories.habit_instance_repo import get_habit_instance_repo
@@ -761,9 +764,15 @@ def default_recovery_strategies() -> list[RecoveryStrategyCatalog]:
 class FakeRecoveryRepo:
     """in-memory RecoveryRepo — Issue #20-A. 카탈로그는 마이그레이션 시드 미러."""
 
-    def __init__(self) -> None:
-        self._executions: dict[UUID, ExecutionEvent] = {}
-        self._failure_tags: dict[UUID, list[str]] = {}
+    def __init__(
+        self,
+        *,
+        executions: dict[UUID, ExecutionEvent] | None = None,
+        failure_tags: dict[UUID, list[str]] | None = None,
+    ) -> None:
+        # FakeExecutionRepo(#19-B)와 스토어 공유 가능 — E2E 루프 테스트용
+        self._executions: dict[UUID, ExecutionEvent] = executions if executions is not None else {}
+        self._failure_tags: dict[UUID, list[str]] = failure_tags if failure_tags is not None else {}
         self._attempts: dict[UUID, RecoveryAttempt] = {}
         self._strategies: list[RecoveryStrategyCatalog] = default_recovery_strategies()
 
@@ -848,6 +857,142 @@ class FakeRecoveryRepo:
         a.created_at = datetime.now(UTC)
         self._attempts[a.id] = a
         return a
+
+
+# 마이그레이션 d09c105520b5 의 13종 실패 사유 미러 (Issue #19-B)
+_FAILURE_TAG_SEED: list[tuple[str, str, int]] = [
+    ("TIME_SHORTAGE", "시간이 부족했어요", 10),
+    ("LOW_ENERGY", "에너지가 낮았어요", 20),
+    ("HARD_TO_START", "시작이 어려웠어요", 30),
+    ("PRIORITY_SHIFT", "더 중요한 일이 생겼어요", 40),
+    ("PLAN_TOO_BIG", "계획이 너무 컸어요", 50),
+    ("FATIGUE", "피곤했어요", 60),
+    ("AMBIGUITY", "뭘 해야 할지 모호했어요", 70),
+    ("CONFLICT", "다른 일정과 겹쳤어요", 80),
+    ("OVERRUN", "이전 일이 길어졌어요", 90),
+    ("AVOIDANCE", "회피하고 싶었어요", 100),
+    ("DISTRACTION", "방해를 받았어요", 110),
+    ("EMERGENCY", "급한 일이 있었어요", 120),
+    ("CONTEXT_LOSS", "맥락을 잃었어요", 130),
+]
+
+
+def default_failure_tags() -> list[FailureReasonTag]:
+    tags: list[FailureReasonTag] = []
+    for code, label, order in _FAILURE_TAG_SEED:
+        t = FailureReasonTag()
+        t.tag_code = code
+        t.label_ko = label
+        t.description = None
+        t.sort_order = order
+        t.is_active = True
+        tags.append(t)
+    return tags
+
+
+class FakeExecutionRepo:
+    """in-memory ExecutionRepo — Issue #19-B.
+
+    `_executions`/`_failure_tags` 는 FakeRecoveryRepo 와 공유 (fixture에서 주입) —
+    체크인→실패태깅→복구생성 E2E 루프 테스트를 위해.
+    """
+
+    def __init__(self) -> None:
+        self._executions: dict[UUID, ExecutionEvent] = {}
+        self._failure_tags: dict[UUID, list[str]] = {}
+        self._blocks: dict[UUID, ScheduledBlock] = {}
+        self._tag_master: list[FailureReasonTag] = default_failure_tags()
+
+    async def get_by_id(self, user_id: UUID, execution_id: UUID) -> ExecutionEvent | None:
+        e = self._executions.get(execution_id)
+        if e is None or e.user_id != user_id:
+            return None
+        return e
+
+    async def get_active_for_action(
+        self, user_id: UUID, action_item_id: UUID
+    ) -> ExecutionEvent | None:
+        for e in self._executions.values():
+            if (
+                e.user_id == user_id
+                and e.action_item_id == action_item_id
+                and e.completion_status == "in_progress"
+            ):
+                return e
+        return None
+
+    async def find_open_block(self, user_id: UUID, action_item_id: UUID) -> ScheduledBlock | None:
+        candidates = [
+            b
+            for b in self._blocks.values()
+            if b.user_id == user_id
+            and b.action_item_id == action_item_id
+            and b.block_status in ("scheduled", "started")
+        ]
+        return min(candidates, key=lambda b: b.start_at) if candidates else None
+
+    async def create_adhoc_block(
+        self, *, user_id: UUID, action_item: ActionItem, start_at: datetime
+    ) -> ScheduledBlock:
+        from datetime import timedelta
+
+        b = ScheduledBlock()
+        b.id = uuid4()
+        b.user_id = user_id
+        b.action_item_id = action_item.id
+        b.start_at = start_at
+        b.end_at = start_at + timedelta(minutes=action_item.estimated_minutes)
+        b.block_status = "started"
+        b.source = "user_edit"
+        b.external_calendar_event_id = None
+        self._blocks[b.id] = b
+        return b
+
+    async def create_execution(
+        self,
+        *,
+        user_id: UUID,
+        action_item_id: UUID,
+        block: ScheduledBlock,
+        started_at: datetime,
+    ) -> ExecutionEvent:
+        e = ExecutionEvent()
+        e.id = uuid4()
+        e.user_id = user_id
+        e.action_item_id = action_item_id
+        e.scheduled_block_id = block.id
+        e.plan_start_at = block.start_at
+        e.plan_end_at = block.end_at
+        e.actual_start_at = started_at
+        e.actual_end_at = None
+        e.actual_duration_minutes = None
+        e.pause_total_minutes = 0
+        e.completion_status = "in_progress"
+        e.user_rating = None
+        e.user_feedback_encrypted = None
+        self._executions[e.id] = e
+        self._failure_tags.setdefault(e.id, [])
+        return e
+
+    async def get_block(self, block_id: UUID) -> ScheduledBlock | None:
+        return self._blocks.get(block_id)
+
+    async def list_active_failure_tags(self) -> list[FailureReasonTag]:
+        return sorted((t for t in self._tag_master if t.is_active), key=lambda t: t.sort_order)
+
+    async def has_failure_tags(self, execution_id: UUID) -> bool:
+        return len(self._failure_tags.get(execution_id, [])) > 0
+
+    async def add_failure_tags(
+        self,
+        *,
+        execution_id: UUID,
+        tag_codes: list[str],
+        memo_encrypted: str | None,
+    ) -> list[Any]:
+        self._failure_tags.setdefault(execution_id, []).extend(tag_codes)
+        self._last_memo_encrypted = memo_encrypted
+        return []
 
 
 class FakeDailyBriefRepo:
@@ -1077,8 +1222,17 @@ def fake_interview_repo() -> FakeInterviewRepo:
 
 
 @pytest.fixture
-def fake_recovery_repo() -> FakeRecoveryRepo:
-    return FakeRecoveryRepo()
+def fake_execution_repo() -> FakeExecutionRepo:
+    return FakeExecutionRepo()
+
+
+@pytest.fixture
+def fake_recovery_repo(fake_execution_repo: FakeExecutionRepo) -> FakeRecoveryRepo:
+    # 실행/실패태그 스토어를 ExecutionRepo 와 공유 — 체크인→복구 E2E 가능
+    return FakeRecoveryRepo(
+        executions=fake_execution_repo._executions,
+        failure_tags=fake_execution_repo._failure_tags,
+    )
 
 
 @pytest.fixture
@@ -1101,6 +1255,7 @@ def client(
     fake_interview_repo: FakeInterviewRepo,
     fake_daily_brief_repo: FakeDailyBriefRepo,
     fake_recovery_repo: FakeRecoveryRepo,
+    fake_execution_repo: FakeExecutionRepo,
 ) -> Iterator[TestClient]:
     """기본 client — 인증된 demo user + 도메인 fake repo + fake session."""
     _reset_process_singletons()
@@ -1124,6 +1279,7 @@ def client(
     app.dependency_overrides[get_interview_repo] = lambda: fake_interview_repo
     app.dependency_overrides[get_daily_brief_repo] = lambda: fake_daily_brief_repo
     app.dependency_overrides[get_recovery_repo] = lambda: fake_recovery_repo
+    app.dependency_overrides[get_execution_repo] = lambda: fake_execution_repo
     with TestClient(app) as test_client:
         yield test_client
 
@@ -1192,6 +1348,7 @@ __all__ = [
     "DEMO_USER_UUID",
     "FakeActionItemRepo",
     "FakeDailyBriefRepo",
+    "FakeExecutionRepo",
     "FakeFixedScheduleRepo",
     "FakeGoalRepo",
     "FakeHabitInstanceRepo",
@@ -1206,6 +1363,7 @@ __all__ = [
     "demo_user_orm",
     "fake_action_item_repo",
     "fake_daily_brief_repo",
+    "fake_execution_repo",
     "fake_fixed_schedule_repo",
     "fake_goal_repo",
     "fake_habit_instance_repo",
