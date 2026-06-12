@@ -334,12 +334,28 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 ## 12. Recovery (`/recovery`, `/replan`) — S19, S20
 
-| Method | Path | 설명 |
-| --- | --- | --- |
-| POST | `/recovery/proposals/generate` | Recovery Coach (LLM ≤ 8s, 룰 fallback) → 후보 2~4개 |
-| POST | `/recovery/decisions` | 사용자 선택 저장 (Idempotency) |
-| GET | `/replan/{executionId}` | before/after diff (S20) |
-| POST | `/replan/{executionId}/approve` | 최종 적용 (Idempotency) |
+| Method | Path | 설명 | 상태 |
+| --- | --- | --- | --- |
+| POST | `/recovery/proposals/generate` | Recovery Coach (LLM ≤ 8s, 룰 fallback) → 후보 2~4개 | ✅ #20-A |
+| POST | `/recovery/decisions` | 사용자 선택 저장 (Idempotency) | ✅ #20-A |
+| GET | `/replan/{executionId}` | before/after diff (S20) | 🚧 501 → #20-B |
+| POST | `/replan/{executionId}/approve` | 최종 적용 (Idempotency) | 🚧 501 → #20-B |
+
+#20-A 구현 메모:
+- `POST /recovery/proposals/generate` 요청 `{ executionId }` — completion_status 가
+  `failed`/`partial_done` 인 실행만 허용 (422 `RECOVERY_NOT_ELIGIBLE`).
+  pending 카드가 있으면 그대로 반환 (재호출 안전). 응답은 Draft Layer
+  (`isDraft=true`, `aiSource=llm|rule`) + `cards[]` (attemptId/optionGroup/strategyType/
+  labelKo/suggestedActionText/minRecoveryUnitMinutes/allowRestMode/triggerTag).
+- 룰 선택: `recovery_strategy_catalog.primary_trigger_tags` ↔ 실패 태그 매칭,
+  그룹별 최고 1장, 최소 2장 패딩 (orchestrator/recovery.py).
+- `POST /recovery/decisions` 요청 `{ executionId, decision: accepted|skipped,
+  acceptedAttemptId?, decisionReason? }` — accepted 시 나머지 pending 은 rejected.
+  DOWNSCOPE/CARRY_OVER 수락 → 새 ActionItem(source=`recovery_downscope`/
+  `recovery_carryover`, `parent_action_item_id` 혈통) 생성. RESCHEDULE/PARK 는 생성 없음.
+- 에러: `RECOVERY_EXECUTION_NOT_FOUND`(404) / `RECOVERY_NOT_ELIGIBLE`(422) /
+  `RECOVERY_NO_PROPOSAL`(422) / `RECOVERY_ATTEMPT_NOT_FOUND`(404) /
+  `RECOVERY_ALREADY_DECIDED`(409).
 
 UX 4 그룹 / 내부 9 전략:
 ```
