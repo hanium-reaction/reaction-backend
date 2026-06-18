@@ -30,7 +30,7 @@
 | ECS Fargate | 비권장 | task def·ALB·VPC 설정 과함. 학생 데모엔 오버엔지니어링 |
 | ~~App Runner~~ | **불가** | 2026-04-30 신규 고객 차단 |
 
-→ 아래는 **Lightsail Containers** 기준. (EC2 선호 시 §6 참고)
+→ **100명 베타 = small(0.5vCPU/2GB) 배포 권장** — 워크로드가 LLM(Gemini)·DB(Supabase) 외부 호출 위주라 **I/O 바운드** → small로 충분, micro는 아침/저녁 몰림 때 빠듯. cap은 성장 대비 medium까지 ₩60k로 신청. 아래는 Lightsail Containers 기준(EC2 선호 시 §6).
 
 ## 2. 사전 준비 (계정 수령 후)
 
@@ -43,10 +43,11 @@
 # 1) runtime 이미지 빌드 (멀티스테이지 마지막 = prod uvicorn)
 docker build --target runtime -t reaction-backend:latest .
 
-# 2) 컨테이너 서비스 생성 (최초 1회) — micro = $10/mo, 서울 리전
+# 2) 컨테이너 서비스 생성 (최초 1회) — small = $20/mo (100명 베타 권장), 서울 리전
 aws lightsail create-container-service \
   --service-name reaction-backend \
-  --power micro --scale 1 --region ap-northeast-2
+  --power small --scale 1 --region ap-northeast-2
+#   ※ 데모만이면 micro($10)도 충분. 트래픽 늘면 --power medium 로 재배포(cap ₩60k 내, 재신청 불필요)
 
 # 3) 이미지 푸시
 aws lightsail push-container-image \
@@ -124,13 +125,13 @@ docker run -d -p 80:8000 --env-file .env --restart=always reaction-backend:lates
 | Lightsail micro (1GB) | $10 ≈ ₩13.5k | ≈ ₩54k |
 | Lightsail small (2GB) | $20 ≈ ₩27k | ≈ ₩108k |
 
-→ 데모/베타엔 **micro($10)** 면 충분. 잔액(≈₩105만) 대비 여유 큼. 신청서엔 micro 기준 월 ₩13.5k × 개월수.
+→ **100명 베타 = small($20≈₩27k/월) 권장**. 신청서 월 금액(cap)은 성장 대비 medium까지 덮어 **₩60k**(실사용만 정산이라 추가비용 0). 4개월 실비 ~₩108k, 잔액 ₩1.05M 대비 여유 큼.
 
 ## 8. 한이음 신청서 작성값 — 실제 제출(2026-06-18, 2차 창구)
 
 - **클라우드 종류**: AWS
 - **사용기간**: 7월부터 ~ 10월까지 (4개월, 승인 6/22 이후 가동)
-- **월 금액**: 7·8·9·10월 **각 15,000원** (Lightsail micro $10 실비 + 환율 여유 cap. 한도 내 실사용액만 자동 정산이라 cap을 약간 높게)
+- **월 금액**: 7·8·9·10월 **각 60,000원** (cap). 실배포는 Lightsail **small**(2GB, $20≈₩27k)이지만, **100명 베타 성장 대비 medium($40)까지 덮는 상한**. 한도 내 **실사용액만 자동 정산**이라 cap을 높여도 실비용은 동일(small 기준 ~₩27k/월)
 - **신청사유**: "한이음 창의도전 프로젝트 'Re:Action'(AI 실행 회복 코치)의 백엔드 API 서버 상시 호스팅용입니다. FastAPI 백엔드를 Docker 컨테이너로 AWS Lightsail Container(서울 리전, micro)에 배포하여 Supabase DB 및 프론트엔드(Vercel)와 연동합니다. 7~10월 중간발표·베타 운영 기간 동안 서비스 상시 가동이 필요합니다."
 - 등록(제출) 후 **멘토께 직접 승인 요청** 필수(자동 알림 없음).
 - ⚠️ 클라우드 관련 문의(Gemini SW 지원 여부, 인스턴스 사양 등)는 **[팀오피스 → 문의게시판 → 클라우드]** 로만 접수(업체가 직접 답변).
