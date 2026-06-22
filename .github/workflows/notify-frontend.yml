@@ -1,0 +1,47 @@
+name: notify-frontend
+
+# 백엔드 main 에 push 되면 프론트(reaction-frontend) 의 sync-api 워크플로를
+# 즉시 트리거한다 (repository_dispatch). 프론트가 OpenAPI 를 다시 뽑아 타입을
+# 재생성하고 변경이 있으면 PR 을 연다 → "백엔드 머지하면 1분 내 반영".
+#
+# 필요 시크릿: FRONTEND_DISPATCH_TOKEN
+#   = reaction-frontend 에 대한 PAT (classic: repo 스코프 / fine-grained:
+#     reaction-frontend Contents·Metadata Read, 그리고 dispatch 가능 권한).
+#   시크릿이 없으면 이 잡은 조용히 통과하고, 프론트의 매일 schedule 이 대신 처리.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notify-frontend
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch sync-api to frontend
+        env:
+          TOKEN: ${{ secrets.FRONTEND_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::FRONTEND_DISPATCH_TOKEN 시크릿 없음 — 즉시 트리거 생략. 프론트는 매일 schedule 로 동기화됩니다."
+            exit 0
+          fi
+          code=$(curl -sS -o /tmp/resp -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/hanium-reaction/reaction-frontend/dispatches \
+            -d '{"event_type":"backend-openapi-updated"}')
+          if [ "$code" = "204" ]; then
+            echo "✓ 프론트 sync-api 트리거 전송됨 (204)."
+          else
+            echo "::error::dispatch 실패 (HTTP $code)"; cat /tmp/resp; exit 1
+          fi
