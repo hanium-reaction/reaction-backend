@@ -72,6 +72,36 @@ class ActionItemRepo:
         await self._session.refresh(action)
         return action
 
+    async def create_from_recovery(
+        self,
+        *,
+        user_id: UUID,
+        parent_action_item_id: UUID,
+        title: str,
+        category: str,
+        source: str,
+        target_date: date,
+        estimated_minutes: int,
+    ) -> ActionItem:
+        """회복 수락 시 새 실행 카드 생성 (source='recovery_*', Issue #20-A).
+
+        원본 카드의 status 는 변경하지 않고 `parent_action_item_id` 로 혈통만 기록한다
+        (AGENTS.md §2 — Resilience 지표 전제).
+        """
+        action = ActionItem(
+            user_id=user_id,
+            title=title,
+            target_date=target_date,
+            category=category,
+            source=source,
+            parent_action_item_id=parent_action_item_id,
+            estimated_minutes=estimated_minutes,
+        )
+        self._session.add(action)
+        await self._session.flush()
+        await self._session.refresh(action)
+        return action
+
 
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 

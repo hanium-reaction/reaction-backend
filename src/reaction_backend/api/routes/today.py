@@ -1,8 +1,11 @@
 """Today / Execution — S10~S13 (api-contract §10).
 
-Issue #19-A: **조회만** — `GET /today/agenda` + `GET /today/actions/{id}`.
-Focus 실행 로깅(start/pause/resume/check-ins)은 #19-B (`execution_events.scheduled_block_id`
-NOT NULL → First Plan #18/#32 의 scheduled_blocks 의존).
+Issue #19-A: 조회 — `GET /today/agenda` + `GET /today/actions/{id}`.
+Issue #19-B: 실행 쓰기 — `POST /today/actions/{id}/start` + `POST /today/check-ins`.
+  - scheduled_block 이 없으면 즉석(ad-hoc) 블록을 생성해 NOT NULL 의존을 해소
+    (source='user_edit', §5.10). First Plan(#32) 블록이 있으면 그것을 사용.
+  - 체크인 시 `action_item.status` 전이 — execution 레이어의 책임 (ActionItemRepo 합의).
+  - pause/resume(interruption_events)은 #19-B-2 후속.
 
 agenda 데이터 출처: daily_briefs(Morning Brief, #19-C cron 이 채움) + action_items(오늘 target_date)
 + habit_instances(이번 주) + fixed_schedules(오늘 요일). 모두 조회 — 쓰기 없음.
@@ -16,14 +19,17 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.daily_brief import DailyBrief
 from reaction_backend.db.models.fixed_schedule import FixedSchedule
 from reaction_backend.db.models.habit_instance import HabitInstance
+from reaction_backend.db.session import get_db
 from reaction_backend.repositories.action_item_repo import ActionItemRepo, get_action_item_repo
 from reaction_backend.repositories.daily_brief_repo import DailyBriefRepo, get_daily_brief_repo
+from reaction_backend.repositories.execution_repo import ExecutionRepo, get_execution_repo
 from reaction_backend.repositories.fixed_schedule_repo import (
     FixedScheduleRepo,
     get_fixed_schedule_repo,
@@ -33,6 +39,7 @@ from reaction_backend.repositories.habit_instance_repo import (
     get_habit_instance_repo,
 )
 from reaction_backend.repositories.habit_repo import current_week_start_kst
+from reaction_backend.safety.encryption import encrypt_memo
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.today import (
@@ -40,6 +47,9 @@ from reaction_backend.schemas.today import (
     AgendaCard,
     AgendaFixedSchedule,
     AgendaHabit,
+    CheckInRequest,
+    CheckInResponse,
+    ExecutionStartResponse,
     MorningBrief,
     TodayAgenda,
 )
@@ -123,6 +133,8 @@ def _fixed_schema(s: FixedSchedule) -> AgendaFixedSchedule:
 
 
 ActionRepoDep = Annotated[ActionItemRepo, Depends(get_action_item_repo)]
+ExecutionRepoDep = Annotated[ExecutionRepo, Depends(get_execution_repo)]
+SessionDep = Annotated[AsyncSession, Depends(get_db)]
 BriefRepoDep = Annotated[DailyBriefRepo, Depends(get_daily_brief_repo)]
 HabitInstRepoDep = Annotated[HabitInstanceRepo, Depends(get_habit_instance_repo)]
 FixedRepoDep = Annotated[FixedScheduleRepo, Depends(get_fixed_schedule_repo)]
@@ -175,4 +187,131 @@ async def get_action_detail(
         why_now=action.why_now,
         first_step=action.first_step,
         goal_id=f"goal_{action.goal_id}" if action.goal_id is not None else None,
+    )
+
+
+_EXEC_PREFIX = "exec_"
+
+
+def _parse_execution_id(execution_id: str) -> UUID:
+    if not execution_id.startswith(_EXEC_PREFIX):
+        raise _execution_not_found()
+    try:
+        return UUID(execution_id[len(_EXEC_PREFIX) :])
+    except ValueError as e:
+        raise _execution_not_found() from e
+
+
+def _execution_not_found() -> ApiError:
+    return ApiError(
+        ErrorCode.TODAY_EXECUTION_NOT_FOUND,
+        "해당 실행 기록을 찾을 수 없어요.",
+        http_status=HTTPStatus.NOT_FOUND,
+    )
+
+
+@router.post("/actions/{action_id}/start", status_code=201)
+async def start_action(
+    action_id: str,
+    user: CurrentUser,
+    action_repo: ActionRepoDep,
+    execution_repo: ExecutionRepoDep,
+    session: SessionDep,
+) -> ExecutionStartResponse:
+    """[▶ 시작] → execution_events 생성 (#19-B).
+
+    카드의 미종결 scheduled_block 이 있으면 사용, 없으면 즉석 블록 생성
+    (source='user_edit'). 같은 카드의 in_progress 실행이 있으면 409.
+    """
+    action = await action_repo.get_by_id(user.id, _parse_action_id(action_id))
+    if action is None:
+        raise _action_not_found()
+
+    active = await execution_repo.get_active_for_action(user.id, action.id)
+    if active is not None:
+        raise ApiError(
+            ErrorCode.TODAY_EXECUTION_ALREADY_ACTIVE,
+            "이미 진행 중인 실행이 있어요. 먼저 체크인으로 마무리해 주세요.",
+            http_status=HTTPStatus.CONFLICT,
+        )
+
+    started_at = now_kst()
+    block = await execution_repo.find_open_block(user.id, action.id)
+    if block is None:
+        block = await execution_repo.create_adhoc_block(
+            user_id=user.id, action_item=action, start_at=started_at
+        )
+    else:
+        block.block_status = "started"
+
+    execution = await execution_repo.create_execution(
+        user_id=user.id,
+        action_item_id=action.id,
+        block=block,
+        started_at=started_at,
+    )
+    # 실행 시작 → 카드 상태 전이 (execution 레이어 책임)
+    action.status = "in_progress"
+    await session.commit()
+
+    return ExecutionStartResponse(
+        execution_id=f"{_EXEC_PREFIX}{execution.id}",
+        action_id=f"{_ACTION_PREFIX}{action.id}",
+        completion_status=execution.completion_status,
+        actual_start_at=started_at,
+    )
+
+
+@router.post("/check-ins")
+async def quick_check_in(
+    body: CheckInRequest,
+    user: CurrentUser,
+    action_repo: ActionRepoDep,
+    execution_repo: ExecutionRepoDep,
+    session: SessionDep,
+) -> CheckInResponse:
+    """Quick Check-in 4칩 (S13/S17) — 완료/조금함/못함/더함 (#19-B).
+
+    execution 종결 + 블록 finished + `action_item.status` 전이.
+    `needs_failure_tags=True`(failed/partial_done) 면 FE 는 S18 실패 사유로 이동
+    → `POST /reflection/failure-tags/{executionId}` → Recovery(§12) 로 이어진다.
+    """
+    execution = await execution_repo.get_by_id(user.id, _parse_execution_id(body.execution_id))
+    if execution is None:
+        raise _execution_not_found()
+    if execution.completion_status != "in_progress":
+        raise ApiError(
+            ErrorCode.TODAY_ALREADY_CHECKED_IN,
+            "이미 체크인이 끝난 실행이에요.",
+            http_status=HTTPStatus.CONFLICT,
+        )
+
+    ended_at = now_kst()
+    execution.completion_status = body.completion_status
+    execution.actual_end_at = ended_at
+    if execution.actual_start_at is not None:
+        delta = ended_at - execution.actual_start_at
+        execution.actual_duration_minutes = max(int(delta.total_seconds() // 60), 0)
+    if body.user_rating is not None:
+        execution.user_rating = body.user_rating
+    if body.user_feedback:
+        execution.user_feedback_encrypted = encrypt_memo(body.user_feedback)
+
+    block = await execution_repo.get_block(execution.scheduled_block_id)
+    if block is not None:
+        block.block_status = "finished"
+
+    # 카드 상태 전이 — 4칩 값은 ACTION_STATUS_VALUES 와 1:1 (done/partial_done/failed/over_done)
+    action = await action_repo.get_by_id(user.id, execution.action_item_id)
+    if action is not None:
+        action.status = body.completion_status
+
+    await session.commit()
+
+    return CheckInResponse(
+        execution_id=body.execution_id,
+        action_id=f"{_ACTION_PREFIX}{execution.action_item_id}",
+        completion_status=execution.completion_status,
+        actual_duration_minutes=execution.actual_duration_minutes,
+        needs_failure_tags=body.completion_status in ("failed", "partial_done"),
     )

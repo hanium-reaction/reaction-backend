@@ -23,6 +23,8 @@ from reaction_backend.api.deps import get_current_user
 from reaction_backend.auth.revoke import get_revoke_store
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.daily_brief import DailyBrief
+from reaction_backend.db.models.execution_event import ExecutionEvent
+from reaction_backend.db.models.failure_reason_tag import FailureReasonTag
 from reaction_backend.db.models.fixed_schedule import FixedSchedule
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.habit import Habit
@@ -31,12 +33,16 @@ from reaction_backend.db.models.inbox_item import InboxItem
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionModel
 from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.models.notification_setting import NotificationSetting
+from reaction_backend.db.models.recovery_attempt import RecoveryAttempt
+from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
+from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.time_policy import TimePolicy
 from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
 from reaction_backend.main import create_app
 from reaction_backend.repositories.action_item_repo import get_action_item_repo
 from reaction_backend.repositories.daily_brief_repo import get_daily_brief_repo
+from reaction_backend.repositories.execution_repo import get_execution_repo
 from reaction_backend.repositories.fixed_schedule_repo import get_fixed_schedule_repo
 from reaction_backend.repositories.goal_repo import get_goal_repo
 from reaction_backend.repositories.habit_instance_repo import get_habit_instance_repo
@@ -44,6 +50,7 @@ from reaction_backend.repositories.habit_repo import get_habit_repo
 from reaction_backend.repositories.inbox_repo import get_inbox_repo
 from reaction_backend.repositories.interview_repo import get_interview_repo
 from reaction_backend.repositories.notification_repo import get_notification_repo
+from reaction_backend.repositories.recovery_repo import get_recovery_repo
 from reaction_backend.repositories.time_policy_repo import get_time_policy_repo
 from reaction_backend.repositories.user_repo import GoogleProfile, get_user_repo
 
@@ -600,9 +607,392 @@ class FakeActionItemRepo:
         self._items[a.id] = a
         return a
 
+    async def create_from_recovery(
+        self,
+        *,
+        user_id: UUID,
+        parent_action_item_id: UUID,
+        title: str,
+        category: str,
+        source: str,
+        target_date: date,
+        estimated_minutes: int,
+    ) -> ActionItem:
+        a = ActionItem()
+        a.id = uuid4()
+        a.user_id = user_id
+        a.title = title
+        a.target_date = target_date
+        a.category = category
+        a.source = source
+        a.parent_action_item_id = parent_action_item_id
+        a.inbox_item_id = None
+        a.status = "planned"
+        a.priority = 3
+        a.estimated_minutes = estimated_minutes
+        a.why_now = None
+        a.first_step = None
+        a.goal_id = None
+        a.archived_at = None
+        self._items[a.id] = a
+        return a
+
     def seed(self, action: ActionItem) -> None:
         """테스트 보조 — 카드 직접 주입 (First Plan/manual 카드 시뮬레이션)."""
         self._items[action.id] = action
+
+
+def _make_strategy(
+    code: str,
+    group: str,
+    label: str,
+    template: str,
+    min_unit: int,
+    primary_tags: list[str],
+    allow_rest: bool,
+    priority: int,
+) -> RecoveryStrategyCatalog:
+    s = RecoveryStrategyCatalog()
+    s.strategy_type = code
+    s.option_group = group
+    s.label_ko = label
+    s.if_then_template = template
+    s.min_recovery_unit_minutes = min_unit
+    s.primary_trigger_tags = primary_tags
+    s.allow_rest_mode = allow_rest
+    s.display_priority = priority
+    s.is_active = True
+    return s
+
+
+# 마이그레이션 d09c105520b5 의 9전략 시드 미러 (Issue #20-A)
+def default_recovery_strategies() -> list[RecoveryStrategyCatalog]:
+    return [
+        _make_strategy(
+            "NANO_STEP",
+            "DOWNSCOPE",
+            "5분 단위로 쪼개기",
+            "딱 5분만, 첫 단계만 해볼까요? {first_step}",
+            5,
+            ["AMBIGUITY", "HARD_TO_START"],
+            False,
+            10,
+        ),
+        _make_strategy(
+            "DOWNSCOPE_DEFAULT",
+            "DOWNSCOPE",
+            "범위 줄여서 진행",
+            "오늘은 절반만, 가능한 만큼만 해볼까요?",
+            15,
+            ["FATIGUE", "PLAN_TOO_BIG"],
+            False,
+            20,
+        ),
+        _make_strategy(
+            "ENVIRONMENT_SHIFT",
+            "DOWNSCOPE",
+            "공간 옮겨서 30분",
+            "공간을 옮겨서 30분만 해볼까요? 잘 되는 자리가 있으셨죠.",
+            30,
+            ["DISTRACTION"],
+            False,
+            30,
+        ),
+        _make_strategy(
+            "CONTEXT_REWARMING",
+            "DOWNSCOPE",
+            "맥락 워밍업 5분",
+            "{suspended_step} 부터, 5분 워밍업으로 다시 잡아볼까요?",
+            5,
+            ["CONTEXT_LOSS"],
+            False,
+            40,
+        ),
+        _make_strategy(
+            "RESCHEDULE_DEFAULT",
+            "RESCHEDULE",
+            "내일로 옮기기",
+            "내일 잘 되는 시간대로 옮겨드릴까요?",
+            30,
+            ["CONFLICT"],
+            False,
+            50,
+        ),
+        _make_strategy(
+            "ACTIVE_RECOVERY",
+            "RESCHEDULE",
+            "산책 후 가볍게",
+            "잠깐 산책 20분 후, 가벼운 정리만 해볼까요?",
+            20,
+            ["LOW_ENERGY", "FATIGUE"],
+            True,
+            60,
+        ),
+        _make_strategy(
+            "CARRYOVER_DEFAULT",
+            "CARRY_OVER",
+            "내일 같은 시간",
+            "내일 같은 슬롯으로 그대로 옮겨드릴까요?",
+            30,
+            ["PRIORITY_SHIFT"],
+            False,
+            70,
+        ),
+        _make_strategy(
+            "FREEZE_SLOT",
+            "CARRY_OVER",
+            "슬롯 예약 (다음 주)",
+            "이번 슬롯은 비워두고 다음 주 같은 시간에 예약할게요.",
+            30,
+            ["EMERGENCY"],
+            False,
+            80,
+        ),
+        _make_strategy(
+            "PARK_DEFAULT",
+            "PARK",
+            "이번 주는 보류",
+            "이번 주는 보류하고, 다음 주 리뷰 때 다시 보는 건 어때요?",
+            0,
+            [],
+            True,
+            90,
+        ),
+    ]
+
+
+class FakeRecoveryRepo:
+    """in-memory RecoveryRepo — Issue #20-A. 카탈로그는 마이그레이션 시드 미러."""
+
+    def __init__(
+        self,
+        *,
+        executions: dict[UUID, ExecutionEvent] | None = None,
+        failure_tags: dict[UUID, list[str]] | None = None,
+    ) -> None:
+        # FakeExecutionRepo(#19-B)와 스토어 공유 가능 — E2E 루프 테스트용
+        self._executions: dict[UUID, ExecutionEvent] = executions if executions is not None else {}
+        self._failure_tags: dict[UUID, list[str]] = failure_tags if failure_tags is not None else {}
+        self._attempts: dict[UUID, RecoveryAttempt] = {}
+        self._strategies: list[RecoveryStrategyCatalog] = default_recovery_strategies()
+
+    # ── 테스트 보조 seed ──
+    def register_execution(
+        self,
+        *,
+        user_id: UUID,
+        action_item_id: UUID,
+        completion_status: str = "failed",
+        failure_tags: list[str] | None = None,
+    ) -> ExecutionEvent:
+        e = ExecutionEvent()
+        e.id = uuid4()
+        e.user_id = user_id
+        e.action_item_id = action_item_id
+        e.scheduled_block_id = uuid4()
+        e.plan_start_at = datetime.now(UTC)
+        e.plan_end_at = datetime.now(UTC)
+        e.completion_status = completion_status
+        self._executions[e.id] = e
+        self._failure_tags[e.id] = list(failure_tags or [])
+        return e
+
+    # ── RecoveryRepo 인터페이스 ──
+    async def get_execution(self, user_id: UUID, execution_id: UUID) -> ExecutionEvent | None:
+        e = self._executions.get(execution_id)
+        if e is None or e.user_id != user_id:
+            return None
+        return e
+
+    async def list_failure_tag_codes(self, execution_id: UUID) -> list[str]:
+        return list(self._failure_tags.get(execution_id, []))
+
+    async def list_active_strategies(self) -> list[RecoveryStrategyCatalog]:
+        return sorted(
+            (s for s in self._strategies if s.is_active),
+            key=lambda s: s.display_priority,
+        )
+
+    async def list_attempts(self, user_id: UUID, execution_id: UUID) -> list[RecoveryAttempt]:
+        return [
+            a
+            for a in self._attempts.values()
+            if a.user_id == user_id and a.execution_id == execution_id
+        ]
+
+    async def get_attempt(self, user_id: UUID, attempt_id: UUID) -> RecoveryAttempt | None:
+        a = self._attempts.get(attempt_id)
+        if a is None or a.user_id != user_id:
+            return None
+        return a
+
+    async def create_attempt(
+        self,
+        *,
+        user_id: UUID,
+        execution_id: UUID,
+        option_group: str,
+        strategy_type: str,
+        suggested_action_text: str,
+        trigger_tag: str | None,
+        llm_fallback_used: bool,
+    ) -> RecoveryAttempt:
+        a = RecoveryAttempt()
+        a.id = uuid4()
+        a.user_id = user_id
+        a.execution_id = execution_id
+        a.recovery_option_group = option_group
+        a.recovery_strategy_type = strategy_type
+        a.suggested_action_text = suggested_action_text
+        a.trigger_tag = trigger_tag
+        a.llm_fallback_used = llm_fallback_used
+        a.user_decision = "pending"
+        a.decision_reason = None
+        a.recovery_decided_at = None
+        a.recovery_started_at = None
+        a.recovery_completed_at = None
+        a.recovery_duration_minutes = None
+        a.recovery_result = "pending"
+        a.resulting_action_item_id = None
+        a.created_at = datetime.now(UTC)
+        self._attempts[a.id] = a
+        return a
+
+
+# 마이그레이션 d09c105520b5 의 13종 실패 사유 미러 (Issue #19-B)
+_FAILURE_TAG_SEED: list[tuple[str, str, int]] = [
+    ("TIME_SHORTAGE", "시간이 부족했어요", 10),
+    ("LOW_ENERGY", "에너지가 낮았어요", 20),
+    ("HARD_TO_START", "시작이 어려웠어요", 30),
+    ("PRIORITY_SHIFT", "더 중요한 일이 생겼어요", 40),
+    ("PLAN_TOO_BIG", "계획이 너무 컸어요", 50),
+    ("FATIGUE", "피곤했어요", 60),
+    ("AMBIGUITY", "뭘 해야 할지 모호했어요", 70),
+    ("CONFLICT", "다른 일정과 겹쳤어요", 80),
+    ("OVERRUN", "이전 일이 길어졌어요", 90),
+    ("AVOIDANCE", "회피하고 싶었어요", 100),
+    ("DISTRACTION", "방해를 받았어요", 110),
+    ("EMERGENCY", "급한 일이 있었어요", 120),
+    ("CONTEXT_LOSS", "맥락을 잃었어요", 130),
+]
+
+
+def default_failure_tags() -> list[FailureReasonTag]:
+    tags: list[FailureReasonTag] = []
+    for code, label, order in _FAILURE_TAG_SEED:
+        t = FailureReasonTag()
+        t.tag_code = code
+        t.label_ko = label
+        t.description = None
+        t.sort_order = order
+        t.is_active = True
+        tags.append(t)
+    return tags
+
+
+class FakeExecutionRepo:
+    """in-memory ExecutionRepo — Issue #19-B.
+
+    `_executions`/`_failure_tags` 는 FakeRecoveryRepo 와 공유 (fixture에서 주입) —
+    체크인→실패태깅→복구생성 E2E 루프 테스트를 위해.
+    """
+
+    def __init__(self) -> None:
+        self._executions: dict[UUID, ExecutionEvent] = {}
+        self._failure_tags: dict[UUID, list[str]] = {}
+        self._blocks: dict[UUID, ScheduledBlock] = {}
+        self._tag_master: list[FailureReasonTag] = default_failure_tags()
+
+    async def get_by_id(self, user_id: UUID, execution_id: UUID) -> ExecutionEvent | None:
+        e = self._executions.get(execution_id)
+        if e is None or e.user_id != user_id:
+            return None
+        return e
+
+    async def get_active_for_action(
+        self, user_id: UUID, action_item_id: UUID
+    ) -> ExecutionEvent | None:
+        for e in self._executions.values():
+            if (
+                e.user_id == user_id
+                and e.action_item_id == action_item_id
+                and e.completion_status == "in_progress"
+            ):
+                return e
+        return None
+
+    async def find_open_block(self, user_id: UUID, action_item_id: UUID) -> ScheduledBlock | None:
+        candidates = [
+            b
+            for b in self._blocks.values()
+            if b.user_id == user_id
+            and b.action_item_id == action_item_id
+            and b.block_status in ("scheduled", "started")
+        ]
+        return min(candidates, key=lambda b: b.start_at) if candidates else None
+
+    async def create_adhoc_block(
+        self, *, user_id: UUID, action_item: ActionItem, start_at: datetime
+    ) -> ScheduledBlock:
+        from datetime import timedelta
+
+        b = ScheduledBlock()
+        b.id = uuid4()
+        b.user_id = user_id
+        b.action_item_id = action_item.id
+        b.start_at = start_at
+        b.end_at = start_at + timedelta(minutes=action_item.estimated_minutes)
+        b.block_status = "started"
+        b.source = "user_edit"
+        b.external_calendar_event_id = None
+        self._blocks[b.id] = b
+        return b
+
+    async def create_execution(
+        self,
+        *,
+        user_id: UUID,
+        action_item_id: UUID,
+        block: ScheduledBlock,
+        started_at: datetime,
+    ) -> ExecutionEvent:
+        e = ExecutionEvent()
+        e.id = uuid4()
+        e.user_id = user_id
+        e.action_item_id = action_item_id
+        e.scheduled_block_id = block.id
+        e.plan_start_at = block.start_at
+        e.plan_end_at = block.end_at
+        e.actual_start_at = started_at
+        e.actual_end_at = None
+        e.actual_duration_minutes = None
+        e.pause_total_minutes = 0
+        e.completion_status = "in_progress"
+        e.user_rating = None
+        e.user_feedback_encrypted = None
+        self._executions[e.id] = e
+        self._failure_tags.setdefault(e.id, [])
+        return e
+
+    async def get_block(self, block_id: UUID) -> ScheduledBlock | None:
+        return self._blocks.get(block_id)
+
+    async def list_active_failure_tags(self) -> list[FailureReasonTag]:
+        return sorted((t for t in self._tag_master if t.is_active), key=lambda t: t.sort_order)
+
+    async def has_failure_tags(self, execution_id: UUID) -> bool:
+        return len(self._failure_tags.get(execution_id, [])) > 0
+
+    async def add_failure_tags(
+        self,
+        *,
+        execution_id: UUID,
+        tag_codes: list[str],
+        memo_encrypted: str | None,
+    ) -> list[Any]:
+        self._failure_tags.setdefault(execution_id, []).extend(tag_codes)
+        self._last_memo_encrypted = memo_encrypted
+        return []
 
 
 class FakeDailyBriefRepo:
@@ -832,6 +1222,20 @@ def fake_interview_repo() -> FakeInterviewRepo:
 
 
 @pytest.fixture
+def fake_execution_repo() -> FakeExecutionRepo:
+    return FakeExecutionRepo()
+
+
+@pytest.fixture
+def fake_recovery_repo(fake_execution_repo: FakeExecutionRepo) -> FakeRecoveryRepo:
+    # 실행/실패태그 스토어를 ExecutionRepo 와 공유 — 체크인→복구 E2E 가능
+    return FakeRecoveryRepo(
+        executions=fake_execution_repo._executions,
+        failure_tags=fake_execution_repo._failure_tags,
+    )
+
+
+@pytest.fixture
 def fake_daily_brief_repo() -> FakeDailyBriefRepo:
     return FakeDailyBriefRepo()
 
@@ -850,6 +1254,8 @@ def client(
     fake_action_item_repo: FakeActionItemRepo,
     fake_interview_repo: FakeInterviewRepo,
     fake_daily_brief_repo: FakeDailyBriefRepo,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_execution_repo: FakeExecutionRepo,
 ) -> Iterator[TestClient]:
     """기본 client — 인증된 demo user + 도메인 fake repo + fake session."""
     _reset_process_singletons()
@@ -872,6 +1278,8 @@ def client(
     app.dependency_overrides[get_action_item_repo] = lambda: fake_action_item_repo
     app.dependency_overrides[get_interview_repo] = lambda: fake_interview_repo
     app.dependency_overrides[get_daily_brief_repo] = lambda: fake_daily_brief_repo
+    app.dependency_overrides[get_recovery_repo] = lambda: fake_recovery_repo
+    app.dependency_overrides[get_execution_repo] = lambda: fake_execution_repo
     with TestClient(app) as test_client:
         yield test_client
 
@@ -940,12 +1348,14 @@ __all__ = [
     "DEMO_USER_UUID",
     "FakeActionItemRepo",
     "FakeDailyBriefRepo",
+    "FakeExecutionRepo",
     "FakeFixedScheduleRepo",
     "FakeGoalRepo",
     "FakeHabitInstanceRepo",
     "FakeHabitRepo",
     "FakeInboxRepo",
     "FakeNotificationRepo",
+    "FakeRecoveryRepo",
     "FakeTimePolicyRepo",
     "FakeUserRepo",
     "auth_client",
@@ -953,12 +1363,14 @@ __all__ = [
     "demo_user_orm",
     "fake_action_item_repo",
     "fake_daily_brief_repo",
+    "fake_execution_repo",
     "fake_fixed_schedule_repo",
     "fake_goal_repo",
     "fake_habit_instance_repo",
     "fake_habit_repo",
     "fake_inbox_repo",
     "fake_notification_repo",
+    "fake_recovery_repo",
     "fake_time_policy_repo",
     "fake_user_repo",
     "issue_helper_token",
