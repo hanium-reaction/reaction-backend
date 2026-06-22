@@ -54,6 +54,7 @@ from reaction_backend.repositories.interview_repo import get_interview_repo
 from reaction_backend.repositories.notification_repo import get_notification_repo
 from reaction_backend.repositories.recovery_repo import get_recovery_repo
 from reaction_backend.repositories.review_repo import get_review_repo
+from reaction_backend.repositories.scheduled_block_repo import get_scheduled_block_repo
 from reaction_backend.repositories.time_policy_repo import get_time_policy_repo
 from reaction_backend.repositories.user_repo import GoogleProfile, get_user_repo
 
@@ -1098,6 +1099,55 @@ class FakeReviewRepo:
         return ps
 
 
+class FakeScheduledBlockRepo:
+    """in-memory ScheduledBlockRepo — Issue #21-B.
+
+    실제 join 대신 seed 시 (title, category) 를 함께 보관한다.
+    """
+
+    def __init__(self) -> None:
+        self._blocks: dict[UUID, ScheduledBlock] = {}
+        self._meta: dict[UUID, tuple[str, str]] = {}
+
+    def seed(self, block: ScheduledBlock, *, title: str, category: str) -> None:
+        self._blocks[block.id] = block
+        self._meta[block.id] = (title, category)
+
+    async def list_week(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[tuple[ScheduledBlock, str, str]]:
+        rows = [
+            (b, *self._meta[b.id])
+            for b in self._blocks.values()
+            if b.user_id == user_id and start_dt <= b.start_at < end_dt
+        ]
+        return sorted(rows, key=lambda r: r[0].start_at)
+
+    async def get_block(self, user_id: UUID, block_id: UUID) -> ScheduledBlock | None:
+        b = self._blocks.get(block_id)
+        if b is None or b.user_id != user_id:
+            return None
+        return b
+
+    async def list_overlapping(
+        self,
+        user_id: UUID,
+        start_dt: datetime,
+        end_dt: datetime,
+        *,
+        exclude_block_id: UUID,
+    ) -> list[ScheduledBlock]:
+        return [
+            b
+            for b in self._blocks.values()
+            if b.user_id == user_id
+            and b.id != exclude_block_id
+            and b.block_status != "cancelled"
+            and b.start_at < end_dt
+            and b.end_at > start_dt
+        ]
+
+
 class FakeInterviewRepo:
     """in-memory InterviewRepo — #6 배선. 세션 + 슬롯답 정규화 저장 미러."""
 
@@ -1313,6 +1363,11 @@ def fake_review_repo() -> FakeReviewRepo:
 
 
 @pytest.fixture
+def fake_scheduled_block_repo() -> FakeScheduledBlockRepo:
+    return FakeScheduledBlockRepo()
+
+
+@pytest.fixture
 def client(
     demo_user_orm: User,
     fake_time_policy_repo: FakeTimePolicyRepo,
@@ -1329,6 +1384,7 @@ def client(
     fake_recovery_repo: FakeRecoveryRepo,
     fake_execution_repo: FakeExecutionRepo,
     fake_review_repo: FakeReviewRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
 ) -> Iterator[TestClient]:
     """기본 client — 인증된 demo user + 도메인 fake repo + fake session."""
     _reset_process_singletons()
@@ -1354,6 +1410,7 @@ def client(
     app.dependency_overrides[get_recovery_repo] = lambda: fake_recovery_repo
     app.dependency_overrides[get_execution_repo] = lambda: fake_execution_repo
     app.dependency_overrides[get_review_repo] = lambda: fake_review_repo
+    app.dependency_overrides[get_scheduled_block_repo] = lambda: fake_scheduled_block_repo
     with TestClient(app) as test_client:
         yield test_client
 
@@ -1431,6 +1488,7 @@ __all__ = [
     "FakeNotificationRepo",
     "FakeRecoveryRepo",
     "FakeReviewRepo",
+    "FakeScheduledBlockRepo",
     "FakeTimePolicyRepo",
     "FakeUserRepo",
     "auth_client",
@@ -1447,6 +1505,7 @@ __all__ = [
     "fake_notification_repo",
     "fake_recovery_repo",
     "fake_review_repo",
+    "fake_scheduled_block_repo",
     "fake_time_policy_repo",
     "fake_user_repo",
     "issue_helper_token",

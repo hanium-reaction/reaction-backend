@@ -48,6 +48,13 @@ class ErrorCode(StrEnum):
 
     # ── Time Policies (POLICY_) — #3-C ──
     POLICY_NOT_FOUND = "POLICY_NOT_FOUND"
+    # 블록 편집(S15)이 활성 시간 정책 윈도우(sleep/lunch/late_night_block)에 진입 — #21-B
+    POLICY_VIOLATION = "POLICY_VIOLATION"
+
+    # ── Planning / Blocks (PLAN_) — #21-B ──
+    PLAN_BLOCK_NOT_FOUND = "PLAN_BLOCK_NOT_FOUND"
+    PLAN_BLOCK_CONFLICT = "PLAN_BLOCK_CONFLICT"
+    PLAN_INVALID_TIME = "PLAN_INVALID_TIME"
 
     # ── Calendar (CALENDAR_) — #3-C ──
     CALENDAR_NOT_CONNECTED = "CALENDAR_NOT_CONNECTED"

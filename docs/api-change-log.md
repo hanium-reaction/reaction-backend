@@ -7,6 +7,16 @@
 
 ---
 
+## v1.7 — 2026-06-22 (#21-B — Weekly Plan + 직접 편집)
+
+- Planning(§8) S14/S15 실구현 — `GET /plans/weekly` + `PATCH /plans/{planId}/blocks/{blockId}`
+- `GET /plans/weekly?weekStart=` — 그 주 월요일로 정규화(생략 시 이번 주). 7일 × `blocks[]`(blockId/actionId/title/category/startAt/endAt/blockStatus/source). 영속 `scheduled_blocks` ⨝ `action_items`
+- `PATCH .../blocks/{blockId}` — `{startAt, endAt?}`, **15분 snap**, endAt 생략 시 길이 보존. 적용 시 `source='user_edit'`. Plan 테이블 없음 → planId 는 주 논리 식별자, 편집 권한은 blockId
+- 새 에러 코드: `PLAN_BLOCK_NOT_FOUND`(404) · `PLAN_BLOCK_CONFLICT`(422) · `PLAN_INVALID_TIME`(422) · `POLICY_VIOLATION`(422)
+- 정책 위반 판정 = 순수 함수 `orchestrator/plan_edit.py`(sleep/lunch/late_night_block 윈도우, 자정 wrap·카테고리 게이팅). `no_touch`/`break_min`/freebusy·fixed_schedule 충돌은 후속
+- 신설 `repositories/scheduled_block_repo.py`. ⚠️ DB 마이그레이션 없음(기존 `scheduled_blocks`)
+- S22 habit-penalty 는 #21-C 잔여
+
 ## v1.6 — 2026-06-22 (#21-A — Weekly Review)
 
 - Reviews(§13) S21 실구현 — `GET /reviews/weekly` + `POST /reviews/weekly/generate` (501 스텁 → 실 endpoint). **룰 기반**(LLM 한 줄 평 P2)
