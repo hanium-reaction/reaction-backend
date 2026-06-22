@@ -7,6 +7,15 @@
 
 ---
 
+## v1.8 — 2026-06-22 (#21-C — Habit Penalty)
+
+- Reviews(§13) S22 실구현 — `GET /reviews/habit-penalty` + `POST /reviews/habit-penalty/{habitId}/accept`
+- 감지: 직전 완료 주 기준 최근 3주 연속 `done_count < target_count*0.5`. 순수 함수 `orchestrator/habit_penalty.py`. suggestedFrequency = 3주 평균(round, 최소 1, 현재보다 작게)
+- `GET` 후보 — 이번 사이클 이미 결정한 habit(`last_penalty_evaluated_at` ≥ 직전 완료 주) 제외 (비난 아닌 재설계 톤)
+- `POST accept` — Idempotency-Key 필수(§1.7 미들웨어가 경로 강제). 수락 시 frequency=target=suggested + `last_penalty_decision='accepted'`. 조건 미충족/중복 422 `HABIT_PENALTY_NOT_ELIGIBLE`
+- 새 에러 코드 `HABIT_PENALTY_NOT_ELIGIBLE`. `habit_instance_repo.list_recent_for_habit` + `habit_repo.apply_penalty` 추가. DB 마이그레이션 없음
+- reject(+4주 cooldown) 경로는 후속 — 이로써 #21 (Weekly Plan+Review) 전체 완료(#21-A/B/C)
+
 ## v1.7 — 2026-06-22 (#21-B — Weekly Plan + 직접 편집)
 
 - Planning(§8) S14/S15 실구현 — `GET /plans/weekly` + `PATCH /plans/{planId}/blocks/{blockId}`

@@ -449,8 +449,22 @@ class FakeHabitRepo:
             habit.target_count = frequency_per_week
         return habit
 
+    async def apply_penalty(
+        self, habit: Habit, *, new_frequency: int, decided_at: datetime
+    ) -> Habit:
+        habit.frequency_per_week = new_frequency
+        habit.target_count = new_frequency
+        habit.last_penalty_decision = "accepted"
+        habit.last_penalty_evaluated_at = decided_at
+        habit.consecutive_miss_weeks = 0
+        return habit
+
     async def soft_delete(self, habit: Habit) -> None:
         habit.archived_at = datetime.now(UTC)
+
+    def seed(self, habit: Habit) -> None:
+        """테스트 보조 — habit 직접 주입."""
+        self._items[habit.id] = habit
 
     async def count_active(self, user_id: UUID) -> int:
         return len(await self.list_active(user_id))
@@ -472,6 +486,31 @@ class FakeHabitInstanceRepo:
 
     async def get_for_user(self, user_id: UUID, instance_id: UUID) -> HabitInstance | None:
         return self._items.get(instance_id)
+
+    async def list_recent_for_habit(
+        self, habit_id: UUID, before_week: date, limit: int = 3
+    ) -> list[HabitInstance]:
+        items = [
+            i
+            for i in self._items.values()
+            if i.habit_id == habit_id and i.week_start <= before_week
+        ]
+        items.sort(key=lambda i: i.week_start, reverse=True)
+        return items[:limit]
+
+    def seed_instance(
+        self, habit_id: UUID, week_start: date, *, done: int, target: int
+    ) -> HabitInstance:
+        """테스트 보조 — done/target 지정 인스턴스 주입 (S22 페널티 시드)."""
+        i = HabitInstance()
+        i.id = uuid4()
+        i.habit_id = habit_id
+        i.week_start = week_start
+        i.target_count = target
+        i.done_count = done
+        self._items[i.id] = i
+        self._by_habit_week[(habit_id, week_start)] = i.id
+        return i
 
     async def get_for_week(self, habit_id: UUID, week_start: date) -> HabitInstance | None:
         iid = self._by_habit_week.get((habit_id, week_start))

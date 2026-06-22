@@ -43,3 +43,39 @@ class WeeklyReviewResponse(CamelModel):
     policy_update_candidates: list[dict[str, object]] = Field(default_factory=list)
 
     generated_at: KstDatetime
+
+
+# ── S22 Habit Penalty (#21-C) ──
+
+
+class HabitWeekStat(CamelModel):
+    """페널티 근거 — 한 주의 달성/목표."""
+
+    done_count: int
+    target_count: int
+
+
+class HabitPenaltyCandidate(CamelModel):
+    """3주 연속 미달로 빈도 재설계를 제안할 habit."""
+
+    habit_id: str
+    title: str
+    current_frequency: int
+    suggested_frequency: int
+    recent_weeks: list[HabitWeekStat] = Field(default_factory=list)
+    message: str
+
+
+class HabitPenaltyListResponse(CamelModel):
+    """GET /reviews/habit-penalty — 제안 후보 목록."""
+
+    candidates: list[HabitPenaltyCandidate] = Field(default_factory=list)
+
+
+class HabitPenaltyAcceptResponse(CamelModel):
+    """POST /reviews/habit-penalty/{habitId}/accept — 빈도 다운 결과."""
+
+    habit_id: str
+    previous_frequency: int
+    new_frequency: int
+    message: str
