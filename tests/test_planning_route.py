@@ -367,3 +367,37 @@ def test_approve_policy_violation_rolls_back(client: TestClient) -> None:
     assert res.json()["code"] == "PLAN_POLICY_VIOLATION"
     assert cap.rolled_back is True
     assert cap.committed is False
+
+
+def _approve_body() -> dict[str, Any]:
+    action = ActionItemDraft(
+        node_id="n1", title="작업", estimated_minutes=30, category="study", first_step="시작"
+    )
+    return {
+        "outcome": _outcome().model_dump(by_alias=True, mode="json"),
+        "actionItems": [action.model_dump(by_alias=True)],
+        "blocks": [_block_dict("n1", 10)],
+        "targetDate": "2026-06-22",
+    }
+
+
+def test_approve_advances_onboarding_first_plan_to_notifications(
+    client: TestClient, demo_user_orm: Any
+) -> None:
+    """승인 → onboarding ONBOARDING_FIRST_PLAN → ONBOARDING_NOTIFICATIONS (Issue #17 규약)."""
+    demo_user_orm.onboarding_state = "ONBOARDING_FIRST_PLAN"
+
+    res = client.post("/plans/plan_demo/approve", json=_approve_body())
+    assert res.status_code == 200
+    assert demo_user_orm.onboarding_state == "ONBOARDING_NOTIFICATIONS"
+
+
+def test_approve_does_not_regress_onboarding_when_active(
+    client: TestClient, demo_user_orm: Any
+) -> None:
+    """이미 ACTIVE 인 사용자(재계획 등)는 승인해도 onboarding 후퇴 없음 (멱등)."""
+    demo_user_orm.onboarding_state = "ACTIVE"
+
+    res = client.post("/plans/plan_demo/approve", json=_approve_body())
+    assert res.status_code == 200
+    assert demo_user_orm.onboarding_state == "ACTIVE"

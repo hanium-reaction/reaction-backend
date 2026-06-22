@@ -14,6 +14,7 @@
 - 흐름: VALIDATING(**Focus≤3 / Maintain≤5** 게이트, LLM 0회) → decompose(`planning/goal_decompose` LLM, 8s timeout→룰) → schedule(`goal_structuring.py` 룰 스케줄러, LLM 0회) → review(`planning/plan_quality` LLM, 8s timeout→룰). 한도 초과 시 **LLM 분해 전** 422 `GOAL_TIER_LIMIT_EXCEEDED`.
 - 응답 `FirstPlanResponse` — 항상 `isDraft=true`(AGENTS §1.4). `aiSource`=`llm`|`rule`(orchestrator `used_fallback`). `blocks`=룰 스케줄러가 action_item 을 가용 시간(free/busy)에 배치한 미리보기(KST). 배치 실패 항목은 `warnings`.
 - `POST /plans/{planId}/approve` (HITL [수락]) — `FirstPlanApproveRequest`(outcome + action_items + blocks 되돌려 전달, `planId` 는 ephemeral echo). `policy_guarded_transaction`(PR #30 재사용) 단일 트랜잭션으로 action_items + scheduled_blocks 영속화. 절대 시간 정책(수면/노터치) 위반 시 롤백 + 422 `PLAN_POLICY_VIOLATION`, 그 외 영속화 실패는 롤백 + 500 `PLAN_SAVE_FAILED`. 응답 `is_draft=false`(명시 승인, ADR-0005 §7.2).
+- 온보딩 전이 — approve 가 `ONBOARDING_FIRST_PLAN → ONBOARDING_NOTIFICATIONS` 전이(멱등)를 수행. Issue #17 이 이 전이를 "#9(First Plan) 다음에" 로 First Plan 에 위임했고(각 도메인 라우터가 자기 단계 완료 시 전이), 그동안 빠져 있어 온보딩 체인이 `ACTIVE` 에 도달하지 못하던 갭을 메움. api-contract §3 표 갱신.
 - 동시성 lock(ADR-0005 §7.6) — `user_id × planning` advisory lock, 다중 디바이스 동시 생성/승인 시 409 `AGENT_CONCURRENT_ACCESS`.
 - 새 에러 코드: `PLAN_POLICY_VIOLATION`(422), `PLAN_SAVE_FAILED`(500). DB 마이그레이션 없음(기존 `action_items`·`scheduled_blocks` 모델 사용).
 - 금지어 후처리 / `llm_runs` 로깅 / 8s timeout 룰 fallback 은 LLM 게이트(`aiClient.run`, Issue #5)가 일관 적용 — 강제 timeout·llm_runs 2행 기록 회귀 테스트 추가.

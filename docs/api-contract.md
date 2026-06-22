@@ -145,9 +145,10 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | --- | --- | --- |
 | `POST /fixed-schedules` | `ONBOARDING_CALENDAR` / `ONBOARDING_MANUAL_SCHEDULE` | `ONBOARDING_POLICIES` |
 | `POST /time-policies` | `ONBOARDING_POLICIES` | `ONBOARDING_FIRST_PLAN` |
+| `POST /plans/{planId}/approve` | `ONBOARDING_FIRST_PLAN` | `ONBOARDING_NOTIFICATIONS` |
 | `PATCH /notifications/settings` | `ONBOARDING_NOTIFICATIONS` | `ACTIVE` |
 
-각 트리거는 `expected_from` 에 해당할 때만 전이 (멱등). 이미 더 진행된 상태(예: `ACTIVE`)면 no-op — 같은 endpoint 두 번 호출해도 안전. `ONBOARDING_FIRST_PLAN → ONBOARDING_NOTIFICATIONS` 전이는 Issue #18 (First Plan) 에서.
+각 트리거는 `expected_from` 에 해당할 때만 전이 (멱등). 이미 더 진행된 상태(예: `ACTIVE`)면 no-op — 같은 endpoint 두 번 호출해도 안전. `ONBOARDING_FIRST_PLAN → ONBOARDING_NOTIFICATIONS` 전이는 First Plan 승인(`POST /plans/{planId}/approve`) 에서 수행한다 (#32; Issue #17 이 "#9 다음에" 로 First Plan 에 위임).
 
 ---
 
@@ -254,7 +255,7 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | --- | --- | --- |
 | POST | `/plans/generate` | First Plan orchestrator(LangGraph) 실행. 입력: `outcome`(InterviewOutcome 인라인) 또는 `interviewSessionId`(+`targetDate` 선택). Focus≤3 초과 시 422 `GOAL_TIER_LIMIT_EXCEEDED`. 응답은 항상 `isDraft=true` (#32) |
 | GET | `/plans/{planId}` | 미리보기 (workloadLevel, conflicts, warnings) |
-| POST | `/plans/{planId}/approve` | HITL [수락] → SAVING. 입력: `outcome`+`actionItems`+`blocks` 되돌려 전달(planId ephemeral). `policy_guarded_transaction` 단일 트랜잭션 영속화, 정책 위반 시 롤백 422 `PLAN_POLICY_VIOLATION` / 저장 실패 500 `PLAN_SAVE_FAILED`. 응답 `isDraft=false` (#32) |
+| POST | `/plans/{planId}/approve` | HITL [수락] → SAVING. 입력: `outcome`+`actionItems`+`blocks` 되돌려 전달(planId ephemeral). `policy_guarded_transaction` 단일 트랜잭션 영속화, 정책 위반 시 롤백 422 `PLAN_POLICY_VIOLATION` / 저장 실패 500 `PLAN_SAVE_FAILED`. 응답 `isDraft=false`. 부수: onboarding `ONBOARDING_FIRST_PLAN→ONBOARDING_NOTIFICATIONS` 전이(멱등) (#32) |
 | PATCH | `/plans/{planId}/blocks/{blockId}` | 15분 snap 직접 편집 (S15) |
 | POST | `/plans/{planId}/ai-edit` | 자연어 수정 (S16, P1) — diff 반환만, apply는 별도 |
 | POST | `/plans/{planId}/ai-edit/apply` | diff 적용 (사용자 승인 후) |

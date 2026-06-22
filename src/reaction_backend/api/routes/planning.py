@@ -40,6 +40,7 @@ from reaction_backend.orchestrator import first_plan, first_plan_adapter, interv
 from reaction_backend.orchestrator._common import user_agent_lock
 from reaction_backend.orchestrator.goal_structuring import PolicyViolationError
 from reaction_backend.repositories.interview_repo import InterviewRepo, get_interview_repo
+from reaction_backend.repositories.user_repo import UserRepo, get_user_repo
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.interview import InterviewEndReason, InterviewOutcome
@@ -56,6 +57,7 @@ router = APIRouter(prefix="/plans", tags=["planning"])
 _LOCK_AGENT = "planning"
 
 RepoDep = Annotated[InterviewRepo, Depends(get_interview_repo)]
+UserRepoDep = Annotated[UserRepo, Depends(get_user_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 
 
@@ -181,6 +183,7 @@ async def approve_plan(
     plan_id: str,
     body: FirstPlanApproveRequest,
     user: CurrentUser,
+    user_repo: UserRepoDep,
     session: SessionDep,
 ) -> FirstPlanApproveResponse:
     """First Plan Draft 승인 → SAVING (단일 가드 트랜잭션 영속화, ADR-0005 §2.5.1).
@@ -188,6 +191,10 @@ async def approve_plan(
     HITL [수락] 이후에만 호출되는 영속화 경로. `policy_guarded_transaction`(PR #30 재사용)이
     절대 시간 정책 위반 시 즉시 롤백 → 422 `PLAN_POLICY_VIOLATION`. 그 외 영속화 실패는 롤백 후
     500 `PLAN_SAVE_FAILED`. 응답은 명시 승인이므로 `is_draft=false` (ADR-0005 §7.2).
+
+    부수 효과: First Plan 단계 완료 → onboarding `ONBOARDING_FIRST_PLAN → ONBOARDING_NOTIFICATIONS`
+    전이 (멱등). Issue #17 "각 도메인 라우터가 자기 단계 완료 시 전이" 규약 + 본 전이는 #17 이
+    "#9(First Plan) 다음에" 로 명시적으로 First Plan 에 위임 → api-contract §3.
 
     동시성 lock(ADR-0005 §7.6): 다중 디바이스 동시 승인 race 방지.
     ⚠️ 본 슬라이스는 action_items + scheduled_blocks 만 영속화 — goal/goal_node 트리 +
@@ -218,6 +225,14 @@ async def approve_plan(
                 "계획 저장에 잠시 문제가 있어요. 잠시 후 다시 시도해 주세요.",
                 http_status=HTTPStatus.INTERNAL_SERVER_ERROR,
             ) from exc
+
+        # First Plan 단계 완료 → 다음 온보딩 단계(알림 설정)로 전이. 멱등(이미 진행/ACTIVE 면 no-op).
+        await user_repo.advance_onboarding(
+            user,
+            expected_from="ONBOARDING_FIRST_PLAN",
+            to="ONBOARDING_NOTIFICATIONS",
+        )
+        await session.commit()
 
     return FirstPlanApproveResponse(
         plan_id=plan_id,
