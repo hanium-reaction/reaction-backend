@@ -378,14 +378,28 @@ PARK       → PARK_DEFAULT
 
 ## 13. Reviews (`/reviews`) — S21, S22
 
-| Method | Path | 설명 |
-| --- | --- | --- |
-| GET | `/reviews/weekly?weekStart=YYYY-MM-DD` | 이번 주 리뷰 (일요일 03:00 precomputed) |
-| POST | `/reviews/weekly/generate` | 수동 재생성 (디버그) |
-| POST | `/reviews/habit-penalty/{habitId}/accept` | 3주 미달 페널티 수락 (Idempotency) |
+| Method | Path | 설명 | 상태 |
+| --- | --- | --- | --- |
+| GET | `/reviews/weekly?weekStart=YYYY-MM-DD` | 이번 주 리뷰 (일요일 03:00 precomputed) | ✅ #21-A |
+| POST | `/reviews/weekly/generate` | 수동 재생성 (디버그) | ✅ #21-A |
+| POST | `/reviews/habit-penalty/{habitId}/accept` | 3주 미달 페널티 수락 (Idempotency) | 🚧 → #21-C |
 
 핵심 필드: `adherenceRate`, `consistencyDays`, `resilienceRate`, `categorySuccessRate`,
 `peakWindow`, `drainWindow`, `policyUpdateCandidates`
+
+#21-A 구현 메모 (룰 기반, LLM 한 줄 평은 P2):
+- `weekStart` 는 해당 주 **월요일**로 정규화(아무 날 넣어도 그 주로 스냅). 생략 시 이번 주.
+  형식 오류 → 422 `REVIEW_INVALID_WEEK`.
+- `GET` 은 precomputed `period_summaries`(period_type=`weekly`) 우선 반환, 없으면 **즉석 계산
+  (쓰기 X)** — cron 미실행 환경(데모)에서도 빈 화면 방지. `POST generate` 만 영속화(덮어쓰기).
+- 집계 소스: `execution_events`(완료/실패), `recovery_attempts`(수락=resilience 분자),
+  `action_items.category`. 집계는 순수 함수 `orchestrator/weekly_review.py`.
+- `resilienceRate` = 실패(`failed`/`partial_done`) 중 회복 카드 **수락** 비율(#21-A 정의).
+  "회복 후 24h 내 완료" 정밀화는 #20-B(replan 완료) 데이터 확보 후.
+- `restartSuccessRate`·`repeatedFailureCount`(interruption·failure_tag 조인) / `policyUpdateCandidates`(P2)
+  는 #21-A 에서 `null`/`[]`.
+- 일요일 03:00 KST precompute cron = `scheduler/weekly_review_precompute.py`(idempotent).
+  실제 시각 트리거는 #24 운영준비에서 등록 (morning_brief 와 동일).
 
 ---
 

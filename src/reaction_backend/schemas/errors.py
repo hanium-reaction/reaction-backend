@@ -91,6 +91,9 @@ class ErrorCode(StrEnum):
     RECOVERY_ATTEMPT_NOT_FOUND = "RECOVERY_ATTEMPT_NOT_FOUND"
     RECOVERY_ALREADY_DECIDED = "RECOVERY_ALREADY_DECIDED"
 
+    # ── Reviews (REVIEW_) — #21-A ──
+    REVIEW_INVALID_WEEK = "REVIEW_INVALID_WEEK"
+
     # ── Agent 동시성 (AGENT_) — ADR-0005 §7.6 ──
     # user_id × agent advisory lock 미획득 (다른 디바이스에서 진행 중). Interview/Planning/Recovery 공용.
     AGENT_CONCURRENT_ACCESS = "AGENT_CONCURRENT_ACCESS"
