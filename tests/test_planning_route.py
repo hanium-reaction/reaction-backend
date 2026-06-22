@@ -10,15 +10,16 @@ ADR-0005 §7.3 패턴: aiClient.run 만 stub (Gemini 미호출). 라우터 → f
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
 from reaction_backend.config import get_settings
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionRow
 from reaction_backend.db.models.llm_run import LlmRun
+from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.session import get_db
 from reaction_backend.llm import RunResult, aiClient
 from reaction_backend.schemas.common import KST, now_kst
@@ -37,7 +38,12 @@ from reaction_backend.schemas.planning import (
     PlanReview,
     ScheduledBlockPreview,
 )
-from tests.conftest import DEMO_USER_UUID, FakeInterviewRepo, _FakeSession
+from tests.conftest import (
+    DEMO_USER_UUID,
+    FakeInterviewRepo,
+    FakePlanDraftRepo,
+    _FakeSession,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 픽스처 헬퍼
@@ -124,15 +130,6 @@ def _stub(*, action_items: list[ActionItemDraft] | None = None, fell_back: bool 
     return stub_run
 
 
-def _block_dict(node_id: str, hour: int, minute: int = 0, dur: int = 30) -> dict[str, Any]:
-    """ScheduledBlockPreview camelCase JSON (approve 요청 blocks 용)."""
-    start = datetime(2026, 6, 22, hour, minute, tzinfo=KST)
-    end = start + timedelta(minutes=dur)
-    return ScheduledBlockPreview(
-        start=start, end=end, title="작업", category="study", origin="goal", origin_id=node_id
-    ).model_dump(by_alias=True, mode="json")
-
-
 class _CapturingSession(_FakeSession):
     """commit/rollback/add 호출을 기록하는 fake session (로깅·트랜잭션 검증용)."""
 
@@ -198,7 +195,7 @@ def test_generate_returns_draft_plan_with_scheduled_blocks(
 
     assert body["isDraft"] is True  # AGENTS §1.4 — 승인 전 항상 Draft
     assert body["aiSource"] == "llm"
-    assert body["planId"].startswith("plan_")
+    UUID(body["planId"])  # 저장된 Draft 의 실제 id (#62)
     assert body["targetDate"] == "2026-06-22"
     assert body["goalNodes"][0]["nodeId"] == "n1"
     # 룰 스케줄러가 action_item 을 free 블록(09:00~23:00)에 1개 배치
@@ -319,85 +316,193 @@ def test_generate_logs_each_llm_call_to_llm_runs(client: TestClient, monkeypatch
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# approve — SAVING (가드 트랜잭션 + 롤백)
+# Draft 영속화 — GET + generate→approve flow (#62)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_approve_persists_within_guarded_transaction(client: TestClient) -> None:
-    """승인 → 가용 시간 블록 영속화 + commit, is_draft=false."""
-    cap = _CapturingSession()
-    _use_session(client, cap)
-
+def _seed_draft(
+    repo: FakePlanDraftRepo,
+    *,
+    blocks: list[ScheduledBlockPreview],
+    status: str = "draft",
+    expires_in_hours: int = 1,
+) -> UUID:
+    """fake repo 에 Draft 직접 주입 (정책 위반/만료 분기 테스트용)."""
     action = ActionItemDraft(
         node_id="n1", title="작업", estimated_minutes=30, category="study", first_step="시작"
     )
-    body = {
-        "outcome": _outcome().model_dump(by_alias=True, mode="json"),
-        "actionItems": [action.model_dump(by_alias=True)],
-        "blocks": [_block_dict("n1", 10)],  # 10:00 — 활동시간 내(09~23)
-        "targetDate": "2026-06-22",
+    node = GoalNodeDraft(
+        node_id="n1", parent_id=None, title="목표", node_type="root", order_index=0, is_leaf=True
+    )
+    payload = {
+        "outcome": _outcome().model_dump(mode="json"),
+        "goal_nodes": [node.model_dump(mode="json")],
+        "action_items": [action.model_dump(mode="json")],
+        "blocks": [b.model_dump(mode="json") for b in blocks],
+        "warnings": [],
+        "policy_violations": [],
+        "generated_at": now_kst().isoformat(),
     }
-    res = client.post("/plans/plan_demo/approve", json=body)
+    d = PlanDraft()
+    d.id = uuid4()
+    d.user_id = DEMO_USER_UUID
+    d.status = status
+    d.target_date = date(2026, 6, 22)
+    d.horizon = None
+    d.ai_source = "llm"
+    d.payload = payload
+    d.expires_at = now_kst() + timedelta(hours=expires_in_hours)
+    d.approved_at = None
+    repo._items[d.id] = d
+    return d.id
+
+
+def _block(hour: int, minute: int = 0, dur: int = 30) -> ScheduledBlockPreview:
+    start = datetime(2026, 6, 22, hour, minute, tzinfo=KST)
+    return ScheduledBlockPreview(
+        start=start,
+        end=start + timedelta(minutes=dur),
+        title="작업",
+        category="study",
+        origin="goal",
+        origin_id="n1",
+    )
+
+
+def test_get_plan_returns_saved_draft(client: TestClient, monkeypatch: Any) -> None:
+    """generate 로 저장 → GET /plans/{id} 가 같은 Draft 미리보기 재구성."""
+    action = ActionItemDraft(
+        node_id="n1", title="캡스톤 작업", estimated_minutes=30, category="study", first_step="열기"
+    )
+    monkeypatch.setattr(aiClient, "run", _stub(action_items=[action]))
+
+    plan_id = client.post("/plans/generate", json=_body(_outcome())).json()["planId"]
+    res = client.get(f"/plans/{plan_id}")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["planId"] == plan_id
+    assert body["isDraft"] is True
+    assert body["actionItems"][0]["title"] == "캡스톤 작업"
+    assert len(body["blocks"]) == 1
+
+
+def test_get_plan_unknown_returns_404(client: TestClient) -> None:
+    res = client.get(f"/plans/{uuid4()}")
+    assert res.status_code == 404
+    assert res.json()["code"] == "PLAN_DRAFT_NOT_FOUND"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# approve — SAVING (goal 트리 영속화 + 가드 롤백 + 3회 재시도 + 만료)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_approve_persists_goal_tree(client: TestClient, monkeypatch: Any) -> None:
+    """generate→approve: goals/goal_nodes/action_items/blocks 영속화, is_draft=false."""
+    action = ActionItemDraft(
+        node_id="n1", title="작업", estimated_minutes=30, category="study", first_step="시작"
+    )
+    monkeypatch.setattr(aiClient, "run", _stub(action_items=[action]))
+    plan_id = client.post("/plans/generate", json=_body(_outcome())).json()["planId"]
+
+    res = client.post(f"/plans/{plan_id}/approve")
     assert res.status_code == 200
     j = res.json()
     assert j["isDraft"] is False
-    assert j["planId"] == "plan_demo"
+    assert j["planId"] == plan_id
+    assert j["activatedGoals"] == 1
+    assert j["activatedGoalNodes"] == 1
     assert j["activatedActionItems"] == 1
     assert j["activatedBlocks"] == 1
-    assert cap.committed is True
-    assert cap.rolled_back is False
 
 
-def test_approve_policy_violation_rolls_back(client: TestClient) -> None:
+def test_approve_policy_violation_rolls_back(
+    client: TestClient, fake_plan_draft_repo: FakePlanDraftRepo
+) -> None:
     """수면(23~09) 시간과 겹치는 블록 → 가드가 롤백 + 422 PLAN_POLICY_VIOLATION."""
     cap = _CapturingSession()
     _use_session(client, cap)
+    plan_id = _seed_draft(fake_plan_draft_repo, blocks=[_block(2)])  # 02:00 — 수면 침범
 
-    action = ActionItemDraft(
-        node_id="n1", title="작업", estimated_minutes=30, category="study", first_step="시작"
-    )
-    body = {
-        "outcome": _outcome().model_dump(by_alias=True, mode="json"),
-        "actionItems": [action.model_dump(by_alias=True)],
-        "blocks": [_block_dict("n1", 2)],  # 02:00 — 수면 시간 침범
-        "targetDate": "2026-06-22",
-    }
-    res = client.post("/plans/plan_demo/approve", json=body)
+    res = client.post(f"/plans/{plan_id}/approve")
     assert res.status_code == 422
     assert res.json()["code"] == "PLAN_POLICY_VIOLATION"
     assert cap.rolled_back is True
     assert cap.committed is False
 
 
-def _approve_body() -> dict[str, Any]:
-    action = ActionItemDraft(
-        node_id="n1", title="작업", estimated_minutes=30, category="study", first_step="시작"
-    )
-    return {
-        "outcome": _outcome().model_dump(by_alias=True, mode="json"),
-        "actionItems": [action.model_dump(by_alias=True)],
-        "blocks": [_block_dict("n1", 10)],
-        "targetDate": "2026-06-22",
-    }
+def test_approve_expired_draft_returns_410(
+    client: TestClient, fake_plan_draft_repo: FakePlanDraftRepo
+) -> None:
+    """72h 만료된 Draft 승인 → 410 PLAN_DRAFT_EXPIRED (ADR-0005 §7.8)."""
+    plan_id = _seed_draft(fake_plan_draft_repo, blocks=[_block(10)], expires_in_hours=-1)
+
+    res = client.post(f"/plans/{plan_id}/approve")
+    assert res.status_code == 410
+    assert res.json()["code"] == "PLAN_DRAFT_EXPIRED"
 
 
 def test_approve_advances_onboarding_first_plan_to_notifications(
-    client: TestClient, demo_user_orm: Any
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
 ) -> None:
     """승인 → onboarding ONBOARDING_FIRST_PLAN → ONBOARDING_NOTIFICATIONS (Issue #17 규약)."""
     demo_user_orm.onboarding_state = "ONBOARDING_FIRST_PLAN"
+    monkeypatch.setattr(aiClient, "run", _stub())
+    plan_id = client.post("/plans/generate", json=_body(_outcome())).json()["planId"]
 
-    res = client.post("/plans/plan_demo/approve", json=_approve_body())
+    res = client.post(f"/plans/{plan_id}/approve")
     assert res.status_code == 200
     assert demo_user_orm.onboarding_state == "ONBOARDING_NOTIFICATIONS"
 
 
 def test_approve_does_not_regress_onboarding_when_active(
-    client: TestClient, demo_user_orm: Any
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
 ) -> None:
     """이미 ACTIVE 인 사용자(재계획 등)는 승인해도 onboarding 후퇴 없음 (멱등)."""
     demo_user_orm.onboarding_state = "ACTIVE"
+    monkeypatch.setattr(aiClient, "run", _stub())
+    plan_id = client.post("/plans/generate", json=_body(_outcome())).json()["planId"]
 
-    res = client.post("/plans/plan_demo/approve", json=_approve_body())
+    res = client.post(f"/plans/{plan_id}/approve")
     assert res.status_code == 200
     assert demo_user_orm.onboarding_state == "ACTIVE"
+
+
+class _RetryFailSession(_CapturingSession):
+    """flush 가 처음 `fail_times` 회 RuntimeError → 3회 재시도(ADR-0005 §2.5.1) 검증용."""
+
+    def __init__(self, *, fail_times: int) -> None:
+        super().__init__()
+        self._fail_times = fail_times
+        self.flush_count = 0
+
+    async def flush(self) -> None:
+        self.flush_count += 1
+        if self.flush_count <= self._fail_times:
+            raise RuntimeError("simulated flush failure")
+
+
+def test_approve_retries_then_succeeds(
+    client: TestClient, fake_plan_draft_repo: FakePlanDraftRepo
+) -> None:
+    """flush 가 2회 실패 후 성공 → 3회 재시도 내 영속화 성공 (200)."""
+    session = _RetryFailSession(fail_times=2)
+    _use_session(client, session)
+    plan_id = _seed_draft(fake_plan_draft_repo, blocks=[_block(10)])
+
+    res = client.post(f"/plans/{plan_id}/approve")
+    assert res.status_code == 200
+    assert session.flush_count >= 3  # 최소 2회 실패 + 성공 시도
+
+
+def test_approve_save_failure_returns_500(
+    client: TestClient, fake_plan_draft_repo: FakePlanDraftRepo
+) -> None:
+    """flush 가 매번 실패 → 3회 재시도 후 500 PLAN_SAVE_FAILED."""
+    session = _RetryFailSession(fail_times=99)
+    _use_session(client, session)
+    plan_id = _seed_draft(fake_plan_draft_repo, blocks=[_block(10)])
+
+    res = client.post(f"/plans/{plan_id}/approve")
+    assert res.status_code == 500
+    assert res.json()["code"] == "PLAN_SAVE_FAILED"

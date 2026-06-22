@@ -253,9 +253,9 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 | Method | Path | 설명 |
 | --- | --- | --- |
-| POST | `/plans/generate` | First Plan orchestrator(LangGraph) 실행. 입력: `outcome`(InterviewOutcome 인라인) 또는 `interviewSessionId`(+`targetDate` 선택). Focus≤3 초과 시 422 `GOAL_TIER_LIMIT_EXCEEDED`. 응답은 항상 `isDraft=true` (#32) |
-| GET | `/plans/{planId}` | 미리보기 (workloadLevel, conflicts, warnings) |
-| POST | `/plans/{planId}/approve` | HITL [수락] → SAVING. 입력: `outcome`+`actionItems`+`blocks` 되돌려 전달(planId ephemeral). `policy_guarded_transaction` 단일 트랜잭션 영속화, 정책 위반 시 롤백 422 `PLAN_POLICY_VIOLATION` / 저장 실패 500 `PLAN_SAVE_FAILED`. 응답 `isDraft=false`. 부수: onboarding `ONBOARDING_FIRST_PLAN→ONBOARDING_NOTIFICATIONS` 전이(멱등) (#32) |
+| POST | `/plans/generate` | First Plan orchestrator(LangGraph) 실행. 입력: `outcome`(InterviewOutcome 인라인) 또는 `interviewSessionId`(+`targetDate` 선택). Focus≤3/Maintain≤5 초과 시 422 `GOAL_TIER_LIMIT_EXCEEDED`. Draft 를 `plan_drafts`(72h)에 저장하고 실제 `planId` 반환. 응답 `isDraft=true` (#32/#62) |
+| GET | `/plans/{planId}` | 저장된 Draft 미리보기 재구성(LLM 0회). 없으면 404 `PLAN_DRAFT_NOT_FOUND` (#62) |
+| POST | `/plans/{planId}/approve` | HITL [수락] → SAVING. **`planId` 로 저장된 Draft 로드**(body 불필요, #62 FE 계약 변경). goals/goal_nodes/action_items/scheduled_blocks 단일 트랜잭션 영속화(+3회 재시도). 정책 위반 422 `PLAN_POLICY_VIOLATION` / 저장 실패 500 `PLAN_SAVE_FAILED` / 만료 410 `PLAN_DRAFT_EXPIRED`. 응답 `isDraft=false`. 부수: onboarding `ONBOARDING_FIRST_PLAN→ONBOARDING_NOTIFICATIONS` 전이(멱등) (#32/#62) |
 | PATCH | `/plans/{planId}/blocks/{blockId}` | 15분 snap 직접 편집 (S15) |
 | POST | `/plans/{planId}/ai-edit` | 자연어 수정 (S16, P1) — diff 반환만, apply는 별도 |
 | POST | `/plans/{planId}/ai-edit/apply` | diff 적용 (사용자 승인 후) |
@@ -283,7 +283,7 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
   "generatedAt": "2026-06-22T08:00:00+09:00"
 }
 ```
-> `planId` 는 본 PR 에선 ephemeral(영속화 X) — `/plans/{id}/approve`(승인 → 활성화)는 후속 PR. `aiSource` 는 LLM 분해/검토가 룰 fallback 됐으면 `"rule"`.
+> `planId` 는 `plan_drafts` 에 저장된 Draft 의 실제 UUID (#62) — `GET /plans/{planId}` 로 재조회, `POST /plans/{planId}/approve` 로 승인. `aiSource` 는 LLM 분해/검토가 룰 fallback 됐으면 `"rule"`.
 
 ---
 
