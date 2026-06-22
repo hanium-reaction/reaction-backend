@@ -31,6 +31,7 @@ from reaction_backend.db.models.inbox_item import InboxItem
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionModel
 from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.models.notification_setting import NotificationSetting
+from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.time_policy import TimePolicy
 from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
@@ -44,6 +45,7 @@ from reaction_backend.repositories.habit_repo import get_habit_repo
 from reaction_backend.repositories.inbox_repo import get_inbox_repo
 from reaction_backend.repositories.interview_repo import get_interview_repo
 from reaction_backend.repositories.notification_repo import get_notification_repo
+from reaction_backend.repositories.plan_draft_repo import get_plan_draft_repo
 from reaction_backend.repositories.time_policy_repo import get_time_policy_repo
 from reaction_backend.repositories.user_repo import GoogleProfile, get_user_repo
 
@@ -721,6 +723,57 @@ class FakeInterviewRepo:
         session.ended_at = datetime.now(UTC)
 
 
+class FakePlanDraftRepo:
+    """in-memory PlanDraftRepo — #62 First Plan Draft 영속화 미러."""
+
+    def __init__(self) -> None:
+        self._items: dict[UUID, PlanDraft] = {}
+
+    async def create(
+        self,
+        user_id: UUID,
+        *,
+        target_date: date,
+        horizon: str | None,
+        ai_source: str,
+        payload: dict[str, Any],
+        expires_at: datetime,
+    ) -> PlanDraft:
+        d = PlanDraft()
+        d.id = uuid4()
+        d.user_id = user_id
+        d.status = "draft"
+        d.target_date = target_date
+        d.horizon = horizon
+        d.ai_source = ai_source
+        d.payload = payload
+        d.expires_at = expires_at
+        d.approved_at = None
+        d.created_at = datetime.now(UTC)
+        d.updated_at = datetime.now(UTC)
+        self._items[d.id] = d
+        return d
+
+    async def get_by_id(self, user_id: UUID, draft_id: UUID) -> PlanDraft | None:
+        d = self._items.get(draft_id)
+        if d is None or d.user_id != user_id:
+            return None
+        return d
+
+    async def mark_approved(self, draft: PlanDraft, *, approved_at: datetime) -> PlanDraft:
+        draft.status = "approved"
+        draft.approved_at = approved_at
+        return draft
+
+    async def expire_stale(self, *, now: datetime) -> int:
+        count = 0
+        for d in self._items.values():
+            if d.status == "draft" and d.expires_at < now:
+                d.status = "expired"
+                count += 1
+        return count
+
+
 class FakeUserRepo:
     """in-memory UserRepo. /auth 흐름 + 상태 전이 헬퍼 둘 다 지원."""
 
@@ -837,6 +890,11 @@ def fake_daily_brief_repo() -> FakeDailyBriefRepo:
 
 
 @pytest.fixture
+def fake_plan_draft_repo() -> FakePlanDraftRepo:
+    return FakePlanDraftRepo()
+
+
+@pytest.fixture
 def client(
     demo_user_orm: User,
     fake_time_policy_repo: FakeTimePolicyRepo,
@@ -850,6 +908,7 @@ def client(
     fake_action_item_repo: FakeActionItemRepo,
     fake_interview_repo: FakeInterviewRepo,
     fake_daily_brief_repo: FakeDailyBriefRepo,
+    fake_plan_draft_repo: FakePlanDraftRepo,
 ) -> Iterator[TestClient]:
     """기본 client — 인증된 demo user + 도메인 fake repo + fake session."""
     _reset_process_singletons()
@@ -872,6 +931,7 @@ def client(
     app.dependency_overrides[get_action_item_repo] = lambda: fake_action_item_repo
     app.dependency_overrides[get_interview_repo] = lambda: fake_interview_repo
     app.dependency_overrides[get_daily_brief_repo] = lambda: fake_daily_brief_repo
+    app.dependency_overrides[get_plan_draft_repo] = lambda: fake_plan_draft_repo
     with TestClient(app) as test_client:
         yield test_client
 
@@ -946,6 +1006,7 @@ __all__ = [
     "FakeHabitRepo",
     "FakeInboxRepo",
     "FakeNotificationRepo",
+    "FakePlanDraftRepo",
     "FakeTimePolicyRepo",
     "FakeUserRepo",
     "auth_client",
@@ -959,6 +1020,7 @@ __all__ = [
     "fake_habit_repo",
     "fake_inbox_repo",
     "fake_notification_repo",
+    "fake_plan_draft_repo",
     "fake_time_policy_repo",
     "fake_user_repo",
     "issue_helper_token",

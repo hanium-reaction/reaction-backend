@@ -26,18 +26,28 @@ from reaction_backend.db.models.action_item import (
     ACTION_CATEGORY_VALUES,
     ActionItem,
 )
+from reaction_backend.db.models.goal import GOAL_CATEGORY_VALUES, GOAL_TIER_VALUES, Goal
+from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.orchestrator.goal_structuring import (
     DraftPlan,
     DraftScheduledBlock,
     HabitLike,
+    PolicyViolationError,
     TimeInterval,
     TimePolicyLike,
     policy_guarded_transaction,
 )
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.interview import InterviewOutcome
-from reaction_backend.schemas.planning import ActionItemDraft, ScheduledBlockPreview
+from reaction_backend.schemas.planning import (
+    ActionItemDraft,
+    GoalNodeDraft,
+    ScheduledBlockPreview,
+)
+
+# GoalNodeDraft.node_type(root/branch/leaf, LLM) → goal_nodes.node_type enum(core/subgoal/.../leaf).
+_NODE_TYPE_MAP = {"root": "core", "branch": "subgoal", "leaf": "leaf"}
 
 
 def context_from_outcome(outcome: InterviewOutcome) -> dict[str, Any]:
@@ -184,9 +194,22 @@ def action_placements(action_items: list[ActionItemDraft]) -> list[HabitLike]:
 #
 # HITL [수락] 이후에만 호출되는 단 하나의 영속화 경로. PR #30 의
 # `policy_guarded_transaction` 을 재사용해 절대 시간 정책 위반 시 즉시 롤백한다.
-# ⚠️ 본 슬라이스는 action_items + scheduled_blocks 만 영속화한다. goal/goal_node 트리
-# (temp_uuid → 실 UUID 치환) + dependency_links 영속화는 후속 SAVING 작업.
+# #62: goal/goal_node 트리(temp_uuid → 실 UUID) + action_item 링크 + scheduled_blocks 까지
+# 단일 트랜잭션 영속화 + 3회 재시도. ⚠️ dependency_links 는 GoalDecomposition 에 소스 데이터가
+# 없어 후속 분리(이슈 #62 제외 범위).
 # ─────────────────────────────────────────────────────────────────────────────
+
+MAX_SAVE_RETRIES = 3  # ADR-0005 §2.5.1 — DB Agent 최대 3회 재시도 후 PLAN_SAVE_FAILED.
+
+
+@dataclass(frozen=True, slots=True)
+class FirstPlanSaveResult:
+    """SAVING 영속화 결과 카운트."""
+
+    goals: int
+    goal_nodes: int
+    action_items: int
+    scheduled_blocks: int
 
 
 def _normalize_category(raw: str) -> str:
@@ -194,24 +217,42 @@ def _normalize_category(raw: str) -> str:
     return raw if raw in ACTION_CATEGORY_VALUES else "other"
 
 
-async def db_apply_first_plan(
+def _normalize_goal_category(raw: str) -> str:
+    return raw if raw in GOAL_CATEGORY_VALUES else "other"
+
+
+def _normalize_goal_tier(raw: str) -> str:
+    return raw if raw in GOAL_TIER_VALUES else "maintain"
+
+
+def _node_depths(goal_nodes: Sequence[GoalNodeDraft]) -> dict[str, int]:
+    """temp node_id → depth (parent_id 체인 hop 수). root = 0."""
+    parent_of = {n.node_id: n.parent_id for n in goal_nodes}
+    depths: dict[str, int] = {}
+    for node in goal_nodes:
+        depth = 0
+        cursor = node.parent_id
+        seen: set[str] = set()
+        while cursor is not None and cursor in parent_of and cursor not in seen:
+            seen.add(cursor)
+            depth += 1
+            cursor = parent_of[cursor]
+        depths[node.node_id] = depth
+    return depths
+
+
+async def _apply_once(
     session: AsyncSession,
     *,
     user_id: uuid.UUID,
     target_date: date,
+    outcome: InterviewOutcome,
+    goal_nodes: Sequence[GoalNodeDraft],
     action_items: Sequence[ActionItemDraft],
     blocks: Sequence[ScheduledBlockPreview],
     time_policies: Sequence[TimePolicyLike],
-) -> tuple[int, int]:
-    """승인된 Draft 를 단일 가드 트랜잭션으로 영속화. 반환: (action_item 수, block 수).
-
-    `policy_guarded_transaction` 이 영속화 **이전에** 절대 정책 위반을 검사하고, 위반 또는
-    임의 예외 시 `session.rollback()` 으로 트랜잭션을 안전하게 취소한다(PR #30 재사용).
-    block 은 `originId`(=action_item 의 node_id)로 방금 만든 action_item 에 연결한다.
-
-    Raises:
-        PolicyViolationError: block 이 절대 시간 정책(수면/노터치 등)을 침범한 경우.
-    """
+) -> FirstPlanSaveResult:
+    """단일 가드 트랜잭션 1회 시도 — goals → goal_nodes → action_items → scheduled_blocks."""
     guard_plan = DraftPlan(
         target_date=target_date,
         blocks=tuple(
@@ -231,6 +272,46 @@ async def db_apply_first_plan(
     )
 
     async with policy_guarded_transaction(session, guard_plan, time_policies):
+        # 1) goals — core_goals 전체 영속화. heaviest 가 분해 트리의 소속 goal.
+        goal_rows: list[Goal] = []
+        heaviest: Goal | None = None
+        for gc in outcome.core_goals:
+            g = Goal()
+            g.user_id = user_id
+            g.title = gc.title
+            g.category = _normalize_goal_category(gc.category)
+            g.goal_tier = _normalize_goal_tier(gc.tentative_tier)
+            g.deadline = date.fromisoformat(gc.deadline) if gc.deadline else None
+            g.status = "active"
+            g.why_now = gc.why_now
+            session.add(g)
+            goal_rows.append(g)
+            if gc.is_heaviest and heaviest is None:
+                heaviest = g
+        if heaviest is None and goal_rows:
+            heaviest = goal_rows[0]
+        await session.flush()  # goal.id 확보
+
+        # 2) goal_nodes — heaviest goal 트리. temp node_id → GoalNode (parent 는 relationship).
+        depths = _node_depths(goal_nodes)
+        node_by_temp: dict[str, GoalNode] = {}
+        for nd in goal_nodes:
+            n = GoalNode()
+            if heaviest is not None:
+                n.goal_id = heaviest.id
+            n.title = nd.title
+            n.node_type = _NODE_TYPE_MAP.get(nd.node_type, "subgoal")
+            n.depth = depths.get(nd.node_id, 0)
+            n.order_index = nd.order_index
+            n.is_leaf = nd.is_leaf
+            session.add(n)
+            node_by_temp[nd.node_id] = n
+        for nd in goal_nodes:
+            if nd.parent_id is not None and nd.parent_id in node_by_temp:
+                node_by_temp[nd.node_id].parent = node_by_temp[nd.parent_id]
+        await session.flush()  # goal_node.id 확보 (action_item FK)
+
+        # 3) action_items — goal_id + goal_node_id 링크 (#62)
         action_by_node: dict[str, ActionItem] = {}
         for item in action_items:
             row = ActionItem()
@@ -242,10 +323,16 @@ async def db_apply_first_plan(
             row.status = "planned"  # 신규 카드 — 원본 status 변경 아님(AGENTS §2)
             row.source = "goal"
             row.first_step = item.first_step
+            if heaviest is not None:
+                row.goal_id = heaviest.id
+            node = node_by_temp.get(item.node_id)
+            if node is not None:
+                row.goal_node_id = node.id
             session.add(row)
             action_by_node[item.node_id] = row
         await session.flush()  # action_item.id 확보 (block FK)
 
+        # 4) scheduled_blocks — action_item 에 연결
         block_count = 0
         for b in blocks:
             action = action_by_node.get(b.origin_id or "")
@@ -260,5 +347,54 @@ async def db_apply_first_plan(
             sb.block_status = "scheduled"
             session.add(sb)
             block_count += 1
+        # dependency_links: GoalDecomposition 에 의존성 소스 데이터 없음 → 후속(#62 제외 범위).
 
-    return len(action_by_node), block_count
+    return FirstPlanSaveResult(
+        goals=len(goal_rows),
+        goal_nodes=len(goal_nodes),
+        action_items=len(action_by_node),
+        scheduled_blocks=block_count,
+    )
+
+
+async def db_apply_first_plan(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    target_date: date,
+    outcome: InterviewOutcome,
+    goal_nodes: Sequence[GoalNodeDraft],
+    action_items: Sequence[ActionItemDraft],
+    blocks: Sequence[ScheduledBlockPreview],
+    time_policies: Sequence[TimePolicyLike],
+    max_retries: int = MAX_SAVE_RETRIES,
+) -> FirstPlanSaveResult:
+    """승인된 Draft 를 goal 트리까지 단일 트랜잭션 영속화 + 최대 3회 재시도(ADR-0005 §2.5.1).
+
+    정책 위반(`PolicyViolationError`)은 결정적이라 재시도하지 않고 즉시 전파한다. 그 외
+    영속화 예외(IntegrityError 등)는 가드 트랜잭션이 롤백 후, 최대 `max_retries` 회 재시도하고
+    마지막 실패는 원 예외를 전파한다(라우터가 `PLAN_SAVE_FAILED` 로 매핑).
+
+    Raises:
+        PolicyViolationError: block 이 절대 시간 정책(수면/노터치 등)을 침범한 경우.
+        Exception: max_retries 회 모두 실패한 경우 마지막 예외.
+    """
+    last_exc: Exception | None = None
+    for _attempt in range(max_retries):
+        try:
+            return await _apply_once(
+                session,
+                user_id=user_id,
+                target_date=target_date,
+                outcome=outcome,
+                goal_nodes=goal_nodes,
+                action_items=action_items,
+                blocks=blocks,
+                time_policies=time_policies,
+            )
+        except PolicyViolationError:
+            raise  # 결정적 — 재시도 무의미
+        except Exception as exc:  # noqa: BLE001 — 롤백은 가드 트랜잭션이 보장, 재시도 후 전파
+            last_exc = exc
+    assert last_exc is not None
+    raise last_exc

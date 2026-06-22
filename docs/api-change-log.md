@@ -7,6 +7,16 @@
 
 ---
 
+## v1.7 — 2026-06-22 (#62 / 9-C — First Plan SAVING 전체 영속화 + Draft 영속화)
+
+- ⚠️ **새 테이블/마이그레이션** `plan_drafts` (Alembic `b1f2a3c4d5e6`) — AGENTS §8 팀 합의 후 머지. First Plan Draft 영속화(payload JSONB 스냅샷 + status/expires_at).
+- `POST /plans/generate` — Draft 를 `plan_drafts`(72h 만료)에 저장하고 **실제 `planId`(UUID) 반환**(이전 ephemeral `plan_…` → 변경).
+- `GET /plans/{planId}` 실구현 — 저장된 Draft 미리보기 재구성(LLM 0회). 없으면 404 `PLAN_DRAFT_NOT_FOUND`.
+- ⚠️ **FE 계약 변경** `POST /plans/{planId}/approve` — body 재전송 방식 → **`planId` 로 Draft 로드** 방식으로 전환(body 불필요). goals/goal_nodes/action_items/scheduled_blocks 단일 트랜잭션 영속화(temp_uuid→실 UUID, goal_node 트리 parent 링크, action_item.goal_id/goal_node_id) + **최대 3회 재시도**(ADR-0005 §2.5.1). 만료 410 `PLAN_DRAFT_EXPIRED`, 이미 승인 시 멱등.
+- 신규 에러코드: `PLAN_DRAFT_NOT_FOUND`(404), `PLAN_DRAFT_EXPIRED`(410).
+- 72h Draft 만료 cron `run_expire_stale_drafts`(`scheduler/expire_drafts.py`, idempotent) + scheduler README 시간표 갱신. 트리거 등록은 #24.
+- ⚠️ **제외**: `dependency_links` 영속화 — `GoalDecomposition` 에 의존성 소스 데이터가 없어 LLM 스키마 확장이 선행 필요 → 별도 후속.
+
 ## v1.6 — 2026-06-22 (#32 / 9-B — Planning LLM 통합 / First Plan)
 
 - Planning(§8) `POST /plans/generate` + `POST /plans/{planId}/approve` 실구현 (501 스텁 → First Plan orchestrator). ADR-0005 §2.5.1 Sequential + 룰 fallback.
