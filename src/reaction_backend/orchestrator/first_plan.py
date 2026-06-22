@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any, Literal, TypedDict
 from uuid import UUID
 
@@ -34,8 +35,18 @@ from langgraph.graph.state import CompiledStateGraph
 
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator import first_plan_adapter
+from reaction_backend.orchestrator.goal_structuring import (
+    compute_free_blocks,
+    reserve_habit_sessions,
+    time_policies_to_busy,
+)
 from reaction_backend.schemas.interview import InterviewOutcome
-from reaction_backend.schemas.planning import GoalDecomposition, GoalNodeDraft, PlanReview
+from reaction_backend.schemas.planning import (
+    GoalDecomposition,
+    GoalNodeDraft,
+    PlanReview,
+    ScheduledBlockPreview,
+)
 
 __all__ = [
     "FirstPlanState",
@@ -62,6 +73,10 @@ class FirstPlanState(TypedDict):
     planning_context: dict[str, Any]
     goal_plan: GoalDecomposition | None
 
+    # PLANNING (룰 스케줄러 산출 — LLM 0회)
+    scheduled_blocks: list[ScheduledBlockPreview]
+    schedule_warnings: list[str]
+
     # REVIEWING
     review: PlanReview | None
     replan_count: int
@@ -80,6 +95,8 @@ def initial_state(*, user_id: UUID, outcome: InterviewOutcome, target_date: str)
         tier_violation=None,
         planning_context={},
         goal_plan=None,
+        scheduled_blocks=[],
+        schedule_warnings=[],
         review=None,
         replan_count=0,
         horizon=outcome.horizon,
@@ -128,11 +145,18 @@ async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> Firs
     """VALIDATING — 필수 슬롯 누락 + Focus/Maintain cap 검증.
 
     누락은 outcome.unresolved_slots 를 그대로 승계(인터뷰가 이미 결정적으로 계산).
-    Focus ≤ 3 초과 시 tier_violation 기록 (라우터가 GOAL_TIER_LIMIT_EXCEEDED 422).
+    Focus ≤ 3 / Maintain ≤ 5 초과 시 tier_violation 기록 (DevBaseline §1.4 잠금) —
+    라우터가 GOAL_TIER_LIMIT_EXCEEDED 422. 룰만(LLM 0회).
     """
     outcome = state["outcome"]
     focus_count = sum(1 for g in outcome.core_goals if g.tentative_tier == "focus")
-    violation = "focus_cap_exceeded" if focus_count > 3 else None
+    maintain_count = sum(1 for g in outcome.core_goals if g.tentative_tier == "maintain")
+    if focus_count > 3:
+        violation: str | None = "focus_cap_exceeded"
+    elif maintain_count > 5:
+        violation = "maintain_cap_exceeded"
+    else:
+        violation = None
     return {
         **state,
         "missing_fields": list(outcome.unresolved_slots),
@@ -163,12 +187,47 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
 
 
 async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> FirstPlanState:
-    """PLANNING (룰 only, LLM 0회) — goal_structuring.py free/busy + 습관 배치 재사용.
+    """PLANNING (룰 only, LLM 0회) — goal_structuring.py free/busy + 배치 알고리즘 재사용.
 
-    베이스라인: 통과 노드. 실제 스케줄링은 #32 본 구현에서 goal_structuring 의
-    GoalStructuringOrchestrator 를 호출해 DraftPlan 을 만든다(자동 적용 금지).
+    분해된 action_item 을 outcome 가용 시간(free/busy)에 실제로 배치한다.
+    - `time_policies_to_busy` + `compute_free_blocks`: 활동 윈도우/노터치를 제외한 가용 구간.
+    - `reserve_habit_sessions`: priority 오름차순 + 길이 맞는 가장 이른 free 슬롯 배치
+      (분해 순서를 priority, estimated_minutes 를 길이로 환원 — `action_placements`).
+    배치 못 한 항목은 `schedule_warnings` 로 남겨 REVIEWING 의 conflict_report 에 합류한다.
+    산출물은 미영속 미리보기(`ScheduledBlockPreview`) — 자동 적용 금지(AGENTS §1.4).
     """
-    return state
+    gp = state["goal_plan"]
+    action_items = list(gp.action_items) if gp is not None else []
+
+    day = date.fromisoformat(state["target_date"])
+    policies = first_plan_adapter.time_policies_from_outcome(state["outcome"])
+    placements = first_plan_adapter.action_placements(action_items)
+    node_by_placement = {p.id: getattr(p, "node_id", "") for p in placements}
+
+    busy = time_policies_to_busy(day, policies)
+    free = compute_free_blocks(day, busy)
+    placed, _remaining = reserve_habit_sessions(day, free, placements)
+
+    blocks = [
+        ScheduledBlockPreview(
+            start=b.interval.start,
+            end=b.interval.end,
+            title=b.title,
+            category=b.category,
+            origin="goal",
+            origin_id=(node_by_placement.get(b.origin_id) or None)
+            if b.origin_id is not None
+            else None,
+        )
+        for b in placed
+    ]
+    placed_ids = {b.origin_id for b in placed}
+    warnings = [
+        f"'{p.title}' 을(를) 배치할 가용 시간을 찾지 못했어요. 다른 시간으로 옮겨볼까요?"
+        for p in placements
+        if p.id not in placed_ids
+    ]
+    return {**state, "scheduled_blocks": blocks, "schedule_warnings": warnings}
 
 
 def _review_variables(state: FirstPlanState) -> dict[str, str]:
@@ -188,11 +247,10 @@ def _review_variables(state: FirstPlanState) -> dict[str, str]:
             "time_policy_summary": time_policy_summary,
             "conflict_report": "분해 결과 없음",
         }
-    conflicts = (
-        "; ".join(f"{v.node_id}: {v.reason}" for v in gp.policy_violations)
-        if gp.policy_violations
-        else "충돌 없음"
-    )
+    # 정책 위반(분해) + 룰 스케줄러 배치 실패(schedule_blocks)를 함께 검토 대상으로 전달.
+    conflict_parts = [f"{v.node_id}: {v.reason}" for v in gp.policy_violations]
+    conflict_parts.extend(state["schedule_warnings"])
+    conflicts = "; ".join(conflict_parts) if conflict_parts else "충돌 없음"
     return {
         "goal_nodes_json": json.dumps([n.model_dump() for n in gp.goal_nodes], ensure_ascii=False),
         "action_items_json": json.dumps(

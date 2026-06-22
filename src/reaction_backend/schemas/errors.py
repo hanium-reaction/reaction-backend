@@ -67,6 +67,12 @@ class ErrorCode(StrEnum):
     # Issue #22 + ADR-0005 §2.5.1 — Focus≤3 / Maintain≤5 단일 422 코드 (위 둘은 deprecated, 잔존)
     GOAL_TIER_LIMIT_EXCEEDED = "GOAL_TIER_LIMIT_EXCEEDED"
 
+    # ── Planning (PLAN_) — #32 ──
+    # First Plan 승인(SAVING) 시 절대 시간 정책 위반 → 트랜잭션 롤백 후 422.
+    PLAN_POLICY_VIOLATION = "PLAN_POLICY_VIOLATION"
+    # 승인 트랜잭션 영속화 실패(부분 실패 롤백 후) → 500.
+    PLAN_SAVE_FAILED = "PLAN_SAVE_FAILED"
+
     # ── Habits (HABIT_) — #3-D ──
     HABIT_NOT_FOUND = "HABIT_NOT_FOUND"
 
