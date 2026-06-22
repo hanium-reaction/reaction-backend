@@ -9,21 +9,136 @@
 / PLAN_TOO_BIG / FATIGUE / AMBIGUITY / CONFLICT / OVERRUN / AVOIDANCE / DISTRACTION
 / EMERGENCY / CONTEXT_LOSS — 최대 2개 선택, memo는 at-rest 암호화.
 
-DB: action_items, execution_events, habit_instances, execution_failure_tags,
-    failure_reason_tags (마스터), idempotency_keys
+#19-B 구현:
+- GET  /reflection/failure-tags            — 13종 마스터 (is_active=true)
+- POST /reflection/failure-tags/{exec_id}  — 실패 사유 태깅 (0~2개, memo 암호화).
+  failed/partial_done 실행만 허용, 재태깅은 409 (hard delete 회피 — AGENTS.md §2).
+  태깅 후 Recovery 카드 생성(§12 `/recovery/proposals/generate`)으로 이어진다.
 
-예정 endpoint:
-- GET  /reflection/pending                 — S17 진입 시 미체크 카드 조회 (3일 누적)
-- POST /reflection/batch                   — [모두 완료] 일괄 처리 (Idempotency-Key 필수)
-- GET  /reflection/failure-tags            — 13종 마스터 (활성만)
-- POST /reflection/failure-tags/{exec_id}  — 실패 사유 태깅 (0~2개, memo 암호화)
-
-구현 위치: domain/reflection/ + safety/ (메모 암호화)
+후속:
+- GET  /reflection/pending — S17 진입 시 미체크 카드 조회 (3일 누적)
+- POST /reflection/batch   — [모두 완료] 일괄 처리 (Idempotency-Key 필수)
 """
 
-from fastapi import APIRouter, HTTPException, status
+from __future__ import annotations
+
+from http import HTTPStatus
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from reaction_backend.api.deps import CurrentUser
+from reaction_backend.db.session import get_db
+from reaction_backend.repositories.execution_repo import ExecutionRepo, get_execution_repo
+from reaction_backend.safety.encryption import encrypt_memo
+from reaction_backend.schemas.errors import ApiError, ErrorCode
+from reaction_backend.schemas.reflection import (
+    FailureTagMaster,
+    FailureTagRequest,
+    FailureTagResponse,
+)
 
 router = APIRouter(prefix="/reflection", tags=["reflection"])
+
+_EXEC_PREFIX = "exec_"
+
+# 태깅 대상 — 실패/부분완료만 (S18 은 미완료 카드에서만 진입)
+_TAGGABLE_STATUSES = ("failed", "partial_done")
+
+ExecutionRepoDep = Annotated[ExecutionRepo, Depends(get_execution_repo)]
+SessionDep = Annotated[AsyncSession, Depends(get_db)]
+
+
+def _execution_not_found() -> ApiError:
+    return ApiError(
+        ErrorCode.TODAY_EXECUTION_NOT_FOUND,
+        "해당 실행 기록을 찾을 수 없어요.",
+        http_status=HTTPStatus.NOT_FOUND,
+    )
+
+
+def _parse_execution_id(execution_id: str) -> UUID:
+    if not execution_id.startswith(_EXEC_PREFIX):
+        raise _execution_not_found()
+    try:
+        return UUID(execution_id[len(_EXEC_PREFIX) :])
+    except ValueError as e:
+        raise _execution_not_found() from e
+
+
+@router.get("/failure-tags")
+async def list_failure_tags(
+    user: CurrentUser,
+    repo: ExecutionRepoDep,
+) -> list[FailureTagMaster]:
+    """S18 칩 마스터 — 13종 (is_active=true, sort_order 순)."""
+    tags = await repo.list_active_failure_tags()
+    return [
+        FailureTagMaster(
+            tag_code=t.tag_code,
+            label_ko=t.label_ko,
+            description=t.description,
+            sort_order=t.sort_order,
+        )
+        for t in tags
+    ]
+
+
+@router.post("/failure-tags/{execution_id}", status_code=status.HTTP_201_CREATED)
+async def tag_failure_reasons(
+    execution_id: str,
+    body: FailureTagRequest,
+    user: CurrentUser,
+    repo: ExecutionRepoDep,
+    session: SessionDep,
+) -> FailureTagResponse:
+    """실패 사유 태깅 (0~2개) + memo at-rest 암호화 (#19-B).
+
+    이 태그가 Recovery 룰 엔진(§12)의 `primary_trigger_tags` 매칭 입력이 된다.
+    """
+    execution = await repo.get_by_id(user.id, _parse_execution_id(execution_id))
+    if execution is None:
+        raise _execution_not_found()
+    if execution.completion_status not in _TAGGABLE_STATUSES:
+        raise ApiError(
+            ErrorCode.REFLECT_NOT_FAILED,
+            "실패/부분완료 실행에만 실패 사유를 남길 수 있어요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+        )
+    if await repo.has_failure_tags(execution.id):
+        raise ApiError(
+            ErrorCode.REFLECT_ALREADY_TAGGED,
+            "이 실행에는 이미 실패 사유가 기록되어 있어요.",
+            http_status=HTTPStatus.CONFLICT,
+        )
+
+    # 13종 마스터 검증 (is_active 만) — 중복 코드 제거
+    codes = list(dict.fromkeys(body.tag_codes))
+    valid = {t.tag_code for t in await repo.list_active_failure_tags()}
+    invalid = [code for code in codes if code not in valid]
+    if invalid:
+        raise ApiError(
+            ErrorCode.REFLECT_INVALID_TAG,
+            f"알 수 없는 실패 사유예요: {', '.join(invalid)}",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="tagCodes",
+        )
+
+    memo_encrypted = encrypt_memo(body.memo) if body.memo else None
+    await repo.add_failure_tags(
+        execution_id=execution.id,
+        tag_codes=codes,
+        memo_encrypted=memo_encrypted,
+    )
+    await session.commit()
+
+    return FailureTagResponse(
+        execution_id=execution_id,
+        tag_codes=codes,
+        has_memo=memo_encrypted is not None,
+    )
 
 
 @router.post("/batch", status_code=status.HTTP_501_NOT_IMPLEMENTED)
