@@ -7,6 +7,18 @@
 
 ---
 
+## v1.6 — 2026-06-22 (#32 / 9-B — Planning LLM 통합 / First Plan)
+
+- Planning(§8) `POST /plans/generate` + `POST /plans/{planId}/approve` 실구현 (501 스텁 → First Plan orchestrator). ADR-0005 §2.5.1 Sequential + 룰 fallback.
+- 입력: `outcome`(InterviewOutcome 인라인) 우선, 없으면 `interviewSessionId` 로 종료 세션 slot 결정적 투영(LLM 0회). `targetDate` 미지정 시 오늘(KST). 둘 다 없으면 422 `COMMON_VALIDATION_ERROR`, 잘못된 세션 id 는 404 `INTERVIEW_SESSION_NOT_FOUND`.
+- 흐름: VALIDATING(**Focus≤3 / Maintain≤5** 게이트, LLM 0회) → decompose(`planning/goal_decompose` LLM, 8s timeout→룰) → schedule(`goal_structuring.py` 룰 스케줄러, LLM 0회) → review(`planning/plan_quality` LLM, 8s timeout→룰). 한도 초과 시 **LLM 분해 전** 422 `GOAL_TIER_LIMIT_EXCEEDED`.
+- 응답 `FirstPlanResponse` — 항상 `isDraft=true`(AGENTS §1.4). `aiSource`=`llm`|`rule`(orchestrator `used_fallback`). `blocks`=룰 스케줄러가 action_item 을 가용 시간(free/busy)에 배치한 미리보기(KST). 배치 실패 항목은 `warnings`.
+- `POST /plans/{planId}/approve` (HITL [수락]) — `FirstPlanApproveRequest`(outcome + action_items + blocks 되돌려 전달, `planId` 는 ephemeral echo). `policy_guarded_transaction`(PR #30 재사용) 단일 트랜잭션으로 action_items + scheduled_blocks 영속화. 절대 시간 정책(수면/노터치) 위반 시 롤백 + 422 `PLAN_POLICY_VIOLATION`, 그 외 영속화 실패는 롤백 + 500 `PLAN_SAVE_FAILED`. 응답 `is_draft=false`(명시 승인, ADR-0005 §7.2).
+- 동시성 lock(ADR-0005 §7.6) — `user_id × planning` advisory lock, 다중 디바이스 동시 생성/승인 시 409 `AGENT_CONCURRENT_ACCESS`.
+- 새 에러 코드: `PLAN_POLICY_VIOLATION`(422), `PLAN_SAVE_FAILED`(500). DB 마이그레이션 없음(기존 `action_items`·`scheduled_blocks` 모델 사용).
+- 금지어 후처리 / `llm_runs` 로깅 / 8s timeout 룰 fallback 은 LLM 게이트(`aiClient.run`, Issue #5)가 일관 적용 — 강제 timeout·llm_runs 2행 기록 회귀 테스트 추가.
+- ⚠️ **설계 변경 주의**: 이슈 9-B 본문은 "LLM 4회(Validation·Planning②③·Review) + `validation/planning/review.v1.md` 3종"을 기술하나, **ADR-0005(Accepted)가 LangGraph 2-LLM(decompose·review) + 룰 Validation/Scheduler 설계로 대체**. 본 구현은 ADR-0005 를 따른다. 미반영: goal/goal_node 트리 + dependency_links 영속화(후속 SAVING), `planId` 영속 draft 테이블.
+
 ## v1.5 — 2026-06-04 (#23-A — Settings 코어)
 
 - Settings(§16) S23 실구현 — `GET /settings` + `PATCH /settings/tone-mode` (501 스텁 → 실 endpoint)

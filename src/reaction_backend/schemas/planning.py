@@ -108,6 +108,30 @@ class ScheduledBlockPreview(CamelModel):
     origin_id: str | None = None
 
 
+class FirstPlanApproveRequest(CamelModel):
+    """POST /plans/{plan_id}/approve (HITL [수락]) 요청.
+
+    `plan_id` 가 ephemeral(영속 draft 테이블은 후속 PR)이므로 클라이언트가 generate 응답의
+    `action_items` + `blocks` 를 그대로 되돌려 보낸다. 절대 시간 정책 가드를 위해 `outcome` 동봉
+    (`policy_guarded_transaction` 재사용, ADR-0005 §2.5.1 SAVING).
+    """
+
+    outcome: InterviewOutcome
+    action_items: list[ActionItemDraft] = Field(default_factory=list)
+    blocks: list[ScheduledBlockPreview] = Field(default_factory=list)
+    target_date: str | None = None  # "YYYY-MM-DD" — 미지정 시 오늘(KST)
+
+
+class FirstPlanApproveResponse(CamelModel):
+    """승인 결과 — 활성화 완료. 명시 승인 endpoint 이므로 `is_draft=False` (ADR-0005 §7.2)."""
+
+    plan_id: str
+    is_draft: Literal[False] = False
+    activated_action_items: int
+    activated_blocks: int
+    activated_at: KstDatetime
+
+
 class FirstPlanResponse(DraftMixin):
     """First Plan 미리보기 응답 — 항상 Draft (사용자 [수락] 전).
 

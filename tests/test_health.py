@@ -38,9 +38,8 @@ def test_cors_preflight_allows_frontend_origin(client: TestClient) -> None:
 
 def test_placeholder_routes_return_501(client: TestClient) -> None:
     """미구현 도메인 라우터는 501. 인증된 사용자 기준."""
-    # /today/agenda 는 #19-A, /settings 는 #23-A 에서 구현됨 — placeholder 목록에서 제외.
+    # /today/agenda 는 #19-A, /settings 는 #23-A, /plans/generate 는 #32 에서 구현됨 — 제외.
     for path in (
-        "/plans/generate",
         "/reflection/batch",
         "/recovery/proposals/generate",
         "/reviews/weekly",
