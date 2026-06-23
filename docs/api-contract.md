@@ -256,10 +256,12 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | POST | `/plans/generate` | First Plan orchestrator(LangGraph) 실행. 입력: `outcome`(InterviewOutcome 인라인) 또는 `interviewSessionId`(+`targetDate` 선택). Focus≤3/Maintain≤5 초과 시 422 `GOAL_TIER_LIMIT_EXCEEDED`. Draft 를 `plan_drafts`(72h)에 저장하고 실제 `planId` 반환. 응답 `isDraft=true` (#32/#62) |
 | GET | `/plans/{planId}` | 저장된 Draft 미리보기 재구성(LLM 0회). 없으면 404 `PLAN_DRAFT_NOT_FOUND` (#62) |
 | POST | `/plans/{planId}/approve` | HITL [수락] → SAVING. **`planId` 로 저장된 Draft 로드**(body 불필요, #62 FE 계약 변경). goals/goal_nodes/action_items/scheduled_blocks 단일 트랜잭션 영속화(+3회 재시도). 정책 위반 422 `PLAN_POLICY_VIOLATION` / 저장 실패 500 `PLAN_SAVE_FAILED` / 만료 410 `PLAN_DRAFT_EXPIRED`. 응답 `isDraft=false`. 부수: onboarding `ONBOARDING_FIRST_PLAN→ONBOARDING_NOTIFICATIONS` 전이(멱등) (#32/#62) |
-| PATCH | `/plans/{planId}/blocks/{blockId}` | 15분 snap 직접 편집 (S15) |
+| PATCH | `/plans/{planId}/blocks/{blockId}` | 15분 snap 직접 편집 (S15) — ✅ #21-B |
 | POST | `/plans/{planId}/ai-edit` | 자연어 수정 (S16, P1) — diff 반환만, apply는 별도 |
 | POST | `/plans/{planId}/ai-edit/apply` | diff 적용 (사용자 승인 후) |
-| GET | `/plans/weekly?weekStart=YYYY-MM-DD` | 주간 그리드 (S14) |
+| GET | `/plans/weekly?weekStart=YYYY-MM-DD` | 주간 그리드 (S14) — ✅ #21-B |
+
+> `/plans/generate`·`/plans/{planId}`·`approve`·`ai-edit` 는 #18/#32 (First Plan) — 현재 `generate` 만 501 스텁.
 
 응답 예 `POST /plans/generate` (#32, `FirstPlanResponse` — Draft Layer):
 ```json
@@ -284,6 +286,17 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 }
 ```
 > `planId` 는 `plan_drafts` 에 저장된 Draft 의 실제 UUID (#62) — `GET /plans/{planId}` 로 재조회, `POST /plans/{planId}/approve` 로 승인. `aiSource` 는 LLM 분해/검토가 룰 fallback 됐으면 `"rule"`.
+
+#21-B 구현 메모 (S14/S15 — 영속 `scheduled_blocks` 읽기/이동):
+- Plan 테이블 없음 — `planId` 는 주(週) 논리 식별자(`plan_<weekStart>`). 편집 권한은 `blockId`.
+- `GET /plans/weekly?weekStart=` — 그 주 월요일로 정규화(생략 시 이번 주). 7일 × `blocks[]`
+  (blockId/actionId/title/category/startAt/endAt/blockStatus/source), KST 직렬화.
+- `PATCH /plans/{planId}/blocks/{blockId}` — `{ startAt, endAt? }`. **15분 snap**(가장 가까운 경계),
+  `endAt` 생략 시 기존 길이 보존. 시간 충돌 422 `PLAN_BLOCK_CONFLICT`(cancelled·자기 제외),
+  정책 위반 422 `POLICY_VIOLATION`(sleep/lunch/late_night_block 윈도우), 잘못된 시각 422
+  `PLAN_INVALID_TIME`, 블록 없음 404 `PLAN_BLOCK_NOT_FOUND`. 적용 시 `source='user_edit'`.
+- 정책 판정은 순수 함수 `orchestrator/plan_edit.py`. `no_touch`/`break_min`/freebusy·fixed_schedule
+  충돌은 후속. DB 마이그레이션 없음.
 
 ---
 
@@ -386,14 +399,39 @@ PARK       → PARK_DEFAULT
 
 ## 13. Reviews (`/reviews`) — S21, S22
 
-| Method | Path | 설명 |
-| --- | --- | --- |
-| GET | `/reviews/weekly?weekStart=YYYY-MM-DD` | 이번 주 리뷰 (일요일 03:00 precomputed) |
-| POST | `/reviews/weekly/generate` | 수동 재생성 (디버그) |
-| POST | `/reviews/habit-penalty/{habitId}/accept` | 3주 미달 페널티 수락 (Idempotency) |
+| Method | Path | 설명 | 상태 |
+| --- | --- | --- | --- |
+| GET | `/reviews/weekly?weekStart=YYYY-MM-DD` | 이번 주 리뷰 (일요일 03:00 precomputed) | ✅ #21-A |
+| POST | `/reviews/weekly/generate` | 수동 재생성 (디버그) | ✅ #21-A |
+| GET | `/reviews/habit-penalty` | 3주 미달 빈도 재설계 후보 (S22) | ✅ #21-C |
+| POST | `/reviews/habit-penalty/{habitId}/accept` | 3주 미달 페널티 수락 (Idempotency) | ✅ #21-C |
 
 핵심 필드: `adherenceRate`, `consistencyDays`, `resilienceRate`, `categorySuccessRate`,
 `peakWindow`, `drainWindow`, `policyUpdateCandidates`
+
+#21-C Habit Penalty 메모 (S22 — 비난 아닌 빈도 재설계):
+- 감지: 직전 완료 주 기준 **최근 3주 연속** `done_count < target_count*0.5`. 순수 함수
+  `orchestrator/habit_penalty.py`. `suggestedFrequency` = 3주 평균 달성(round, 최소 1, 현재보다 작게).
+- `GET /reviews/habit-penalty` — 후보(habitId/title/current·suggestedFrequency/recentWeeks/message).
+  이미 이번 사이클 결정한 habit(`last_penalty_evaluated_at` ≥ 직전 완료 주)은 제외.
+- `POST /reviews/habit-penalty/{habitId}/accept` — **Idempotency-Key 필수**(§1.7 미들웨어). 조건
+  미충족/중복 시 422 `HABIT_PENALTY_NOT_ELIGIBLE`, 습관 없음 404 `HABIT_NOT_FOUND`. 수락 시
+  `frequency_per_week`=`target_count`=suggested, `last_penalty_decision='accepted'`. DB 마이그레이션 없음.
+- reject(+4주 cooldown) 경로는 후속(현재 accept 만).
+
+#21-A 구현 메모 (룰 기반, LLM 한 줄 평은 P2):
+- `weekStart` 는 해당 주 **월요일**로 정규화(아무 날 넣어도 그 주로 스냅). 생략 시 이번 주.
+  형식 오류 → 422 `REVIEW_INVALID_WEEK`.
+- `GET` 은 precomputed `period_summaries`(period_type=`weekly`) 우선 반환, 없으면 **즉석 계산
+  (쓰기 X)** — cron 미실행 환경(데모)에서도 빈 화면 방지. `POST generate` 만 영속화(덮어쓰기).
+- 집계 소스: `execution_events`(완료/실패), `recovery_attempts`(수락=resilience 분자),
+  `action_items.category`. 집계는 순수 함수 `orchestrator/weekly_review.py`.
+- `resilienceRate` = 실패(`failed`/`partial_done`) 중 회복 카드 **수락** 비율(#21-A 정의).
+  "회복 후 24h 내 완료" 정밀화는 #20-B(replan 완료) 데이터 확보 후.
+- `restartSuccessRate`·`repeatedFailureCount`(interruption·failure_tag 조인) / `policyUpdateCandidates`(P2)
+  는 #21-A 에서 `null`/`[]`.
+- 일요일 03:00 KST precompute cron = `scheduler/weekly_review_precompute.py`(idempotent).
+  실제 시각 트리거는 #24 운영준비에서 등록 (morning_brief 와 동일).
 
 ---
 

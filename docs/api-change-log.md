@@ -7,9 +7,7 @@
 
 ---
 
-## v1.8 — 2026-06-23 (#23-B — Privacy: consent + 즉시 익명화)
-
-> ℹ️ 병행 작업 #21 stack 도 v1.6~1.8 를 사용 — 머지 순서에 따라 본 항목 버전 재조정 가능.
+## v1.11 — 2026-06-23 (#23-B — Privacy: consent + 즉시 익명화)
 
 - Settings/Privacy(§16) S28 실구현 — `GET/POST /privacy/consent` + `POST /settings/anonymize` (501 스텁 → 실 endpoint)
 - ⚠️ **새 테이블/마이그레이션** `user_consents` (Alembic `c2d3e4f5a6b7`, append-only) — AGENTS §8 팀 합의 후 머지. consent_type(`required`/`marketing`/`research`) × `is_granted`
@@ -17,6 +15,36 @@
 - `POST /settings/anonymize` — **2단계 확인 토큰**(HMAC, 5분). 토큰 없으면 발급(`confirmation_required`), 동봉 재요청 시 `_encrypted` 7종 + 이름 `[anonymized]` 마스킹 + `is_anonymized`/`anonymized_at` set(`anonymized`). hard delete 아님
 - 새 에러코드 `PRIVACY_INVALID_CONFIRMATION`(422) · `PRIVACY_ALREADY_ANONYMIZED`(409). 신설 `auth/confirm.py`(확인 토큰), `repositories/{consent,privacy}_repo.py`
 - 톤 prefix 의 `aiClient.run()` 배선은 후속(ADR-0003 addendum) — 범위 아님
+
+## v1.10 — 2026-06-22 (#21-C — Habit Penalty)
+
+- Reviews(§13) S22 실구현 — `GET /reviews/habit-penalty` + `POST /reviews/habit-penalty/{habitId}/accept`
+- 감지: 직전 완료 주 기준 최근 3주 연속 `done_count < target_count*0.5`. 순수 함수 `orchestrator/habit_penalty.py`. suggestedFrequency = 3주 평균(round, 최소 1, 현재보다 작게)
+- `GET` 후보 — 이번 사이클 이미 결정한 habit(`last_penalty_evaluated_at` ≥ 직전 완료 주) 제외 (비난 아닌 재설계 톤)
+- `POST accept` — Idempotency-Key 필수(§1.7 미들웨어가 경로 강제). 수락 시 frequency=target=suggested + `last_penalty_decision='accepted'`. 조건 미충족/중복 422 `HABIT_PENALTY_NOT_ELIGIBLE`
+- 새 에러 코드 `HABIT_PENALTY_NOT_ELIGIBLE`. `habit_instance_repo.list_recent_for_habit` + `habit_repo.apply_penalty` 추가. DB 마이그레이션 없음
+- reject(+4주 cooldown) 경로는 후속 — 이로써 #21 (Weekly Plan+Review) 전체 완료(#21-A/B/C)
+
+## v1.9 — 2026-06-22 (#21-B — Weekly Plan + 직접 편집)
+
+- Planning(§8) S14/S15 실구현 — `GET /plans/weekly` + `PATCH /plans/{planId}/blocks/{blockId}`
+- `GET /plans/weekly?weekStart=` — 그 주 월요일로 정규화(생략 시 이번 주). 7일 × `blocks[]`(blockId/actionId/title/category/startAt/endAt/blockStatus/source). 영속 `scheduled_blocks` ⨝ `action_items`
+- `PATCH .../blocks/{blockId}` — `{startAt, endAt?}`, **15분 snap**, endAt 생략 시 길이 보존. 적용 시 `source='user_edit'`. Plan 테이블 없음 → planId 는 주 논리 식별자, 편집 권한은 blockId
+- 새 에러 코드: `PLAN_BLOCK_NOT_FOUND`(404) · `PLAN_BLOCK_CONFLICT`(422) · `PLAN_INVALID_TIME`(422) · `POLICY_VIOLATION`(422)
+- 정책 위반 판정 = 순수 함수 `orchestrator/plan_edit.py`(sleep/lunch/late_night_block 윈도우, 자정 wrap·카테고리 게이팅). `no_touch`/`break_min`/freebusy·fixed_schedule 충돌은 후속
+- 신설 `repositories/scheduled_block_repo.py`. ⚠️ DB 마이그레이션 없음(기존 `scheduled_blocks`)
+- S22 habit-penalty 는 #21-C 잔여
+
+## v1.8 — 2026-06-22 (#21-A — Weekly Review)
+
+- Reviews(§13) S21 실구현 — `GET /reviews/weekly` + `POST /reviews/weekly/generate` (501 스텁 → 실 endpoint). **룰 기반**(LLM 한 줄 평 P2)
+- `GET /reviews/weekly?weekStart=` — precomputed `period_summaries`(weekly) 우선, 없으면 **즉석 계산(쓰기 X)**. `weekStart` 는 그 주 월요일로 정규화, 생략 시 이번 주
+- `POST /reviews/weekly/generate` — 강제 재집계 + 영속화(덮어쓰기, 디버그)
+- 신설 새 에러 코드 `REVIEW_INVALID_WEEK`(422, weekStart 형식 오류)
+- 집계: 순수 함수 `orchestrator/weekly_review.py`(`compute_weekly_kpis`) — adherence/consistency/resilience/category/peak·drain window/one-liner. `restartSuccessRate`·`repeatedFailureCount`·`policyUpdateCandidates` 는 #21-A 에서 null/[] (후속)
+- `resilienceRate` = 실패 중 회복 카드 **수락** 비율(#21-A 정의). "24h 내 완료" 정밀화는 #20-B 후
+- 신설 `repositories/review_repo.py`, `scheduler/weekly_review_precompute.py`(일요일 03:00 cron job, idempotent). 시각 트리거 등록은 #24
+- ⚠️ DB 마이그레이션 없음 (기존 `period_summaries` 테이블 사용). S22 habit-penalty · S14/S15 weekly plan 은 #21-B/#21-C
 
 ## v1.7 — 2026-06-22 (#62 / 9-C — First Plan SAVING 전체 영속화 + Draft 영속화)
 

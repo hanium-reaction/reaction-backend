@@ -48,6 +48,13 @@ class ErrorCode(StrEnum):
 
     # ── Time Policies (POLICY_) — #3-C ──
     POLICY_NOT_FOUND = "POLICY_NOT_FOUND"
+    # 블록 편집(S15)이 활성 시간 정책 윈도우(sleep/lunch/late_night_block)에 진입 — #21-B
+    POLICY_VIOLATION = "POLICY_VIOLATION"
+
+    # ── Planning / Blocks (PLAN_) — #21-B ──
+    PLAN_BLOCK_NOT_FOUND = "PLAN_BLOCK_NOT_FOUND"
+    PLAN_BLOCK_CONFLICT = "PLAN_BLOCK_CONFLICT"
+    PLAN_INVALID_TIME = "PLAN_INVALID_TIME"
 
     # ── Calendar (CALENDAR_) — #3-C ──
     CALENDAR_NOT_CONNECTED = "CALENDAR_NOT_CONNECTED"
@@ -79,6 +86,8 @@ class ErrorCode(StrEnum):
 
     # ── Habits (HABIT_) — #3-D ──
     HABIT_NOT_FOUND = "HABIT_NOT_FOUND"
+    # 3주 연속 미달 조건 미충족 / 이번 사이클 이미 처리 — #21-C
+    HABIT_PENALTY_NOT_ELIGIBLE = "HABIT_PENALTY_NOT_ELIGIBLE"
 
     # ── Privacy (PRIVACY_) — #23-B ──
     # 익명화 2단계 확인 토큰 누락/위조/만료 → 422.
@@ -106,6 +115,9 @@ class ErrorCode(StrEnum):
     RECOVERY_NO_PROPOSAL = "RECOVERY_NO_PROPOSAL"
     RECOVERY_ATTEMPT_NOT_FOUND = "RECOVERY_ATTEMPT_NOT_FOUND"
     RECOVERY_ALREADY_DECIDED = "RECOVERY_ALREADY_DECIDED"
+
+    # ── Reviews (REVIEW_) — #21-A ──
+    REVIEW_INVALID_WEEK = "REVIEW_INVALID_WEEK"
 
     # ── Agent 동시성 (AGENT_) — ADR-0005 §7.6 ──
     # user_id × agent advisory lock 미획득 (다른 디바이스에서 진행 중). Interview/Planning/Recovery 공용.

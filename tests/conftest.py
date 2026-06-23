@@ -33,6 +33,7 @@ from reaction_backend.db.models.inbox_item import InboxItem
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionModel
 from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.models.notification_setting import NotificationSetting
+from reaction_backend.db.models.period_summary import PeriodSummary
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.recovery_attempt import RecoveryAttempt
 from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
@@ -42,6 +43,7 @@ from reaction_backend.db.models.user import User
 from reaction_backend.db.models.user_consent import UserConsent
 from reaction_backend.db.session import get_db
 from reaction_backend.main import create_app
+from reaction_backend.orchestrator.weekly_review import ExecutionStat, RecoveryStat
 from reaction_backend.repositories.action_item_repo import get_action_item_repo
 from reaction_backend.repositories.consent_repo import get_consent_repo
 from reaction_backend.repositories.daily_brief_repo import get_daily_brief_repo
@@ -56,6 +58,8 @@ from reaction_backend.repositories.notification_repo import get_notification_rep
 from reaction_backend.repositories.plan_draft_repo import get_plan_draft_repo
 from reaction_backend.repositories.privacy_repo import get_privacy_repo
 from reaction_backend.repositories.recovery_repo import get_recovery_repo
+from reaction_backend.repositories.review_repo import get_review_repo
+from reaction_backend.repositories.scheduled_block_repo import get_scheduled_block_repo
 from reaction_backend.repositories.time_policy_repo import get_time_policy_repo
 from reaction_backend.repositories.user_repo import GoogleProfile, get_user_repo
 
@@ -450,8 +454,22 @@ class FakeHabitRepo:
             habit.target_count = frequency_per_week
         return habit
 
+    async def apply_penalty(
+        self, habit: Habit, *, new_frequency: int, decided_at: datetime
+    ) -> Habit:
+        habit.frequency_per_week = new_frequency
+        habit.target_count = new_frequency
+        habit.last_penalty_decision = "accepted"
+        habit.last_penalty_evaluated_at = decided_at
+        habit.consecutive_miss_weeks = 0
+        return habit
+
     async def soft_delete(self, habit: Habit) -> None:
         habit.archived_at = datetime.now(UTC)
+
+    def seed(self, habit: Habit) -> None:
+        """테스트 보조 — habit 직접 주입."""
+        self._items[habit.id] = habit
 
     async def count_active(self, user_id: UUID) -> int:
         return len(await self.list_active(user_id))
@@ -473,6 +491,31 @@ class FakeHabitInstanceRepo:
 
     async def get_for_user(self, user_id: UUID, instance_id: UUID) -> HabitInstance | None:
         return self._items.get(instance_id)
+
+    async def list_recent_for_habit(
+        self, habit_id: UUID, before_week: date, limit: int = 3
+    ) -> list[HabitInstance]:
+        items = [
+            i
+            for i in self._items.values()
+            if i.habit_id == habit_id and i.week_start <= before_week
+        ]
+        items.sort(key=lambda i: i.week_start, reverse=True)
+        return items[:limit]
+
+    def seed_instance(
+        self, habit_id: UUID, week_start: date, *, done: int, target: int
+    ) -> HabitInstance:
+        """테스트 보조 — done/target 지정 인스턴스 주입 (S22 페널티 시드)."""
+        i = HabitInstance()
+        i.id = uuid4()
+        i.habit_id = habit_id
+        i.week_start = week_start
+        i.target_count = target
+        i.done_count = done
+        self._items[i.id] = i
+        self._by_habit_week[(habit_id, week_start)] = i.id
+        return i
 
     async def get_for_week(self, habit_id: UUID, week_start: date) -> HabitInstance | None:
         iid = self._by_habit_week.get((habit_id, week_start))
@@ -1036,6 +1079,119 @@ class FakeDailyBriefRepo:
         self._items[(brief.user_id, brief.brief_date)] = brief
 
 
+class FakeReviewRepo:
+    """in-memory ReviewRepo — Issue #21-A.
+
+    실행/회복 통계는 테스트가 `seed_execution`/`seed_recovery` 로 주입한다 (집계 입력).
+    `upsert_weekly` 는 ORM 없이 PeriodSummary 인스턴스를 만들어 저장한다.
+    """
+
+    def __init__(self) -> None:
+        self._summaries: dict[tuple[UUID, date], PeriodSummary] = {}
+        self._exec_stats: list[ExecutionStat] = []
+        self._recovery_stats: list[RecoveryStat] = []
+
+    # ── 테스트 보조 seed ──
+    def seed_execution(self, stat: ExecutionStat) -> None:
+        self._exec_stats.append(stat)
+
+    def seed_recovery(self, stat: RecoveryStat) -> None:
+        self._recovery_stats.append(stat)
+
+    # ── ReviewRepo 인터페이스 ──
+    async def get_weekly(self, user_id: UUID, week_start: date) -> PeriodSummary | None:
+        return self._summaries.get((user_id, week_start))
+
+    async def collect_execution_stats(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[ExecutionStat]:
+        return [s for s in self._exec_stats if start_dt <= s.plan_start_at < end_dt]
+
+    async def collect_recovery_stats(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[RecoveryStat]:
+        return list(self._recovery_stats)
+
+    async def upsert_weekly(
+        self,
+        *,
+        user_id: UUID,
+        week_start: date,
+        week_end: date,
+        kpi: Any,
+        generated_at: datetime,
+    ) -> PeriodSummary:
+        ps = self._summaries.get((user_id, week_start)) or PeriodSummary()
+        ps.user_id = user_id
+        ps.period_type = "weekly"
+        ps.start_date = week_start
+        ps.end_date = week_end
+        ps.adherence_rate = kpi.adherence_rate
+        ps.consistency_days = kpi.consistency_days
+        ps.resilience_rate = kpi.resilience_rate
+        ps.avg_delay_minutes = kpi.avg_delay_minutes
+        ps.restart_success_rate = kpi.restart_success_rate
+        ps.repeated_failure_count = kpi.repeated_failure_count
+        ps.average_recovery_minutes = kpi.average_recovery_minutes
+        ps.category_success_rate = kpi.category_success_rate
+        ps.peak_point_window = kpi.peak_point_window
+        ps.drain_point_window = kpi.drain_point_window
+        ps.llm_one_liner = kpi.one_liner
+        ps.policy_update_candidates = kpi.policy_update_candidates
+        ps.generated_at = generated_at
+        self._summaries[(user_id, week_start)] = ps
+        return ps
+
+
+class FakeScheduledBlockRepo:
+    """in-memory ScheduledBlockRepo — Issue #21-B.
+
+    실제 join 대신 seed 시 (title, category) 를 함께 보관한다.
+    """
+
+    def __init__(self) -> None:
+        self._blocks: dict[UUID, ScheduledBlock] = {}
+        self._meta: dict[UUID, tuple[str, str]] = {}
+
+    def seed(self, block: ScheduledBlock, *, title: str, category: str) -> None:
+        self._blocks[block.id] = block
+        self._meta[block.id] = (title, category)
+
+    async def list_week(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[tuple[ScheduledBlock, str, str]]:
+        rows = [
+            (b, *self._meta[b.id])
+            for b in self._blocks.values()
+            if b.user_id == user_id and start_dt <= b.start_at < end_dt
+        ]
+        return sorted(rows, key=lambda r: r[0].start_at)
+
+    async def get_block(self, user_id: UUID, block_id: UUID) -> ScheduledBlock | None:
+        b = self._blocks.get(block_id)
+        if b is None or b.user_id != user_id:
+            return None
+        return b
+
+    async def list_overlapping(
+        self,
+        user_id: UUID,
+        start_dt: datetime,
+        end_dt: datetime,
+        *,
+        exclude_block_id: UUID,
+    ) -> list[ScheduledBlock]:
+        return [
+            b
+            for b in self._blocks.values()
+            if b.user_id == user_id
+            and b.id != exclude_block_id
+            and b.block_status != "cancelled"
+            and b.start_at < end_dt
+            and b.end_at > start_dt
+        ]
+
+
 class FakeInterviewRepo:
     """in-memory InterviewRepo — #6 배선. 세션 + 슬롯답 정규화 저장 미러."""
 
@@ -1344,6 +1500,16 @@ def fake_daily_brief_repo() -> FakeDailyBriefRepo:
 
 
 @pytest.fixture
+def fake_review_repo() -> FakeReviewRepo:
+    return FakeReviewRepo()
+
+
+@pytest.fixture
+def fake_scheduled_block_repo() -> FakeScheduledBlockRepo:
+    return FakeScheduledBlockRepo()
+
+
+@pytest.fixture
 def fake_plan_draft_repo() -> FakePlanDraftRepo:
     return FakePlanDraftRepo()
 
@@ -1367,6 +1533,8 @@ def client(
     fake_execution_repo: FakeExecutionRepo,
     fake_consent_repo: FakeConsentRepo,
     fake_privacy_repo: FakePrivacyRepo,
+    fake_review_repo: FakeReviewRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
 ) -> Iterator[TestClient]:
     """기본 client — 인증된 demo user + 도메인 fake repo + fake session."""
     _reset_process_singletons()
@@ -1394,6 +1562,8 @@ def client(
     app.dependency_overrides[get_execution_repo] = lambda: fake_execution_repo
     app.dependency_overrides[get_consent_repo] = lambda: fake_consent_repo
     app.dependency_overrides[get_privacy_repo] = lambda: fake_privacy_repo
+    app.dependency_overrides[get_review_repo] = lambda: fake_review_repo
+    app.dependency_overrides[get_scheduled_block_repo] = lambda: fake_scheduled_block_repo
     with TestClient(app) as test_client:
         yield test_client
 
@@ -1473,6 +1643,8 @@ __all__ = [
     "FakePlanDraftRepo",
     "FakePrivacyRepo",
     "FakeRecoveryRepo",
+    "FakeReviewRepo",
+    "FakeScheduledBlockRepo",
     "FakeTimePolicyRepo",
     "FakeUserRepo",
     "auth_client",
@@ -1491,6 +1663,8 @@ __all__ = [
     "fake_plan_draft_repo",
     "fake_privacy_repo",
     "fake_recovery_repo",
+    "fake_review_repo",
+    "fake_scheduled_block_repo",
     "fake_time_policy_repo",
     "fake_user_repo",
     "issue_helper_token",
