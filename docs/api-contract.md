@@ -145,9 +145,10 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | --- | --- | --- |
 | `POST /fixed-schedules` | `ONBOARDING_CALENDAR` / `ONBOARDING_MANUAL_SCHEDULE` | `ONBOARDING_POLICIES` |
 | `POST /time-policies` | `ONBOARDING_POLICIES` | `ONBOARDING_FIRST_PLAN` |
+| `POST /plans/{planId}/approve` | `ONBOARDING_FIRST_PLAN` | `ONBOARDING_NOTIFICATIONS` |
 | `PATCH /notifications/settings` | `ONBOARDING_NOTIFICATIONS` | `ACTIVE` |
 
-각 트리거는 `expected_from` 에 해당할 때만 전이 (멱등). 이미 더 진행된 상태(예: `ACTIVE`)면 no-op — 같은 endpoint 두 번 호출해도 안전. `ONBOARDING_FIRST_PLAN → ONBOARDING_NOTIFICATIONS` 전이는 Issue #18 (First Plan) 에서.
+각 트리거는 `expected_from` 에 해당할 때만 전이 (멱등). 이미 더 진행된 상태(예: `ACTIVE`)면 no-op — 같은 endpoint 두 번 호출해도 안전. `ONBOARDING_FIRST_PLAN → ONBOARDING_NOTIFICATIONS` 전이는 First Plan 승인(`POST /plans/{planId}/approve`) 에서 수행한다 (#32; Issue #17 이 "#9 다음에" 로 First Plan 에 위임).
 
 ---
 
@@ -252,9 +253,9 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 | Method | Path | 설명 |
 | --- | --- | --- |
-| POST | `/plans/generate` | Goal Structuring Orchestrator 실행. 입력: 정책+goal+habit+interview+freebusy |
-| GET | `/plans/{planId}` | 미리보기 (workloadLevel, conflicts, warnings) |
-| POST | `/plans/{planId}/approve` | 사용자 승인 → 활성화. `INTERVIEW_REQUIRED_FIRST` 401 가능 |
+| POST | `/plans/generate` | First Plan orchestrator(LangGraph) 실행. 입력: `outcome`(InterviewOutcome 인라인) 또는 `interviewSessionId`(+`targetDate` 선택). Focus≤3/Maintain≤5 초과 시 422 `GOAL_TIER_LIMIT_EXCEEDED`. Draft 를 `plan_drafts`(72h)에 저장하고 실제 `planId` 반환. 응답 `isDraft=true` (#32/#62) |
+| GET | `/plans/{planId}` | 저장된 Draft 미리보기 재구성(LLM 0회). 없으면 404 `PLAN_DRAFT_NOT_FOUND` (#62) |
+| POST | `/plans/{planId}/approve` | HITL [수락] → SAVING. **`planId` 로 저장된 Draft 로드**(body 불필요, #62 FE 계약 변경). goals/goal_nodes/action_items/scheduled_blocks 단일 트랜잭션 영속화(+3회 재시도). 정책 위반 422 `PLAN_POLICY_VIOLATION` / 저장 실패 500 `PLAN_SAVE_FAILED` / 만료 410 `PLAN_DRAFT_EXPIRED`. 응답 `isDraft=false`. 부수: onboarding `ONBOARDING_FIRST_PLAN→ONBOARDING_NOTIFICATIONS` 전이(멱등) (#32/#62) |
 | PATCH | `/plans/{planId}/blocks/{blockId}` | 15분 snap 직접 편집 (S15) — ✅ #21-B |
 | POST | `/plans/{planId}/ai-edit` | 자연어 수정 (S16, P1) — diff 반환만, apply는 별도 |
 | POST | `/plans/{planId}/ai-edit/apply` | diff 적용 (사용자 승인 후) |
@@ -262,22 +263,29 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 > `/plans/generate`·`/plans/{planId}`·`approve`·`ai-edit` 는 #18/#32 (First Plan) — 현재 `generate` 만 501 스텁.
 
-응답 예 `POST /plans/generate`:
+응답 예 `POST /plans/generate` (#32, `FirstPlanResponse` — Draft Layer):
 ```json
 {
-  "planId": "plan_2026w20",
-  "horizonEnd": "2026-07-12",
-  "weeks": [
-    {
-      "weekStart": "2026-05-18",
-      "workloadLevel": "medium",
-      "warnings": ["WED 6h 초과"],
-      "actionItems": [...],
-      "scheduledBlocks": [...]
-    }
-  ]
+  "isDraft": true,
+  "aiSource": "llm",
+  "planId": "plan_3f8c…",
+  "targetDate": "2026-06-22",
+  "horizon": "2026-07-12",
+  "goalNodes": [
+    {"nodeId": "n1", "parentId": null, "title": "캡스톤", "nodeType": "root", "orderIndex": 0, "isLeaf": true}
+  ],
+  "actionItems": [
+    {"nodeId": "n1", "title": "저장소 세팅 30분", "estimatedMinutes": 30, "category": "study", "firstStep": "레포 clone"}
+  ],
+  "blocks": [
+    {"start": "2026-06-22T09:00:00+09:00", "end": "2026-06-22T09:30:00+09:00", "title": "저장소 세팅 30분", "category": "study", "origin": "goal", "originId": "n1"}
+  ],
+  "warnings": [],
+  "policyViolations": [],
+  "generatedAt": "2026-06-22T08:00:00+09:00"
 }
 ```
+> `planId` 는 `plan_drafts` 에 저장된 Draft 의 실제 UUID (#62) — `GET /plans/{planId}` 로 재조회, `POST /plans/{planId}/approve` 로 승인. `aiSource` 는 LLM 분해/검토가 룰 fallback 됐으면 `"rule"`.
 
 #21-B 구현 메모 (S14/S15 — 영속 `scheduled_blocks` 읽기/이동):
 - Plan 테이블 없음 — `planId` 는 주(週) 논리 식별자(`plan_<weekStart>`). 편집 권한은 `blockId`.

@@ -55,6 +55,7 @@ from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.models.llm_run import LlmRun
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.period_summary import PeriodSummary
+from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.policy_snapshot import PolicySnapshot
 from reaction_backend.db.models.recovery_attempt import RecoveryAttempt
 from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
@@ -86,6 +87,7 @@ __all__ = [
     "LlmRun",
     "NotificationSetting",
     "PeriodSummary",
+    "PlanDraft",
     "PolicySnapshot",
     "RecoveryAttempt",
     "RecoveryStrategyCatalog",
