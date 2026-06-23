@@ -62,6 +62,7 @@ from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrateg
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.time_policy import TimePolicy
 from reaction_backend.db.models.user import User
+from reaction_backend.db.models.user_consent import UserConsent
 
 __all__ = [
     "ActionItem",
@@ -94,4 +95,5 @@ __all__ = [
     "ScheduledBlock",
     "TimePolicy",
     "User",
+    "UserConsent",
 ]

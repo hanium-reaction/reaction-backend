@@ -65,20 +65,4 @@ def test_get_settings_requires_auth(unauthed_client: TestClient) -> None:
     assert resp.json()["code"] == "AUTH_INVALID_TOKEN"
 
 
-def test_anonymize_not_implemented(client: TestClient) -> None:
-    """S28 anonymize 는 #23-B — 501."""
-    resp = client.post("/settings/anonymize")
-    assert resp.status_code == 501
-    assert resp.json()["code"] == "COMMON_NOT_IMPLEMENTED"
-
-
-def test_get_consent_not_implemented(client: TestClient) -> None:
-    resp = client.get("/privacy/consent")
-    assert resp.status_code == 501
-    assert resp.json()["code"] == "COMMON_NOT_IMPLEMENTED"
-
-
-def test_post_consent_not_implemented(client: TestClient) -> None:
-    resp = client.post("/privacy/consent")
-    assert resp.status_code == 501
-    assert resp.json()["code"] == "COMMON_NOT_IMPLEMENTED"
+# S28 Privacy(anonymize·consent)는 #23-B 에서 실구현 — 검증은 tests/test_privacy.py.
