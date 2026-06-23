@@ -1,6 +1,6 @@
 """전역 예외 핸들러 — 모든 에러가 `ErrorResponse` 로 직렬화되는지 (ADR-0002 §2.2)."""
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
@@ -19,9 +19,14 @@ def test_not_found_returns_error_response(client: TestClient) -> None:
     assert body["server_time"].endswith("+09:00")
 
 
-def test_placeholder_route_error_is_error_response(client: TestClient) -> None:
-    # 아직 미구현인 placeholder 라우트 (planning 은 #3-E 에서 구현 예정)
-    resp = client.post("/plans/generate")
+def test_not_implemented_error_is_error_response() -> None:
+    """501 HTTPException 도 ErrorResponse(COMMON_NOT_IMPLEMENTED) 로 직렬화.
+
+    도메인 placeholder 라우트(예: /recovery/...)에 결합하지 않고 전용 테스트 라우트로 검증한다 —
+    각 도메인이 구현되어 501 이 사라져도 본 테스트가 깨지지 않도록(다른 PR 과의 결합 제거).
+    """
+    client = TestClient(_app_with_test_routes())
+    resp = client.get("/__test__/not-implemented")
     assert resp.status_code == 501
     body = resp.json()
     assert set(body) == _ERROR_KEYS
@@ -51,6 +56,10 @@ def _app_with_test_routes() -> FastAPI:
     @app.get("/__test__/boom")
     async def _boom() -> None:
         raise RuntimeError("unexpected failure")
+
+    @app.get("/__test__/not-implemented")
+    async def _not_implemented() -> None:
+        raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, detail="placeholder")
 
     return app
 
