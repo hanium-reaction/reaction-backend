@@ -40,10 +40,12 @@ from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrateg
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.time_policy import TimePolicy
 from reaction_backend.db.models.user import User
+from reaction_backend.db.models.user_consent import UserConsent
 from reaction_backend.db.session import get_db
 from reaction_backend.main import create_app
 from reaction_backend.orchestrator.weekly_review import ExecutionStat, RecoveryStat
 from reaction_backend.repositories.action_item_repo import get_action_item_repo
+from reaction_backend.repositories.consent_repo import get_consent_repo
 from reaction_backend.repositories.daily_brief_repo import get_daily_brief_repo
 from reaction_backend.repositories.execution_repo import get_execution_repo
 from reaction_backend.repositories.fixed_schedule_repo import get_fixed_schedule_repo
@@ -54,6 +56,7 @@ from reaction_backend.repositories.inbox_repo import get_inbox_repo
 from reaction_backend.repositories.interview_repo import get_interview_repo
 from reaction_backend.repositories.notification_repo import get_notification_repo
 from reaction_backend.repositories.plan_draft_repo import get_plan_draft_repo
+from reaction_backend.repositories.privacy_repo import get_privacy_repo
 from reaction_backend.repositories.recovery_repo import get_recovery_repo
 from reaction_backend.repositories.review_repo import get_review_repo
 from reaction_backend.repositories.scheduled_block_repo import get_scheduled_block_repo
@@ -1320,6 +1323,43 @@ class FakePlanDraftRepo:
         return count
 
 
+class FakeConsentRepo:
+    """in-memory ConsentRepo — Issue #23-B (append-only)."""
+
+    def __init__(self) -> None:
+        self._rows: list[UserConsent] = []
+
+    async def list_current(self, user_id: UUID) -> list[UserConsent]:
+        seen: set[str] = set()
+        latest: list[UserConsent] = []
+        for row in reversed(self._rows):  # 최신 추가분 우선
+            if row.user_id == user_id and row.consent_type not in seen:
+                seen.add(row.consent_type)
+                latest.append(row)
+        return latest
+
+    async def add(self, user_id: UUID, consent_type: str, *, is_granted: bool) -> UserConsent:
+        c = UserConsent()
+        c.id = uuid4()
+        c.user_id = user_id
+        c.consent_type = consent_type
+        c.is_granted = is_granted
+        c.created_at = datetime.now(UTC)
+        self._rows.append(c)
+        return c
+
+
+class FakePrivacyRepo:
+    """in-memory PrivacyRepo — Issue #23-B. 실제 마스킹 대신 호출 기록 + 고정 카운트."""
+
+    def __init__(self) -> None:
+        self.anonymized_user: UUID | None = None
+
+    async def anonymize_user(self, user_id: UUID) -> int:
+        self.anonymized_user = user_id
+        return 3
+
+
 class FakeUserRepo:
     """in-memory UserRepo. /auth 흐름 + 상태 전이 헬퍼 둘 다 지원."""
 
@@ -1398,6 +1438,16 @@ def fake_notification_repo() -> FakeNotificationRepo:
 @pytest.fixture
 def fake_user_repo() -> FakeUserRepo:
     return FakeUserRepo()
+
+
+@pytest.fixture
+def fake_consent_repo() -> FakeConsentRepo:
+    return FakeConsentRepo()
+
+
+@pytest.fixture
+def fake_privacy_repo() -> FakePrivacyRepo:
+    return FakePrivacyRepo()
 
 
 @pytest.fixture
@@ -1481,6 +1531,8 @@ def client(
     fake_plan_draft_repo: FakePlanDraftRepo,
     fake_recovery_repo: FakeRecoveryRepo,
     fake_execution_repo: FakeExecutionRepo,
+    fake_consent_repo: FakeConsentRepo,
+    fake_privacy_repo: FakePrivacyRepo,
     fake_review_repo: FakeReviewRepo,
     fake_scheduled_block_repo: FakeScheduledBlockRepo,
 ) -> Iterator[TestClient]:
@@ -1508,6 +1560,8 @@ def client(
     app.dependency_overrides[get_plan_draft_repo] = lambda: fake_plan_draft_repo
     app.dependency_overrides[get_recovery_repo] = lambda: fake_recovery_repo
     app.dependency_overrides[get_execution_repo] = lambda: fake_execution_repo
+    app.dependency_overrides[get_consent_repo] = lambda: fake_consent_repo
+    app.dependency_overrides[get_privacy_repo] = lambda: fake_privacy_repo
     app.dependency_overrides[get_review_repo] = lambda: fake_review_repo
     app.dependency_overrides[get_scheduled_block_repo] = lambda: fake_scheduled_block_repo
     with TestClient(app) as test_client:
@@ -1577,6 +1631,7 @@ def issue_helper_token(
 __all__ = [
     "DEMO_USER_UUID",
     "FakeActionItemRepo",
+    "FakeConsentRepo",
     "FakeDailyBriefRepo",
     "FakeExecutionRepo",
     "FakeFixedScheduleRepo",
@@ -1586,6 +1641,7 @@ __all__ = [
     "FakeInboxRepo",
     "FakeNotificationRepo",
     "FakePlanDraftRepo",
+    "FakePrivacyRepo",
     "FakeRecoveryRepo",
     "FakeReviewRepo",
     "FakeScheduledBlockRepo",
@@ -1595,6 +1651,7 @@ __all__ = [
     "client",
     "demo_user_orm",
     "fake_action_item_repo",
+    "fake_consent_repo",
     "fake_daily_brief_repo",
     "fake_execution_repo",
     "fake_fixed_schedule_repo",
@@ -1604,6 +1661,7 @@ __all__ = [
     "fake_inbox_repo",
     "fake_notification_repo",
     "fake_plan_draft_repo",
+    "fake_privacy_repo",
     "fake_recovery_repo",
     "fake_review_repo",
     "fake_scheduled_block_repo",

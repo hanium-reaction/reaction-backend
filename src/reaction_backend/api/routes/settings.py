@@ -25,16 +25,27 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
+from reaction_backend.auth.confirm import issue_confirmation_token, verify_confirmation_token
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.user import User
+from reaction_backend.db.models.user_consent import UserConsent
 from reaction_backend.db.session import get_db
+from reaction_backend.repositories.consent_repo import ConsentRepo, get_consent_repo
 from reaction_backend.repositories.notification_repo import (
     NotificationRepo,
     get_notification_repo,
 )
+from reaction_backend.repositories.privacy_repo import PrivacyRepo, get_privacy_repo
 from reaction_backend.repositories.user_repo import UserRepo, get_user_repo
+from reaction_backend.safety.encryption import ANONYMIZED_SENTINEL
+from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.settings import (
+    AnonymizeRequest,
+    AnonymizeResponse,
+    ConsentCreateRequest,
+    ConsentItem,
+    ConsentListResponse,
     NotificationSummary,
     SettingsResponse,
     ToneModeUpdateRequest,
@@ -45,7 +56,12 @@ router_privacy = APIRouter(prefix="/privacy", tags=["privacy"])
 
 NotifRepoDep = Annotated[NotificationRepo, Depends(get_notification_repo)]
 UserRepoDep = Annotated[UserRepo, Depends(get_user_repo)]
+ConsentRepoDep = Annotated[ConsentRepo, Depends(get_consent_repo)]
+PrivacyRepoDep = Annotated[PrivacyRepo, Depends(get_privacy_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
+
+# 2단계 확인 토큰 용도 — 익명화 전용.
+_ANONYMIZE_PURPOSE = "anonymize"
 
 
 def _notif_summary(setting: NotificationSetting | None) -> NotificationSummary | None:
@@ -96,34 +112,88 @@ async def update_tone_mode(
     return _to_settings(user, setting)
 
 
-# ───── S28 Privacy — Issue #23-B 범위. 501 스텁 유지. ─────
+# ───── S28 Privacy — Issue #23-B ─────
 
 
-@router.post("/anonymize")
-async def anonymize() -> None:
-    """[#23-B] 즉시 익명화 — 2단계 확인 토큰 + `_encrypted` 필드 마스킹."""
-    raise ApiError(
-        ErrorCode.COMMON_NOT_IMPLEMENTED,
-        "즉시 익명화는 곧 제공돼요 (Issue #23-B).",
-        http_status=HTTPStatus.NOT_IMPLEMENTED,
+def _consent_item(consent: UserConsent) -> ConsentItem:
+    return ConsentItem(
+        consent_type=consent.consent_type,  # type: ignore[arg-type]
+        is_granted=consent.is_granted,
+        updated_at=consent.created_at,
     )
 
 
 @router_privacy.get("/consent")
-async def get_consent() -> None:
-    """[#23-B] 동의 기록 — append-only `user_consents` 테이블 (마이그레이션 동반)."""
-    raise ApiError(
-        ErrorCode.COMMON_NOT_IMPLEMENTED,
-        "동의 기록 조회는 곧 제공돼요 (Issue #23-B).",
-        http_status=HTTPStatus.NOT_IMPLEMENTED,
-    )
+async def get_consent(user: CurrentUser, repo: ConsentRepoDep) -> ConsentListResponse:
+    """동의 현황 — consent_type 별 최신 기록 (필수/마케팅/연구)."""
+    rows = await repo.list_current(user.id)
+    return ConsentListResponse(consents=[_consent_item(c) for c in rows])
 
 
 @router_privacy.post("/consent")
-async def create_consent() -> None:
-    """[#23-B] 신규 동의 (마케팅/연구 토글)."""
-    raise ApiError(
-        ErrorCode.COMMON_NOT_IMPLEMENTED,
-        "동의 등록은 곧 제공돼요 (Issue #23-B).",
-        http_status=HTTPStatus.NOT_IMPLEMENTED,
+async def create_consent(
+    body: ConsentCreateRequest,
+    user: CurrentUser,
+    repo: ConsentRepoDep,
+    session: SessionDep,
+) -> ConsentListResponse:
+    """동의/철회 — append-only 새 기록 추가 후 갱신된 현황 반환.
+
+    `consentType` 외 값은 Pydantic Literal → 422 `COMMON_VALIDATION_ERROR`.
+    """
+    await repo.add(user.id, body.consent_type, is_granted=body.granted)
+    await session.commit()
+    rows = await repo.list_current(user.id)
+    return ConsentListResponse(consents=[_consent_item(c) for c in rows])
+
+
+@router.post("/anonymize")
+async def anonymize(
+    body: AnonymizeRequest,
+    user: CurrentUser,
+    privacy_repo: PrivacyRepoDep,
+    session: SessionDep,
+) -> AnonymizeResponse:
+    """즉시 익명화 — 2단계 확인.
+
+    - `confirmationToken` 없으면 step1: 확인 토큰 발급(미적용).
+    - `confirmationToken` 있으면 step2: 검증 후 `_encrypted` 필드 마스킹 + 이름 마스킹 +
+      `is_anonymized`/`anonymized_at` set. hard delete 아님(행 보존).
+    """
+    if user.is_anonymized:
+        raise ApiError(
+            ErrorCode.PRIVACY_ALREADY_ANONYMIZED,
+            "이미 익명화된 계정이에요.",
+            http_status=HTTPStatus.CONFLICT,
+        )
+
+    if body.confirmation_token is None:
+        token, expires_at = issue_confirmation_token(user.id, _ANONYMIZE_PURPOSE)
+        return AnonymizeResponse(
+            status="confirmation_required",
+            message="정말 익명화할까요? 이 작업은 되돌릴 수 없어요. 확인 토큰으로 한 번 더 요청해 주세요.",
+            confirmation_token=token,
+            expires_at=expires_at,
+        )
+
+    if not verify_confirmation_token(body.confirmation_token, user.id, _ANONYMIZE_PURPOSE):
+        raise ApiError(
+            ErrorCode.PRIVACY_INVALID_CONFIRMATION,
+            "확인 토큰이 유효하지 않거나 만료됐어요. 다시 시도해 주세요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="confirmationToken",
+        )
+
+    masked = await privacy_repo.anonymize_user(user.id)
+    anonymized_at = now_kst()
+    user.is_anonymized = True
+    user.anonymized_at = anonymized_at
+    user.name = ANONYMIZED_SENTINEL
+    await session.commit()
+
+    return AnonymizeResponse(
+        status="anonymized",
+        message="익명화를 완료했어요. 개인정보는 더 이상 식별되지 않아요.",
+        anonymized_at=anonymized_at,
+        masked_count=masked,
     )

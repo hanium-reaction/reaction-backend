@@ -8,10 +8,13 @@ from __future__ import annotations
 
 from typing import Literal
 
-from reaction_backend.schemas.common import CamelModel
+from reaction_backend.schemas.common import CamelModel, KstDatetime
 
 # User.TONE_MODE_VALUES 와 동일 — gentle/strict/encouraging.
 ToneMode = Literal["gentle", "strict", "encouraging"]
+
+# user_consents.CONSENT_TYPE_VALUES 와 동일.
+ConsentType = Literal["required", "marketing", "research"]
 
 
 class NotificationSummary(CamelModel):
@@ -46,3 +49,54 @@ class ToneModeUpdateRequest(CamelModel):
     """
 
     tone_mode: ToneMode
+
+
+# ── S28 Privacy — Consent (#23-B) ──
+
+
+class ConsentItem(CamelModel):
+    """consent_type 별 현재(최신) 동의 상태."""
+
+    consent_type: ConsentType
+    is_granted: bool
+    updated_at: KstDatetime
+
+
+class ConsentListResponse(CamelModel):
+    """GET /privacy/consent — 동의 현황 (필수/마케팅/연구 분리)."""
+
+    consents: list[ConsentItem]
+
+
+class ConsentCreateRequest(CamelModel):
+    """POST /privacy/consent — 동의/철회 (append-only 새 기록)."""
+
+    consent_type: ConsentType
+    granted: bool
+
+
+# ── S28 Privacy — Anonymize (#23-B) ──
+
+
+class AnonymizeRequest(CamelModel):
+    """POST /settings/anonymize 요청.
+
+    `confirmationToken` 없으면 step1(토큰 발급), 있으면 step2(실행) — 2단계 확인.
+    """
+
+    confirmation_token: str | None = None
+
+
+class AnonymizeResponse(CamelModel):
+    """익명화 응답. `status` 로 단계 구분.
+
+    - `confirmation_required` — 토큰 발급(미적용). `confirmationToken`/`expiresAt` 채움.
+    - `anonymized` — 적용 완료. `anonymizedAt`/`maskedCount` 채움.
+    """
+
+    status: Literal["confirmation_required", "anonymized"]
+    message: str
+    confirmation_token: str | None = None
+    expires_at: KstDatetime | None = None
+    anonymized_at: KstDatetime | None = None
+    masked_count: int | None = None

@@ -7,6 +7,15 @@
 
 ---
 
+## v1.11 — 2026-06-23 (#23-B — Privacy: consent + 즉시 익명화)
+
+- Settings/Privacy(§16) S28 실구현 — `GET/POST /privacy/consent` + `POST /settings/anonymize` (501 스텁 → 실 endpoint)
+- ⚠️ **새 테이블/마이그레이션** `user_consents` (Alembic `c2d3e4f5a6b7`, append-only) — AGENTS §8 팀 합의 후 머지. consent_type(`required`/`marketing`/`research`) × `is_granted`
+- `GET /privacy/consent` — consent_type 별 최신 1행. `POST` `{consentType, granted}` — append-only INSERT 후 갱신 현황 반환. 잘못된 type 422 `COMMON_VALIDATION_ERROR`
+- `POST /settings/anonymize` — **2단계 확인 토큰**(HMAC, 5분). 토큰 없으면 발급(`confirmation_required`), 동봉 재요청 시 `_encrypted` 7종 + 이름 `[anonymized]` 마스킹 + `is_anonymized`/`anonymized_at` set(`anonymized`). hard delete 아님
+- 새 에러코드 `PRIVACY_INVALID_CONFIRMATION`(422) · `PRIVACY_ALREADY_ANONYMIZED`(409). 신설 `auth/confirm.py`(확인 토큰), `repositories/{consent,privacy}_repo.py`
+- 톤 prefix 의 `aiClient.run()` 배선은 후속(ADR-0003 addendum) — 범위 아님
+
 ## v1.10 — 2026-06-22 (#21-C — Habit Penalty)
 
 - Reviews(§13) S22 실구현 — `GET /reviews/habit-penalty` + `POST /reviews/habit-penalty/{habitId}/accept`
@@ -36,7 +45,6 @@
 - `resilienceRate` = 실패 중 회복 카드 **수락** 비율(#21-A 정의). "24h 내 완료" 정밀화는 #20-B 후
 - 신설 `repositories/review_repo.py`, `scheduler/weekly_review_precompute.py`(일요일 03:00 cron job, idempotent). 시각 트리거 등록은 #24
 - ⚠️ DB 마이그레이션 없음 (기존 `period_summaries` 테이블 사용). S22 habit-penalty · S14/S15 weekly plan 은 #21-B/#21-C
-- ℹ️ 병행 #62(v1.7)·#23-B·#21-B/C 와 버전 번호 겹칠 수 있음 — 머지 순서 따라 재조정.
 
 ## v1.7 — 2026-06-22 (#62 / 9-C — First Plan SAVING 전체 영속화 + Draft 영속화)
 

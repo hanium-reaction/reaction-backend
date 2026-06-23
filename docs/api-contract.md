@@ -471,9 +471,9 @@ PARK       → PARK_DEFAULT
 | --- | --- | --- | --- |
 | GET | `/settings` | 내 설정 메타 (tone, language, timezone, 알림 요약) | ✅ #23-A |
 | PATCH | `/settings/tone-mode` | `gentle` / `strict` / `encouraging` | ✅ #23-A |
-| POST | `/settings/anonymize` | 즉시 익명화 (2단계 확인 토큰 필수) | 🚧 501 → #23-B |
-| GET | `/privacy/consent` | 동의 기록 | 🚧 501 → #23-B |
-| POST | `/privacy/consent` | 신규 동의 (마케팅/연구 등) | 🚧 501 → #23-B |
+| POST | `/settings/anonymize` | 즉시 익명화 (2단계 확인 토큰 필수) | ✅ #23-B |
+| GET | `/privacy/consent` | 동의 기록 | ✅ #23-B |
+| POST | `/privacy/consent` | 신규 동의 (마케팅/연구 등) | ✅ #23-B |
 
 `GET /settings` 응답:
 
@@ -494,6 +494,13 @@ PARK       → PARK_DEFAULT
 - 톤모드 적용: 시스템 프롬프트 prefix 1줄 분기는 `llm/prompt_compose.py` 에 잠금. `aiClient.run()` 배선(ADR-0003 동결 시그니처 + LangGraph state)은 후속 PR.
 - S28 Privacy(anonymize·consent)는 #23-B — consent 는 append-only `user_consents` 테이블(마이그레이션 동반).
 - 자동 익명화: `last_active_at < now()-90d` 매일 04:00 KST → Issue #15.
+
+#23-B 구현 메모:
+- `GET /privacy/consent` — consent_type(`required`/`marketing`/`research`) 별 **최신 1행**(`{ consentType, isGranted, updatedAt }`). 미기록 시 `[]`.
+- `POST /privacy/consent` `{ consentType, granted }` — **append-only** 새 행 INSERT 후 갱신 현황 반환. 잘못된 type 422 `COMMON_VALIDATION_ERROR`.
+- `POST /settings/anonymize` — **2단계**: 본문 없으면 `confirmationToken` 발급(`status="confirmation_required"`, 5분 TTL, HMAC). 토큰 동봉 재요청 시 검증 후 `_encrypted` 컬럼 7종 + 이름을 `[anonymized]` 마스킹 + `is_anonymized`/`anonymized_at` set(`status="anonymized"`). 토큰 위조/만료 422 `PRIVACY_INVALID_CONFIRMATION`, 이미 익명화 409 `PRIVACY_ALREADY_ANONYMIZED`. hard delete 아님(행 보존).
+- ⚠️ **새 마이그레이션** `c2d3e4f5a6b7`(user_consents) — AGENTS §8 팀 합의 동반.
+- 톤 prefix 의 `aiClient.run()` 배선은 **여전히 후속**(ADR-0003 addendum) — #23-B 범위 아님.
 
 ---
 

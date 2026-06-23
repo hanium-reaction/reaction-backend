@@ -89,6 +89,12 @@ class ErrorCode(StrEnum):
     # 3주 연속 미달 조건 미충족 / 이번 사이클 이미 처리 — #21-C
     HABIT_PENALTY_NOT_ELIGIBLE = "HABIT_PENALTY_NOT_ELIGIBLE"
 
+    # ── Privacy (PRIVACY_) — #23-B ──
+    # 익명화 2단계 확인 토큰 누락/위조/만료 → 422.
+    PRIVACY_INVALID_CONFIRMATION = "PRIVACY_INVALID_CONFIRMATION"
+    # 이미 익명화된 계정 → 409.
+    PRIVACY_ALREADY_ANONYMIZED = "PRIVACY_ALREADY_ANONYMIZED"
+
     # ── Inbox (INBOX_) — #3-D ──
     INBOX_NOT_FOUND = "INBOX_NOT_FOUND"
     INBOX_ALREADY_PROMOTED = "INBOX_ALREADY_PROMOTED"
