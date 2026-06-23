@@ -108,6 +108,21 @@ class ScheduledBlockPreview(CamelModel):
     origin_id: str | None = None
 
 
+class FirstPlanApproveResponse(CamelModel):
+    """승인 결과 — 활성화 완료. 명시 승인 endpoint 이므로 `is_draft=False` (ADR-0005 §7.2).
+
+    #62: `plan_id` 로 저장된 Draft 를 로드해 goal 트리까지 영속화한 결과 카운트.
+    """
+
+    plan_id: str
+    is_draft: Literal[False] = False
+    activated_goals: int
+    activated_goal_nodes: int
+    activated_action_items: int
+    activated_blocks: int
+    activated_at: KstDatetime
+
+
 class FirstPlanResponse(DraftMixin):
     """First Plan 미리보기 응답 — 항상 Draft (사용자 [수락] 전).
 
