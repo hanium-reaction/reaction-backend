@@ -33,6 +33,7 @@ from reaction_backend.db.models.inbox_item import InboxItem
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionModel
 from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.models.notification_setting import NotificationSetting
+from reaction_backend.db.models.period_summary import PeriodSummary
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.recovery_attempt import RecoveryAttempt
 from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
@@ -41,6 +42,7 @@ from reaction_backend.db.models.time_policy import TimePolicy
 from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
 from reaction_backend.main import create_app
+from reaction_backend.orchestrator.weekly_review import ExecutionStat, RecoveryStat
 from reaction_backend.repositories.action_item_repo import get_action_item_repo
 from reaction_backend.repositories.daily_brief_repo import get_daily_brief_repo
 from reaction_backend.repositories.execution_repo import get_execution_repo
@@ -53,6 +55,7 @@ from reaction_backend.repositories.interview_repo import get_interview_repo
 from reaction_backend.repositories.notification_repo import get_notification_repo
 from reaction_backend.repositories.plan_draft_repo import get_plan_draft_repo
 from reaction_backend.repositories.recovery_repo import get_recovery_repo
+from reaction_backend.repositories.review_repo import get_review_repo
 from reaction_backend.repositories.time_policy_repo import get_time_policy_repo
 from reaction_backend.repositories.user_repo import GoogleProfile, get_user_repo
 
@@ -1033,6 +1036,70 @@ class FakeDailyBriefRepo:
         self._items[(brief.user_id, brief.brief_date)] = brief
 
 
+class FakeReviewRepo:
+    """in-memory ReviewRepo — Issue #21-A.
+
+    실행/회복 통계는 테스트가 `seed_execution`/`seed_recovery` 로 주입한다 (집계 입력).
+    `upsert_weekly` 는 ORM 없이 PeriodSummary 인스턴스를 만들어 저장한다.
+    """
+
+    def __init__(self) -> None:
+        self._summaries: dict[tuple[UUID, date], PeriodSummary] = {}
+        self._exec_stats: list[ExecutionStat] = []
+        self._recovery_stats: list[RecoveryStat] = []
+
+    # ── 테스트 보조 seed ──
+    def seed_execution(self, stat: ExecutionStat) -> None:
+        self._exec_stats.append(stat)
+
+    def seed_recovery(self, stat: RecoveryStat) -> None:
+        self._recovery_stats.append(stat)
+
+    # ── ReviewRepo 인터페이스 ──
+    async def get_weekly(self, user_id: UUID, week_start: date) -> PeriodSummary | None:
+        return self._summaries.get((user_id, week_start))
+
+    async def collect_execution_stats(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[ExecutionStat]:
+        return [s for s in self._exec_stats if start_dt <= s.plan_start_at < end_dt]
+
+    async def collect_recovery_stats(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[RecoveryStat]:
+        return list(self._recovery_stats)
+
+    async def upsert_weekly(
+        self,
+        *,
+        user_id: UUID,
+        week_start: date,
+        week_end: date,
+        kpi: Any,
+        generated_at: datetime,
+    ) -> PeriodSummary:
+        ps = self._summaries.get((user_id, week_start)) or PeriodSummary()
+        ps.user_id = user_id
+        ps.period_type = "weekly"
+        ps.start_date = week_start
+        ps.end_date = week_end
+        ps.adherence_rate = kpi.adherence_rate
+        ps.consistency_days = kpi.consistency_days
+        ps.resilience_rate = kpi.resilience_rate
+        ps.avg_delay_minutes = kpi.avg_delay_minutes
+        ps.restart_success_rate = kpi.restart_success_rate
+        ps.repeated_failure_count = kpi.repeated_failure_count
+        ps.average_recovery_minutes = kpi.average_recovery_minutes
+        ps.category_success_rate = kpi.category_success_rate
+        ps.peak_point_window = kpi.peak_point_window
+        ps.drain_point_window = kpi.drain_point_window
+        ps.llm_one_liner = kpi.one_liner
+        ps.policy_update_candidates = kpi.policy_update_candidates
+        ps.generated_at = generated_at
+        self._summaries[(user_id, week_start)] = ps
+        return ps
+
+
 class FakeInterviewRepo:
     """in-memory InterviewRepo — #6 배선. 세션 + 슬롯답 정규화 저장 미러."""
 
@@ -1294,6 +1361,11 @@ def fake_daily_brief_repo() -> FakeDailyBriefRepo:
 
 
 @pytest.fixture
+def fake_review_repo() -> FakeReviewRepo:
+    return FakeReviewRepo()
+
+
+@pytest.fixture
 def fake_plan_draft_repo() -> FakePlanDraftRepo:
     return FakePlanDraftRepo()
 
@@ -1315,6 +1387,7 @@ def client(
     fake_plan_draft_repo: FakePlanDraftRepo,
     fake_recovery_repo: FakeRecoveryRepo,
     fake_execution_repo: FakeExecutionRepo,
+    fake_review_repo: FakeReviewRepo,
 ) -> Iterator[TestClient]:
     """기본 client — 인증된 demo user + 도메인 fake repo + fake session."""
     _reset_process_singletons()
@@ -1340,6 +1413,7 @@ def client(
     app.dependency_overrides[get_plan_draft_repo] = lambda: fake_plan_draft_repo
     app.dependency_overrides[get_recovery_repo] = lambda: fake_recovery_repo
     app.dependency_overrides[get_execution_repo] = lambda: fake_execution_repo
+    app.dependency_overrides[get_review_repo] = lambda: fake_review_repo
     with TestClient(app) as test_client:
         yield test_client
 
@@ -1417,6 +1491,7 @@ __all__ = [
     "FakeNotificationRepo",
     "FakePlanDraftRepo",
     "FakeRecoveryRepo",
+    "FakeReviewRepo",
     "FakeTimePolicyRepo",
     "FakeUserRepo",
     "auth_client",
@@ -1433,6 +1508,7 @@ __all__ = [
     "fake_notification_repo",
     "fake_plan_draft_repo",
     "fake_recovery_repo",
+    "fake_review_repo",
     "fake_time_policy_repo",
     "fake_user_repo",
     "issue_helper_token",

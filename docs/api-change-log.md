@@ -7,6 +7,18 @@
 
 ---
 
+## v1.8 — 2026-06-22 (#21-A — Weekly Review)
+
+- Reviews(§13) S21 실구현 — `GET /reviews/weekly` + `POST /reviews/weekly/generate` (501 스텁 → 실 endpoint). **룰 기반**(LLM 한 줄 평 P2)
+- `GET /reviews/weekly?weekStart=` — precomputed `period_summaries`(weekly) 우선, 없으면 **즉석 계산(쓰기 X)**. `weekStart` 는 그 주 월요일로 정규화, 생략 시 이번 주
+- `POST /reviews/weekly/generate` — 강제 재집계 + 영속화(덮어쓰기, 디버그)
+- 신설 새 에러 코드 `REVIEW_INVALID_WEEK`(422, weekStart 형식 오류)
+- 집계: 순수 함수 `orchestrator/weekly_review.py`(`compute_weekly_kpis`) — adherence/consistency/resilience/category/peak·drain window/one-liner. `restartSuccessRate`·`repeatedFailureCount`·`policyUpdateCandidates` 는 #21-A 에서 null/[] (후속)
+- `resilienceRate` = 실패 중 회복 카드 **수락** 비율(#21-A 정의). "24h 내 완료" 정밀화는 #20-B 후
+- 신설 `repositories/review_repo.py`, `scheduler/weekly_review_precompute.py`(일요일 03:00 cron job, idempotent). 시각 트리거 등록은 #24
+- ⚠️ DB 마이그레이션 없음 (기존 `period_summaries` 테이블 사용). S22 habit-penalty · S14/S15 weekly plan 은 #21-B/#21-C
+- ℹ️ 병행 #62(v1.7)·#23-B·#21-B/C 와 버전 번호 겹칠 수 있음 — 머지 순서 따라 재조정.
+
 ## v1.7 — 2026-06-22 (#62 / 9-C — First Plan SAVING 전체 영속화 + Draft 영속화)
 
 - ⚠️ **새 테이블/마이그레이션** `plan_drafts` (Alembic `b1f2a3c4d5e6`) — AGENTS §8 팀 합의 후 머지. First Plan Draft 영속화(payload JSONB 스냅샷 + status/expires_at).
