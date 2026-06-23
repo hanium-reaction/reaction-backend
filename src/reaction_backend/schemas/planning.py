@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Literal
 
 from pydantic import Field
@@ -138,3 +139,53 @@ class FirstPlanResponse(DraftMixin):
     warnings: list[str] = Field(default_factory=list)
     policy_violations: list[PolicyViolation] = Field(default_factory=list)
     generated_at: KstDatetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S14 Weekly Plan View + S15 직접 편집 (#21-B). 영속 scheduled_blocks 를 읽고/옮긴다.
+# Plan 테이블은 없음 — planId 는 주(週) 논리 식별자(`plan_<weekStart>`), 편집 권한은 blockId.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class WeeklyBlock(CamelModel):
+    """주간 그리드의 스케줄 블록 한 칸."""
+
+    block_id: str  # block_<uuid>
+    action_id: str  # action_<uuid>
+    title: str
+    category: str
+    start_at: KstDatetime
+    end_at: KstDatetime
+    block_status: str
+    source: str
+
+
+class WeeklyPlanDay(CamelModel):
+    """하루치 — 그리드/네비게이터 단위."""
+
+    date: date
+    weekday: str  # monday..sunday
+    blocks: list[WeeklyBlock] = Field(default_factory=list)
+
+
+class WeeklyPlanResponse(CamelModel):
+    """GET /plans/weekly — 7일 블록 그리드 (모바일=1일 그리드+7일 네비게이터)."""
+
+    plan_id: str
+    week_start: date
+    week_end: date
+    days: list[WeeklyPlanDay]
+
+
+class BlockEditRequest(CamelModel):
+    """PATCH /plans/{planId}/blocks/{blockId} — 15분 snap 이동.
+
+    `endAt` 생략 시 기존 길이를 보존한 채 시작만 옮긴다. 시각은 KST ISO 8601.
+    """
+
+    start_at: str  # ISO 8601 (KST)
+    end_at: str | None = None
+
+
+class BlockEditResponse(WeeklyBlock):
+    """편집 결과 — 스냅 적용된 최종 블록."""
