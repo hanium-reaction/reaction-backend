@@ -86,6 +86,8 @@ class ErrorCode(StrEnum):
 
     # ── Habits (HABIT_) — #3-D ──
     HABIT_NOT_FOUND = "HABIT_NOT_FOUND"
+    # 3주 연속 미달 조건 미충족 / 이번 사이클 이미 처리 — #21-C
+    HABIT_PENALTY_NOT_ELIGIBLE = "HABIT_PENALTY_NOT_ELIGIBLE"
 
     # ── Inbox (INBOX_) — #3-D ──
     INBOX_NOT_FOUND = "INBOX_NOT_FOUND"

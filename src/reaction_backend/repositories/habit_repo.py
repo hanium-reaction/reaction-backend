@@ -96,6 +96,18 @@ class HabitRepo:
         await self._session.flush()
         return habit
 
+    async def apply_penalty(
+        self, habit: Habit, *, new_frequency: int, decided_at: datetime
+    ) -> Habit:
+        """S22 수락 — 빈도 재설계 적용 + 페널티 상태 기록 (#21-C)."""
+        habit.frequency_per_week = new_frequency
+        habit.target_count = new_frequency
+        habit.last_penalty_decision = "accepted"
+        habit.last_penalty_evaluated_at = decided_at
+        habit.consecutive_miss_weeks = 0
+        await self._session.flush()
+        return habit
+
     async def soft_delete(self, habit: Habit) -> None:
         habit.archived_at = datetime.now(UTC)
         await self._session.flush()

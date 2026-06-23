@@ -57,6 +57,22 @@ class HabitInstanceRepo:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_recent_for_habit(
+        self, habit_id: UUID, before_week: date, limit: int = 3
+    ) -> list[HabitInstance]:
+        """habit 의 week_start <= before_week 인스턴스를 최신순 limit 개 (S22 페널티 감지)."""
+        stmt = (
+            select(HabitInstance)
+            .where(
+                HabitInstance.habit_id == habit_id,
+                HabitInstance.week_start <= before_week,
+            )
+            .order_by(HabitInstance.week_start.desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get_for_week(self, habit_id: UUID, week_start: date) -> HabitInstance | None:
         stmt = select(HabitInstance).where(
             HabitInstance.habit_id == habit_id,
