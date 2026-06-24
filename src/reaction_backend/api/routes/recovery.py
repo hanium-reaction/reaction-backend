@@ -199,6 +199,7 @@ async def generate_recovery_proposals(
         },
         user_id=user.id,
         session=session,
+        tone_mode=user.tone_mode,
     )
     if not result.fell_back and result.value.strategy_code in texts:
         proposal = result.value

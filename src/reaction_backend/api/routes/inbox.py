@@ -157,6 +157,7 @@ async def create_inbox(
         variables={"raw_text": body.raw_text},
         user_id=user.id,
         session=session,
+        tone_mode=user.tone_mode,
     )
     classification = result.value
 

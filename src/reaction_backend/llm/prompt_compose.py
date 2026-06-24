@@ -8,9 +8,14 @@ DevBaseline §부록 D Q8 잠금: MVP 에선 톤 차이(gentle/strict/encouragin
 비난·압박·죄책감 유발 금지. 후처리 금지어 필터(`safety.banned_words`)와 함께 동작.
 
 본 모듈은 **순수 함수**다 (프레임워크/세션 의존 없음 → 단위 테스트 용이).
-`aiClient.run()` 으로의 배선은 ADR-0003 §1 **동결** 호출 시그니처 변경 +
-오케스트레이터 state 의 `tone_mode` 전달을 수반하므로 후속 PR(ADR-0003 addendum)에서
-한다. 본 PR(#23-A)은 톤 prefix 카피를 잠그고 헬퍼를 테스트로 보호하는 데까지.
+
+배선 상태:
+- #23-A: 본 헬퍼(prefix 카피)를 잠그고 테스트로 보호.
+- #23-C: `aiClient.run(tone_mode=...)` 옵션 kwarg 추가로 **tool_executor 가 렌더 직후 prefix 적용**
+  (ADR-0003 addendum, `docs/decisions/0003-llm-tool-executor.md`). 배선 호출처 = inbox·recovery
+  라우트(`user.tone_mode`) + morning_brief cron.
+- **후속**: interview·first_plan(LangGraph) 은 그래프 state 에 `tone_mode` 를 실어야 해서 별도
+  슬라이스(에이전트 코어, peter 조율).
 """
 
 from __future__ import annotations
