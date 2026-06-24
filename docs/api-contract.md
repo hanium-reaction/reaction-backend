@@ -491,7 +491,7 @@ PARK       → PARK_DEFAULT
 ```
 
 - `PATCH /settings/tone-mode` 요청 `{ "toneMode": "strict" }` → 갱신된 `GET /settings` 형태 반환. 그 외 값은 422 `COMMON_VALIDATION_ERROR`. onboarding 상태 전이 없음.
-- 톤모드 적용: 시스템 프롬프트 prefix 1줄 분기는 `llm/prompt_compose.py` 에 잠금. `aiClient.run()` 배선(ADR-0003 동결 시그니처 + LangGraph state)은 후속 PR.
+- 톤모드 적용: 시스템 프롬프트 prefix 1줄(`llm/prompt_compose.py`). `aiClient.run(tone_mode=...)` 배선 완료(#23-C, ADR-0003 addendum 0003-llm-tool-executor.md) — **inbox·recovery·morning_brief**. interview·first_plan(LangGraph state)은 후속.
 - S28 Privacy(anonymize·consent)는 #23-B — consent 는 append-only `user_consents` 테이블(마이그레이션 동반).
 - 자동 익명화: `last_active_at < now()-90d` 매일 04:00 KST → Issue #15.
 

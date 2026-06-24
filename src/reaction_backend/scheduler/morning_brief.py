@@ -57,10 +57,12 @@ async def run_morning_brief_for_user(
     action_repo: ActionItemRepo,
     brief_repo: DailyBriefRepo,
     session: AsyncSession,
+    tone_mode: str | None = None,
 ) -> DailyBrief:
     """사용자 1명의 오늘 Morning Brief 생성 (idempotent).
 
     이미 오늘 brief 가 있으면 그대로 반환 (재실행 안전). 없으면 LLM(+룰 fallback)으로 생성.
+    `tone_mode` 는 LLM 시스템 프롬프트 톤 prefix 용 (#23) — #24 cron wrapper 가 사용자별로 전달.
     """
     brief_date = now_kst_dt.date()
     existing = await brief_repo.get_by_date(user_id, brief_date)
@@ -85,6 +87,7 @@ async def run_morning_brief_for_user(
         },
         user_id=user_id,
         session=session,
+        tone_mode=tone_mode,
     )
     draft = result.value
     hints = [{"text": h} for h in draft.adjustment_hints]

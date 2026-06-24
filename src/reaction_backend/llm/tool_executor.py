@@ -45,6 +45,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.config import get_settings
+from reaction_backend.llm.prompt_compose import compose_system_prompt
 from reaction_backend.llm.provider import (
     ProviderError,
     ProviderRateLimited,
@@ -109,8 +110,9 @@ class LLMToolExecutor:
         session: AsyncSession | None = None,
         trace_id: str | None = None,
         log_payloads: bool = False,
+        tone_mode: str | None = None,
     ) -> RunResult[T]:
-        """ADR-0003 동결 시그니처.
+        """ADR-0003 동결 시그니처 (+ #23 tone_mode addendum).
 
         Parameters
         ----------
@@ -132,6 +134,9 @@ class LLMToolExecutor:
             제공되면 budget check + `llm_runs` INSERT. 없으면 logging 만.
         log_payloads:
             True 면 input/output 요약을 암호화 저장 (테스트에선 False 권장).
+        tone_mode:
+            gentle/strict/encouraging. 주어지면 렌더된 시스템 프롬프트 앞에 톤 prefix 1줄을
+            덧붙인다 (ADR-0003 addendum, #23). None/미지원 값이면 prefix 없음 = 기존 동작.
         """
         settings = get_settings()
         started = time.monotonic()
@@ -158,6 +163,9 @@ class LLMToolExecutor:
                 latency_ms=int((time.monotonic() - started) * 1000),
                 log_payloads=False,
             )
+
+        # ── 1.5) 톤 prefix (ADR-0003 addendum, #23) — tone 없으면 원문 그대로 ──
+        prompt_text = compose_system_prompt(prompt_text, tone_mode)
 
         # ── 2) 예산 가드 ────────────────────────────────────────────
         if session is not None:

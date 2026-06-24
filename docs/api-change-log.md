@@ -7,6 +7,15 @@
 
 ---
 
+## v1.12 — 2026-06-23 (#23-C — 톤 prefix aiClient.run 배선)
+
+- 톤모드(gentle/strict/encouraging) → LLM 시스템 프롬프트 prefix 1줄을 **단일 게이트에서** 적용
+- `aiClient.run()` 에 **선택 kwarg `tone_mode: str | None = None`** 추가(ADR-0003 동결 시그니처 + addendum). 렌더 직후 `compose_system_prompt` 로 prefix 선행. None/미지원 → 기존 동작(회귀 없음)
+- 배선 호출처: `inbox`·`recovery` 라우트(`user.tone_mode`) + `morning_brief` cron(`tone_mode` 파라미터)
+- **신규 문서** `docs/decisions/0003-llm-tool-executor.md` (그동안 dead link였던 ADR-0003 소급 명문화 + tone addendum)
+- ⚠️ **API endpoint/스키마/DB 변경 없음** (LLM 게이트 내부 + 프롬프트 합성만). interview·first_plan(LangGraph state)은 후속 슬라이스
+- `test_tone_wiring` 4건(prefix 적용/미적용/미지원값/cron 전달)
+
 ## v1.11 — 2026-06-23 (#23-B — Privacy: consent + 즉시 익명화)
 
 - Settings/Privacy(§16) S28 실구현 — `GET/POST /privacy/consent` + `POST /settings/anonymize` (501 스텁 → 실 endpoint)
