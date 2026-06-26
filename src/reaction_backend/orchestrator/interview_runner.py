@@ -48,9 +48,9 @@ class TurnResult:
     end_reason: str | None = None
 
 
-def _config(session: AsyncSession | None) -> RunnableConfig:
-    """노드가 예산 가드·llm_runs 기록에 쓰는 세션 채널 (ADR-0005 §7.1)."""
-    return {"configurable": {"session": session}}
+def _config(session: AsyncSession | None, tone_mode: str | None = None) -> RunnableConfig:
+    """노드가 예산 가드·llm_runs 기록에 쓰는 세션 채널 (ADR-0005 §7.1) + 톤(#23-D)."""
+    return {"configurable": {"session": session, "tone_mode": tone_mode}}
 
 
 def _coerce_answer(value: Any) -> dict[str, Any]:
@@ -72,9 +72,10 @@ async def start_interview(
     session_id: UUID,
     user_id: UUID,
     session: AsyncSession | None = None,
+    tone_mode: str | None = None,
 ) -> TurnResult:
     """세션 시작 → FSM 이 고른 첫 필수 슬롯 질문 1개를 만들어 반환."""
-    config = _config(session)
+    config = _config(session, tone_mode)
     state = interview.initial_state(session_id=session_id, user_id=user_id)
     state = await interview.ask_question(state, config)
     return TurnResult(state=state, done=False, question=state["next_question"])
@@ -86,12 +87,13 @@ async def submit_and_advance(
     slot_key: str,
     answer_value: Any,
     session: AsyncSession | None = None,
+    tone_mode: str | None = None,
 ) -> TurnResult:
     """답 1개 주입 → 채점/정규화/저장 → 종료면 요약+outcome, 아니면 다음 질문.
 
     이게 `POST /interview/sessions/{id}/answers` 가 호출하는 핵심 진입점이다.
     """
-    config = _config(session)
+    config = _config(session, tone_mode)
     state = {**state, "last_answer": _coerce_answer(answer_value), "last_slot_key": slot_key}
 
     state = await interview.receive_answer(state, config)
@@ -108,12 +110,13 @@ async def finish_early(
     *,
     state: InterviewState,
     session: AsyncSession | None = None,
+    tone_mode: str | None = None,
 ) -> TurnResult:
     """[충분해요] — 남은 슬롯이 있어도 즉시 마감(end_reason=early_user).
 
     빈 필수 슬롯은 `interview_adapter` 가 안전 default 로 채우고 unresolved_slots 에 남긴다.
     """
-    config = _config(session)
+    config = _config(session, tone_mode)
     state = {**state, "early_finish": True}
     return await _finalize(state, config)
 

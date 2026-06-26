@@ -185,6 +185,12 @@ def _session(config: RunnableConfig) -> Any:
     return config.get("configurable", {}).get("session")
 
 
+def _tone_mode(config: RunnableConfig) -> str | None:
+    """config["configurable"]["tone_mode"] 안전 추출 (#23-D). 없으면 None = 톤 prefix 없음."""
+    raw = config.get("configurable", {}).get("tone_mode")
+    return raw if isinstance(raw, str) else None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Nodes — async def node(state, config). config 두 번째 인자 (ADR-0005 §7.1).
 # ─────────────────────────────────────────────────────────────────────────────
@@ -210,6 +216,7 @@ async def ask_question(state: InterviewState, config: RunnableConfig) -> Intervi
         },
         user_id=state["user_id"],
         session=_session(config),
+        tone_mode=_tone_mode(config),
     )
     return {
         **state,
@@ -247,6 +254,7 @@ async def validate_answer(state: InterviewState, config: RunnableConfig) -> Inte
         variables={"slot_key": slot_key, "answer": _last_answer_text(state)},
         user_id=state["user_id"],
         session=_session(config),
+        tone_mode=_tone_mode(config),
     )
     update = result.value
 
@@ -283,6 +291,7 @@ async def summarize_interview(state: InterviewState, config: RunnableConfig) -> 
         variables=v,
         user_id=state["user_id"],
         session=_session(config),
+        tone_mode=_tone_mode(config),
     )
     return {
         **state,

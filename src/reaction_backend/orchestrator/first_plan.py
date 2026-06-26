@@ -108,6 +108,12 @@ def _session(config: RunnableConfig) -> Any:
     return config.get("configurable", {}).get("session")
 
 
+def _tone_mode(config: RunnableConfig) -> str | None:
+    """config["configurable"]["tone_mode"] 안전 추출 (#23-D)."""
+    raw = config.get("configurable", {}).get("tone_mode")
+    return raw if isinstance(raw, str) else None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 룰 fallback — 같은 schema 로 환원.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -178,6 +184,7 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
         variables=prompt_vars,
         user_id=state["user_id"],
         session=_session(config),
+        tone_mode=_tone_mode(config),
     )
     return {
         **state,
@@ -276,6 +283,7 @@ async def review_plan(state: FirstPlanState, config: RunnableConfig) -> FirstPla
         variables=_review_variables(state),
         user_id=state["user_id"],
         session=_session(config),
+        tone_mode=_tone_mode(config),
     )
     return {
         **state,

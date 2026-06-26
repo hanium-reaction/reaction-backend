@@ -1,7 +1,8 @@
-"""톤 prefix 배선 — #23-C (ADR-0003 addendum).
+"""톤 prefix 배선 — #23-C/#23-D.
 
-tool_executor 가 렌더 직후 톤 prefix 를 prompt_text 에 선행시키는지, 그리고 cron 이
-tone_mode 를 게이트로 전달하는지 검증. provider 는 mock 으로 가용성 무관하게 테스트.
+#23-C: tool_executor 가 렌더 직후 톤 prefix 를 prompt_text 에 선행시키는지 + cron 전달.
+#23-D: LangGraph(interview/first_plan) 노드·runner 가 config["configurable"]["tone_mode"]
+       경로로 톤을 aiClient.run 에 전달하는지. provider 는 mock 으로 가용성 무관하게 테스트.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
@@ -16,6 +18,7 @@ from pydantic import BaseModel
 from reaction_backend.llm import tool_executor
 from reaction_backend.llm.prompt_compose import TONE_SYSTEM_PREFIXES
 from reaction_backend.llm.provider import ProviderUnavailable
+from reaction_backend.orchestrator import first_plan, interview, interview_runner
 from reaction_backend.schemas.today import MorningBriefDraft
 from tests.conftest import DEMO_USER_UUID, FakeActionItemRepo, FakeDailyBriefRepo, _FakeSession
 
@@ -118,3 +121,58 @@ async def test_morning_brief_threads_tone(monkeypatch: pytest.MonkeyPatch) -> No
         tone_mode="strict",
     )
     assert captured["tone_mode"] == "strict"
+
+
+# ───────────────────────── #23-D LangGraph (config 경로) ─────────────────────────
+
+
+def _capture_run(monkeypatch: pytest.MonkeyPatch, target: Any) -> dict[str, Any]:
+    """target.aiClient.run 을 캡처용 mock 으로 교체 (값은 None, fell_back=False)."""
+    captured: dict[str, Any] = {}
+
+    async def _fake(**kwargs: Any) -> Any:
+        captured["tone_mode"] = kwargs.get("tone_mode")
+        return SimpleNamespace(value=None, fell_back=False)
+
+    monkeypatch.setattr(target.aiClient, "run", _fake)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_interview_node_threads_tone(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_run(monkeypatch, interview)
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    config = {"configurable": {"session": None, "tone_mode": "encouraging"}}
+    await interview.ask_question(state, config)
+    assert captured["tone_mode"] == "encouraging"
+
+
+@pytest.mark.asyncio
+async def test_interview_runner_passes_tone(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_run(monkeypatch, interview)
+    await interview_runner.start_interview(
+        session_id=uuid4(), user_id=uuid4(), session=None, tone_mode="strict"
+    )
+    assert captured["tone_mode"] == "strict"
+
+
+@pytest.mark.asyncio
+async def test_first_plan_node_threads_tone(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_run(monkeypatch, first_plan)
+    state: dict[str, Any] = {
+        "user_id": uuid4(),
+        "planning_context": {"prompt_vars": {}},
+        "used_fallback": False,
+    }
+    config = {"configurable": {"session": None, "tone_mode": "gentle"}}
+    await first_plan.decompose_goal(state, config)  # type: ignore[arg-type]
+    assert captured["tone_mode"] == "gentle"
+
+
+@pytest.mark.asyncio
+async def test_node_no_tone_in_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """config 에 tone 없으면 None 전달 (= 기존 동작)."""
+    captured = _capture_run(monkeypatch, interview)
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    await interview.ask_question(state, {"configurable": {"session": None}})
+    assert captured["tone_mode"] is None

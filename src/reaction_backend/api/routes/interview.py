@@ -233,7 +233,7 @@ async def start_session(user: CurrentUser, repo: RepoDep, session: SessionDep) -
             raise _session_exists()
         row = await repo.create_session(user.id, get_settings().llm_model)
         result = await interview_runner.start_interview(
-            session_id=row.id, user_id=user.id, session=session
+            session_id=row.id, user_id=user.id, session=session, tone_mode=user.tone_mode
         )
         await _persist_turn(repo, row, result.state)
         await session.commit()
@@ -295,7 +295,11 @@ async def submit_answer(
         slot_rows = await repo.list_slot_answers(row.id)
         state = _state_from_db(row, slot_rows)
         result = await interview_runner.submit_and_advance(
-            state=state, slot_key=body.slot_key, answer_value=body.value, session=session
+            state=state,
+            slot_key=body.slot_key,
+            answer_value=body.value,
+            session=session,
+            tone_mode=user.tone_mode,
         )
         await _persist_turn(repo, row, result.state)
 
@@ -354,7 +358,9 @@ async def finish_session(
             return _ended_response(row, await repo.list_slot_answers(row.id))
         slot_rows = await repo.list_slot_answers(row.id)
         state = _state_from_db(row, slot_rows)
-        result = await interview_runner.finish_early(state=state, session=session)
+        result = await interview_runner.finish_early(
+            state=state, session=session, tone_mode=user.tone_mode
+        )
         await _persist_turn(repo, row, result.state)
         reason = result.end_reason or "early_user"
         await repo.finalize(
