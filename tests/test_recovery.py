@@ -283,11 +283,157 @@ def test_decision_accept_requires_attempt_id(
     assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"
 
 
-# ───────────────────────── replan (#20-B 후속) ─────────────────────────
+# ───────────────────────── replan (S20, #20-B) ─────────────────────────
 
 
-def test_replan_endpoints_still_501(client: TestClient) -> None:
-    assert client.get(f"/replan/exec_{uuid4()}").status_code == 501
+def _accept_group(client: TestClient, exec_id: str, option_group: str) -> dict[str, Any]:
+    """제안 생성 → 지정 그룹 카드 수락. 수락 응답(dict) 반환."""
+    cards = _generate(client, exec_id).json()["cards"]
+    target = next(c for c in cards if c["optionGroup"] == option_group)
+    return _decide(  # type: ignore[no-any-return]
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "accepted",
+            "acceptedAttemptId": target["attemptId"],
+        },
+    ).json()
+
+
+def _approve_replan(client: TestClient, exec_id: str, key: str | None = None) -> Any:
+    return client.post(
+        f"/replan/{exec_id}/approve",
+        headers={"Idempotency-Key": key or f"test-{uuid4()}"},
+    )
+
+
+def test_replan_diff_returns_before_after(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AMBIGUITY"]
+    )
+    _accept_group(client, exec_id, "DOWNSCOPE")
+
+    resp = client.get(f"/replan/{exec_id}")
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()
+    assert body["executionId"] == exec_id
+    assert body["optionGroup"] == "DOWNSCOPE"
+    # Draft Layer 프리뷰 — 아직 미승인
+    assert body["isDraft"] is True
+    assert body["alreadyApproved"] is False
+    # before = 원본 카드, after = 회복 카드 (서로 다른 ActionItem)
+    assert body["before"]["actionItemId"] != body["after"]["actionItemId"]
+    assert "GROUP BY 실습" in body["before"]["title"]
+    # 시각은 KST(+09:00) 직렬화
+    assert body["after"]["startAt"].endswith("+09:00")
+
+
+def test_replan_approve_creates_recovery_block(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: Any,
+) -> None:
+    exec_id = _seed_failed_execution(fake_recovery_repo, fake_action_item_repo)
+    decision = _accept_group(client, exec_id, "DOWNSCOPE")
+    recovery_action_id = decision["resultingActionItemId"]
+
+    resp = _approve_replan(client, exec_id)
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()
+    assert body["isDraft"] is False
+    assert body["scheduledBlockId"].startswith("block_")
+    assert body["actionItemId"] == recovery_action_id
+    assert body["startAt"].endswith("+09:00")
+
+    # scheduled_block(source='recovery') 1건 생성
+    blocks = [b for b in fake_scheduled_block_repo._blocks.values() if b.source == "recovery"]
+    assert len(blocks) == 1
+    # 원본 카드 status 불변 (AGENTS.md §2 — Resilience 지표 전제)
+    original = next(a for a in fake_action_item_repo._items.values() if a.source == "manual")
+    assert original.status == "failed"
+
+
+def test_replan_approve_is_idempotent(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: Any,
+) -> None:
+    exec_id = _seed_failed_execution(fake_recovery_repo, fake_action_item_repo)
+    _accept_group(client, exec_id, "DOWNSCOPE")
+
+    # 서로 다른 Idempotency-Key 로 두 번 — 미들웨어 캐시가 아니라 DB 가드로 멱등 보장
+    first = _approve_replan(client, exec_id, key="k1").json()
+    second = _approve_replan(client, exec_id, key="k2").json()
+    assert first["scheduledBlockId"] == second["scheduledBlockId"]
+    blocks = [b for b in fake_scheduled_block_repo._blocks.values() if b.source == "recovery"]
+    assert len(blocks) == 1
+
+
+def test_replan_diff_already_approved_after_approve(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    exec_id = _seed_failed_execution(fake_recovery_repo, fake_action_item_repo)
+    _accept_group(client, exec_id, "DOWNSCOPE")
+    _approve_replan(client, exec_id)
+
+    body = client.get(f"/replan/{exec_id}").json()
+    assert body["alreadyApproved"] is True
+
+
+def test_replan_approve_requires_idempotency_key(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    exec_id = _seed_failed_execution(fake_recovery_repo, fake_action_item_repo)
+    _accept_group(client, exec_id, "DOWNSCOPE")
+    resp = client.post(f"/replan/{exec_id}/approve")
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+
+
+def test_replan_422_when_skipped(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    exec_id = _seed_failed_execution(fake_recovery_repo, fake_action_item_repo)
+    _generate(client, exec_id)
+    _decide(client, {"executionId": exec_id, "decision": "skipped"})
+
+    diff = client.get(f"/replan/{exec_id}")
+    assert diff.status_code == 422
+    assert diff.json()["code"] == "RECOVERY_NO_REPLAN"
+    approve = _approve_replan(client, exec_id)
+    assert approve.status_code == 422
+    assert approve.json()["code"] == "RECOVERY_NO_REPLAN"
+
+
+def test_replan_422_for_reschedule_group(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    # RESCHEDULE 수락은 새 ActionItem 을 만들지 않음 → 재배치 대상 없음
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["CONFLICT"]
+    )
+    decision = _accept_group(client, exec_id, "RESCHEDULE")
+    assert decision["resultingActionItemId"] is None
+    assert client.get(f"/replan/{exec_id}").status_code == 422
+
+
+def test_replan_404_unknown_execution(client: TestClient) -> None:
+    assert client.get(f"/replan/exec_{uuid4()}").status_code == 404
+    assert _approve_replan(client, f"exec_{uuid4()}").status_code == 404
 
 
 # ───────────────────────── 룰 엔진 단위 테스트 ─────────────────────────

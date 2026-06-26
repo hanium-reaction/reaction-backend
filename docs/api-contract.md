@@ -366,8 +366,8 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | --- | --- | --- | --- |
 | POST | `/recovery/proposals/generate` | Recovery Coach (LLM ≤ 8s, 룰 fallback) → 후보 2~4개 | ✅ #20-A |
 | POST | `/recovery/decisions` | 사용자 선택 저장 (Idempotency) | ✅ #20-A |
-| GET | `/replan/{executionId}` | before/after diff (S20) | 🚧 501 → #20-B |
-| POST | `/replan/{executionId}/approve` | 최종 적용 (Idempotency) | 🚧 501 → #20-B |
+| GET | `/replan/{executionId}` | before/after diff (S20) | ✅ #20-B |
+| POST | `/replan/{executionId}/approve` | 최종 적용 (Idempotency) | ✅ #20-B |
 
 #20-A 구현 메모:
 - `POST /recovery/proposals/generate` 요청 `{ executionId }` — completion_status 가
@@ -384,6 +384,21 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 - 에러: `RECOVERY_EXECUTION_NOT_FOUND`(404) / `RECOVERY_NOT_ELIGIBLE`(422) /
   `RECOVERY_NO_PROPOSAL`(422) / `RECOVERY_ATTEMPT_NOT_FOUND`(404) /
   `RECOVERY_ALREADY_DECIDED`(409).
+
+#20-B 구현 메모 (replan S20):
+- `GET /replan/{executionId}` — 수락한 회복의 일정 변화 프리뷰. 응답 Draft Layer
+  (`isDraft=true`, `aiSource=llm|rule`) + `optionGroup` + `before`/`after`
+  (각각 actionItemId/title/targetDate/startAt/endAt/estimatedMinutes, 시각은 KST)
+  + `alreadyApproved`. `before`=원본 실패 카드 계획 시각, `after`=회복 카드 제안 시각
+  (원본 시간대를 회복 `targetDate` 로 일(day) 단위 시프트 — 룰 기반, freebusy 무관).
+- `POST /replan/{executionId}/approve` (Idempotency-Key 필수) — 회복 ActionItem 을
+  `scheduled_blocks`(source=`recovery`) 로 배치. 멱등: 이미 배치돼 있으면 같은 block 반환
+  (중복 INSERT 방지). 응답 `{ executionId, scheduledBlockId, actionItemId, startAt, endAt,
+  isDraft=false }`. 원본 `action_item.status` 불변.
+- 재배치 대상은 **새 ActionItem 을 만든 그룹(DOWNSCOPE/CARRY_OVER)** 뿐. skipped/
+  RESCHEDULE/PARK 는 `RECOVERY_NO_REPLAN`(422) — RESCHEDULE/PARK 의 시간 조정은 S15
+  주간 편집기에서 처리.
+- 에러: `RECOVERY_EXECUTION_NOT_FOUND`(404) / `RECOVERY_NO_REPLAN`(422).
 
 UX 4 그룹 / 내부 9 전략:
 ```

@@ -16,20 +16,25 @@
 - POST /recovery/decisions — 수락/스킵 저장 (Idempotency 미들웨어 §1.7).
   수락 그룹이 DOWNSCOPE/CARRY_OVER 면 새 ActionItem(source=recovery_*) 생성.
 
-후속 (#20-B): GET /replan/{executionId} + POST /replan/{executionId}/approve (S20 diff).
+#20-B 구현 범위 (S20 replan):
+- GET /replan/{executionId} — 수락한 회복의 before/after diff (Draft Layer 프리뷰).
+- POST /replan/{executionId}/approve — 회복 ActionItem 을 scheduled_block(source=recovery)
+  으로 배치 (Idempotency §1.7, 멱등 재배치 방지). 원본 action_item.status 불변.
+  재배치 대상은 새 ActionItem 을 만든 DOWNSCOPE/CARRY_OVER 뿐 (그 외 RECOVERY_NO_REPLAN).
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
+from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.recovery_attempt import RecoveryAttempt
 from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
@@ -45,6 +50,10 @@ from reaction_backend.repositories.action_item_repo import (
     get_action_item_repo,
 )
 from reaction_backend.repositories.recovery_repo import RecoveryRepo, get_recovery_repo
+from reaction_backend.repositories.scheduled_block_repo import (
+    ScheduledBlockRepo,
+    get_scheduled_block_repo,
+)
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.recovery import (
@@ -54,6 +63,9 @@ from reaction_backend.schemas.recovery import (
     RecoveryGenerateRequest,
     RecoveryProposalLLM,
     RecoveryProposalsResponse,
+    ReplanApproveResponse,
+    ReplanBlock,
+    ReplanDiffResponse,
 )
 
 router = APIRouter(tags=["recovery"])
@@ -61,6 +73,7 @@ router = APIRouter(tags=["recovery"])
 _EXEC_PREFIX = "exec_"
 _ATTEMPT_PREFIX = "rec_"
 _ACTION_PREFIX = "action_"
+_BLOCK_PREFIX = "block_"
 
 # 회복 대상 completion_status — 실패/부분완료만 (DevBaseline: 21시 회고 흐름에서 호출)
 _ELIGIBLE_STATUSES = ("failed", "partial_done")
@@ -73,7 +86,11 @@ _GROUP_TO_SOURCE = {
 
 RecoveryRepoDep = Annotated[RecoveryRepo, Depends(get_recovery_repo)]
 ActionRepoDep = Annotated[ActionItemRepo, Depends(get_action_item_repo)]
+BlockRepoDep = Annotated[ScheduledBlockRepo, Depends(get_scheduled_block_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
+
+# replan 으로 만드는 블록의 출처 (DB 설계서 §5.10 block_source)
+_REPLAN_BLOCK_SOURCE = "recovery"
 
 
 def _parse_id(raw: str, prefix: str, error: ApiError) -> UUID:
@@ -332,19 +349,139 @@ async def decide_recovery(
     )
 
 
-@router.get("/replan/{execution_id}", status_code=status.HTTP_501_NOT_IMPLEMENTED)
-async def get_replan_diff(execution_id: str) -> None:
-    """S20 before/after diff — #20-B 후속."""
-    raise HTTPException(
-        status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Defined in api-contract.md §12 — to be implemented in #20-B.",
+def _no_replan() -> ApiError:
+    return ApiError(
+        ErrorCode.RECOVERY_NO_REPLAN,
+        "재배치할 회복 일정이 없어요. 일정을 만드는 회복(범위 축소·내일로 이어가기)을 먼저 수락해 주세요.",
+        http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
     )
 
 
-@router.post("/replan/{execution_id}/approve", status_code=status.HTTP_501_NOT_IMPLEMENTED)
-async def approve_replan(execution_id: str) -> None:
-    """S20 최종 적용 (Idempotency) — #20-B 후속."""
-    raise HTTPException(
-        status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Defined in api-contract.md §12 — to be implemented in #20-B.",
+def _accepted_replan_attempt(attempts: list[RecoveryAttempt]) -> RecoveryAttempt:
+    """일정 재배치 대상인 수락 카드 — 새 ActionItem(resulting_action_item_id) 이 있는 1건.
+
+    수락이 없거나(skipped) 새 카드를 만들지 않는 그룹(RESCHEDULE/PARK)이면 422.
+    """
+    for attempt in attempts:
+        if attempt.user_decision == "accepted" and attempt.resulting_action_item_id is not None:
+            return attempt
+    raise _no_replan()
+
+
+def _after_block_time(
+    execution: ExecutionEvent, original: ActionItem, recovery_action: ActionItem
+) -> tuple[datetime, datetime]:
+    """회복 카드 제안 시각 — 원본 계획 시각대를 회복 target_date 로 그대로 이동.
+
+    일(day) 단위 시프트라 시간대(KST/UTC offset)는 그대로 보존된다 (룰 기반, freebusy 무관).
+    """
+    day_delta = (recovery_action.target_date - original.target_date).days
+    start_at = execution.plan_start_at + timedelta(days=day_delta)
+    end_at = start_at + timedelta(minutes=recovery_action.estimated_minutes)
+    return start_at, end_at
+
+
+async def _load_replan_context(
+    user_id: UUID,
+    raw_execution_id: str,
+    repo: RecoveryRepo,
+    action_repo: ActionItemRepo,
+) -> tuple[ExecutionEvent, RecoveryAttempt, ActionItem, ActionItem]:
+    """(execution, 수락카드, 원본 ActionItem, 회복 ActionItem) 를 한 번에 로드."""
+    execution = await _get_execution_or_404(user_id, raw_execution_id, repo)
+    attempts = await repo.list_attempts(user_id, execution.id)
+    attempt = _accepted_replan_attempt(attempts)
+
+    original = await action_repo.get_by_id(user_id, execution.action_item_id)
+    if original is None:
+        raise _execution_not_found()
+    assert attempt.resulting_action_item_id is not None  # _accepted_replan_attempt 보장
+    recovery_action = await action_repo.get_by_id(user_id, attempt.resulting_action_item_id)
+    if recovery_action is None:
+        raise _no_replan()
+    return execution, attempt, original, recovery_action
+
+
+@router.get("/replan/{execution_id}")
+async def get_replan_diff(
+    execution_id: str,
+    user: CurrentUser,
+    repo: RecoveryRepoDep,
+    action_repo: ActionRepoDep,
+    block_repo: BlockRepoDep,
+) -> ReplanDiffResponse:
+    """S20 before/after diff (Draft Layer) — 수락한 회복의 일정 변화 프리뷰 (#20-B).
+
+    before = 원본 실패 카드의 계획 시각, after = 회복 카드의 제안 시각.
+    이미 approve 로 블록이 배치됐으면 `alreadyApproved=true`.
+    """
+    execution, attempt, original, recovery_action = await _load_replan_context(
+        user.id, execution_id, repo, action_repo
+    )
+    start_at, end_at = _after_block_time(execution, original, recovery_action)
+    existing = await block_repo.list_by_action_item(user.id, recovery_action.id)
+    already_approved = any(b.source == _REPLAN_BLOCK_SOURCE for b in existing)
+
+    return ReplanDiffResponse(
+        execution_id=execution_id,
+        option_group=attempt.recovery_option_group,  # type: ignore[arg-type]
+        before=ReplanBlock(
+            action_item_id=f"{_ACTION_PREFIX}{original.id}",
+            title=original.title,
+            target_date=original.target_date,
+            start_at=execution.plan_start_at,
+            end_at=execution.plan_end_at,
+            estimated_minutes=original.estimated_minutes,
+        ),
+        after=ReplanBlock(
+            action_item_id=f"{_ACTION_PREFIX}{recovery_action.id}",
+            title=recovery_action.title,
+            target_date=recovery_action.target_date,
+            start_at=start_at,
+            end_at=end_at,
+            estimated_minutes=recovery_action.estimated_minutes,
+        ),
+        ai_source="rule" if attempt.llm_fallback_used else "llm",
+        already_approved=already_approved,
+    )
+
+
+@router.post("/replan/{execution_id}/approve")
+async def approve_replan(
+    execution_id: str,
+    user: CurrentUser,
+    repo: RecoveryRepoDep,
+    action_repo: ActionRepoDep,
+    block_repo: BlockRepoDep,
+    session: SessionDep,
+) -> ReplanApproveResponse:
+    """S20 최종 적용 (Idempotency-Key 필수 — §1.7 미들웨어 enforce).
+
+    회복 ActionItem 을 `scheduled_block`(source='recovery') 으로 배치한다. 멱등:
+    이미 배치돼 있으면 같은 block 을 반환(중복 INSERT 방지). 원본 `action_item.status`
+    는 변경하지 않는다 (AGENTS.md §2 — Resilience 지표 전제).
+    """
+    execution, _attempt, original, recovery_action = await _load_replan_context(
+        user.id, execution_id, repo, action_repo
+    )
+
+    existing = await block_repo.list_by_action_item(user.id, recovery_action.id)
+    block = next((b for b in existing if b.source == _REPLAN_BLOCK_SOURCE), None)
+    if block is None:
+        start_at, end_at = _after_block_time(execution, original, recovery_action)
+        block = await block_repo.create_block(
+            user_id=user.id,
+            action_item_id=recovery_action.id,
+            start_at=start_at,
+            end_at=end_at,
+            source=_REPLAN_BLOCK_SOURCE,
+        )
+        await session.commit()
+
+    return ReplanApproveResponse(
+        execution_id=execution_id,
+        scheduled_block_id=f"{_BLOCK_PREFIX}{block.id}",
+        action_item_id=f"{_ACTION_PREFIX}{recovery_action.id}",
+        start_at=block.start_at,
+        end_at=block.end_at,
     )
