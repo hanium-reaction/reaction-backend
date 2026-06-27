@@ -1173,6 +1173,40 @@ class FakeScheduledBlockRepo:
             return None
         return b
 
+    async def list_by_action_item(
+        self, user_id: UUID, action_item_id: UUID
+    ) -> list[ScheduledBlock]:
+        rows = [
+            b
+            for b in self._blocks.values()
+            if b.user_id == user_id
+            and b.action_item_id == action_item_id
+            and b.block_status != "cancelled"
+        ]
+        return sorted(rows, key=lambda b: b.start_at)
+
+    async def create_block(
+        self,
+        *,
+        user_id: UUID,
+        action_item_id: UUID,
+        start_at: datetime,
+        end_at: datetime,
+        source: str,
+    ) -> ScheduledBlock:
+        b = ScheduledBlock()
+        b.id = uuid4()
+        b.user_id = user_id
+        b.action_item_id = action_item_id
+        b.start_at = start_at
+        b.end_at = end_at
+        b.block_status = "scheduled"
+        b.source = source
+        b.external_calendar_event_id = None
+        self._blocks[b.id] = b
+        self._meta[b.id] = ("회복 블록", "recovery")
+        return b
+
     async def list_overlapping(
         self,
         user_id: UUID,

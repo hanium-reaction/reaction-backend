@@ -53,6 +53,47 @@ class ScheduledBlockRepo:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_by_action_item(
+        self, user_id: UUID, action_item_id: UUID
+    ) -> list[ScheduledBlock]:
+        """특정 ActionItem 의 블록 (cancelled 제외) — replan 멱등 체크용 (#20-B)."""
+        stmt = (
+            select(ScheduledBlock)
+            .where(
+                ScheduledBlock.user_id == user_id,
+                ScheduledBlock.action_item_id == action_item_id,
+                ScheduledBlock.block_status != "cancelled",
+            )
+            .order_by(ScheduledBlock.start_at)
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def create_block(
+        self,
+        *,
+        user_id: UUID,
+        action_item_id: UUID,
+        start_at: datetime,
+        end_at: datetime,
+        source: str,
+    ) -> ScheduledBlock:
+        """새 시간 블록 생성 (replan 회복 배치 — source='recovery', #20-B).
+
+        commit 은 호출자 책임.
+        """
+        block = ScheduledBlock(
+            user_id=user_id,
+            action_item_id=action_item_id,
+            start_at=start_at,
+            end_at=end_at,
+            source=source,
+        )
+        self._session.add(block)
+        await self._session.flush()
+        await self._session.refresh(block)
+        return block
+
     async def list_overlapping(
         self,
         user_id: UUID,
