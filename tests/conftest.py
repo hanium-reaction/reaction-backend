@@ -1412,6 +1412,13 @@ class FakeUserRepo:
     async def get_by_email(self, email: str) -> User | None:
         return self._by_email.get(email)
 
+    async def list_active(self) -> list[User]:
+        return [
+            u
+            for u in self._by_id.values()
+            if u.onboarding_state == "ACTIVE" and not getattr(u, "is_anonymized", False)
+        ]
+
     async def upsert_from_google(self, profile: GoogleProfile) -> User:
         existing = self._by_email.get(profile.email)
         if existing is not None:

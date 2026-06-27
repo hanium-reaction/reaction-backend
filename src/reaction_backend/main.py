@@ -10,6 +10,10 @@ auth·onboarding·interview(#3-B), time_policies·calendar·fixed_schedules·not
 goals·habits·inbox(#3-D) 구현 완료. 나머지는 placeholder 501.
 """
 
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -38,6 +42,29 @@ from reaction_backend.api.routes import (
 )
 from reaction_backend.config import get_settings
 
+_log = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """앱 수명주기 — `SCHEDULER_ENABLED=true` 면 in-process cron 스케줄러 기동 (#24).
+
+    기본 OFF: 테스트/로컬에서는 스케줄러가 안 돈다(데모는 시드로 커버). apscheduler import 도
+    enabled 일 때만 (lazy) — 미설치 환경에서도 부팅 가능.
+    """
+    scheduler = None
+    if get_settings().scheduler_enabled:
+        from reaction_backend.scheduler.runtime import build_scheduler
+
+        scheduler = build_scheduler()
+        scheduler.start()
+        _log.info("APScheduler started (%d jobs)", len(scheduler.get_jobs()))
+    try:
+        yield
+    finally:
+        if scheduler is not None:
+            scheduler.shutdown(wait=False)
+
 
 def create_app() -> FastAPI:
     cfg = get_settings()
@@ -50,6 +77,7 @@ def create_app() -> FastAPI:
             "도메인/플로우 명세는 docs/api-contract.md, "
             "에이전트 아키텍처는 docs/architecture.md 참고."
         ),
+        lifespan=_lifespan,
     )
 
     # 전역 예외 핸들러 — 모든 에러를 ErrorResponse 로 직렬화 (ADR-0002 §2.2)
