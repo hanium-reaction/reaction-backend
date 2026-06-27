@@ -46,6 +46,16 @@ class UserRepo:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_active(self) -> list[User]:
+        """모든 활성 사용자 (cron sweep 용, #24) — onboarding ACTIVE + 익명화/삭제 안 됨."""
+        stmt = select(User).where(
+            User.archived_at.is_(None),
+            User.is_anonymized.is_(False),
+            User.onboarding_state == "ACTIVE",
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def upsert_from_google(self, profile: GoogleProfile) -> User:
         """email 기준 upsert.
 

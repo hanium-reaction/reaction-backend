@@ -21,6 +21,7 @@ dependencies = [
     "pyjwt>=2.13.0",
     "requests>=2.34.2",
     "langgraph>=0.2,<1.0",  # ADR-0005 — Agentic Orchestration (LangGraph 채택)
+    "apscheduler>=3.11.2",
 ]
 
 [dependency-groups]

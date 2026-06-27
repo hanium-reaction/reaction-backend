@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     # staging/prod 는 반드시 False. True 일 때 GOOGLE_OAUTH_CLIENT_ID 가 비어도 부팅 가능.
     auth_stub_mode: bool = False
 
+    # ── Scheduler (#24) ──
+    # True 면 앱 기동 시 in-process APScheduler 로 cron job 을 등록한다.
+    # 기본 False — 테스트/로컬은 안 돈다(데모는 시드로 커버). ⚠️ in-process 라
+    # 다중 인스턴스 배포 시 중복 실행(모든 job idempotent → 안전하나 단일 인스턴스 권장).
+    scheduler_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
