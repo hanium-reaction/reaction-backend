@@ -105,9 +105,9 @@ _WEEKDAY_NAMES = (
 )
 
 
-def _config(session: AsyncSession) -> RunnableConfig:
-    """노드가 예산 가드·llm_runs 기록에 쓰는 세션 채널 (ADR-0005 §7.1)."""
-    return {"configurable": {"session": session}}
+def _config(session: AsyncSession, tone_mode: str | None = None) -> RunnableConfig:
+    """노드가 예산 가드·llm_runs 기록에 쓰는 세션 채널 (ADR-0005 §7.1) + 톤(#23-D)."""
+    return {"configurable": {"session": session, "tone_mode": tone_mode}}
 
 
 def _resolve_target_date(raw: str | None) -> str:
@@ -267,7 +267,7 @@ async def generate_plan(
     target_date = _resolve_target_date(body.target_date)
 
     async with user_agent_lock(session, user.id, _LOCK_AGENT):
-        config = _config(session)
+        config = _config(session, user.tone_mode)
         state = first_plan.initial_state(user_id=user.id, outcome=outcome, target_date=target_date)
         # Validation Agent — LLM 분해 전에 Focus≤3 / Maintain≤5 게이트 (LLM 0회, 룰만).
         gate = await first_plan.validate_inputs(state, config)

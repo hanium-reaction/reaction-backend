@@ -51,11 +51,20 @@ DevBaseline §부록 D Q8 잠금: 톤 모드(gentle/strict/encouraging)를 **시
 | `inbox` 라우트 | `user.tone_mode` | ✅ #23-C |
 | `recovery` 라우트 | `user.tone_mode` | ✅ #23-C |
 | `morning_brief` cron | `tone_mode` 파라미터(#24 wrapper 가 주입) | ✅ #23-C |
-| `interview` 노드(3) | LangGraph state `tone_mode` | 🚧 후속(에이전트 코어) |
-| `first_plan` 노드(2) | LangGraph state `tone_mode` | 🚧 후속(에이전트 코어) |
+| `interview` 노드(3) | `config["configurable"]["tone_mode"]` (runner 가 주입) | ✅ #23-D |
+| `first_plan` 노드(2) | `config["configurable"]["tone_mode"]` (planning route 가 주입) | ✅ #23-D |
+
+### LangGraph 전달 경로 (#23-D)
+
+세션과 동일하게 **state 가 아닌 `config["configurable"]` 채널**로 tone 을 나른다(ADR-0005 §7.1
+"비직렬화/요청-scope 값은 config 로"). state(`InterviewState`/`FirstPlanState`) 스키마는 불변:
+
+- 노드: `tone_mode=_tone_mode(config)` (각 orchestrator 의 `_session` 옆 헬퍼).
+- 주입: `interview_runner._config(session, tone_mode)` + `planning._config(session, tone_mode)`.
+  runner/route 가 `user.tone_mode` 를 넘긴다.
 
 ## 결과
 
-- 톤은 동결 게이트 한 곳에서만 합성 → 호출처는 `tone_mode=` 한 줄만 전달.
-- LangGraph(interview/first_plan)는 그래프 state 에 `tone_mode` 를 실어야 하므로 별도 슬라이스로
-  분리(소유: AI/LangGraph 파트). 그 전까지 해당 경로는 톤 미적용(=기존 동작, 회귀 없음).
+- 톤은 동결 게이트 한 곳에서만 합성 → 호출처는 `tone_mode=` 한 줄(또는 config 채널)만 전달.
+- LangGraph 도 config 채널로 일관 처리 → state 스키마/직렬화 불변, 회귀 없음.
+- 모든 LLM 호출(5도메인 8지점)에 톤 적용 완료.

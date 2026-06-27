@@ -12,10 +12,10 @@ DevBaseline §부록 D Q8 잠금: MVP 에선 톤 차이(gentle/strict/encouragin
 배선 상태:
 - #23-A: 본 헬퍼(prefix 카피)를 잠그고 테스트로 보호.
 - #23-C: `aiClient.run(tone_mode=...)` 옵션 kwarg 추가로 **tool_executor 가 렌더 직후 prefix 적용**
-  (ADR-0003 addendum, `docs/decisions/0003-llm-tool-executor.md`). 배선 호출처 = inbox·recovery
+  (ADR-0003 addendum, `docs/decisions/0003-llm-tool-executor.md`). 배선 = inbox·recovery
   라우트(`user.tone_mode`) + morning_brief cron.
-- **후속**: interview·first_plan(LangGraph) 은 그래프 state 에 `tone_mode` 를 실어야 해서 별도
-  슬라이스(에이전트 코어, peter 조율).
+- #23-D: interview·first_plan(LangGraph) 노드도 `config["configurable"]["tone_mode"]` 채널로
+  전달(state 불변). 모든 LLM 호출에 톤 적용 완료.
 """
 
 from __future__ import annotations

@@ -7,6 +7,14 @@
 
 ---
 
+## v1.13 — 2026-06-23 (#23-D — 톤 prefix LangGraph(interview·first_plan) 배선)
+
+- interview(3)·first_plan(2) LangGraph 노드의 `aiClient.run` 에도 톤 prefix 적용 → **모든 LLM 호출(5도메인 8지점) 톤 적용 완료**
+- 전달 = state 가 아닌 **`config["configurable"]["tone_mode"]` 채널**(세션과 동일, ADR-0005 §7.1). `InterviewState`/`FirstPlanState` 스키마 불변
+- 노드: `tone_mode=_tone_mode(config)`. 주입: `interview_runner._config(session, tone_mode)` + `planning._config(session, tone_mode)` — runner/route가 `user.tone_mode` 전달
+- ⚠️ API/스키마/DB 변경 없음. `test_tone_wiring` +4(노드·runner·없을 때 None). 전체 314 passed
+- 이로써 #23(Settings/Privacy/톤모드) 톤 배선 전부 완료
+
 ## v1.12 — 2026-06-23 (#23-C — 톤 prefix aiClient.run 배선)
 
 - 톤모드(gentle/strict/encouraging) → LLM 시스템 프롬프트 prefix 1줄을 **단일 게이트에서** 적용
