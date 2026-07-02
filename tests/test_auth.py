@@ -40,6 +40,31 @@ def test_google_login_reuses_existing_user(
     assert len(fake_user_repo._by_email) == 1
 
 
+def test_stub_device_token_creates_isolated_users(
+    auth_client: TestClient, fake_user_repo: FakeUserRepo
+) -> None:
+    """`demo:<id>` — 브라우저별 격리 데모 계정 (테스터 충돌 방지)."""
+    a = auth_client.post("/auth/google", json={"idToken": "demo:tester-one"}).json()
+    b = auth_client.post("/auth/google", json={"idToken": "demo:tester-two"}).json()
+    again = auth_client.post("/auth/google", json={"idToken": "demo:tester-one"}).json()
+
+    assert a["user"]["email"] == "demo+tester-one@reaction.local"
+    assert b["user"]["email"] == "demo+tester-two@reaction.local"
+    assert a["user"]["userId"] != b["user"]["userId"]  # 서로 다른 유저
+    assert again["user"]["userId"] == a["user"]["userId"]  # 같은 id 는 같은 유저
+    assert len(fake_user_repo._by_email) == 2
+
+
+def test_stub_plain_token_keeps_fixed_demo_account(auth_client: TestClient) -> None:
+    """`demo:` 접두사가 아니면 종전대로 고정 demo 계정 — 시드 시나리오 계정 유지."""
+    res = auth_client.post("/auth/google", json={"idToken": "anything-else"}).json()
+    assert res["user"]["email"] == "demo@reaction.local"
+
+    # 접두사만 있고 id 가 비면(정규화 후 빈 slug) 고정 계정으로 fallback
+    edge = auth_client.post("/auth/google", json={"idToken": "demo:!!!"}).json()
+    assert edge["user"]["email"] == "demo@reaction.local"
+
+
 def test_refresh_returns_new_access(auth_client: TestClient) -> None:
     login = auth_client.post("/auth/google", json={"idToken": "stub"}).json()
     resp = auth_client.post(
