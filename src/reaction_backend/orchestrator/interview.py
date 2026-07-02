@@ -18,8 +18,11 @@
 - State 는 직렬화 가능해야 한다 → `AsyncSession` 은 넣지 않고
   `config["configurable"]["session"]` 채널로 전달 (ADR-0005 §7.1).
 
-종료 조건 5종 (ADR-0005 §2.5.2 + FSM 완료):
-  필수 슬롯 전부 충족 / ambiguity ≤ 0.2 / total_turns ≥ 15 / early_finish / 3턴 연속 정체.
+종료 조건:
+  필수 슬롯 전부 충족 / early_finish.
+
+  `ambiguity_score` float 는 LLM 채점 보조값일 뿐 API 의 `ambiguityScore`
+  (남은 필수 슬롯 수) 완료 조건을 대체하지 않는다.
 
 라우터는 보통 그래프를 한 번에 `ainvoke` 하지 않고 `interview_runner` 로 턴 단위 구동한다
 (사용자 답이 HTTP 요청으로 외부에서 들어오기 때문 — `receive_answer` 가 no-op 인 이유).
@@ -57,10 +60,6 @@ __all__ = [
     "validate_answer",
 ]
 
-# ── 종료/판정 임계값 (ADR-0005 §2.5.2) ────────────────────────────────────────
-AMBIGUITY_DONE_THRESHOLD = 0.2  # 모호함 ≤ 0.2 ("0 까지"는 보장 어려워 실용 임계값)
-MAX_TURNS = 15  # 베이스라인 §6 최대 15턴
-STALL_LIMIT = 3  # 3턴 연속 모호함 감소 0 → 정체 종료
 STORE_CLARITY_MIN = 0.4  # clarity 가 이 미만이면 답을 채우지 않고 같은 슬롯 재질문
 
 # Rule-based FSM 이 순서대로 채워가는 필수 슬롯 (interview_adapter 와 동일 진실 소스).
@@ -321,18 +320,12 @@ async def finalize_outcome(state: InterviewState, config: RunnableConfig) -> Int
 def _terminal_reason(state: InterviewState) -> InterviewEndReason | None:
     """종료 조건 평가. 종료면 DB enum 사유, 아니면 None.
 
-    필수 슬롯 완료(FSM)·모호함 임계·정체(stall)는 모두 현재 슬롯으로 마감 가능하므로
-    `completed` 로 환원한다 (interview_end_reason enum 에 stall/slots_full 없음).
+    일반 진행은 필수 슬롯 완료(FSM)일 때만 `completed` 로 마감한다.
+    LLM 의 float `ambiguity_score` 가 낮아도 미해결 필수 슬롯이 남아 있으면 계속 묻는다.
     """
     if state["early_finish"]:
         return "early_user"
     if _all_required_filled(state):
-        return "completed"
-    if state["ambiguity_score"] <= AMBIGUITY_DONE_THRESHOLD:
-        return "completed"
-    if state["total_turns"] >= MAX_TURNS:
-        return "turn_limit"
-    if state["stall_count"] >= STALL_LIMIT:
         return "completed"
     return None
 

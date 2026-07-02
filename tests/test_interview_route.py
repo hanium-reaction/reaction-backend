@@ -20,7 +20,7 @@ from reaction_backend.schemas.interview import (
 from tests.conftest import FakeInterviewRepo
 
 
-def _stub(*, clarity: float = 0.9, fell_back: bool = False) -> Any:
+def _stub(*, clarity: float = 0.9, new_ambiguity: float = 0.9, fell_back: bool = False) -> Any:
     """aiClient.run stub — clarity 높게 두어 답을 저장, 종료는 FSM(필수 슬롯)이 운전."""
 
     async def stub_run(**kwargs: Any) -> RunResult[Any]:
@@ -36,7 +36,7 @@ def _stub(*, clarity: float = 0.9, fell_back: bool = False) -> Any:
             value = AmbiguityUpdate(
                 slot_key=kwargs["variables"]["slot_key"],
                 clarity_score=clarity,
-                new_ambiguity=0.9,
+                new_ambiguity=new_ambiguity,
             )
         elif schema is InterviewSummary:
             value = InterviewSummary(
@@ -97,6 +97,27 @@ def test_submit_advances_and_persists(
     stored = fake_interview_repo._answers[next(iter(fake_interview_repo._sessions))]
     assert "identity.role" in stored
     assert stored["identity.role"].value == {"type": "chip", "values": ["3학년"]}
+
+
+def test_submit_does_not_finish_until_required_slots_are_filled(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """LLM ambiguity 가 낮아도 미해결 필수 슬롯이 남아 있으면 다음 질문을 계속한다."""
+    monkeypatch.setattr(aiClient, "run", _stub(new_ambiguity=0.1))
+
+    start = client.post("/interview/sessions").json()
+    sid = start["sessionId"]
+
+    res = client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.role", "value": ["3학년"], "clientTurn": 1},
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ambiguityScore"] == 12
+    assert body["endReason"] is None
+    assert body["currentQuestion"]["slotKey"] == "identity.season"
 
 
 def test_finish_returns_summary_and_outcome(client: TestClient, monkeypatch: Any) -> None:
