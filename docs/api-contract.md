@@ -184,9 +184,9 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 - `ambiguityScore`(int) = **남은 미해결 필수 슬롯 수** (진행될수록 감소, 0 이면 충분).
 - `currentQuestion.options` = chip/select 보기 (카탈로그 기반). `goals.heaviest` 는 `goals.list` 응답에서 동적 생성. text/date/range 는 `[]`.
 - 종료 턴(`endReason` 채워지고 `currentQuestion=null`)에만 `summary`(S03 확인 카드) + `outcome`(First Plan 시드, `InterviewOutcome`)이 채워진다.
-- 단일 활성 세션 enforce: 진행 중(`endReason=null`) 세션이 있는데 `POST /interview/sessions` 재호출 시 409 `INTERVIEW_SESSION_EXISTS`. 종료된 세션은 활성으로 치지 않는다.
+- 단일 활성 세션 + **재시작 승리(restart-wins)**: `POST /interview/sessions` 는 진행 중(`endReason=null`) 세션이 있으면 그 세션을 `endReason=abandoned` 로 닫고 새 세션을 만든다 — **항상 201**. 이어하기는 저장해 둔 sessionId 로 `next-question` 재개. (v1.12 이전의 409 `INTERVIEW_SESSION_EXISTS` 는 클라이언트가 sessionId 를 잃으면 복구 불가라 폐기 — 코드 자체는 하위호환 위해 enum 에 유지.)
 - 동시성 lock(ADR-0005 §7.6): 모든 mutating 진입점(`sessions`·`answers`·`next-question`·`finish`)은 `user_id × interview` advisory lock 으로 보호. 다른 디바이스가 점유 중이면 409 `AGENT_CONCURRENT_ACCESS` 즉시 fail.
-- 구현 상태(#6): 엔진+영속화 배선 + 단일 활성 세션 enforce + 동시성 lock 완료. **후속**: 재조립 시 transient 상태(stall_count·used_fallback) 영속.
+- 구현 상태(#6): 엔진+영속화 배선 + 단일 활성 세션(restart-wins) + 동시성 lock 완료. **후속**: 재조립 시 transient 상태(stall_count·used_fallback) 영속.
 
 ---
 
