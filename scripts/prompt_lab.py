@@ -22,6 +22,10 @@ DB/서버 불필요 — `session=None` 으로 호출하므로 budget check·llm_
     # 같은 입력을 3번 — 출력 변동성(일관성) 점검. 프롬프트 튜닝의 핵심.
     uv run python scripts/prompt_lab.py recovery --repeat 3
 
+    # v1 vs v2 A/B 비교 (시나리오별 나란히). 프롬프트 개선 채택 판단용.
+    uv run python scripts/prompt_lab.py recovery --compare 1,2
+    uv run python scripts/prompt_lab.py recovery --compare 1,2 --show-prompt   # 오프라인 문안 비교
+
     # 키 없이 프롬프트 문안만 보기 (오프라인)
     uv run python scripts/prompt_lab.py brief --show-prompt
 
@@ -306,6 +310,7 @@ async def _call(
     schema: type,
     variables: Mapping[str, str],
     *,
+    prompt_id: str,
     timeout: float,
     price_in: float | None,
     price_out: float | None,
@@ -320,7 +325,7 @@ async def _call(
     result = await aiClient.run(
         module=spec.module,
         schema=schema,
-        prompt_id=spec.prompt_id,
+        prompt_id=prompt_id,
         fallback=lambda: spec.fallback_factory(schema),
         timeout=timeout,
         variables=dict(variables),
@@ -347,12 +352,17 @@ async def _call(
     )
 
 
-def _render_prompt(spec: PromptSpec, variables: Mapping[str, str]) -> tuple[str, str]:
+def _render_prompt(prompt_id: str, variables: Mapping[str, str]) -> tuple[str, str]:
     from reaction_backend.prompts import registry as prompt_registry
 
     prompt_registry.reload()
-    text, tmpl = prompt_registry.render(spec.prompt_id, dict(variables))
+    text, tmpl = prompt_registry.render(prompt_id, dict(variables))
     return text, tmpl.full_id
+
+
+def _resolve_prompt_id(spec: PromptSpec, version: str | None) -> str:
+    """version 지정 시 `<id>@vN` 으로 핀, 없으면 latest."""
+    return spec.prompt_id if version is None else f"{spec.prompt_id}@v{version}"
 
 
 def _field(value: Any, name: str) -> str:
@@ -418,29 +428,55 @@ def _print_outcome(
     print("└" + "─" * 40)
 
 
+def _relabel(scn: Scenario, name: str) -> Scenario:
+    return Scenario(
+        name=name,
+        variables=scn.variables,
+        note=scn.note,
+        expect_field=scn.expect_field,
+        expect_starts_with=scn.expect_starts_with,
+    )
+
+
+def _versions(args: argparse.Namespace) -> list[str | None]:
+    """실행할 버전 목록. --compare 우선, 없으면 --version, 둘 다 없으면 [None]=latest."""
+    if args.compare:
+        return [v.strip() for v in args.compare.split(",") if v.strip()]
+    if args.version:
+        return [args.version]
+    return [None]
+
+
 async def _run_spec(
     spec: PromptSpec,
     args: argparse.Namespace,
 ) -> list[tuple[Scenario, CallOutcome]]:
-    try:
-        schema = _import_schema(spec.schema_path)
-    except (ImportError, AttributeError) as exc:
-        # 예: RecoveryProposalLLM 은 #20-A(PR #53) 머지 후에야 존재. 그 전엔 친절히 안내.
-        print(
-            _c(
-                f"[건너뜀] {spec.key}: schema '{spec.schema_path}' 없음 ({exc}).",
-                YELLOW,
-                on=args.color,
+    versions = _versions(args)
+    multi_ver = len(versions) > 1 or args.version is not None
+
+    # schema 는 실제 호출(LLM) 때만 필요 — --show-prompt 는 렌더만이라 import 안 함.
+    schema: type | None = None
+    if not args.show_prompt:
+        try:
+            schema = _import_schema(spec.schema_path)
+        except (ImportError, AttributeError) as exc:
+            # 예: RecoveryProposalLLM 은 #20-A(PR #53) 머지 후에야 존재. 그 전엔 친절히 안내.
+            print(
+                _c(
+                    f"[건너뜀] {spec.key}: schema '{spec.schema_path}' 없음 ({exc}).",
+                    YELLOW,
+                    on=args.color,
+                )
             )
-        )
-        print(
-            _c(
-                "         해당 PR 머지 후 사용 가능. inbox/brief 는 지금 바로 동작합니다.",
-                DIM,
-                on=args.color,
+            print(
+                _c(
+                    "         해당 PR 머지 후 LLM 호출 가능. --show-prompt 는 지금도 됩니다.",
+                    DIM,
+                    on=args.color,
+                )
             )
-        )
-        return []
+            return []
+
     scenarios = spec.scenarios
     if args.scenario:
         scenarios = [s for s in scenarios if s.name == args.scenario]
@@ -451,53 +487,52 @@ async def _run_spec(
 
     results: list[tuple[Scenario, CallOutcome]] = []
     for scn in scenarios:
-        rendered: str | None = None
-        if args.raw or args.show_prompt:
-            try:
-                rendered, _ = _render_prompt(spec, scn.variables)
-            except Exception as exc:  # noqa: BLE001
-                print(_c(f"[렌더 실패] {scn.name}: {exc}", RED, on=args.color))
+        for ver in versions:
+            prompt_id = _resolve_prompt_id(spec, ver)
+            vtag = f" @v{ver}" if (ver is not None or multi_ver) else ""
+
+            rendered: str | None = None
+            if args.raw or args.show_prompt:
+                try:
+                    rendered, _ = _render_prompt(prompt_id, scn.variables)
+                except Exception as exc:  # noqa: BLE001
+                    print(_c(f"[렌더 실패] {scn.name}{vtag}: {exc}", RED, on=args.color))
+                    continue
+
+            if args.show_prompt:
+                print()
+                print(_c(f"┌─ {scn.name}{vtag} (렌더만) ", BOLD, on=args.color))
+                for line in (rendered or "").splitlines():
+                    print(f"│  {line}")
+                print("└" + "─" * 40)
                 continue
 
-        if args.show_prompt:
-            print()
-            print(_c(f"┌─ {scn.name} (렌더만) ", BOLD, on=args.color))
-            for line in (rendered or "").splitlines():
-                print(f"│  {line}")
-            print("└" + "─" * 40)
-            continue
-
-        # --repeat: 변동성 점검 (fallback 은 결정적이라 1회로 강제)
-        n = max(1, args.repeat)
-        first_outcome: CallOutcome | None = None
-        for i in range(n):
-            outcome = await _call(
-                spec,
-                schema,
-                scn.variables,
-                timeout=args.timeout,
-                price_in=args.price_in,
-                price_out=args.price_out,
-            )
-            if first_outcome is None:
-                first_outcome = outcome
-            label = (
-                scn
-                if n == 1
-                else Scenario(
-                    name=f"{scn.name} #{i + 1}",
-                    variables=scn.variables,
-                    note=scn.note,
-                    expect_field=scn.expect_field,
-                    expect_starts_with=scn.expect_starts_with,
+            assert schema is not None
+            # --repeat: 변동성 점검 (fallback 은 결정적이라 1회로 강제)
+            n = max(1, args.repeat)
+            first_outcome: CallOutcome | None = None
+            for i in range(n):
+                outcome = await _call(
+                    spec,
+                    schema,
+                    scn.variables,
+                    prompt_id=prompt_id,
+                    timeout=args.timeout,
+                    price_in=args.price_in,
+                    price_out=args.price_out,
                 )
-            )
-            _print_outcome(spec, label, outcome, color=args.color, raw=args.raw, rendered=rendered)
-            if outcome.source == "FALLBACK" and n > 1:
-                print(_c("   (fallback 은 결정적 — repeat 생략)", DIM, on=args.color))
-                break
-        if first_outcome is not None:
-            results.append((scn, first_outcome))
+                if first_outcome is None:
+                    first_outcome = outcome
+                rep = "" if n == 1 else f" #{i + 1}"
+                label = _relabel(scn, f"{scn.name}{vtag}{rep}")
+                _print_outcome(
+                    spec, label, outcome, color=args.color, raw=args.raw, rendered=rendered
+                )
+                if outcome.source == "FALLBACK" and n > 1:
+                    print(_c("   (fallback 은 결정적 — repeat 생략)", DIM, on=args.color))
+                    break
+            if first_outcome is not None:
+                results.append((_relabel(scn, f"{scn.name}{vtag}"), first_outcome))
     return results
 
 
@@ -545,6 +580,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--list", action="store_true", help="프롬프트·시나리오 목록만 출력")
     parser.add_argument("--scenario", help="한 시나리오만 실행")
+    parser.add_argument("--version", help="프롬프트 버전 핀 (예: 2 → recovery/if_then_proposal@v2)")
+    parser.add_argument("--compare", help="버전 A/B 비교 (예: 1,2 → 시나리오별 v1·v2 나란히)")
     parser.add_argument("--repeat", type=int, default=1, help="같은 입력 N회 (변동성 점검)")
     parser.add_argument("--raw", action="store_true", help="렌더된 프롬프트 + raw JSON 출력")
     parser.add_argument("--show-prompt", action="store_true", help="호출 없이 렌더된 프롬프트만")
