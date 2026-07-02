@@ -126,10 +126,13 @@ def test_interview_outcome_serializes_camel_case() -> None:
 @pytest.mark.parametrize(
     ("patch", "expected"),
     [
-        ({"ambiguity_score": 0.2}, "completed"),  # 모호함 ≤ 0.2
-        ({"ambiguity_score": 0.7, "total_turns": 15}, "turn_limit"),  # 15턴
         ({"ambiguity_score": 0.7, "early_finish": True}, "early_user"),  # 충분해요
-        ({"ambiguity_score": 0.7, "stall_count": 3}, "completed"),  # 3턴 정체
+        (
+            {"ambiguity_score": 0.2},
+            None,
+        ),  # 필수 슬롯 완료 전에는 낮은 LLM 모호함만으로 종료하지 않음
+        ({"ambiguity_score": 0.7, "total_turns": 15}, None),  # 턴 제한보다 필수 슬롯 완료가 우선
+        ({"ambiguity_score": 0.7, "stall_count": 3}, None),  # 정체도 자동 완료로 환원하지 않음
         ({"ambiguity_score": 0.7}, None),  # 계속
     ],
 )
@@ -138,6 +141,16 @@ def test_interview_termination_conditions(patch: dict[str, Any], expected: str |
     state.update(patch)  # type: ignore[typeddict-item]
     assert interview._terminal_reason(state) == expected
     assert interview.should_continue(state) == ("finish" if expected else "continue")
+
+
+def test_interview_terminates_when_required_slots_are_filled() -> None:
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = {
+        key: {"type": "text", "raw": "답변"} for key in interview.REQUIRED_SLOT_SEQUENCE
+    }
+
+    assert interview._terminal_reason(state) == "completed"
+    assert interview.should_continue(state) == "finish"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -216,10 +229,11 @@ def _stub_factory(new_ambiguity: float, *, fell_back: bool = False):
 
 
 async def test_interview_graph_runs_to_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
-    """LLM 성공 path — update_ambiguity 가 0.1 반환 → completed 종료 + outcome 빌드."""
+    """LLM 성공 path — 필수 슬롯 완료 상태에서 completed 종료 + outcome 빌드."""
     monkeypatch.setattr(aiClient, "run", _stub_factory(0.1))
     graph = interview.build_interview_graph()
     state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = dict(SLOT_ANSWERS)
 
     final = await graph.ainvoke(state)
 
@@ -236,6 +250,7 @@ async def test_interview_graph_marks_rule_source_on_fallback(
     monkeypatch.setattr(aiClient, "run", _stub_factory(0.1, fell_back=True))
     graph = interview.build_interview_graph()
     state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = dict(SLOT_ANSWERS)
 
     final = await graph.ainvoke(state)
 
