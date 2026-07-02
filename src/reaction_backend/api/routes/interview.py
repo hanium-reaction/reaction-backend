@@ -16,7 +16,9 @@ mock 스텁을 걷어내고 LangGraph 인터뷰 엔진(`orchestrator/interview*`
 - 종료 턴에는 `summary`(S03 확인 카드) + `outcome`(First Plan 시드)을 함께 싣는다.
 
 동시성/세션 가드:
-- 단일 활성 세션 enforce — 진행 중 세션이 있으면 새 세션 생성 시 409 `INTERVIEW_SESSION_EXISTS`.
+- 단일 활성 세션 + **재시작 승리(restart-wins)** — 새 세션 시작 시 진행 중 세션이 있으면
+  `abandoned` 로 닫고 새로 만든다(항상 201). FE 가 sessionId 를 잃어도 재시작만으로 복구
+  가능 (이전의 409 `INTERVIEW_SESSION_EXISTS` 는 sessionId 분실 시 영구 차단이었다).
 - 동시성 lock(ADR-0005 §7.6) — mutating 진입점은 `user_agent_lock` 으로 보호, 다중 디바이스
   동시 진입 시 409 `AGENT_CONCURRENT_ACCESS`.
 
@@ -74,14 +76,6 @@ def _not_found() -> ApiError:
         ErrorCode.INTERVIEW_SESSION_NOT_FOUND,
         "해당 인터뷰 세션을 찾을 수 없어요.",
         http_status=status.HTTP_404_NOT_FOUND,
-    )
-
-
-def _session_exists() -> ApiError:
-    return ApiError(
-        ErrorCode.INTERVIEW_SESSION_EXISTS,
-        "이미 진행 중인 인터뷰가 있어요. 기존 세션을 이어서 진행해 주세요.",
-        http_status=status.HTTP_409_CONFLICT,
     )
 
 
@@ -225,12 +219,20 @@ async def _persist_turn(
 async def start_session(user: CurrentUser, repo: RepoDep, session: SessionDep) -> InterviewSession:
     """딥 인터뷰 세션 시작 — FSM 이 고른 첫 필수 슬롯 질문 1개 생성.
 
-    단일 활성 세션 enforce: 이미 진행 중(end_reason IS NULL)인 세션이 있으면 409.
+    재시작 승리(restart-wins): 진행 중(end_reason IS NULL) 세션이 있으면 `abandoned` 로
+    닫고 새로 시작한다 — 항상 201. FE 가 sessionId 를 잃어도(새로고침·localStorage 유실)
+    재시작만으로 복구된다. 이어하기는 기존 `next-question` 재개 경로 그대로.
     동시성 lock(ADR-0005 §7.6) 안에서 검사+생성해 다중 디바이스 race 를 막는다.
     """
     async with user_agent_lock(session, user.id, _LOCK_AGENT):
-        if await repo.get_active_session(user.id) is not None:
-            raise _session_exists()
+        stale = await repo.get_active_session(user.id)
+        if stale is not None:
+            await repo.finalize(
+                stale,
+                end_reason="abandoned",
+                total_turns=stale.total_turns,
+                ambiguity_final=float(stale.ambiguity_final or 0.0),
+            )
         row = await repo.create_session(user.id, get_settings().llm_model)
         result = await interview_runner.start_interview(
             session_id=row.id, user_id=user.id, session=session, tone_mode=user.tone_mode

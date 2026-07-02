@@ -137,16 +137,27 @@ def test_unknown_session_returns_404(client: TestClient, monkeypatch: Any) -> No
     assert res.status_code == 404
 
 
-def test_start_with_active_session_returns_409(client: TestClient, monkeypatch: Any) -> None:
-    """단일 활성 세션 enforce — 진행 중 세션이 있는데 또 시작하면 409."""
+def test_start_with_active_session_abandons_old_and_creates(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """재시작 승리(restart-wins) — 진행 중 세션이 있어도 abandoned 로 닫고 새로 시작(201).
+
+    FE 가 sessionId 를 잃어도 재시작만으로 복구된다 (이전 409 는 영구 차단이었다).
+    """
     monkeypatch.setattr(aiClient, "run", _stub())
 
     first = client.post("/interview/sessions")
     assert first.status_code == 201  # 첫 세션은 생성
+    first_sid = first.json()["sessionId"]
 
-    second = client.post("/interview/sessions")  # 진행 중 세션 존재
-    assert second.status_code == 409
-    assert second.json()["code"] == "INTERVIEW_SESSION_EXISTS"
+    second = client.post("/interview/sessions")  # 진행 중 세션 존재 → abandon 후 새로
+    assert second.status_code == 201
+    second_sid = second.json()["sessionId"]
+    assert second_sid != first_sid
+
+    old = client.get(f"/interview/sessions/{first_sid}")
+    assert old.status_code == 200
+    assert old.json()["endReason"] == "abandoned"
 
 
 def test_start_after_finish_is_allowed(client: TestClient, monkeypatch: Any) -> None:
