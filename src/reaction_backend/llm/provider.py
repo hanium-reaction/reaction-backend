@@ -84,15 +84,23 @@ async def generate_structured[T: BaseModel](
     client = _get_client()
     model_name = get_settings().llm_model
 
+    config: dict[str, Any] = {
+        "response_mime_type": "application/json",
+        "response_schema": schema,
+    }
+    # gemini-2.5-flash 계열은 기본으로 내부 thinking 을 수행해 단일 호출이 4~8s+ 로
+    # 늘어난다 — 우리 워크로드(분류·짧은 구조화 출력)에선 품질 이득 대비 지연 손해가
+    # 크고, 이 지연이 agent lock 점유 시간을 늘려 동시성 충돌의 트리거가 된다(#76).
+    # thinking_budget=0 으로 비활성화. 2.5-pro 는 budget 0 미지원이라 flash 만 적용.
+    if "2.5-flash" in model_name:
+        config["thinking_config"] = {"thinking_budget": 0}
+
     try:
         # `google-genai` 2.x 비동기 API
         response = await client.aio.models.generate_content(
             model=model_name,
             contents=prompt_text,
-            config={
-                "response_mime_type": "application/json",
-                "response_schema": schema,
-            },
+            config=config,
         )
     except Exception as exc:  # noqa: BLE001
         message = str(exc).lower()
