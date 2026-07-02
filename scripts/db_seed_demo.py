@@ -65,6 +65,7 @@ async def _get_or_create_user(session: AsyncSession) -> tuple[User, bool]:
 
     user = User(
         email=DEMO_EMAIL,
+        name="데모 사용자",  # users.name 은 NOT NULL (DB 설계서 v0.7.1 §5.1)
         onboarding_state="ACTIVE",
         tone_mode="gentle",
         timezone="Asia/Seoul",
@@ -78,7 +79,7 @@ async def _get_or_create_user(session: AsyncSession) -> tuple[User, bool]:
             user_id=user.id,
             attention_span=30,
             energy_cycle="morning",
-            time_chunk_preference=30,
+            time_chunk_preference="30",  # VARCHAR(20) — "10/20/30/60/90" (§5.25)
             success_buffer=0.2,
         )
     )
@@ -87,8 +88,8 @@ async def _get_or_create_user(session: AsyncSession) -> tuple[User, bool]:
             user_id=user.id,
             suggestion_style="neutral",
             recovery_tone="gentle",
-            explanation_depth="medium",
-            reminder_frequency="medium",
+            explanation_depth="normal",  # enum: brief/normal/detailed (§5.26)
+            reminder_frequency="standard",  # enum: minimal/standard/active (§5.26)
         )
     )
     session.add(NotificationSetting(user_id=user.id))

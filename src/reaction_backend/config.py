@@ -45,8 +45,8 @@ class Settings(BaseSettings):
     # ── LLM (Issue #5 / ADR-0003) ──
     # Gemini API key. 비어있으면 Tool Executor 가 항상 fallback 으로 분기.
     gemini_api_key: str = ""
-    # 호출 모델. Flash-Lite 기본 (구 gemini-2.0-flash-exp 는 retired → 404).
-    llm_model: str = "gemini-flash-lite-latest"
+    # 호출 모델. Flash 무료 티어 기본.
+    llm_model: str = "gemini-2.5-flash"
     # 단일 호출 timeout (초). ADR-0003 §1 동결값.
     llm_timeout_seconds: float = 8.0
     # 재시도 횟수 (지수 backoff). Tool Executor §1.

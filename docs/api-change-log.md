@@ -7,6 +7,13 @@
 
 ---
 
+## v1.14 — 2026-07-02 (인터뷰 재시작 승리 — staging FE 연동 실측 후속)
+
+- ⚠️ `POST /interview/sessions` 동작 변경: 진행 중 세션이 있으면 **409 `INTERVIEW_SESSION_EXISTS` 대신 그 세션을 `endReason=abandoned` 로 닫고 새 세션 생성(항상 201)** — 재시작 승리(restart-wins)
+- 배경: staging FE(Vercel) 연동에서 클라이언트가 sessionId 를 잃으면(새로고침 등) 활성 세션 조회 수단이 없어 409 로 **영구 차단**됨을 실측. `abandoned` 는 DB enum(§5.2)에 이미 존재
+- 이어하기 경로 불변: sessionId 보유 시 `next-question` 재개. 동시성 lock(`AGENT_CONCURRENT_ACCESS`) 불변
+- `INTERVIEW_SESSION_EXISTS` 에러 코드는 더 이상 발생하지 않음 (enum 은 하위호환 위해 유지)
+
 ## v1.13 — 2026-06-23 (#23-D — 톤 prefix LangGraph(interview·first_plan) 배선)
 
 - interview(3)·first_plan(2) LangGraph 노드의 `aiClient.run` 에도 톤 prefix 적용 → **모든 LLM 호출(5도메인 8지점) 톤 적용 완료**
