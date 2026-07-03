@@ -106,6 +106,9 @@ def _ensure_test_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "COLUMN_ENCRYPTION_KEY",
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
     )
+    # 로컬 .env 에 GEMINI_API_KEY 가 있어도 테스트 시에는 비워서 fallback 을 타게 격리
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+
     from reaction_backend.config import get_settings
     from reaction_backend.safety.encryption import get_cipher
 
@@ -1242,6 +1245,7 @@ class FakeInterviewRepo:
         s.ambiguity_final = None
         s.end_reason = None
         s.ended_at = None
+        s.used_fallback = False
         self._sessions[s.id] = s
         self._answers[s.id] = {}
         return s
@@ -1287,10 +1291,16 @@ class FakeInterviewRepo:
                 existing.clarity_score = clarity_score
 
     async def save_progress(
-        self, session: InterviewSessionModel, *, total_turns: int, ambiguity_final: float
+        self,
+        session: InterviewSessionModel,
+        *,
+        total_turns: int,
+        ambiguity_final: float,
+        used_fallback: bool = False,
     ) -> None:
         session.total_turns = total_turns
         session.ambiguity_final = ambiguity_final
+        session.used_fallback = bool(session.used_fallback) or used_fallback
 
     async def finalize(
         self,
@@ -1299,10 +1309,12 @@ class FakeInterviewRepo:
         end_reason: str,
         total_turns: int,
         ambiguity_final: float,
+        used_fallback: bool = False,
     ) -> None:
         session.end_reason = end_reason
         session.total_turns = total_turns
         session.ambiguity_final = ambiguity_final
+        session.used_fallback = bool(session.used_fallback) or used_fallback
         session.ended_at = datetime.now(UTC)
 
 

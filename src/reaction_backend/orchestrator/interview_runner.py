@@ -48,9 +48,30 @@ class TurnResult:
     end_reason: str | None = None
 
 
-def _config(session: AsyncSession | None, tone_mode: str | None = None) -> RunnableConfig:
-    """노드가 예산 가드·llm_runs 기록에 쓰는 세션 채널 (ADR-0005 §7.1) + 톤(#23-D)."""
-    return {"configurable": {"session": session, "tone_mode": tone_mode}}
+def _config(
+    session: AsyncSession | None,
+    tone_mode: str | None = None,
+    *,
+    answer_type: str | None = None,
+    options: list[str] | None = None,
+    slot_meta: dict[str, dict[str, Any]] | None = None,
+) -> RunnableConfig:
+    """노드가 예산 가드·llm_runs 기록에 쓰는 세션 채널 (ADR-0005 §7.1) + 톤(#23-D).
+
+    answer_type/options 는 직전 답 슬롯 메타(라우터가 카탈로그에서 주입) — validate_answer
+    가 자유서술을 슬롯 형식대로 구조화(normalized_value)하는 데 쓴다.
+    slot_meta 는 슬롯키→{label,answer_type,options} 전체 맵 — ask_question 이 이번에 물을
+    슬롯의 라벨·형식·보기를 질문 프롬프트에 실어 정확한 질문을 만드는 데 쓴다.
+    """
+    return {
+        "configurable": {
+            "session": session,
+            "tone_mode": tone_mode,
+            "answer_type": answer_type,
+            "options": options or [],
+            "slot_meta": slot_meta or {},
+        }
+    }
 
 
 def _coerce_answer(value: Any) -> dict[str, Any]:
@@ -73,9 +94,10 @@ async def start_interview(
     user_id: UUID,
     session: AsyncSession | None = None,
     tone_mode: str | None = None,
+    slot_meta: dict[str, dict[str, Any]] | None = None,
 ) -> TurnResult:
     """세션 시작 → FSM 이 고른 첫 필수 슬롯 질문 1개를 만들어 반환."""
-    config = _config(session, tone_mode)
+    config = _config(session, tone_mode, slot_meta=slot_meta)
     state = interview.initial_state(session_id=session_id, user_id=user_id)
     state = await interview.ask_question(state, config)
     return TurnResult(state=state, done=False, question=state["next_question"])
@@ -88,12 +110,18 @@ async def submit_and_advance(
     answer_value: Any,
     session: AsyncSession | None = None,
     tone_mode: str | None = None,
+    answer_type: str | None = None,
+    options: list[str] | None = None,
+    slot_meta: dict[str, dict[str, Any]] | None = None,
 ) -> TurnResult:
     """답 1개 주입 → 채점/정규화/저장 → 종료면 요약+outcome, 아니면 다음 질문.
 
     이게 `POST /interview/sessions/{id}/answers` 가 호출하는 핵심 진입점이다.
+    answer_type/options 는 답한 슬롯 메타(정규화용), slot_meta 는 다음 질문 슬롯 메타용.
     """
-    config = _config(session, tone_mode)
+    config = _config(
+        session, tone_mode, answer_type=answer_type, options=options, slot_meta=slot_meta
+    )
     state = {**state, "last_answer": _coerce_answer(answer_value), "last_slot_key": slot_key}
 
     state = await interview.receive_answer(state, config)

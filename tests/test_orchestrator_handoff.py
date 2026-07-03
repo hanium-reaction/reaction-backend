@@ -119,17 +119,24 @@ def test_interview_outcome_serializes_camel_case() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Interview Cyclic 종료 조건 4종 (순수 함수 _terminal_reason / should_continue)
+# Interview Cyclic 종료 조건 (순수 함수 _terminal_reason / should_continue)
+#
+# 완료는 필수 슬롯 완료(FSM)가 단독으로 운전한다 — float ambiguity_score 임계로는
+# 조기 종료하지 않는다(그러면 명료성이 100%에 못 닿음). turn_limit 만 최종 안전 밸브.
+# (슬롯별 재질문 상한은 _decide_storage 가 담당 — stall_count 는 제거됨.)
 # ─────────────────────────────────────────────────────────────────────────────
+
+_ALL_REQUIRED_FILLED = {k: {"type": "text", "raw": "x"} for k in interview.REQUIRED_SLOT_SEQUENCE}
 
 
 @pytest.mark.parametrize(
     ("patch", "expected"),
     [
-        ({"ambiguity_score": 0.2}, "completed"),  # 모호함 ≤ 0.2
-        ({"ambiguity_score": 0.7, "total_turns": 15}, "turn_limit"),  # 15턴
+        ({"slot_answers": _ALL_REQUIRED_FILLED}, "completed"),  # 필수 슬롯 완료 = 명료성 100%
+        # 회귀: 모호도가 낮아도(≤0.2) 필수 슬롯이 안 찼으면 종료하지 않는다.
+        ({"ambiguity_score": 0.05}, None),
+        ({"ambiguity_score": 0.05, "total_turns": 15}, "turn_limit"),  # 15턴 안전 밸브
         ({"ambiguity_score": 0.7, "early_finish": True}, "early_user"),  # 충분해요
-        ({"ambiguity_score": 0.7, "stall_count": 3}, "completed"),  # 3턴 정체
         ({"ambiguity_score": 0.7}, None),  # 계속
     ],
 )
@@ -173,8 +180,6 @@ def _stub_factory(new_ambiguity: float, *, fell_back: bool = False):
         if schema is NextQuestionSchema:
             value = NextQuestionSchema(
                 question="다음 질문",
-                clarity_score=0.8,
-                normalized_value=None,
                 empathy_one_liner="좋아요",
             )
         elif schema is AmbiguityUpdate:
@@ -216,14 +221,17 @@ def _stub_factory(new_ambiguity: float, *, fell_back: bool = False):
 
 
 async def test_interview_graph_runs_to_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
-    """LLM 성공 path — update_ambiguity 가 0.1 반환 → completed 종료 + outcome 빌드."""
+    """LLM 성공 path — batch ainvoke 는 답 주입이 없어 turn_limit(15턴) 로 마감.
+
+    (float ambiguity 0.1 은 종료를 운전하지 않고, stall 은 제거됨 → 최종 상한 turn_limit.)
+    outcome 빌드까지 확인. recursion_limit 은 15턴 × 노드수 여유로 상향."""
     monkeypatch.setattr(aiClient, "run", _stub_factory(0.1))
     graph = interview.build_interview_graph()
     state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
 
-    final = await graph.ainvoke(state)
+    final = await graph.ainvoke(state, {"recursion_limit": 100})
 
-    assert final["end_reason"] == "completed"
+    assert final["end_reason"] == "turn_limit"
     assert isinstance(final["outcome"], InterviewOutcome)
     assert final["outcome"].analysis_source == "llm"
     assert final["used_fallback"] is False
@@ -237,7 +245,7 @@ async def test_interview_graph_marks_rule_source_on_fallback(
     graph = interview.build_interview_graph()
     state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
 
-    final = await graph.ainvoke(state)
+    final = await graph.ainvoke(state, {"recursion_limit": 100})
 
     assert final["used_fallback"] is True
     assert final["outcome"].analysis_source == "rule"

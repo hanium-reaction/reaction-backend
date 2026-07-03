@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, func, text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -56,6 +56,12 @@ class InterviewSession(Base, TimestampMixin):
 
     # 종료 시점 모호함 지표 (0~1) — DB 설계서 §5.2: NUMERIC(4,3)
     ambiguity_final: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
+
+    # 인터뷰 중 한 번이라도 LLM 룰 fallback 이 있었는지 (OR 누적) → outcome.analysis_source.
+    # 턴마다 재조립되는 transient 상태라 세션에 영속해야 전체 인터뷰 기준으로 정확하다.
+    used_fallback: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
 
     # ── relationships ──
     user: Mapped[User] = relationship(back_populates="interview_sessions")

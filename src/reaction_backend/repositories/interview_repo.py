@@ -103,9 +103,12 @@ class InterviewRepo:
         *,
         total_turns: int,
         ambiguity_final: float,
+        used_fallback: bool = False,
     ) -> None:
         session.total_turns = total_turns
         session.ambiguity_final = ambiguity_final
+        # OR 누적 — 한 번이라도 fallback 이면 계속 True (재조립돼도 유지).
+        session.used_fallback = bool(session.used_fallback) or used_fallback
 
     async def finalize(
         self,
@@ -114,10 +117,12 @@ class InterviewRepo:
         end_reason: str,
         total_turns: int,
         ambiguity_final: float,
+        used_fallback: bool = False,
     ) -> None:
         session.end_reason = end_reason
         session.total_turns = total_turns
         session.ambiguity_final = ambiguity_final
+        session.used_fallback = bool(session.used_fallback) or used_fallback
         session.ended_at = datetime.now(UTC)
 
 

@@ -50,6 +50,18 @@ _DEFAULT_ACTIVITY = TimeRange(start="09:00", end="23:00")
 _DEFAULT_TONE = "담백"
 
 
+def is_filled_answer(value: Mapping[str, Any] | None) -> bool:
+    """슬롯 값이 실질적으로 채워진 답인지.
+
+    빈 값(None/빈 dict)과 재질문 대기 마커(`{"type":"pending"}`)는 미충족으로 본다
+    (pending 은 시도 횟수만 누적하며 FSM 이 같은 슬롯을 다시 묻게 하는 임시 상태).
+    스킵 마커(`{"type":"text","raw":""}`)는 '없음'을 명시한 유효 답이므로 충족으로 친다.
+    """
+    if not value:
+        return False
+    return value.get("type") != "pending"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 값 추출 헬퍼 (discriminated by value["type"])
 # ─────────────────────────────────────────────────────────────────────────────
@@ -115,7 +127,7 @@ def build_outcome(
     빈 필수 슬롯은 default 로 채우고 `unresolved_slots` 에 키를 남긴다 (First Plan 이
     VALIDATING 에서 보완 질문/재입력 분기를 띄울 수 있도록).
     """
-    unresolved = [k for k in REQUIRED_SLOT_KEYS if not slot_answers.get(k)]
+    unresolved = [k for k in REQUIRED_SLOT_KEYS if not is_filled_answer(slot_answers.get(k))]
 
     identity = IdentityContext(
         role=_first(_chip_values(slot_answers.get("identity.role"))) or "미상",
