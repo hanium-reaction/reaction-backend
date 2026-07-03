@@ -54,15 +54,15 @@ jobs:
 
       - name: Show DB revision (before)
         working-directory: ${{ env.APP_DIR }}
-        run: ~/.local/bin/uv run alembic current
+        run: ~/.local/bin/uv run --no-dev alembic current
 
       - name: Apply migrations
         working-directory: ${{ env.APP_DIR }}
-        run: ~/.local/bin/uv run alembic upgrade head
+        run: ~/.local/bin/uv run --no-dev alembic upgrade head
 
       - name: Show DB revision (after)
         working-directory: ${{ env.APP_DIR }}
-        run: ~/.local/bin/uv run alembic current
+        run: ~/.local/bin/uv run --no-dev alembic current
 
       - name: Restart app
         run: sudo systemctl restart reaction-backend
