@@ -18,17 +18,17 @@
 - State 는 직렬화 가능해야 한다 → `AsyncSession` 은 넣지 않고
   `config["configurable"]["session"]` 채널로 전달 (ADR-0005 §7.1).
 
-종료 조건 (ADR-0005 §2.5.2 + FSM 완료):
-  필수 슬롯 전부 충족(= 명료성 100%) / total_turns ≥ 15(turn_limit) / early_finish.
-
-  루프 방지는 **슬롯별 시도 상한**(`_decide_storage`/`MAX_SLOT_ATTEMPTS`, pending 마커로
-  영속)이 담당한다 — 상한에 닿으면 그 슬롯을 스킵/best-effort 로 진행시켜 같은 질문이 무한
-  반복되지 않는다. turn_limit 은 그래도 남는 전체 상한(안전 밸브).
+종료 조건 (FSM 완료):
+  필수 슬롯 전부 충족(= 명료성 100%) / early_finish.
 
   ⚠️ float `ambiguity_score` 는 **종료를 운전하지 않는다**. FE 명료성 지표(= 남은 필수
-  슬롯 수, `ambiguity_score`(int))와 진실 소스가 달라, float 임계(≤0.2)로 조기 종료하면
-  필수 슬롯이 다 차기 전에 인터뷰가 끝나 명료성이 100%에 못 닿았다. 완료는 슬롯 충족(FSM)이
-  단독으로 운전하고, float 값은 telemetry(`ambiguity_final`)로만 남긴다.
+  슬롯 수, API 의 `ambiguityScore`(int))와 진실 소스가 달라, float 임계로 조기 종료하면
+  필수 슬롯이 다 차기 전에 끝나 명료성이 100%에 못 닿는다. 완료는 슬롯 충족(FSM)이 단독으로
+  운전하고, float 값은 telemetry(`ambiguity_final`)로만 남긴다.
+
+  루프 방지는 **슬롯별 시도 상한**(`_decide_storage`/`MAX_SLOT_ATTEMPTS`, pending 마커로
+  영속)이 담당한다 — 상한에 닿으면 그 슬롯을 스킵/best-effort 로 채워 진행시켜, 같은 질문이
+  무한 반복되지 않고 모든 슬롯이 결국 채워져 완료로 수렴한다(별도 turn_limit 불필요).
 
 라우터는 보통 그래프를 한 번에 `ainvoke` 하지 않고 `interview_runner` 로 턴 단위 구동한다
 (사용자 답이 HTTP 요청으로 외부에서 들어오기 때문 — `receive_answer` 가 no-op 인 이유).
@@ -67,8 +67,6 @@ __all__ = [
     "validate_answer",
 ]
 
-# ── 종료/판정 임계값 (ADR-0005 §2.5.2) ────────────────────────────────────────
-MAX_TURNS = 15  # 베이스라인 §6 최대 15턴 (재질문 폭주의 최종 상한)
 STORE_CLARITY_MIN = 0.4  # clarity 가 이 미만이면 답을 채우지 않고 같은 슬롯 재질문
 
 # 사용자가 '없음/모름/건너뛰기'를 밝힌 슬롯에 저장하는 스킵 마커(빈 text). build_outcome 은
@@ -406,17 +404,14 @@ def _terminal_reason(state: InterviewState) -> InterviewEndReason | None:
     """종료 조건 평가. 종료면 DB enum 사유, 아니면 None.
 
     완료는 **필수 슬롯 완료(FSM)가 단독으로 운전**한다 — 이때만 남은 필수 슬롯 0(= FE
-    명료성 100%)이 보장된다. float `ambiguity_score` 임계로는 조기 종료하지 않는다(그러면
-    슬롯이 다 차기 전에 끝나 명료성이 100%에 못 닿는다 — 모듈 docstring 참조).
-    turn_limit 은 재질문 폭주의 최종 상한(안전 밸브) — 슬롯별 루프는 `_decide_storage` 의
-    시도 상한이 먼저 막는다.
+    명료성 100%)이 보장된다. float `ambiguity_score` 가 낮아도 미해결 필수 슬롯이 남으면
+    계속 묻는다. 재질문 폭주는 `_decide_storage` 의 슬롯별 시도 상한이 막아 모든 슬롯이 결국
+    채워지므로, 별도 turn_limit 없이도 완료로 수렴한다.
     """
     if state["early_finish"]:
         return "early_user"
     if _all_required_filled(state):
         return "completed"
-    if state["total_turns"] >= MAX_TURNS:
-        return "turn_limit"
     return None
 
 

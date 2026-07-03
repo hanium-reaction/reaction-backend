@@ -1,0 +1,94 @@
+name: Deploy (EC2)
+
+# main 머지 시 staging EC2 에 실배포. self-hosted runner 가 EC2 위에서 직접 실행되므로
+# 코드 전송/SSH 키가 필요 없다 — runner 가 GitHub 에 outbound 로 폴링해 잡을 받아온다
+# (nxtcloud 샌드박스 보안그룹 22번 포트는 손대지 않음).
+#
+# 사전 조건:
+# - EC2 에 self-hosted runner 가 systemd 서비스로 상시 구동 (labels: self-hosted, ec2,
+#   reaction-backend). 등록: repo Settings → Actions → Runners → New self-hosted runner.
+# - /home/ubuntu/reaction-backend/.env 가 이미 존재 (RDS DATABASE_URL·GEMINI_API_KEY 등).
+#   이 워크플로는 .env 를 절대 만들거나 덮어쓰지 않는다 — rsync 에서 명시적으로 제외.
+# - systemd 서비스 `reaction-backend` 가 이미 존재 (0.0.0.0:8000).
+#
+# 안전 장치:
+# - main 에 push 된 경우에만 배포 (PR/fork 에서는 트리거되지 않음 — self-hosted runner
+#   에서 pull_request 트리거를 쓰지 않는 이유이기도 하다: fork 의 임의 코드 실행 방지)
+# - .venv 는 rsync --exclude 로 보존 → uv sync 가 매번 풀 재설치 대신 증분 갱신
+# - 마이그레이션 적용 전/후 리비전을 로그로 남김 (migrate.yml 과 동일한 가시성 패턴)
+# - 배포 후 health check 실패 시 job 자체를 실패시키고 최근 로그를 함께 출력
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # 동시 배포 방지 — 같은 EC2 앱 디렉터리를 여러 잡이 동시에 건드리지 않도록.
+  group: deploy-ec2
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: sync → migrate → restart → health check
+    runs-on: [self-hosted, ec2, reaction-backend]
+    timeout-minutes: 15
+
+    env:
+      APP_DIR: /home/ubuntu/reaction-backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Promote build → app dir (.env · .venv 보존)
+        run: |
+          rsync -a --delete \
+            --exclude='.env' \
+            --exclude='.venv' \
+            --exclude='.git' \
+            "$GITHUB_WORKSPACE"/ "$APP_DIR"/
+
+      - name: Install / update dependencies
+        working-directory: ${{ env.APP_DIR }}
+        run: ~/.local/bin/uv sync --no-dev --python 3.12
+
+      - name: Show DB revision (before)
+        working-directory: ${{ env.APP_DIR }}
+        run: ~/.local/bin/uv run --no-dev alembic current
+
+      - name: Apply migrations
+        working-directory: ${{ env.APP_DIR }}
+        run: ~/.local/bin/uv run --no-dev alembic upgrade head
+
+      - name: Show DB revision (after)
+        working-directory: ${{ env.APP_DIR }}
+        run: ~/.local/bin/uv run --no-dev alembic current
+
+      - name: Restart app
+        run: sudo systemctl restart reaction-backend
+
+      - name: Health check
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://127.0.0.1:8000/health -o /tmp/health.json; then
+              if grep -q '"status":"ok"' /tmp/health.json; then
+                echo "healthy:"; cat /tmp/health.json; exit 0
+              fi
+            fi
+            sleep 2
+          done
+          echo "::error::health check failed after restart (db degraded or app down)"
+          [ -f /tmp/health.json ] && cat /tmp/health.json
+          sudo journalctl -u reaction-backend -n 60 --no-pager
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Deploy Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Commit: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Status: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Health:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          curl -s http://127.0.0.1:8000/health >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
