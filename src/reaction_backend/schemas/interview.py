@@ -31,12 +31,18 @@ class SlotCatalogEntry(CamelModel):
 
 
 class Question(CamelModel):
-    """인터뷰 질문 — 세션의 currentQuestion."""
+    """인터뷰 질문 — 세션의 currentQuestion.
+
+    `options` = 카탈로그 고정 보기 (chip/select 의 유효 선택지, 정적 진실 소스).
+    `suggested_answers` = LLM 이 슬롯 맥락에 맞춰 추천한 답변 카드 — 주로 고정 보기가 없는
+    자유서술 슬롯(goals.list·success_image·time.fixed_blocks 등)에서 탭/참고용으로 채워진다.
+    """
 
     slot_key: str
     text: str
     answer_type: str
     options: list[str]
+    suggested_answers: list[str] = Field(default_factory=list)
 
 
 class InterviewSession(CamelModel):
@@ -75,11 +81,15 @@ class NextQuestionSchema(CamelModel):
 
     직전 답의 채점(clarity)·정규화(normalized_value)는 `AmbiguityUpdate`
     (`interview/ambiguity_score`) 가 전담한다 — 여기 두면 두 프롬프트가 같은 걸 중복
-    계산하고 스키마가 드리프트한다. 라우터가 실제로 읽는 건 `question`.
+    계산하고 스키마가 드리프트한다.
+
+    `suggested_answers` = 이 슬롯에 대해 사용자가 탭/참고할 답변 카드 추천 (0~4개). 고정 보기가
+    있는 chip/select 는 그 보기로 답하므로 보통 비우고, 자유서술 슬롯에서 예시를 채운다.
     """
 
     question: str
     empathy_one_liner: str
+    suggested_answers: list[str] = Field(default_factory=list, max_length=4)
 
 
 class AmbiguityUpdate(CamelModel):
