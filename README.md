@@ -165,8 +165,9 @@ DATABASE_URL=postgresql://reaction:reaction@localhost:5432/reaction
 ### CI/CD
 
 - **CI** (`.github/workflows/ci.yml`): PR 마다 lint / typecheck / test / docker build + **alembic check (drift 감지) + downgrade smoke**
-- **CD** (`.github/workflows/migrate.yml`): main 머지 시 **staging Supabase 에 alembic 자동 적용** (GitHub Secrets `STAGING_DATABASE_URL` 필요)
-- 가이드: [`docs/cicd.md`](docs/cicd.md) — Supabase staging 생성 + Secrets 등록 + manual approval 옵션
+- **CD** (`.github/workflows/deploy.yml`): main 머지 시 **EC2 staging 에 자동 배포** — self-hosted runner 가 EC2 위에서 직접 코드 반영 → `alembic upgrade head` → 앱 재기동 → `/health` 확인
+- (dormant) `.github/workflows/migrate.yml`: Supabase staging 전제로 작성된 이전 CD — 현재 EC2+RDS 조합으로 대체되어 미사용
+- 가이드: [`docs/cicd.md`](docs/cicd.md) — self-hosted runner 등록, deploy.yml 동작 흐름, Supabase staging 재활성화 방법
 
 ---
 
