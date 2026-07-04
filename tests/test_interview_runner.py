@@ -40,7 +40,11 @@ def _answer_for(slot_key: str) -> Any:
     if slot_key in _RANGE_SLOTS:
         return {"start": "09:00", "end": "23:00"}
     if slot_key in _CHIP_SLOTS:
-        return ["오전"] if slot_key == "time.peak_window" else ["네"]
+        if slot_key == "time.peak_window":
+            return ["오전"]
+        if slot_key == "recovery.downscope_unit":
+            return ["10분"]  # 분 단위 select
+        return ["네"]
     if slot_key == "goals.list":
         return "캡스톤, 토익"
     if slot_key == "goals.heaviest":

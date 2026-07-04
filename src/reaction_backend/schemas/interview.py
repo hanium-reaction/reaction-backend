@@ -187,7 +187,8 @@ class PreferenceProfile(CamelModel):
 
     recovery_tone: str  # recovery.tone (필수)
     rest_ok: bool  # recovery.rest_ok (필수)
-    downscope_ok: bool  # recovery.downscope_unit (필수)
+    # recovery.downscope_unit (필수) — 회복 시 할 일을 이 분(min) 단위까지 줄이면 해볼 만함.
+    downscope_unit_min: int = Field(default=10, ge=1)
     focus_duration_min: int | None = None  # energy.focus_duration (선택)
     break_pattern: str | None = None  # energy.break_pattern (선택)
     weekly_energy: str | None = None  # energy.weekly_drain (선택)
