@@ -195,7 +195,9 @@ async def generate_recovery_proposals(
     }
     texts = {s.strategy_type: render_template(s.if_then_template, variables) for s in selected}
 
-    # LLM personalize — 선두 카드의 if-then 문구만. 실패 시 카탈로그 템플릿 그대로 (PRD §9).
+    # LLM personalize — 룰이 고른 **선두 카드**의 if-then 문구를 이 사용자 맥락에 맞게 다듬는다.
+    # 전략 선택은 룰이 이미 끝냈으므로, LLM 에 선두 전략(label/group/template)을 넘겨 "그 전략을
+    # personalize"하게 한다(새 전략을 고르지 않음). 실패 시 카탈로그 템플릿 그대로 (PRD §9).
     top = selected[0]
     result = await aiClient.run(
         module="recovery",
@@ -213,18 +215,23 @@ async def generate_recovery_proposals(
             "confidence": "n/a",
             "interruption_summary": "없음",
             "context_summary": f"실행 카드: {action_title} / 결과: {execution.completion_status}",
+            "strategy_label": top.label_ko,
+            "strategy_group": top.option_group,
+            "base_template": texts[top.strategy_type],
         },
         user_id=user.id,
         session=session,
         tone_mode=user.tone_mode,
     )
-    if not result.fell_back and result.value.strategy_code in texts:
-        proposal = result.value
+    # 선두 카드에 personalize 적용. LLM 이 '선두 전략을 다듬어라'는 지시를 받으므로
+    # strategy_code 일치 여부로 게이트하지 않는다 — 과거엔 LLM 이 generic code("downscope")를
+    # 반환해 선택 전략키(NANO_STEP 등)와 항상 불일치 → Gemini 문구가 통째로 폐기되던 버그.
+    if not result.fell_back:
         personalized = " ".join(
-            part for part in (proposal.if_clause, proposal.then_clause) if part
+            part for part in (result.value.if_clause, result.value.then_clause) if part
         ).strip()
         if personalized:
-            texts[proposal.strategy_code] = personalized
+            texts[top.strategy_type] = personalized
 
     attempts = [
         await repo.create_attempt(

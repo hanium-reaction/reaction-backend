@@ -131,6 +131,50 @@ def test_generate_ambiguity_maps_to_nano_step(
     assert "GROUP BY 실습" in top["suggestedActionText"]
 
 
+def test_generate_applies_llm_personalized_text_to_leading_card(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """LLM 성공 시 선두 카드 문구가 personalize 된다.
+
+    회귀: 과거엔 `LLM.strategy_code ∈ 선택 전략키`일 때만 적용했는데, LLM 은 generic 코드
+    ("downscope")를 반환하고 선택키는 strategy_type("NANO_STEP")이라 항상 불일치 →
+    Gemini 문구가 통째로 폐기되고 카탈로그 템플릿만 노출됐다. 이제 선두 카드에 직접 적용한다."""
+    from reaction_backend.llm import RunResult, aiClient
+    from reaction_backend.schemas.recovery import RecoveryProposalLLM
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        return RunResult(
+            value=RecoveryProposalLLM(
+                strategy_code="downscope",  # generic — 선택키 NANO_STEP 과 불일치해도 적용돼야
+                if_clause="오늘 GROUP BY 5문제가 버겁게 느껴지면",
+                then_clause="핵심 2문제만 골라 풀고 나머지는 내일 이어가요",
+                rationale="부담을 낮춰 시작을 쉽게",
+                estimated_workload_change_minutes=-15,
+            ),
+            fell_back=False,
+            reason=None,
+            prompt_id="recovery/if_then_proposal",
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AMBIGUITY"]
+    )
+    body = _generate(client, exec_id).json()
+    top = body["cards"][0]
+    assert top["strategyType"] == "NANO_STEP"  # 룰이 고른 선두 전략
+    assert (
+        top["suggestedActionText"]
+        == "오늘 GROUP BY 5문제가 버겁게 느껴지면 핵심 2문제만 골라 풀고 나머지는 내일 이어가요"
+    )
+    assert body["aiSource"] == "llm"
+
+
 def test_generate_no_tags_still_pads_to_min_cards(
     client: TestClient,
     fake_recovery_repo: FakeRecoveryRepo,
