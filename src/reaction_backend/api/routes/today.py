@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from reaction_backend.api.deps import CurrentUser
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.daily_brief import DailyBrief
+from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.fixed_schedule import FixedSchedule
 from reaction_backend.db.models.habit_instance import HabitInstance
 from reaction_backend.db.session import get_db
@@ -49,6 +50,7 @@ from reaction_backend.schemas.today import (
     AgendaHabit,
     CheckInRequest,
     CheckInResponse,
+    ExecutionEventResponse,
     ExecutionStartResponse,
     MorningBrief,
     TodayAgenda,
@@ -315,3 +317,80 @@ async def quick_check_in(
         actual_duration_minutes=execution.actual_duration_minutes,
         needs_failure_tags=body.completion_status in ("failed", "partial_done"),
     )
+
+
+def _execution_event(execution: ExecutionEvent, *, status: str) -> ExecutionEventResponse:
+    return ExecutionEventResponse(
+        execution_id=f"{_EXEC_PREFIX}{execution.id}",
+        action_item_id=f"{_ACTION_PREFIX}{execution.action_item_id}",
+        started_at=execution.actual_start_at or execution.plan_start_at,
+        ended_at=execution.actual_end_at,
+        status=status,
+        pause_total_minutes=execution.pause_total_minutes,
+    )
+
+
+def _require_in_progress(execution: ExecutionEvent | None) -> ExecutionEvent:
+    if execution is None:
+        raise _execution_not_found()
+    if execution.completion_status != "in_progress":
+        raise ApiError(
+            ErrorCode.TODAY_ALREADY_CHECKED_IN,
+            "이미 체크인이 끝난 실행이에요.",
+            http_status=HTTPStatus.CONFLICT,
+        )
+    return execution
+
+
+@router.post("/focus/{execution_id}/pause")
+async def pause_focus(
+    execution_id: str,
+    user: CurrentUser,
+    execution_repo: ExecutionRepoDep,
+    session: SessionDep,
+) -> ExecutionEventResponse:
+    """[⏸] 집중 세션 일시정지 (#83) — user_pause interruption 을 연다.
+
+    execution 은 in_progress 유지. 이미 정지 중이면 409. 재개 시 누적 시간이 반영된다.
+    """
+    execution = _require_in_progress(
+        await execution_repo.get_by_id(user.id, _parse_execution_id(execution_id))
+    )
+    if await execution_repo.get_open_pause(execution.id) is not None:
+        raise ApiError(
+            ErrorCode.TODAY_ALREADY_PAUSED,
+            "이미 일시정지 중이에요.",
+            http_status=HTTPStatus.CONFLICT,
+        )
+    await execution_repo.create_pause(user_id=user.id, execution_id=execution.id)
+    await session.commit()
+    return _execution_event(execution, status="paused")
+
+
+@router.post("/focus/{execution_id}/resume")
+async def resume_focus(
+    execution_id: str,
+    user: CurrentUser,
+    execution_repo: ExecutionRepoDep,
+    session: SessionDep,
+) -> ExecutionEventResponse:
+    """[▶ 계속] 집중 세션 재개 (#83) — 열린 정지 구간을 닫고 pause_total_minutes 누적.
+
+    정지 중이 아니면 409. 정지 시작(created_at)부터 지금까지를 지연분으로 기록한다.
+    """
+    execution = _require_in_progress(
+        await execution_repo.get_by_id(user.id, _parse_execution_id(execution_id))
+    )
+    pause = await execution_repo.get_open_pause(execution.id)
+    if pause is None:
+        raise ApiError(
+            ErrorCode.TODAY_NOT_PAUSED,
+            "일시정지 상태가 아니에요.",
+            http_status=HTTPStatus.CONFLICT,
+        )
+    paused_minutes = max(int((now_kst() - pause.created_at).total_seconds() // 60), 0)
+    pause.resume_delay_minutes = paused_minutes
+    pause.resumed_after_interrupt = True
+    execution.pause_total_minutes += paused_minutes
+    await session.commit()
+    return _execution_event(execution, status="in_progress")
