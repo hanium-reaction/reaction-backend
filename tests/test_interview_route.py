@@ -219,10 +219,12 @@ def test_critical_slot_reask_persists_attempts_across_db(
     assert body["currentQuestion"]["slotKey"] == "goals.list"
     assert body["ambiguityScore"] == amb_at_goals
 
-    # 3회차(상한): DB 를 넘어 누적된 시도 → best-effort 채택하고 다음 슬롯으로
+    # 3회차(상한): DB 를 넘어 누적된 시도 → best-effort 채택하고 다음 슬롯으로.
+    # 목표가 1개(단일)라 goals.heaviest 가 자동 채워짐 → heaviest 질문을 건너뛰고
+    # 남은 필수 슬롯이 2개 감소, 다음은 goals.deadlines.
     body = answer("goals.list", "그럼 프로젝트 하나 할래")
-    assert body["currentQuestion"]["slotKey"] != "goals.list"
-    assert body["ambiguityScore"] == amb_at_goals - 1  # goals.list 충족 → 하나 감소
+    assert body["currentQuestion"]["slotKey"] == "goals.deadlines"
+    assert body["ambiguityScore"] == amb_at_goals - 2  # goals.list + goals.heaviest 충족
 
 
 def test_suggested_answers_only_for_free_text_slots(client: TestClient, monkeypatch: Any) -> None:

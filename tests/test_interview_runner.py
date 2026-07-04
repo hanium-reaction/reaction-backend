@@ -320,6 +320,56 @@ async def test_critical_slot_rejects_skip_then_best_effort(
     assert result.state["next_slot_key"] != "goals.list"
 
 
+async def _advance_to_goals_list(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """identity 두 슬롯을 채우고 goals.list 를 물어보는 지점까지 진행."""
+    monkeypatch.setattr(aiClient, "run", _stub(clarity=0.9))
+    result = await interview_runner.start_interview(session_id=uuid4(), user_id=uuid4())
+    for slot in ("identity.role", "identity.season"):
+        assert result.state["next_slot_key"] == slot
+        result = await interview_runner.submit_and_advance(
+            state=result.state, slot_key=slot, answer_value=_answer_for(slot)
+        )
+    assert result.state["next_slot_key"] == "goals.list"
+    return result
+
+
+async def test_single_goal_autofills_heaviest_and_skips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """목표가 1개면 goals.heaviest 를 자동 채우고 자명한 select 질문을 건너뛴다.
+
+    회귀: heaviest 는 goals.list 파생 select 라, 목표가 하나면 보기가 직전 답을 그대로
+    반복(echo)한다 → 그 하나를 heaviest 로 자동 확정하고 다음 슬롯으로 넘어가야 한다.
+    """
+    result = await _advance_to_goals_list(monkeypatch)
+    result = await interview_runner.submit_and_advance(
+        state=result.state,
+        slot_key="goals.list",
+        answer_value="영어 공부 시작하기",  # 단일 목표
+        answer_type="text",
+    )
+    assert result.state["slot_answers"]["goals.heaviest"] == {
+        "type": "chip",
+        "values": ["영어 공부 시작하기"],
+    }
+    assert result.state["next_slot_key"] == "goals.deadlines"  # heaviest 는 건너뜀
+
+
+async def test_multiple_goals_still_asks_heaviest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """목표가 2개 이상이면 heaviest 를 자동 채우지 않고 정상적으로 질문한다."""
+    result = await _advance_to_goals_list(monkeypatch)
+    result = await interview_runner.submit_and_advance(
+        state=result.state,
+        slot_key="goals.list",
+        answer_value="캡스톤, 토익",  # 복수 목표
+        answer_type="text",
+    )
+    assert not interview._is_filled(result.state["slot_answers"].get("goals.heaviest"))
+    assert result.state["next_slot_key"] == "goals.heaviest"  # 정상 질문
+
+
 async def test_finish_early_defaults_unresolved(monkeypatch: pytest.MonkeyPatch) -> None:
     """[충분해요] — 빈 필수 슬롯은 default + unresolved_slots, end_reason=early_user."""
     monkeypatch.setattr(aiClient, "run", _stub())

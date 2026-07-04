@@ -340,7 +340,7 @@ async def validate_answer(state: InterviewState, config: RunnableConfig) -> Inte
 
     slot_answers = dict(state["slot_answers"])
     attempts = _pending_attempts(slot_answers.get(slot_key)) + 1  # 이번 시도 포함
-    stored, _filled = _decide_storage(
+    stored, filled_now = _decide_storage(
         slot_key,
         answer_type,
         state["last_answer"],
@@ -350,6 +350,9 @@ async def validate_answer(state: InterviewState, config: RunnableConfig) -> Inte
     )
     if stored is not None:  # 실제 값·스킵·pending 모두 저장(영속) — pending 은 '미충족'으로 읽힘
         slot_answers[slot_key] = stored
+    # 목표가 1개뿐이면 goals.heaviest 자동 채움 → 자명한 select 질문(직전 답 echo)을 건너뛴다.
+    if filled_now and slot_key == "goals.list":
+        _autofill_single_goal_heaviest(slot_answers)
 
     return {
         **state,
@@ -659,6 +662,20 @@ def _slot_items(value: dict[str, Any] | None) -> list[str]:
         return [str(v) for v in norm if str(v).strip()]
     raw = value.get("raw")
     return [str(raw)] if isinstance(raw, str) and raw.strip() else []
+
+
+def _autofill_single_goal_heaviest(slot_answers: dict[str, dict[str, Any] | None]) -> None:
+    """목표가 1개뿐이면 goals.heaviest 를 그 목표로 자동 채워 자명한 select 질문을 건너뛴다.
+
+    heaviest 는 '어느 목표가 가장 무거운가'를 고르는 select 인데, 목표가 하나면 선택지가 없어
+    보기가 직전 답(goals.list)을 그대로 반복(echo)한다 → 그 하나를 heaviest 로 자동 확정한다.
+    사용자가 이미 답한 경우(재조립 등)엔 건드리지 않는다.
+    """
+    if _is_filled(slot_answers.get("goals.heaviest")):
+        return
+    items = _slot_items(slot_answers.get("goals.list"))
+    if len(items) == 1:
+        slot_answers["goals.heaviest"] = {"type": "chip", "values": [items[0]]}
 
 
 # 카탈로그 기본 질문 (LLM 죽었을 때 회귀) — mock.interview.SLOT_CATALOG 라벨 기반.
