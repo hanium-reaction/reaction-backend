@@ -22,6 +22,7 @@ from reaction_backend.db.models.llm_run import LlmRun
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.session import get_db
 from reaction_backend.llm import RunResult, aiClient
+from reaction_backend.orchestrator.interview_adapter import PLACEHOLDER_GOAL_TITLE
 from reaction_backend.schemas.common import KST, now_kst
 from reaction_backend.schemas.interview import (
     AvailabilityProfile,
@@ -414,6 +415,53 @@ def test_approve_persists_goal_tree(client: TestClient, monkeypatch: Any) -> Non
     assert j["activatedGoalNodes"] == 1
     assert j["activatedActionItems"] == 1
     assert j["activatedBlocks"] == 1
+
+
+def _placeholder_outcome() -> InterviewOutcome:
+    """goals.list 미입력 → core_goals 에 placeholder 1개 + unresolved_slots 기록 (#88)."""
+    return InterviewOutcome(
+        session_id="iv_ph",
+        generated_at=now_kst(),
+        end_reason="early_user",
+        ambiguity_final=0.5,
+        analysis_source="rule",
+        identity=IdentityContext(role="대3", season="학기중"),
+        core_goals=[
+            GoalCandidate(
+                title=PLACEHOLDER_GOAL_TITLE,
+                category="other",
+                tentative_tier="maintain",
+                confidence=0.0,
+            )
+        ],
+        availability=AvailabilityProfile(
+            activity_window=TimeRange(start="09:00", end="23:00"), peak_window=["오전"]
+        ),
+        preferences=PreferenceProfile(recovery_tone="담백", rest_ok=True, downscope_ok=True),
+        unresolved_slots=["goals.list"],
+        horizon=None,
+    )
+
+
+def test_approve_skips_placeholder_goal(client: TestClient, monkeypatch: Any) -> None:
+    """goals.list 미입력 시 '(미입력 목표)' placeholder 는 실제 Goal 로 영속되지 않는다 (#88).
+
+    placeholder 만 있으면 소속시킬 goal 이 없어 트리/액션도 만들지 않는다 → 목표 관리
+    화면에 정체불명 카드가 노출되지 않는다.
+    """
+    action = ActionItemDraft(
+        node_id="n1", title="작업", estimated_minutes=30, category="study", first_step="시작"
+    )
+    monkeypatch.setattr(aiClient, "run", _stub(action_items=[action]))
+    plan_id = client.post("/plans/generate", json=_body(_placeholder_outcome())).json()["planId"]
+
+    res = client.post(f"/plans/{plan_id}/approve")
+    assert res.status_code == 200
+    j = res.json()
+    assert j["isDraft"] is False
+    assert j["activatedGoals"] == 0  # placeholder 제외 → 실제 Goal 0개
+    assert j["activatedGoalNodes"] == 0
+    assert j["activatedActionItems"] == 0
 
 
 def test_approve_policy_violation_rolls_back(
