@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, time, timedelta
 from http import HTTPStatus
 from typing import Annotated
 from uuid import UUID
@@ -31,23 +32,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
 from reaction_backend.db.session import get_db
+from reaction_backend.repositories.action_item_repo import ActionItemRepo, get_action_item_repo
 from reaction_backend.repositories.execution_repo import ExecutionRepo, get_execution_repo
 from reaction_backend.safety.encryption import encrypt_memo
+from reaction_backend.schemas.common import KST, now_kst, to_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.reflection import (
     FailureTagMaster,
     FailureTagRequest,
     FailureTagResponse,
+    ReflectionPendingItem,
 )
 
 router = APIRouter(prefix="/reflection", tags=["reflection"])
 
 _EXEC_PREFIX = "exec_"
+_ACTION_PREFIX = "action_"
+
+# 회고 누적 창 — 오늘+어제+그제 (DevBaseline §1.4). 초과분은 cron 이 reflection_skipped 로 만료.
+_PENDING_WINDOW_DAYS = 3
 
 # 태깅 대상 — 실패/부분완료만 (S18 은 미완료 카드에서만 진입)
 _TAGGABLE_STATUSES = ("failed", "partial_done")
 
 ExecutionRepoDep = Annotated[ExecutionRepo, Depends(get_execution_repo)]
+ActionRepoDep = Annotated[ActionItemRepo, Depends(get_action_item_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 
 
@@ -66,6 +75,38 @@ def _parse_execution_id(execution_id: str) -> UUID:
         return UUID(execution_id[len(_EXEC_PREFIX) :])
     except ValueError as e:
         raise _execution_not_found() from e
+
+
+@router.get("/pending")
+async def list_pending_reflections(
+    user: CurrentUser,
+    repo: ExecutionRepoDep,
+    action_repo: ActionRepoDep,
+) -> list[ReflectionPendingItem]:
+    """S17 저녁 회고 — 최근 3일(오늘+어제+그제) 미체크(in_progress) 실행 목록 (#83).
+
+    시작만 하고 체크인하지 않은 실행을 소급 회고(POST /reflection/batch)하도록 모은다.
+    아직 결과 미정이라 completionStatus 는 null.
+    """
+    today = now_kst().date()
+    since = datetime.combine(today - timedelta(days=_PENDING_WINDOW_DAYS - 1), time.min, tzinfo=KST)
+    executions = await repo.list_pending_reflection(user.id, since=since)
+
+    items: list[ReflectionPendingItem] = []
+    for execution in executions:
+        action = await action_repo.get_by_id(user.id, execution.action_item_id)
+        start = to_kst(execution.plan_start_at)
+        items.append(
+            ReflectionPendingItem(
+                execution_id=f"{_EXEC_PREFIX}{execution.id}",
+                action_item_id=f"{_ACTION_PREFIX}{execution.action_item_id}",
+                title=action.title if action is not None else "(삭제된 카드)",
+                scheduled_date=start.date(),
+                scheduled_time=start.strftime("%H:%M"),
+                completion_status=None,
+            )
+        )
+    return items
 
 
 @router.get("/failure-tags")
