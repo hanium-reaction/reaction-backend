@@ -152,7 +152,8 @@ async def _resolve_outcome(
                 float(row.ambiguity_final) if row.ambiguity_final is not None else 0.0
             ),
             end_reason=cast(InterviewEndReason, row.end_reason or "completed"),
-            analysis_source="rule",  # slot 결정적 투영 — 정규화 LLM 미개입
+            # 인터뷰 정규화가 LLM 이었는지 룰 fallback 이었는지 (세션에 영속된 플래그).
+            analysis_source="rule" if row.used_fallback else "llm",
         )
     raise ApiError(
         ErrorCode.COMMON_VALIDATION_ERROR,

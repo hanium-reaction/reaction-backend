@@ -71,20 +71,34 @@ class SlotAnswerRequest(CamelModel):
 
 
 class NextQuestionSchema(CamelModel):
-    """LLM ① — `interview/next_question` 응답. 다음 질문 1개 + 직전 답 정규화/채점."""
+    """LLM ① — `interview/next_question` 응답. 다음 질문 1개 (+ 공감 한 줄).
+
+    직전 답의 채점(clarity)·정규화(normalized_value)는 `AmbiguityUpdate`
+    (`interview/ambiguity_score`) 가 전담한다 — 여기 두면 두 프롬프트가 같은 걸 중복
+    계산하고 스키마가 드리프트한다. 라우터가 실제로 읽는 건 `question`.
+    """
 
     question: str
-    clarity_score: float = Field(ge=0.0, le=1.0)
-    normalized_value: str | None = None
     empathy_one_liner: str
 
 
 class AmbiguityUpdate(CamelModel):
-    """LLM ② — `interview/ambiguity_score` 응답. 슬롯 채점 결과 + 갱신된 모호함 지표."""
+    """LLM ② — `interview/ambiguity_score` 응답. 슬롯 채점 + 모호함 + 구조화 정규화 값.
+
+    `normalized_value` 는 자유서술 답을 슬롯 answer_type 에 맞는 구조로 추출한 값이다
+    (딥 인터뷰는 채팅이라 답이 전부 자유서술 text 로 들어오는데, First Plan 시드
+    `build_outcome` 은 chip/range/date 구조를 읽으므로 여기서 LLM 이 구조화해 저장한다):
+    - chip/select   → 보기 중 하나(또는 배열)  예: "3학년" / ["오전","저녁"]
+    - time_range    → {"start":"HH:MM","end":"HH:MM"}
+    - date_picker   → "YYYY-MM-DD" (오늘 기준 상대표현 해석)
+    - text          → 정리된 핵심값(문자열 또는 배열)
+    추출 불가/무관한 답이면 null → 구조화 슬롯은 재질문, text 는 원문 저장으로 폴백.
+    """
 
     slot_key: str
     clarity_score: float = Field(ge=0.0, le=1.0)
     new_ambiguity: float = Field(ge=0.0, le=1.0)
+    normalized_value: JsonValue | None = None
 
 
 class InterviewSummary(CamelModel):

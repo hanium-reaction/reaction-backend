@@ -45,7 +45,7 @@ class ActionItemDraft(CamelModel):
 
     node_id: str  # 소속 leaf 의 temp_uuid
     title: str
-    estimated_minutes: int = Field(gt=0, le=60)  # leaf 는 60분 이내 (goal_decompose 규칙)
+    estimated_minutes: int = Field(ge=1, le=60)  # leaf 는 60분 이내 (goal_decompose 규칙)
     category: str
     first_step: str  # 5분 내 시작 가능한 tiny first step
 

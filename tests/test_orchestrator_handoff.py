@@ -119,20 +119,25 @@ def test_interview_outcome_serializes_camel_case() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Interview Cyclic 종료 조건 4종 (순수 함수 _terminal_reason / should_continue)
+# Interview Cyclic 종료 조건 (순수 함수 _terminal_reason / should_continue)
+#
+# 완료는 필수 슬롯 완료(FSM)가 단독으로 운전한다 — float ambiguity_score 임계로는 조기
+# 종료하지 않는다(그러면 명료성이 100%에 못 닿음). turn_limit 도 없다(슬롯별 시도 상한이
+# 완료 수렴을 보장 — _decide_storage). 조기 종료는 [충분해요](early_finish)뿐.
 # ─────────────────────────────────────────────────────────────────────────────
+
+_ALL_REQUIRED_FILLED = {k: {"type": "text", "raw": "x"} for k in interview.REQUIRED_SLOT_SEQUENCE}
 
 
 @pytest.mark.parametrize(
     ("patch", "expected"),
     [
+        ({"slot_answers": _ALL_REQUIRED_FILLED}, "completed"),  # 필수 슬롯 완료 = 명료성 100%
         ({"ambiguity_score": 0.7, "early_finish": True}, "early_user"),  # 충분해요
-        (
-            {"ambiguity_score": 0.2},
-            None,
-        ),  # 필수 슬롯 완료 전에는 낮은 LLM 모호함만으로 종료하지 않음
-        ({"ambiguity_score": 0.7, "total_turns": 15}, None),  # 턴 제한보다 필수 슬롯 완료가 우선
-        ({"ambiguity_score": 0.7, "stall_count": 3}, None),  # 정체도 자동 완료로 환원하지 않음
+        # 회귀: 필수 슬롯 완료 전에는 낮은 LLM 모호함만으로 종료하지 않음
+        ({"ambiguity_score": 0.05}, None),
+        # 회귀: turn_limit 없음 — 턴이 많아도 필수 슬롯 완료가 우선
+        ({"ambiguity_score": 0.7, "total_turns": 15}, None),
         ({"ambiguity_score": 0.7}, None),  # 계속
     ],
 )
@@ -186,8 +191,6 @@ def _stub_factory(new_ambiguity: float, *, fell_back: bool = False):
         if schema is NextQuestionSchema:
             value = NextQuestionSchema(
                 question="다음 질문",
-                clarity_score=0.8,
-                normalized_value=None,
                 empathy_one_liner="좋아요",
             )
         elif schema is AmbiguityUpdate:

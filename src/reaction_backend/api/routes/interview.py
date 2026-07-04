@@ -22,7 +22,9 @@ mock 스텁을 걷어내고 LangGraph 인터뷰 엔진(`orchestrator/interview*`
 - 동시성 lock(ADR-0005 §7.6) — mutating 진입점은 `user_agent_lock` 으로 보호, 다중 디바이스
   동시 진입 시 409 `AGENT_CONCURRENT_ACCESS`.
 
-⚠️ 본 PR 의 한계(후속): 재조립 시 transient 상태(stall_count·used_fallback)는 리셋된다.
+영속 상태: 슬롯별 재질문 시도 횟수는 `interview_slot_answers.value` 의 pending 마커로,
+`used_fallback`(인터뷰 중 룰 fallback 있었는지 → `outcome.analysis_source`)은
+`interview_sessions.used_fallback` 컬럼으로 OR 누적 영속된다.
 """
 
 from __future__ import annotations
@@ -86,9 +88,27 @@ def _parse_session_id(session_id: str) -> UUID:
         raise _not_found() from e
 
 
-def _config(session: AsyncSession) -> RunnableConfig:
-    """노드가 예산 가드·llm_runs 기록에 쓰는 세션 채널 (ADR-0005 §7.1)."""
-    return {"configurable": {"session": session}}
+def _config(
+    session: AsyncSession, slot_meta: dict[str, dict[str, Any]] | None = None
+) -> RunnableConfig:
+    """노드가 예산 가드·llm_runs 기록에 쓰는 세션 채널 (ADR-0005 §7.1) + 슬롯 메타."""
+    return {"configurable": {"session": session, "slot_meta": slot_meta or {}}}
+
+
+def _slot_meta(slot_answers: Mapping[str, dict[str, Any] | None]) -> dict[str, dict[str, Any]]:
+    """슬롯키→{label, answer_type, options} 맵 — ask_question 이 질문 프롬프트에 실어
+
+    슬롯 의도(라벨)·형식·보기까지 보고 정확한 질문을 만들게 한다. goals.heaviest 보기는
+    현재 slot_answers(goals.list)에서 동적 생성.
+    """
+    return {
+        s.slot_key: {
+            "label": s.label,
+            "answer_type": s.answer_type,
+            "options": _question_options(s.slot_key, slot_answers),
+        }
+        for s in SLOT_CATALOG
+    }
 
 
 async def _load(repo: InterviewRepo, user_id: UUID, session_id: str) -> InterviewSessionRow:
@@ -103,20 +123,23 @@ def _state_from_db(
 ) -> InterviewState:
     """interview_sessions 스칼라 + slot_answers 행 → InterviewState 재조립.
 
-    transient(stall_count·used_fallback·next_*)은 initial_state default(0/False/None)로
-    시작 — 재조립 한계(PR 본문). 영속 대상은 slot_answers·ambiguity·total_turns.
+    영속 대상: slot_answers(pending 시도 마커 포함)·ambiguity·total_turns·used_fallback.
+    (`next_*` 만 turn-local transient 라 default 로 시작.)
     """
     state = interview.initial_state(session_id=row.id, user_id=row.user_id)
     state["slot_answers"] = {r.slot_key: r.value for r in slot_rows if r.value is not None}
     if row.ambiguity_final is not None:
         state["ambiguity_score"] = float(row.ambiguity_final)
+    state["used_fallback"] = bool(row.used_fallback)
     state["total_turns"] = row.total_turns
     return state
 
 
 def _remaining_required(slot_answers: Mapping[str, dict[str, Any] | None]) -> int:
-    """남은 미해결 필수 슬롯 수 → FE ambiguityScore(int)."""
-    return sum(1 for k in _REQUIRED_KEYS if not slot_answers.get(k))
+    """남은 미해결 필수 슬롯 수 → FE ambiguityScore(int). pending(재질문 대기)은 미충족으로 센다."""
+    return sum(
+        1 for k in _REQUIRED_KEYS if not interview_adapter.is_filled_answer(slot_answers.get(k))
+    )
 
 
 def _question_options(
@@ -174,14 +197,17 @@ def _response(
 def _ended_response(
     row: InterviewSessionRow, slot_rows: list[InterviewSlotAnswer]
 ) -> InterviewSession:
-    """이미 종료된 세션 재조회 — outcome 은 slot_answers 에서 결정적 재빌드(LLM 0회)."""
+    """이미 종료된 세션 재조회 — outcome 은 slot_answers 에서 결정적 재빌드(LLM 0회).
+
+    analysis_source 는 영속된 `used_fallback`(인터뷰 중 룰 fallback 있었는지) 기준.
+    """
     slot_answers = {r.slot_key: r.value for r in slot_rows if r.value is not None}
     outcome = interview_adapter.build_outcome(
         session_id=str(row.id),
         slot_answers=slot_answers,
         ambiguity_final=float(row.ambiguity_final) if row.ambiguity_final is not None else 0.0,
         end_reason=cast(InterviewEndReason, row.end_reason or "completed"),
-        analysis_source="rule",
+        analysis_source="rule" if row.used_fallback else "llm",
     )
     return InterviewSession(
         session_id=str(row.id),
@@ -206,7 +232,10 @@ async def _persist_turn(
             is_required=slot_key in _REQUIRED_KEYS,
         )
     await repo.save_progress(
-        row, total_turns=state["total_turns"], ambiguity_final=state["ambiguity_score"]
+        row,
+        total_turns=state["total_turns"],
+        ambiguity_final=state["ambiguity_score"],
+        used_fallback=state["used_fallback"],
     )
 
 
@@ -235,7 +264,11 @@ async def start_session(user: CurrentUser, repo: RepoDep, session: SessionDep) -
             )
         row = await repo.create_session(user.id, get_settings().llm_model)
         result = await interview_runner.start_interview(
-            session_id=row.id, user_id=user.id, session=session, tone_mode=user.tone_mode
+            session_id=row.id,
+            user_id=user.id,
+            session=session,
+            tone_mode=user.tone_mode,
+            slot_meta=_slot_meta({}),
         )
         await _persist_turn(repo, row, result.state)
         await session.commit()
@@ -296,12 +329,16 @@ async def submit_answer(
 
         slot_rows = await repo.list_slot_answers(row.id)
         state = _state_from_db(row, slot_rows)
+        answered_slot = _CATALOG_BY_KEY.get(body.slot_key)
         result = await interview_runner.submit_and_advance(
             state=state,
             slot_key=body.slot_key,
             answer_value=body.value,
             session=session,
             tone_mode=user.tone_mode,
+            answer_type=answered_slot.answer_type if answered_slot else None,
+            options=_question_options(body.slot_key, state["slot_answers"]),
+            slot_meta=_slot_meta(state["slot_answers"]),
         )
         await _persist_turn(repo, row, result.state)
 
@@ -312,6 +349,7 @@ async def submit_answer(
                 end_reason=reason,
                 total_turns=result.state["total_turns"],
                 ambiguity_final=result.state["ambiguity_score"],
+                used_fallback=result.state["used_fallback"],
             )
             await session.commit()
             return _response(
@@ -340,7 +378,9 @@ async def next_question(
             return _ended_response(row, await repo.list_slot_answers(row.id))
         slot_rows = await repo.list_slot_answers(row.id)
         state = _state_from_db(row, slot_rows)
-        state = await interview.ask_question(state, _config(session))
+        state = await interview.ask_question(
+            state, _config(session, _slot_meta(state["slot_answers"]))
+        )
         await _persist_turn(repo, row, state)
         await session.commit()
         return _response(row.id, state)
@@ -370,6 +410,7 @@ async def finish_session(
             end_reason=reason,
             total_turns=result.state["total_turns"],
             ambiguity_final=result.state["ambiguity_score"],
+            used_fallback=result.state["used_fallback"],
         )
         await session.commit()
         return _response(

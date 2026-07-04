@@ -28,8 +28,6 @@ def _stub(*, clarity: float = 0.9, new_ambiguity: float = 0.9, fell_back: bool =
         if schema is NextQuestionSchema:
             value: Any = NextQuestionSchema(
                 question="다음 질문이에요",
-                clarity_score=clarity,
-                normalized_value=None,
                 empathy_one_liner="좋아요",
             )
         elif schema is AmbiguityUpdate:
@@ -138,6 +136,86 @@ def test_finish_returns_summary_and_outcome(client: TestClient, monkeypatch: Any
     assert body["summary"]["confirmQuestion"]  # S03 확인 카드
     assert body["outcome"]["sessionId"] == sid  # First Plan 시드
     assert "identity.role" not in body["outcome"]["unresolvedSlots"]  # 채운 슬롯
+    assert body["outcome"]["analysisSource"] == "llm"  # fallback 없음 → llm
+
+
+def test_used_fallback_persists_to_analysis_source(client: TestClient, monkeypatch: Any) -> None:
+    """이전 턴에 LLM 룰 fallback 이 있었으면, 재조립을 넘어 outcome.analysisSource='rule'.
+
+    used_fallback 은 턴마다 재조립되는 transient 라 세션 컬럼에 OR 누적 영속돼야 전체 인터뷰
+    기준으로 정확하다 (마지막 턴만 보고 'llm' 로 잘못 찍히던 것을 고침)."""
+    monkeypatch.setattr(aiClient, "run", _stub(fell_back=True))  # 시작 턴부터 fallback
+    sid = client.post("/interview/sessions").json()["sessionId"]
+
+    # 이후 턴은 정상(fallback 아님) — 그래도 앞선 fallback 이 영속돼야 한다
+    monkeypatch.setattr(aiClient, "run", _stub(fell_back=False))
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.role", "value": ["3학년"], "clientTurn": 1},
+    )
+    body = client.post(f"/interview/sessions/{sid}/finish").json()
+    assert body["outcome"]["analysisSource"] == "rule"
+
+    # 재조회(이미 종료된 세션)도 동일하게 영속된 플래그 기준
+    again = client.get(f"/interview/sessions/{sid}").json()
+    assert again["outcome"]["analysisSource"] == "rule"
+
+
+def test_critical_slot_reask_persists_attempts_across_db(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """핵심 슬롯 재질문 시 시도 횟수가 DB 왕복(재조립)을 넘어 누적돼, 상한 후 진행한다.
+
+    매 턴 라우터가 slot_answers 를 DB(fake)에 영속하고 다시 재조립하는데, pending 마커가
+    그 왕복을 견뎌야 3회차에서 best-effort 로 goals.list 를 벗어난다(무한 재질문 방지)."""
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        schema = kwargs["schema"]
+        if schema is NextQuestionSchema:
+            value: Any = NextQuestionSchema(question="다음 질문", empathy_one_liner="좋아요")
+        else:  # AmbiguityUpdate — goals.list 는 계속 애매(재질문), 나머지는 유효
+            slot = kwargs["variables"]["slot_key"]
+            value = AmbiguityUpdate(
+                slot_key=slot,
+                clarity_score=0.1 if slot == "goals.list" else 0.9,
+                new_ambiguity=0.5,
+            )
+        return RunResult(
+            value=value,
+            fell_back=False,
+            reason=None,
+            prompt_id=kwargs["prompt_id"],
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+    sid = client.post("/interview/sessions").json()["sessionId"]
+
+    def answer(slot: str, val: Any) -> dict[str, Any]:
+        return client.post(
+            f"/interview/sessions/{sid}/answers",
+            json={"slotKey": slot, "value": val, "clientTurn": 1},
+        ).json()
+
+    # identity 두 chip 슬롯을 유효하게 채워 goals.list 에 도달
+    answer("identity.role", ["3학년"])
+    body = answer("identity.season", ["방학"])
+    assert body["currentQuestion"]["slotKey"] == "goals.list"
+    amb_at_goals = body["ambiguityScore"]
+
+    # 1·2회차: 애매한 자유서술 → 재질문 (ambiguityScore 그대로, 여전히 goals.list)
+    body = answer("goals.list", "음 그냥 이것저것")
+    assert body["currentQuestion"]["slotKey"] == "goals.list"
+    assert body["ambiguityScore"] == amb_at_goals  # pending — 미충족 유지
+    body = answer("goals.list", "여전히 잘 정리가 안돼")
+    assert body["currentQuestion"]["slotKey"] == "goals.list"
+    assert body["ambiguityScore"] == amb_at_goals
+
+    # 3회차(상한): DB 를 넘어 누적된 시도 → best-effort 채택하고 다음 슬롯으로
+    body = answer("goals.list", "그럼 프로젝트 하나 할래")
+    assert body["currentQuestion"]["slotKey"] != "goals.list"
+    assert body["ambiguityScore"] == amb_at_goals - 1  # goals.list 충족 → 하나 감소
 
 
 def test_slot_catalog_includes_options(client: TestClient) -> None:

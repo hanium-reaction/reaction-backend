@@ -18,11 +18,17 @@
 - State 는 직렬화 가능해야 한다 → `AsyncSession` 은 넣지 않고
   `config["configurable"]["session"]` 채널로 전달 (ADR-0005 §7.1).
 
-종료 조건:
-  필수 슬롯 전부 충족 / early_finish.
+종료 조건 (FSM 완료):
+  필수 슬롯 전부 충족(= 명료성 100%) / early_finish.
 
-  `ambiguity_score` float 는 LLM 채점 보조값일 뿐 API 의 `ambiguityScore`
-  (남은 필수 슬롯 수) 완료 조건을 대체하지 않는다.
+  ⚠️ float `ambiguity_score` 는 **종료를 운전하지 않는다**. FE 명료성 지표(= 남은 필수
+  슬롯 수, API 의 `ambiguityScore`(int))와 진실 소스가 달라, float 임계로 조기 종료하면
+  필수 슬롯이 다 차기 전에 끝나 명료성이 100%에 못 닿는다. 완료는 슬롯 충족(FSM)이 단독으로
+  운전하고, float 값은 telemetry(`ambiguity_final`)로만 남긴다.
+
+  루프 방지는 **슬롯별 시도 상한**(`_decide_storage`/`MAX_SLOT_ATTEMPTS`, pending 마커로
+  영속)이 담당한다 — 상한에 닿으면 그 슬롯을 스킵/best-effort 로 채워 진행시켜, 같은 질문이
+  무한 반복되지 않고 모든 슬롯이 결국 채워져 완료로 수렴한다(별도 turn_limit 불필요).
 
 라우터는 보통 그래프를 한 번에 `ainvoke` 하지 않고 `interview_runner` 로 턴 단위 구동한다
 (사용자 답이 HTTP 요청으로 외부에서 들어오기 때문 — `receive_answer` 가 no-op 인 이유).
@@ -40,6 +46,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator import interview_adapter
+from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.interview import (
     AmbiguityUpdate,
     InterviewEndReason,
@@ -62,6 +69,44 @@ __all__ = [
 
 STORE_CLARITY_MIN = 0.4  # clarity 가 이 미만이면 답을 채우지 않고 같은 슬롯 재질문
 
+# 사용자가 '없음/모름/건너뛰기'를 밝힌 슬롯에 저장하는 스킵 마커(빈 text). build_outcome 은
+# 이를 값 없음(default)으로 읽고, FSM 은 '채워짐'으로 보아 다음 슬롯으로 진행 → 무한 재질문 방지.
+_SKIP_MARKER: dict[str, Any] = {"type": "text", "raw": ""}
+
+# 핵심 목표 슬롯 — 계획의 근간이라 '없어/모름' 스킵을 받지 않고, 유효한 답이 나올 때까지
+# (상한 내에서) 재질문한다. 비핵심 슬롯은 스킵/제약-무루프로 곧장 진행.
+CRITICAL_SLOTS: frozenset[str] = frozenset({"goals.list", "goals.heaviest"})
+
+# 한 슬롯에 허용하는 최대 시도 횟수(최초 1 + 재질문 2). 이후엔 어쩔 수 없이 진행:
+# 핵심 슬롯은 마지막 비지 않은 답을 best-effort 로 채택, 비핵심은 스킵(default).
+MAX_SLOT_ATTEMPTS = 3
+
+
+def _pending(attempts: int) -> dict[str, Any]:
+    """재질문 대기 마커 — 시도 횟수를 slot_answers 에 실어 턴 사이에 영속(스키마 변경 없이)."""
+    return {"type": "pending", "attempts": attempts}
+
+
+def _pending_attempts(value: dict[str, Any] | None) -> int:
+    """슬롯에 누적된 시도 횟수 (pending 마커면 그 값, 아니면 0)."""
+    if value and value.get("type") == "pending":
+        raw = value.get("attempts", 0)
+        return int(raw) if isinstance(raw, int) else 0
+    return 0
+
+
+def _retry_hint(slot_key: str, attempts: int) -> str:
+    """재질문 힌트 — 같은 질문 반복이 아니라 직전 답이 왜 부족했는지 짚고 더 구체적으로 묻게 한다."""
+    if attempts <= 0:
+        return ""
+    if slot_key in CRITICAL_SLOTS:
+        return (
+            "재질문: 직전 답으로는 이 항목을 정하기 어려웠다. 이건 계획의 핵심이라 건너뛸 수 없으니, "
+            "직전 답을 짧게 되짚고 보기·예시를 들어 고르기 쉽게 다시 물어라."
+        )
+    return "재질문: 직전 답이 조금 모호했다. 같은 말 반복 말고 예시·보기를 들어 답하기 쉽게 물어라."
+
+
 # Rule-based FSM 이 순서대로 채워가는 필수 슬롯 (interview_adapter 와 동일 진실 소스).
 # 핵심 목표(goals.*) / 가용 시간(time.*) / 선호 방식(recovery.*) 그룹을 모두 포함.
 REQUIRED_SLOT_SEQUENCE: tuple[str, ...] = interview_adapter.REQUIRED_SLOT_KEYS
@@ -78,7 +123,6 @@ class InterviewState(TypedDict):
     user_id: UUID
     ambiguity_score: float  # 0..1, 낮을수록 명확 (DB ambiguity_final 과 동일 척도)
     total_turns: int
-    stall_count: int
     early_finish: bool  # [충분해요] 탭
     end_reason: InterviewEndReason | None
 
@@ -104,7 +148,6 @@ def initial_state(*, session_id: UUID, user_id: UUID) -> InterviewState:
         user_id=user_id,
         ambiguity_score=1.0,
         total_turns=0,
-        stall_count=0,
         early_finish=False,
         end_reason=None,
         next_slot_key=None,
@@ -124,8 +167,8 @@ def initial_state(*, session_id: UUID, user_id: UUID) -> InterviewState:
 
 
 def _is_filled(value: dict[str, Any] | None) -> bool:
-    """슬롯 값이 실질적으로 채워졌는지 (빈 dict/None 제외)."""
-    return bool(value)
+    """슬롯 값이 실질적으로 채워졌는지 (빈 dict/None/pending 마커 제외)."""
+    return interview_adapter.is_filled_answer(value)
 
 
 def _next_required_slot(state: InterviewState) -> str | None:
@@ -149,8 +192,6 @@ def _rule_next_question(state: InterviewState, slot_key: str) -> NextQuestionSch
         question=_DEFAULT_SLOT_QUESTIONS.get(
             slot_key, "조금만 더 구체적으로 알려주실 수 있을까요?"
         ),
-        clarity_score=0.5,
-        normalized_value=None,
         empathy_one_liner="천천히 알려주셔도 괜찮아요.",
     )
 
@@ -190,6 +231,28 @@ def _tone_mode(config: RunnableConfig) -> str | None:
     return raw if isinstance(raw, str) else None
 
 
+def _answer_type(config: RunnableConfig) -> str | None:
+    """직전 답 슬롯의 answer_type (라우터가 카탈로그에서 주입). 정규화 추출 지시에 사용."""
+    raw = config.get("configurable", {}).get("answer_type")
+    return raw if isinstance(raw, str) else None
+
+
+def _answer_options(config: RunnableConfig) -> list[str]:
+    """직전 답 슬롯의 chip/select 보기 (라우터 주입). LLM 이 자유서술을 보기로 매핑하게 한다."""
+    raw = config.get("configurable", {}).get("options")
+    return [str(x) for x in raw] if isinstance(raw, list) else []
+
+
+def _slot_meta(config: RunnableConfig) -> dict[str, dict[str, Any]]:
+    """슬롯키→{label, answer_type, options} 맵 (라우터가 카탈로그에서 주입).
+
+    ask_question 이 이번에 물을 슬롯의 사람용 라벨·형식·보기를 프롬프트에 실어, LLM 이
+    슬롯 의도에 정확히 맞는 질문을 만들게 한다(없으면 키 문자열만 보고 추측하던 문제).
+    """
+    raw = config.get("configurable", {}).get("slot_meta")
+    return raw if isinstance(raw, dict) else {}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Nodes — async def node(state, config). config 두 번째 인자 (ADR-0005 §7.1).
 # ─────────────────────────────────────────────────────────────────────────────
@@ -201,6 +264,9 @@ async def ask_question(state: InterviewState, config: RunnableConfig) -> Intervi
     슬롯 선택은 룰(`_next_required_slot`), 문장만 LLM. timeout 시 카탈로그 기본 질문.
     """
     slot_key = _next_required_slot(state) or ""
+    meta = _slot_meta(config).get(slot_key) or {}
+    meta_options = meta.get("options") or []
+    attempts = _pending_attempts(state["slot_answers"].get(slot_key))  # 이 슬롯 재질문 횟수
     result = await aiClient.run(
         module="interview",
         schema=NextQuestionSchema,
@@ -211,7 +277,12 @@ async def ask_question(state: InterviewState, config: RunnableConfig) -> Intervi
             "goal_title": _heaviest_goal_hint(state),
             "turn_index": str(state["total_turns"]),
             "ambiguous_slot": slot_key,
+            # 슬롯 의도(라벨)·형식·보기를 실어 LLM 이 정확한 질문을 만들게 한다.
+            "slot_label": str(meta.get("label") or _DEFAULT_SLOT_QUESTIONS.get(slot_key, slot_key)),
+            "answer_type": str(meta.get("answer_type") or "text"),
+            "options": ", ".join(str(o) for o in meta_options) or "(자유 입력)",
             "last_answer": _last_answer_text(state),
+            "retry": _retry_hint(slot_key, attempts),
         },
         user_id=state["user_id"],
         session=_session(config),
@@ -236,13 +307,17 @@ async def receive_answer(state: InterviewState, config: RunnableConfig) -> Inter
 
 
 async def validate_answer(state: InterviewState, config: RunnableConfig) -> InterviewState:
-    """LLM ② — 직전 답을 채점·정규화하고, 충분하면 슬롯에 채운 뒤 모호함 갱신.
+    """LLM ② — 직전 답을 채점·정규화(`interview/ambiguity_score`)하고 슬롯에 저장한다.
 
-    - clarity ≥ STORE_CLARITY_MIN → 정규화해 `slot_answers[slot]` 에 저장(슬롯 충족).
-    - clarity 미달 → 저장 안 함 → FSM 이 같은 슬롯을 한 번 더 묻는다 (재질문).
-    - 새 슬롯이 안 채워진 턴이면 stall_count 증가(진척 없음), 채워지면 리셋 (정체 감지).
+    실제 저장 결정(무엇을 저장하고 채워졌다고 볼지)은 순수 함수 `_decide_storage` 가 맡는다
+    (표로 단위 테스트 가능). 이 노드는 LLM 호출·상태 조립만 한다.
+
+    ⚠️ chip 을 clarity 게이트에 태우면 안 되는 이유: 실 LLM 이 "1학년"·"담백" 같은 유효한
+    단일 chip 선택을 0.3 정도로 낮게 채점해, 필수 chip 슬롯(13개 중 7개)이 영구 재질문에
+    빠져 turn_limit 로 끝나고 명료성이 0% 에 갇힌다. 명확성 판단이 필요한 건 자유 서술뿐이다.
     """
     slot_key = state.get("last_slot_key") or state.get("next_slot_key") or ""
+    answer_type = _answer_type(config)
 
     result = await aiClient.run(
         module="interview",
@@ -250,7 +325,13 @@ async def validate_answer(state: InterviewState, config: RunnableConfig) -> Inte
         prompt_id="interview/ambiguity_score",
         fallback=lambda: _rule_ambiguity_update(state, slot_key),
         timeout=8.0,
-        variables={"slot_key": slot_key, "answer": _last_answer_text(state)},
+        variables={
+            "slot_key": slot_key,
+            "answer": _last_answer_text(state),
+            "answer_type": answer_type or "text",
+            "options": ", ".join(_answer_options(config)) or "(자유 입력)",
+            "today": now_kst().date().isoformat(),
+        },
         user_id=state["user_id"],
         session=_session(config),
         tone_mode=_tone_mode(config),
@@ -258,20 +339,22 @@ async def validate_answer(state: InterviewState, config: RunnableConfig) -> Inte
     update = result.value
 
     slot_answers = dict(state["slot_answers"])
-    last_answer = state["last_answer"]
-    filled_now = (
-        bool(slot_key) and last_answer is not None and update.clarity_score >= STORE_CLARITY_MIN
+    attempts = _pending_attempts(slot_answers.get(slot_key)) + 1  # 이번 시도 포함
+    stored, _filled = _decide_storage(
+        slot_key,
+        answer_type,
+        state["last_answer"],
+        update.normalized_value,
+        update.clarity_score,
+        attempts,
     )
-    if filled_now and last_answer is not None:  # 2번째 조건은 mypy 내로잉용 (filled_now 에 포함)
-        slot_answers[slot_key] = _normalize_for_store(slot_key, last_answer)
+    if stored is not None:  # 실제 값·스킵·pending 모두 저장(영속) — pending 은 '미충족'으로 읽힘
+        slot_answers[slot_key] = stored
 
-    new_score = update.new_ambiguity
-    stall = 0 if filled_now else state["stall_count"] + 1
     return {
         **state,
         "slot_answers": slot_answers,
-        "ambiguity_score": new_score,
-        "stall_count": stall,
+        "ambiguity_score": update.new_ambiguity,  # telemetry(ambiguity_final) — 종료는 FSM 이 운전
         "last_answer": None,  # 소비 완료 — 다음 턴 답과 섞이지 않게
         "last_slot_key": None,
         "used_fallback": state["used_fallback"] or result.fell_back,
@@ -320,8 +403,10 @@ async def finalize_outcome(state: InterviewState, config: RunnableConfig) -> Int
 def _terminal_reason(state: InterviewState) -> InterviewEndReason | None:
     """종료 조건 평가. 종료면 DB enum 사유, 아니면 None.
 
-    일반 진행은 필수 슬롯 완료(FSM)일 때만 `completed` 로 마감한다.
-    LLM 의 float `ambiguity_score` 가 낮아도 미해결 필수 슬롯이 남아 있으면 계속 묻는다.
+    완료는 **필수 슬롯 완료(FSM)가 단독으로 운전**한다 — 이때만 남은 필수 슬롯 0(= FE
+    명료성 100%)이 보장된다. float `ambiguity_score` 가 낮아도 미해결 필수 슬롯이 남으면
+    계속 묻는다. 재질문 폭주는 `_decide_storage` 의 슬롯별 시도 상한이 막아 모든 슬롯이 결국
+    채워지므로, 별도 turn_limit 없이도 완료로 수렴한다.
     """
     if state["early_finish"]:
         return "early_user"
@@ -341,6 +426,22 @@ def should_continue(state: InterviewState) -> Literal["continue", "finish"]:
 
 _TEXT_SPLIT_RE = re.compile(r"[,、，\n]")
 
+# '없음/모름/건너뛰기' 의사 표현 — LLM 이 normalized_value="" 신호를 놓쳐도(짧은 "없어" 등)
+# 룰로 스킵 처리해 무한 재질문을 막는 백스톱.
+_SKIP_RE = re.compile(
+    r"없어|없음|없다|없습니다|모르|몰라|상관\s*없|딱히|건너|넘어갈|해당\s*없|스킵|skip",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_skip(text: str) -> bool:
+    """항목 없음·건너뛰기 의사가 답의 거의 전부인지 (룰 백스톱).
+
+    긴 답에 우연히 '없어'가 섞인 경우(예: "고정 시간 없어서 자유로워")는 제외하려고 길이 상한.
+    """
+    t = text.strip()
+    return bool(t) and len(t) <= 20 and _SKIP_RE.search(t) is not None
+
 
 def _normalize_for_store(slot_key: str, answer: dict[str, Any]) -> dict[str, Any]:
     """저장 직전 룰 정규화 — text 답은 항목 리스트(`normalized`)를 채워 어댑터가 쓰기 쉽게.
@@ -355,12 +456,130 @@ def _normalize_for_store(slot_key: str, answer: dict[str, Any]) -> dict[str, Any
     return answer
 
 
+# 구조화 슬롯 — 추출값만 있으면 clarity 게이트 없이 저장(선택/구간/날짜는 재질문 대상 아님).
+_CONSTRAINED_TYPES = {"chip", "select", "time_range", "date_picker"}
+
+
+def _coerce_normalized(answer_type: str | None, norm: Any) -> dict[str, Any] | None:
+    """LLM 이 뽑은 normalized_value 를 슬롯 형식대로 저장 형태(dict)로 환원. 불가면 None.
+
+    build_outcome 이 읽는 규약과 일치:
+    - chip/select → {"type":"chip","values":[...]}
+    - time_range  → {"type":"range","start":"HH:MM","end":"HH:MM"}
+    - date_picker → {"type":"text","raw":"YYYY-MM-DD"}  (goals.deadlines 는 _text_raw 로 읽음)
+    - text/미지정 → {"type":"text","raw":..., "normalized":[...]}
+    """
+    if norm is None:
+        return None
+    if answer_type in {"chip", "select"}:
+        vals = norm if isinstance(norm, list) else [norm]
+        cleaned = [str(v).strip() for v in vals if str(v).strip()]
+        return {"type": "chip", "values": cleaned} if cleaned else None
+    if answer_type == "time_range":
+        if isinstance(norm, dict):
+            start, end = norm.get("start"), norm.get("end")
+            if isinstance(start, str) and start and isinstance(end, str) and end:
+                return {"type": "range", "start": start, "end": end}
+        return None
+    if answer_type == "date_picker":
+        if isinstance(norm, (dict, list)):
+            return None
+        s = str(norm).strip()
+        return {"type": "text", "raw": s} if s else None
+    # text 또는 answer_type 미지정 (graph/legacy) — 정리된 핵심값
+    if isinstance(norm, list):
+        items = [str(v).strip() for v in norm if str(v).strip()]
+        return {"type": "text", "raw": ", ".join(items), "normalized": items} if items else None
+    s = str(norm).strip()
+    return {"type": "text", "raw": s} if s else None
+
+
+def _resolve_stored_value(
+    slot_key: str,
+    answer_type: str | None,
+    last_answer: dict[str, Any] | None,
+    normalized: Any,
+) -> tuple[dict[str, Any] | None, bool]:
+    """저장할 값과 is_constrained 를 결정.
+
+    우선순위: LLM 정규화값 → 이미 구조화된 raw(chip/range) → text raw.
+    구조화 슬롯인데 어느 것도 못 얻으면 (None, True) → 저장 안 함(재질문). text 슬롯은
+    원문 저장으로 폴백해 clarity 게이트가 판단하게 한다.
+    """
+    raw_type = last_answer.get("type") if last_answer else None
+    raw_structured = raw_type in {"chip", "range"}
+    is_constrained = answer_type in _CONSTRAINED_TYPES or raw_structured
+
+    norm = _coerce_normalized(answer_type, normalized)
+    if norm is not None:
+        return norm, is_constrained
+    if raw_structured and last_answer is not None:
+        return _normalize_for_store(slot_key, last_answer), is_constrained
+    if not is_constrained and last_answer is not None:
+        return _normalize_for_store(slot_key, last_answer), is_constrained
+    return None, is_constrained
+
+
+def _decide_storage(
+    slot_key: str,
+    answer_type: str | None,
+    last_answer: dict[str, Any] | None,
+    normalized: Any,
+    clarity: float,
+    attempts: int,
+) -> tuple[dict[str, Any] | None, bool]:
+    """직전 답을 어떻게 저장할지 결정하는 **순수 함수** — `(stored, filled_now)`.
+
+    LLM 없이 표로 단위 테스트할 수 있도록 validate_answer 의 분기를 여기로 모은다.
+    - 답 미주입(배치 그래프): (None, False).
+    - 유효한 구조화/자유서술 값(has_real): 곧바로 저장.
+    - 핵심 목표 슬롯(CRITICAL_SLOTS): '없어/모름' 스킵 불가 → 상한까지 재질문(pending),
+      상한(MAX_SLOT_ATTEMPTS) 도달 시 마지막 비지 않은 답을 best-effort 로 채택.
+    - 비핵심: 스킵 의사·제약 슬롯·상한 도달이면 스킵(default)로 진행, 아니면 재질문(pending).
+
+    `attempts` 는 이번 시도 포함 누적 횟수(pending 마커에서 복원). pending 은 '미충족'으로
+    읽혀(FSM 이 같은 슬롯 재질문) 시도 횟수를 턴 사이에 나른다.
+    """
+    if last_answer is None:
+        return None, False  # 배치 그래프 등 답 미주입 턴
+
+    answer_text = _answer_text(last_answer)
+    llm_skip = isinstance(normalized, str) and not normalized.strip()
+
+    if llm_skip:
+        real_value: dict[str, Any] | None = None
+        is_constrained = answer_type in _CONSTRAINED_TYPES or last_answer.get("type") in {
+            "chip",
+            "range",
+        }
+    else:
+        real_value, is_constrained = _resolve_stored_value(
+            slot_key, answer_type, last_answer, normalized
+        )
+    has_real = real_value is not None and (is_constrained or clarity >= STORE_CLARITY_MIN)
+
+    if has_real:
+        return real_value, True
+    if slot_key in CRITICAL_SLOTS:
+        # 핵심 목표 — 스킵 불가. 상한 도달 & 비지 않은 답이면 best-effort, 아니면 재질문.
+        if attempts >= MAX_SLOT_ATTEMPTS and answer_text.strip():
+            return {"type": "text", "raw": answer_text.strip()}, True
+        return _pending(attempts), False
+    if llm_skip or is_constrained or _looks_like_skip(answer_text) or attempts >= MAX_SLOT_ATTEMPTS:
+        return _SKIP_MARKER, True
+    return _pending(attempts), False
+
+
 def _has_answer_text(state: InterviewState) -> bool:
     return bool(_last_answer_text(state))
 
 
 def _last_answer_text(state: InterviewState) -> str:
-    answer = state["last_answer"]
+    return _answer_text(state["last_answer"])
+
+
+def _answer_text(answer: dict[str, Any] | None) -> str:
+    """답 value(dict) → 사람이 읽는 문자열 (프롬프트·스킵 감지용)."""
     if not answer:
         return ""
     if answer.get("type") == "text":
