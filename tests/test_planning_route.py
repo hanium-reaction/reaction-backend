@@ -85,7 +85,7 @@ def _outcome(*, focus_goals: int = 1, maintain_goals: int = 0) -> InterviewOutco
             activity_window=TimeRange(start="09:00", end="23:00"),
             peak_window=["오전"],
         ),
-        preferences=PreferenceProfile(recovery_tone="담백", rest_ok=True, downscope_ok=True),
+        preferences=PreferenceProfile(recovery_tone="담백", rest_ok=True, downscope_unit_min=10),
         horizon=None,
     )
 

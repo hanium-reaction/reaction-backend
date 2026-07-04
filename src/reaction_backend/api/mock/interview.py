@@ -128,11 +128,11 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
     ),
     InterviewSlot(
         "recovery.downscope_unit",
-        "5분짜리로 줄어든 일도 의미 있게 느껴지나요?",
+        "계획이 밀렸을 때, 할 일을 몇 분짜리까지 줄이면 그래도 해볼 만할까요?",
         "chip",
         True,
         "recovery",
-        options=("네", "아니오"),
+        options=("5분", "10분", "15분", "30분"),
     ),
     # [F] 외부 제약
     InterviewSlot(
