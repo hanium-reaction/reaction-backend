@@ -20,7 +20,13 @@ from reaction_backend.schemas.interview import (
 from tests.conftest import FakeInterviewRepo
 
 
-def _stub(*, clarity: float = 0.9, new_ambiguity: float = 0.9, fell_back: bool = False) -> Any:
+def _stub(
+    *,
+    clarity: float = 0.9,
+    new_ambiguity: float = 0.9,
+    suggested: tuple[str, ...] = (),
+    fell_back: bool = False,
+) -> Any:
     """aiClient.run stub — clarity 높게 두어 답을 저장, 종료는 FSM(필수 슬롯)이 운전."""
 
     async def stub_run(**kwargs: Any) -> RunResult[Any]:
@@ -29,6 +35,7 @@ def _stub(*, clarity: float = 0.9, new_ambiguity: float = 0.9, fell_back: bool =
             value: Any = NextQuestionSchema(
                 question="다음 질문이에요",
                 empathy_one_liner="좋아요",
+                suggested_answers=list(suggested),
             )
         elif schema is AmbiguityUpdate:
             value = AmbiguityUpdate(
@@ -216,6 +223,34 @@ def test_critical_slot_reask_persists_attempts_across_db(
     body = answer("goals.list", "그럼 프로젝트 하나 할래")
     assert body["currentQuestion"]["slotKey"] != "goals.list"
     assert body["ambiguityScore"] == amb_at_goals - 1  # goals.list 충족 → 하나 감소
+
+
+def test_suggested_answers_only_for_free_text_slots(client: TestClient, monkeypatch: Any) -> None:
+    """LLM 추천 답변 카드(suggestedAnswers)는 고정 보기가 없는 자유서술 슬롯에서만 노출된다.
+
+    chip(카탈로그 보기 있음) → suggestedAnswers 빈 배열 / goals.list(자유서술) → LLM 추천 노출."""
+    monkeypatch.setattr(aiClient, "run", _stub(suggested=("캡스톤 마무리", "토익 900점")))
+
+    # 첫 질문 identity.role — chip 보기가 있으니 추천 카드는 비어야
+    start = client.post("/interview/sessions").json()
+    assert start["currentQuestion"]["slotKey"] == "identity.role"
+    assert start["currentQuestion"]["options"]  # 카탈로그 보기 존재
+    assert start["currentQuestion"]["suggestedAnswers"] == []
+
+    sid = start["sessionId"]
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.role", "value": ["3학년"], "clientTurn": 1},
+    )
+    body = client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.season", "value": ["방학"], "clientTurn": 2},
+    ).json()
+
+    # goals.list — 자유서술(카탈로그 보기 없음) → LLM 추천 카드 노출
+    assert body["currentQuestion"]["slotKey"] == "goals.list"
+    assert body["currentQuestion"]["options"] == []
+    assert body["currentQuestion"]["suggestedAnswers"] == ["캡스톤 마무리", "토익 900점"]
 
 
 def test_slot_catalog_includes_options(client: TestClient) -> None:

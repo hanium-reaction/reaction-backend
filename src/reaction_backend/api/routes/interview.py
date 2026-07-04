@@ -161,17 +161,23 @@ def _question_options(
 
 
 def _to_question(state: InterviewState) -> Question | None:
-    """엔진 질문(NextQuestionSchema) + 슬롯 카탈로그 → FE Question."""
+    """엔진 질문(NextQuestionSchema) + 슬롯 카탈로그 → FE Question.
+
+    보기(options)는 카탈로그 고정 진실 소스. `suggested_answers`(LLM 추천 답변 카드)는
+    고정 보기가 없는 자유서술 슬롯에서만 노출한다(chip/select 는 보기로 답하므로 제외).
+    """
     nq = state["next_question"]
     slot_key = state["next_slot_key"]
     if nq is None or not slot_key:
         return None
     slot = _CATALOG_BY_KEY.get(slot_key)
+    options = _question_options(slot_key, state["slot_answers"])
     return Question(
         slot_key=slot_key,
         text=nq.question,
         answer_type=slot.answer_type if slot else "text",
-        options=_question_options(slot_key, state["slot_answers"]),
+        options=options,
+        suggested_answers=[] if options else list(nq.suggested_answers),
     )
 
 
