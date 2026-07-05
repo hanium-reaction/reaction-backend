@@ -692,7 +692,7 @@ _DEFAULT_SLOT_QUESTIONS: dict[str, str] = {
     "time.no_touch": "절대 일정 잡으면 안 되는 시간은요?",
     "recovery.tone": "못 한 날 어떤 톤이 좋아요?",
     "recovery.rest_ok": "쉬는 게 어때요 하는 제안을 받을 의향 있어요?",
-    "recovery.downscope_unit": "5분짜리로 줄어든 일도 의미 있게 느껴지나요?",
+    "recovery.downscope_unit": "밀렸을 때 할 일을 몇 분짜리까지 줄이면 해볼 만해요?",
 }
 
 

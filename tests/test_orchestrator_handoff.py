@@ -46,7 +46,7 @@ SLOT_ANSWERS: dict[str, dict[str, Any] | None] = {
     "time.fixed_blocks": {"type": "text", "raw": "화목 수업", "normalized": ["화목 수업"]},
     "recovery.tone": {"type": "chip", "values": ["담백"]},
     "recovery.rest_ok": {"type": "chip", "values": ["네"]},
-    "recovery.downscope_unit": {"type": "chip", "values": ["네"]},
+    "recovery.downscope_unit": {"type": "chip", "values": ["10분"]},
     "energy.focus_duration": {"type": "chip", "values": ["50분"]},
 }
 
