@@ -158,6 +158,111 @@ def test_check_in_404_unknown_execution(client: TestClient) -> None:
     assert resp.json()["code"] == "TODAY_EXECUTION_NOT_FOUND"
 
 
+# ───────────────────────── focus pause / resume (#83) ─────────────────────────
+
+
+def _pause(client: TestClient, execution_id: str) -> Any:
+    return client.post(f"/today/focus/{execution_id}/pause")
+
+
+def _resume(client: TestClient, execution_id: str) -> Any:
+    return client.post(f"/today/focus/{execution_id}/resume")
+
+
+def test_pause_then_resume(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """[⏸]→[▶] 정지/재개: execution 은 in_progress 유지, interruption 구간이 닫힌다."""
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+
+    p = _pause(client, exec_id)
+    assert p.status_code == 200
+    body = p.json()
+    assert body["status"] == "paused"
+    assert body["executionId"] == exec_id
+    assert body["actionItemId"] == f"action_{action.id}"
+    assert body["pauseTotalMinutes"] == 0
+
+    r = _resume(client, exec_id)
+    assert r.status_code == 200
+    assert r.json()["status"] == "in_progress"
+
+    # 정지 구간이 닫혔는지 (재개 표시 + 지연분 기록)
+    interruptions = list(fake_execution_repo._interruptions.values())
+    assert len(interruptions) == 1
+    assert interruptions[0].resumed_after_interrupt is True
+    assert interruptions[0].resume_delay_minutes is not None
+    # execution 은 여전히 진행 중 (체크인 전)
+    execution = next(iter(fake_execution_repo._executions.values()))
+    assert execution.completion_status == "in_progress"
+
+
+def test_resume_accumulates_pause_minutes(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """재개 시 정지 시작(created_at)부터의 경과가 pause_total_minutes 로 누적된다."""
+    from datetime import timedelta
+
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    _pause(client, exec_id)
+    # 정지 시작을 10분 전으로 되돌려 누적 검증
+    pause = next(iter(fake_execution_repo._interruptions.values()))
+    pause.created_at = pause.created_at - timedelta(minutes=10)
+
+    body = _resume(client, exec_id).json()
+    assert body["pauseTotalMinutes"] == 10
+    execution = next(iter(fake_execution_repo._executions.values()))
+    assert execution.pause_total_minutes == 10
+
+
+def test_pause_conflict_when_already_paused(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    _pause(client, exec_id)
+    resp = _pause(client, exec_id)
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "TODAY_ALREADY_PAUSED"
+
+
+def test_resume_conflict_when_not_paused(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    resp = _resume(client, exec_id)
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "TODAY_NOT_PAUSED"
+
+
+def test_pause_conflict_after_check_in(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """체크인으로 종결된 실행은 정지할 수 없다 (409)."""
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    _check_in(client, exec_id, "done")
+    resp = _pause(client, exec_id)
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "TODAY_ALREADY_CHECKED_IN"
+
+
+def test_pause_404_unknown_execution(client: TestClient) -> None:
+    resp = _pause(client, f"exec_{uuid4()}")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "TODAY_EXECUTION_NOT_FOUND"
+
+
 # ───────────────────────── reflection failure-tags ─────────────────────────
 
 

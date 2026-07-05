@@ -109,6 +109,21 @@ class ExecutionStartResponse(CamelModel):
     actual_start_at: KstDatetime
 
 
+class ExecutionEventResponse(CamelModel):
+    """POST /today/focus/{id}/pause·resume 응답 — 집중 세션 일시정지/재개 (#83).
+
+    pause 는 interruption_events(user_pause) 를 열고, resume 은 그 구간을 닫아
+    execution.pause_total_minutes 에 누적한다. execution 자체는 in_progress 유지.
+    """
+
+    execution_id: str
+    action_item_id: str
+    started_at: KstDatetime
+    ended_at: KstDatetime | None
+    status: str  # paused | in_progress
+    pause_total_minutes: int
+
+
 class CheckInRequest(CamelModel):
     """POST /today/check-ins 요청 — Quick Check-in 4칩 (S13/S17)."""
 
