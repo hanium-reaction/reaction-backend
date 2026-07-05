@@ -1,7 +1,7 @@
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -83,6 +83,25 @@ class Settings(BaseSettings):
     # 기본 False — 테스트/로컬은 안 돈다(데모는 시드로 커버). ⚠️ in-process 라
     # 다중 인스턴스 배포 시 중복 실행(모든 job idempotent → 안전하나 단일 인스턴스 권장).
     scheduler_enabled: bool = False
+
+    @model_validator(mode="after")
+    def _forbid_auth_stub_in_deployed_envs(self) -> Self:
+        """staging/prod 에서 AUTH_STUB_MODE=true 를 부팅 시점에 차단한다 (Issue #94).
+
+        stub 모드는 Google id_token 서명 검증을 통째로 건너뛰고 고정 demo 클레임
+        (`demo@reaction.local`)을 반환한다 — 즉 **인증 우회**. 배포 환경(staging/prod)에
+        이 값이 켜지면 서로 다른 Google 계정이 전부 한 유저로 붕괴한다 (#94 증상).
+        설정 실수를 조용히 통과시키지 않고 앱 기동을 실패시켜(loud fail) 잘못된 배포가
+        헬스체크를 통과하지 못하게 한다. local/dev 는 기존대로 stub 허용.
+        """
+        if self.auth_stub_mode and self.app_env in ("staging", "prod"):
+            raise ValueError(
+                f"AUTH_STUB_MODE=true is forbidden when APP_ENV='{self.app_env}'. "
+                "Stub mode bypasses Google id_token verification and collapses every "
+                "login into the demo user. Set AUTH_STUB_MODE=false and configure "
+                "GOOGLE_OAUTH_CLIENT_ID for staging/prod."
+            )
+        return self
 
 
 @lru_cache
