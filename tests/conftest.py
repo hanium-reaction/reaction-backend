@@ -30,6 +30,7 @@ from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.habit import Habit
 from reaction_backend.db.models.habit_instance import HabitInstance
 from reaction_backend.db.models.inbox_item import InboxItem
+from reaction_backend.db.models.interruption_event import InterruptionEvent
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionModel
 from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.models.notification_setting import NotificationSetting
@@ -62,6 +63,7 @@ from reaction_backend.repositories.review_repo import get_review_repo
 from reaction_backend.repositories.scheduled_block_repo import get_scheduled_block_repo
 from reaction_backend.repositories.time_policy_repo import get_time_policy_repo
 from reaction_backend.repositories.user_repo import GoogleProfile, get_user_repo
+from reaction_backend.schemas.common import now_kst
 
 DEMO_USER_UUID = UUID("11111111-1111-4111-8111-111111111111")
 
@@ -952,6 +954,7 @@ class FakeExecutionRepo:
         self._executions: dict[UUID, ExecutionEvent] = {}
         self._failure_tags: dict[UUID, list[str]] = {}
         self._blocks: dict[UUID, ScheduledBlock] = {}
+        self._interruptions: dict[UUID, InterruptionEvent] = {}
         self._tag_master: list[FailureReasonTag] = default_failure_tags()
 
     async def get_by_id(self, user_id: UUID, execution_id: UUID) -> ExecutionEvent | None:
@@ -1044,6 +1047,30 @@ class FakeExecutionRepo:
         self._failure_tags.setdefault(execution_id, []).extend(tag_codes)
         self._last_memo_encrypted = memo_encrypted
         return []
+
+    async def get_open_pause(self, execution_id: UUID) -> InterruptionEvent | None:
+        opens = [
+            p
+            for p in self._interruptions.values()
+            if p.execution_id == execution_id
+            and p.interruption_type == "user_pause"
+            and p.resume_delay_minutes is None
+            and p.resumed_after_interrupt is None
+        ]
+        return max(opens, key=lambda p: p.created_at) if opens else None
+
+    async def create_pause(self, *, user_id: UUID, execution_id: UUID) -> InterruptionEvent:
+        row = InterruptionEvent()
+        row.id = uuid4()
+        row.user_id = user_id
+        row.execution_id = execution_id
+        row.interruption_type = "user_pause"
+        row.interruption_source = None
+        row.resume_delay_minutes = None
+        row.resumed_after_interrupt = None
+        row.created_at = now_kst()
+        self._interruptions[row.id] = row
+        return row
 
 
 class FakeDailyBriefRepo:

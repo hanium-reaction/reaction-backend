@@ -22,6 +22,7 @@ from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.execution_failure_tag import ExecutionFailureTag
 from reaction_backend.db.models.failure_reason_tag import FailureReasonTag
+from reaction_backend.db.models.interruption_event import InterruptionEvent
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.session import get_db
 
@@ -110,6 +111,38 @@ class ExecutionRepo:
         stmt = select(ScheduledBlock).where(ScheduledBlock.id == block_id)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    # ── pause / resume (interruption_events) — #83 Focus 일시정지/재개 ──
+    async def get_open_pause(self, execution_id: UUID) -> InterruptionEvent | None:
+        """아직 재개되지 않은(열린) user_pause 구간 — 가장 최근 것.
+
+        열림 = resume_delay_minutes IS NULL AND resumed_after_interrupt IS NULL
+        (재개되면 True+지연분, cron 이 방치분을 False 로 마감).
+        """
+        stmt = (
+            select(InterruptionEvent)
+            .where(
+                InterruptionEvent.execution_id == execution_id,
+                InterruptionEvent.interruption_type == "user_pause",
+                InterruptionEvent.resume_delay_minutes.is_(None),
+                InterruptionEvent.resumed_after_interrupt.is_(None),
+            )
+            .order_by(InterruptionEvent.created_at.desc())
+        )
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
+
+    async def create_pause(self, *, user_id: UUID, execution_id: UUID) -> InterruptionEvent:
+        """[⏸] — user_pause interruption INSERT. created_at 이 정지 시작 시각."""
+        row = InterruptionEvent(
+            user_id=user_id,
+            execution_id=execution_id,
+            interruption_type="user_pause",
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
 
     # ── failure tags ──
     async def list_active_failure_tags(self) -> list[FailureReasonTag]:

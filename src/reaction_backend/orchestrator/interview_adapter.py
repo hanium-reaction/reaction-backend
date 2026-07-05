@@ -48,6 +48,7 @@ REQUIRED_SLOT_KEYS: tuple[str, ...] = (
 
 _DEFAULT_ACTIVITY = TimeRange(start="09:00", end="23:00")
 _DEFAULT_TONE = "담백"
+_DEFAULT_DOWNSCOPE_MIN = 10
 
 # goals.list 미입력(early_finish 등) 시 core_goals min_length=1 계약을 맞추는 placeholder.
 # 실제 Goal 로 영속하면 안 되며(#88), First Plan SAVING 이 이 sentinel 을 걸러낸다.
@@ -236,14 +237,17 @@ def _build_preferences(
     return PreferenceProfile(
         recovery_tone=_first(_chip_values(slot_answers.get("recovery.tone"))) or _DEFAULT_TONE,
         rest_ok=_bool(slot_answers.get("recovery.rest_ok"), default=True),
-        downscope_ok=_bool(slot_answers.get("recovery.downscope_unit"), default=True),
-        focus_duration_min=_focus_minutes(slot_answers.get("energy.focus_duration")),
+        downscope_unit_min=(
+            _chip_minutes(slot_answers.get("recovery.downscope_unit")) or _DEFAULT_DOWNSCOPE_MIN
+        ),
+        focus_duration_min=_chip_minutes(slot_answers.get("energy.focus_duration")),
         break_pattern=_first(_chip_values(slot_answers.get("energy.break_pattern"))),
         weekly_energy=_first(_chip_values(slot_answers.get("energy.weekly_drain"))),
     )
 
 
-def _focus_minutes(value: Mapping[str, Any] | None) -> int | None:
+def _chip_minutes(value: Mapping[str, Any] | None) -> int | None:
+    """'25분'·'5분' 같은 chip 답에서 분(min) 정수를 추출. 숫자 없으면 None."""
     chips = _chip_values(value)
     if not chips:
         return None
