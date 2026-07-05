@@ -38,6 +38,7 @@ from reaction_backend.orchestrator.goal_structuring import (
     TimePolicyLike,
     policy_guarded_transaction,
 )
+from reaction_backend.orchestrator.interview_adapter import is_placeholder_goal
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.interview import InterviewOutcome
 from reaction_backend.schemas.planning import (
@@ -272,10 +273,12 @@ async def _apply_once(
     )
 
     async with policy_guarded_transaction(session, guard_plan, time_policies):
-        # 1) goals — core_goals 전체 영속화. heaviest 가 분해 트리의 소속 goal.
+        # 1) goals — 실제 목표만 영속화. 미입력 placeholder(#88)는 제외해 '(미입력 목표)'
+        #    카드가 목표 관리 화면에 뜨지 않게 한다. heaviest 가 분해 트리의 소속 goal.
+        real_goals = [gc for gc in outcome.core_goals if not is_placeholder_goal(gc)]
         goal_rows: list[Goal] = []
         heaviest: Goal | None = None
-        for gc in outcome.core_goals:
+        for gc in real_goals:
             g = Goal()
             g.user_id = user_id
             g.title = gc.title
@@ -292,13 +295,19 @@ async def _apply_once(
             heaviest = goal_rows[0]
         await session.flush()  # goal.id 확보
 
+        # 실제 목표가 없으면(=goals.list 미입력) 트리/액션도 만들지 않는다: placeholder 로부터
+        # 분해된 노드는 소속시킬 goal 이 없고(GoalNode.goal_id 는 NOT NULL) 의미도 없다.
+        node_by_temp: dict[str, GoalNode] = {}
+        action_by_node: dict[str, ActionItem] = {}
+        block_count = 0
+        if heaviest is None:
+            return FirstPlanSaveResult(goals=0, goal_nodes=0, action_items=0, scheduled_blocks=0)
+
         # 2) goal_nodes — heaviest goal 트리. temp node_id → GoalNode (parent 는 relationship).
         depths = _node_depths(goal_nodes)
-        node_by_temp: dict[str, GoalNode] = {}
         for nd in goal_nodes:
             n = GoalNode()
-            if heaviest is not None:
-                n.goal_id = heaviest.id
+            n.goal_id = heaviest.id
             n.title = nd.title
             n.node_type = _NODE_TYPE_MAP.get(nd.node_type, "subgoal")
             n.depth = depths.get(nd.node_id, 0)
@@ -312,7 +321,6 @@ async def _apply_once(
         await session.flush()  # goal_node.id 확보 (action_item FK)
 
         # 3) action_items — goal_id + goal_node_id 링크 (#62)
-        action_by_node: dict[str, ActionItem] = {}
         for item in action_items:
             row = ActionItem()
             row.user_id = user_id

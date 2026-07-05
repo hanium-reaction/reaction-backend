@@ -50,6 +50,15 @@ _DEFAULT_ACTIVITY = TimeRange(start="09:00", end="23:00")
 _DEFAULT_TONE = "담백"
 _DEFAULT_DOWNSCOPE_MIN = 10
 
+# goals.list 미입력(early_finish 등) 시 core_goals min_length=1 계약을 맞추는 placeholder.
+# 실제 Goal 로 영속하면 안 되며(#88), First Plan SAVING 이 이 sentinel 을 걸러낸다.
+PLACEHOLDER_GOAL_TITLE = "(미입력 목표)"
+
+
+def is_placeholder_goal(goal: GoalCandidate) -> bool:
+    """미입력 placeholder 목표인지 — 영속/노출 대상에서 제외 (#88)."""
+    return goal.confidence == 0.0 and goal.title == PLACEHOLDER_GOAL_TITLE
+
 
 def is_filled_answer(value: Mapping[str, Any] | None) -> bool:
     """슬롯 값이 실질적으로 채워진 답인지.
@@ -177,7 +186,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
     if not titles:
         return [
             GoalCandidate(
-                title="(미입력 목표)",
+                title=PLACEHOLDER_GOAL_TITLE,
                 category="other",
                 tentative_tier="maintain",
                 confidence=0.0,
