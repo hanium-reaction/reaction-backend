@@ -430,3 +430,136 @@ def test_reflection_pending_excludes_checked_in(
 
 def test_reflection_pending_empty_when_nothing_started(client: TestClient) -> None:
     assert client.get("/reflection/pending").json() == []
+
+
+# ───────────────────────── reflection/batch (§11) ─────────────────────────
+
+
+def _batch(client: TestClient, items: list[dict[str, Any]]) -> Any:
+    # 매 호출 고유 Idempotency-Key — 미들웨어 캐시 교차오염 방지.
+    return client.post(
+        "/reflection/batch",
+        json={"items": items},
+        headers={"Idempotency-Key": f"batch-{uuid4()}"},
+    )
+
+
+def test_reflection_batch_checks_in_all(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """미체크 실행 2건 일괄 종결 — done + failed(사유 포함). pending 에서 빠지고 status 전이."""
+    a1 = _seed_action(fake_action_item_repo, title="A1")
+    a2 = _seed_action(fake_action_item_repo, title="A2")
+    e1 = _start(client, f"action_{a1.id}").json()["executionId"]
+    e2 = _start(client, f"action_{a2.id}").json()["executionId"]
+
+    resp = _batch(
+        client,
+        [
+            {"executionId": e1, "completionStatus": "done"},
+            {
+                "executionId": e2,
+                "completionStatus": "failed",
+                "failureTags": ["AMBIGUITY"],
+                "memo": "막막함",
+            },
+        ],
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["processedCount"] == 2
+    assert body["taggedCount"] == 1
+    assert body["needsFailureTags"] == []
+    assert client.get("/reflection/pending").json() == []
+    assert a1.status == "done"
+    assert a2.status == "failed"
+
+
+def test_reflection_batch_flags_untagged_failures(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """failed 인데 사유 미기록 → needsFailureTags 에 executionId (FE 가 S18 로 유도)."""
+    a = _seed_action(fake_action_item_repo)
+    e = _start(client, f"action_{a.id}").json()["executionId"]
+    body = _batch(client, [{"executionId": e, "completionStatus": "failed"}]).json()
+    assert body["processedCount"] == 1
+    assert body["taggedCount"] == 0
+    assert body["needsFailureTags"] == [e]
+
+
+def test_reflection_batch_empty_is_noop(client: TestClient) -> None:
+    resp = _batch(client, [])
+    assert resp.status_code == 200
+    assert resp.json()["processedCount"] == 0
+
+
+def test_reflection_batch_requires_idempotency_key(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    a = _seed_action(fake_action_item_repo)
+    e = _start(client, f"action_{a.id}").json()["executionId"]
+    resp = client.post(
+        "/reflection/batch",
+        json={"items": [{"executionId": e, "completionStatus": "done"}]},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+
+
+def test_reflection_batch_rejects_tags_on_non_failure(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    a = _seed_action(fake_action_item_repo)
+    e = _start(client, f"action_{a.id}").json()["executionId"]
+    resp = _batch(
+        client, [{"executionId": e, "completionStatus": "done", "failureTags": ["AMBIGUITY"]}]
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "REFLECT_NOT_FAILED"
+
+
+def test_reflection_batch_atomic_rollback_on_invalid_item(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """한 항목이 이미 체크인됐으면 전체 롤백 — 유효 항목도 미적용(여전히 pending)."""
+    a1 = _seed_action(fake_action_item_repo, title="A1")
+    a2 = _seed_action(fake_action_item_repo, title="A2")
+    e1 = _start(client, f"action_{a1.id}").json()["executionId"]
+    e2 = _start(client, f"action_{a2.id}").json()["executionId"]
+    _check_in(client, e2, "done")  # e2 미리 종결
+
+    resp = _batch(
+        client,
+        [
+            {"executionId": e1, "completionStatus": "done"},
+            {"executionId": e2, "completionStatus": "done"},  # 이미 체크인 → 409
+        ],
+    )
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "TODAY_ALREADY_CHECKED_IN"
+    # e1 은 검증 단계에서 막혀 미적용 — 아직 pending 에 남아있다.
+    pending_ids = [i["executionId"] for i in client.get("/reflection/pending").json()]
+    assert e1 in pending_ids
+    assert a1.status != "done"
+
+
+def test_reflection_batch_rejects_duplicate_execution(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    a = _seed_action(fake_action_item_repo)
+    e = _start(client, f"action_{a.id}").json()["executionId"]
+    resp = _batch(
+        client,
+        [
+            {"executionId": e, "completionStatus": "done"},
+            {"executionId": e, "completionStatus": "failed"},
+        ],
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"

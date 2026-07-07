@@ -27,10 +27,11 @@ from http import HTTPStatus
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
+from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.session import get_db
 from reaction_backend.repositories.action_item_repo import ActionItemRepo, get_action_item_repo
 from reaction_backend.repositories.execution_repo import ExecutionRepo, get_execution_repo
@@ -41,6 +42,9 @@ from reaction_backend.schemas.reflection import (
     FailureTagMaster,
     FailureTagRequest,
     FailureTagResponse,
+    ReflectionBatchItem,
+    ReflectionBatchRequest,
+    ReflectionBatchResponse,
     ReflectionPendingItem,
 )
 
@@ -182,10 +186,106 @@ async def tag_failure_reasons(
     )
 
 
-@router.post("/batch", status_code=status.HTTP_501_NOT_IMPLEMENTED)
-async def batch_reflect() -> None:
-    """오늘+어제+그제 미체크 카드 일괄 처리. Idempotency-Key 헤더 필수."""
-    raise HTTPException(
-        status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Defined in api-contract.md §11 — to be implemented in a follow-up.",
+@router.post("/batch")
+async def batch_reflect(
+    body: ReflectionBatchRequest,
+    user: CurrentUser,
+    repo: ExecutionRepoDep,
+    action_repo: ActionRepoDep,
+    session: SessionDep,
+) -> ReflectionBatchResponse:
+    """저녁 회고 일괄 처리 (S17) — 오늘+어제+그제 미체크 카드를 한 번에 종결.
+
+    각 항목 = 미체크(in_progress) 실행 1건의 최종 결과(4칩) + 선택적 실패 사유(0~2개).
+    check-in(`POST /today/check-ins`)과 동일한 전이(execution 종결 + 블록 finished
+    + action_item.status)를 재현하고, failed/partial_done 항목엔 실패 사유를 함께 기록한다.
+    **전량 사전 검증 후 한 트랜잭션으로 적용** — 하나라도 무효면 전체 롤백(부분 적용 없음).
+    Idempotency-Key 는 미들웨어가 강제([모두 완료] 중복 탭 방지). 빈 배열은 no-op.
+    """
+    valid_codes = {t.tag_code for t in await repo.list_active_failure_tags()}
+    seen: set[str] = set()
+    resolved: list[tuple[ExecutionEvent, ReflectionBatchItem, list[str]]] = []
+
+    # 1) 전량 검증 (쓰기 전) — 원자성 보장. 하나라도 무효면 여기서 raise → 아무것도 안 바뀜.
+    for item in body.items:
+        if item.execution_id in seen:
+            raise ApiError(
+                ErrorCode.COMMON_VALIDATION_ERROR,
+                f"중복된 executionId 예요: {item.execution_id}",
+                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                field="items",
+            )
+        seen.add(item.execution_id)
+
+        execution = await repo.get_by_id(user.id, _parse_execution_id(item.execution_id))
+        if execution is None:
+            raise _execution_not_found()
+        if execution.completion_status != "in_progress":
+            raise ApiError(
+                ErrorCode.TODAY_ALREADY_CHECKED_IN,
+                f"이미 체크인이 끝난 실행이 있어요: {item.execution_id}",
+                http_status=HTTPStatus.CONFLICT,
+            )
+
+        codes = list(dict.fromkeys(item.failure_tags))
+        if codes:
+            if item.completion_status not in _TAGGABLE_STATUSES:
+                raise ApiError(
+                    ErrorCode.REFLECT_NOT_FAILED,
+                    "실패/부분완료가 아닌 항목엔 실패 사유를 남길 수 없어요.",
+                    http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                    field="failureTags",
+                )
+            invalid = [code for code in codes if code not in valid_codes]
+            if invalid:
+                raise ApiError(
+                    ErrorCode.REFLECT_INVALID_TAG,
+                    f"알 수 없는 실패 사유예요: {', '.join(invalid)}",
+                    http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                    field="failureTags",
+                )
+            if await repo.has_failure_tags(execution.id):
+                raise ApiError(
+                    ErrorCode.REFLECT_ALREADY_TAGGED,
+                    f"이미 실패 사유가 기록된 실행이 있어요: {item.execution_id}",
+                    http_status=HTTPStatus.CONFLICT,
+                )
+        resolved.append((execution, item, codes))
+
+    # 2) 전량 적용 (단일 트랜잭션) — check-in 전이 재현 + 선택적 태깅.
+    ended_at = now_kst()
+    tagged_count = 0
+    needs_tags: list[str] = []
+    for execution, item, codes in resolved:
+        execution.completion_status = item.completion_status
+        execution.actual_end_at = ended_at
+        if execution.actual_start_at is not None:
+            delta = ended_at - execution.actual_start_at
+            execution.actual_duration_minutes = max(int(delta.total_seconds() // 60), 0)
+
+        block = await repo.get_block(execution.scheduled_block_id)
+        if block is not None:
+            block.block_status = "finished"
+
+        action = await action_repo.get_by_id(user.id, execution.action_item_id)
+        if action is not None:
+            action.status = item.completion_status
+
+        if codes:
+            memo_encrypted = encrypt_memo(item.memo) if item.memo else None
+            await repo.add_failure_tags(
+                execution_id=execution.id,
+                tag_codes=codes,
+                memo_encrypted=memo_encrypted,
+            )
+            tagged_count += 1
+        elif item.completion_status in _TAGGABLE_STATUSES:
+            # 실패/부분완료인데 사유를 안 준 항목 — FE 가 S18(실패 사유)로 유도할 대상.
+            needs_tags.append(item.execution_id)
+
+    await session.commit()
+    return ReflectionBatchResponse(
+        processed_count=len(resolved),
+        tagged_count=tagged_count,
+        needs_failure_tags=needs_tags,
     )

@@ -1,7 +1,7 @@
 """Reflection 도메인 스키마 (api-contract §11) — S17 저녁 회고 / S18 실패 사유.
 
 #19-B 범위: 13종 마스터 조회 + 실행 1건 태깅 (0~2개, memo at-rest 암호화).
-batch(S17 일괄 처리)는 후속.
+batch(S17 일괄 처리)는 이 파일의 `ReflectionBatch*`.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from datetime import date
 from pydantic import Field
 
 from reaction_backend.schemas.common import CamelModel
+from reaction_backend.schemas.today import ExecutionCompletion
 
 
 class ReflectionPendingItem(CamelModel):
@@ -51,3 +52,35 @@ class FailureTagResponse(CamelModel):
     execution_id: str
     tag_codes: list[str]
     has_memo: bool
+
+
+class ReflectionBatchItem(CamelModel):
+    """POST /reflection/batch 항목 — 미체크 실행 1건의 최종 결과 + 선택적 실패 사유.
+
+    `failure_tags`/`memo` 는 `completion_status` 가 failed/partial_done 일 때만 유효
+    (그 외 값과 함께 오면 422). `memo` 는 서버가 at-rest 암호화한다.
+    """
+
+    execution_id: str
+    completion_status: ExecutionCompletion  # done / partial_done / failed / over_done
+    failure_tags: list[str] = Field(default_factory=list, max_length=2)
+    memo: str | None = Field(default=None, max_length=300)
+
+
+class ReflectionBatchRequest(CamelModel):
+    """POST /reflection/batch — [모두 완료] 일괄 처리. Idempotency-Key 필수(미들웨어).
+
+    빈 배열은 no-op(200, processedCount=0). 상한 50건.
+    """
+
+    items: list[ReflectionBatchItem] = Field(default_factory=list, max_length=50)
+
+
+class ReflectionBatchResponse(CamelModel):
+    """일괄 처리 결과 요약."""
+
+    processed_count: int  # 종결(체크인) 처리된 실행 수
+    tagged_count: int  # 실패 사유가 함께 기록된 실행 수
+    needs_failure_tags: list[
+        str
+    ]  # failed/partial_done 인데 사유 미기록 → S18 유도 대상 executionId
