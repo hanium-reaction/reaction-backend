@@ -256,8 +256,56 @@ def test_generate_focus_cap_exceeded_returns_422(client: TestClient, monkeypatch
 
 
 def test_generate_requires_outcome_or_session(client: TestClient, monkeypatch: Any) -> None:
-    """outcome / interviewSessionId 둘 다 없으면 422 COMMON_VALIDATION_ERROR."""
+    """빈 본문 + 완료된 인터뷰도 없으면 422 COMMON_VALIDATION_ERROR."""
     monkeypatch.setattr(aiClient, "run", _stub())
+    res = client.post("/plans/generate", json={})
+    assert res.status_code == 422
+    assert res.json()["code"] == "COMMON_VALIDATION_ERROR"
+
+
+def _seed_finished_session(
+    repo: FakeInterviewRepo,
+    *,
+    end_reason: str = "completed",
+    ended_at: datetime | None = None,
+) -> InterviewSessionRow:
+    row = InterviewSessionRow()
+    row.id = uuid4()
+    row.user_id = DEMO_USER_UUID
+    row.end_reason = end_reason
+    row.total_turns = 5
+    row.ambiguity_final = 0.1
+    row.ended_at = ended_at if ended_at is not None else now_kst()
+    row.used_fallback = False
+    repo._sessions[row.id] = row
+    repo._answers[row.id] = {}
+    return row
+
+
+def test_generate_empty_body_recovers_latest_interview(
+    client: TestClient, fake_interview_repo: FakeInterviewRepo, monkeypatch: Any
+) -> None:
+    """빈 본문이어도 최근 '정상 종료' 인터뷰로 자동 복구 — FE 가 sessionId 를 잃어도 생성 가능."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    _seed_finished_session(fake_interview_repo, ended_at=now_kst() - timedelta(hours=2))
+    _seed_finished_session(fake_interview_repo)  # 가장 최근 — 이게 선택돼야 함
+    # 더 최신이지만 abandoned — 복구 대상 아님
+    _seed_finished_session(
+        fake_interview_repo, end_reason="abandoned", ended_at=now_kst() + timedelta(minutes=5)
+    )
+
+    res = client.post("/plans/generate", json={})
+    assert res.status_code == 200, res.text
+    assert res.json()["isDraft"] is True
+
+
+def test_generate_empty_body_ignores_abandoned_only(
+    client: TestClient, fake_interview_repo: FakeInterviewRepo, monkeypatch: Any
+) -> None:
+    """abandoned 세션만 있으면 복구하지 않고 422 (restart-wins 로 밀려난 미완 세션)."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    _seed_finished_session(fake_interview_repo, end_reason="abandoned")
+
     res = client.post("/plans/generate", json={})
     assert res.status_code == 422
     assert res.json()["code"] == "COMMON_VALIDATION_ERROR"

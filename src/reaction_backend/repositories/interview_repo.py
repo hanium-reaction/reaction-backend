@@ -62,6 +62,25 @@ class InterviewRepo:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_latest_finished(self, user_id: UUID) -> InterviewSession | None:
+        """user 의 가장 최근 '정상 종료' 세션 1개 (abandoned 제외).
+
+        FE 가 sessionId 를 잃었을 때(`POST /plans/generate` 빈 본문) 복구 시드로 쓴다.
+        abandoned 는 restart-wins 로 밀려난 미완 세션이라 제외 — 없으면 None.
+        """
+        stmt = (
+            select(InterviewSession)
+            .where(
+                InterviewSession.user_id == user_id,
+                InterviewSession.end_reason.is_not(None),
+                InterviewSession.end_reason != "abandoned",
+            )
+            .order_by(InterviewSession.ended_at.desc().nulls_last())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def list_slot_answers(self, session_id: UUID) -> list[InterviewSlotAnswer]:
         stmt = select(InterviewSlotAnswer).where(InterviewSlotAnswer.session_id == session_id)
         result = await self._session.execute(stmt)
