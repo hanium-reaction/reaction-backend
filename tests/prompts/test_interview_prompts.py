@@ -28,7 +28,7 @@ _PROMPTS_DIR = Path(reaction_backend.__file__).parent / "prompts" / "interview"
 CODE_VARS: dict[str, set[str]] = {
     "interview/next_question": {
         "goal_title",
-        "turn_index",
+        "answered_context",
         "ambiguous_slot",
         "slot_label",
         "answer_type",
@@ -37,6 +37,7 @@ CODE_VARS: dict[str, set[str]] = {
         "retry",
     },
     "interview/ambiguity_score": {"slot_key", "answer", "answer_type", "options", "today"},
+    "interview/slot_extraction": {"answer", "answered_slot", "today", "open_slots"},
     "interview/summary": {
         "identity",
         "goals",
@@ -55,6 +56,7 @@ CODE_VARS: dict[str, set[str]] = {
 _FILES = {
     "interview/next_question": "next_question.v1.md",
     "interview/ambiguity_score": "ambiguity_score.v1.md",
+    "interview/slot_extraction": "slot_extraction.v1.md",
     "interview/summary": "summary.v1.md",
 }
 

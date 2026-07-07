@@ -392,3 +392,41 @@ def test_full_demo_loop_fail_to_recovery_action(
     ]
     assert len(recovered) == 1
     assert recovered[0].parent_action_item_id == action.id
+
+
+# ───────────────────────── reflection/pending (#83) ─────────────────────────
+
+
+def test_reflection_pending_lists_unchecked_execution(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """시작만 하고 체크인 안 한 실행이 저녁 회고 pending 에 뜬다 (completionStatus null)."""
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+
+    resp = client.get("/reflection/pending")
+    assert resp.status_code == 200
+    items = resp.json()
+    assert len(items) == 1
+    item = items[0]
+    assert item["executionId"] == exec_id
+    assert item["actionItemId"] == f"action_{action.id}"
+    assert item["title"] == action.title
+    assert item["completionStatus"] is None
+    assert item["scheduledTime"] is not None  # "HH:MM"
+
+
+def test_reflection_pending_excludes_checked_in(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """체크인으로 종결된 실행은 pending 에서 빠진다."""
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    _check_in(client, exec_id, "done")
+    assert client.get("/reflection/pending").json() == []
+
+
+def test_reflection_pending_empty_when_nothing_started(client: TestClient) -> None:
+    assert client.get("/reflection/pending").json() == []

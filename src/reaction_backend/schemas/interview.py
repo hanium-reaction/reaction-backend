@@ -111,6 +111,29 @@ class AmbiguityUpdate(CamelModel):
     normalized_value: JsonValue | None = None
 
 
+class HarvestedSlot(CamelModel):
+    """직전 자유서술 답에서 함께 추출된 다른 슬롯 값 1개 (`interview/slot_extraction`).
+
+    `normalized_value` 규칙은 `AmbiguityUpdate` 와 동일 — 슬롯 answer_type 에 맞춘 구조화 값.
+    `confidence` 가 낮으면 채우지 않고(잘못 채우면 재질문보다 나쁨) 정식 질문으로 넘어간다.
+    """
+
+    slot_key: str
+    normalized_value: JsonValue
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class SlotHarvest(CamelModel):
+    """LLM — `interview/slot_extraction` 응답. 한 답변에 섞여 들어온 다른 슬롯들을 미리 추출.
+
+    사용자가 한 질문에 여러 항목을 함께 답할 수 있으므로(예: "3학년 방학이고 캡스톤 8월 마감"),
+    직전 자유서술 답에서 아직 안 물은 슬롯 정보를 뽑아 미리 채워 **불필요한 재질문을 줄인다**.
+    확신 있게 뽑은 것만 담고, 없으면 빈 배열(정상). 룰 fallback 도 빈 배열.
+    """
+
+    slots: list[HarvestedSlot] = Field(default_factory=list)
+
+
 class InterviewSummary(CamelModel):
     """LLM ③ — `interview/summary` 응답. Analysis Confirm(S03) 요약 확인 카드.
 

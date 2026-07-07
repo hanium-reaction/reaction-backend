@@ -53,6 +53,7 @@ from reaction_backend.schemas.interview import (
     InterviewOutcome,
     InterviewSummary,
     NextQuestionSchema,
+    SlotHarvest,
 )
 
 __all__ = [
@@ -60,6 +61,7 @@ __all__ = [
     "ask_question",
     "build_interview_graph",
     "finalize_outcome",
+    "harvest_slots",
     "initial_state",
     "receive_answer",
     "should_continue",
@@ -80,6 +82,12 @@ CRITICAL_SLOTS: frozenset[str] = frozenset({"goals.list", "goals.heaviest"})
 # 한 슬롯에 허용하는 최대 시도 횟수(최초 1 + 재질문 2). 이후엔 어쩔 수 없이 진행:
 # 핵심 슬롯은 마지막 비지 않은 답을 best-effort 로 채택, 비핵심은 스킵(default).
 MAX_SLOT_ATTEMPTS = 3
+
+# 하베스팅(slot_extraction) — 이 신뢰도 미만은 미리 채우지 않고 정식 질문으로 넘긴다.
+# 잘못 채우면 사용자가 정정 기회를 잃어 재질문보다 나쁘므로 보수적으로.
+HARVEST_MIN_CONFIDENCE = 0.7
+# 하베스팅 대상에서 제외 — goals.heaviest 는 goals.list 응답에서 파생(동적 보기)이라 별도.
+_HARVEST_EXCLUDE: frozenset[str] = frozenset({"goals.heaviest"})
 
 
 def _pending(attempts: int) -> dict[str, Any]:
@@ -111,6 +119,23 @@ def _retry_hint(slot_key: str, attempts: int) -> str:
 # 핵심 목표(goals.*) / 가용 시간(time.*) / 선호 방식(recovery.*) 그룹을 모두 포함.
 REQUIRED_SLOT_SEQUENCE: tuple[str, ...] = interview_adapter.REQUIRED_SLOT_KEYS
 
+# 러닝 컨텍스트용 짧은 태그 — 앞서 답한 슬롯을 다음 질문 프롬프트에 실어(ask_question) LLM 이
+# 이전 답을 이어받아 자연스럽게 묻게 한다(맥락 없이 슬롯키만 보고 추측하던 문제 보완).
+_CONTEXT_LABELS: dict[str, str] = {
+    "identity.role": "학년/시기",
+    "identity.season": "학기",
+    "goals.list": "목표",
+    "goals.heaviest": "가장 무거운 목표",
+    "goals.deadlines": "마감",
+    "goals.success_image": "이번 주 목표 모습",
+    "time.activity_window": "활동 시간대",
+    "time.peak_window": "집중 시간대",
+    "time.no_touch": "노터치",
+    "recovery.tone": "회복 톤",
+    "recovery.rest_ok": "휴식 수용",
+    "recovery.downscope_unit": "최소 실행 단위",
+}
+
 
 class InterviewState(TypedDict):
     """LangGraph 가 Node 간 전달하는 상태. DB(`interview_sessions`)와 별도 short-lived.
@@ -136,6 +161,9 @@ class InterviewState(TypedDict):
     # 누적 슬롯 (DB slot_answers 의 in-memory 미러) {slot_key: value}
     slot_answers: dict[str, dict[str, Any] | None]
 
+    # 이번 턴에 하베스팅으로 미리 채운 슬롯키들 (transient — 응답 표시용, 영속 대상 아님)
+    harvested: list[str]
+
     # 터미널 산출물
     summary: InterviewSummary | None  # 요약 확인 카드 (표현 계층)
     outcome: InterviewOutcome | None  # 경계 계약 (First Plan 시드)
@@ -156,6 +184,7 @@ def initial_state(*, session_id: UUID, user_id: UUID) -> InterviewState:
         next_question=None,
         used_fallback=False,
         slot_answers={},
+        harvested=[],
         summary=None,
         outcome=None,
     )
@@ -298,7 +327,7 @@ async def ask_question(state: InterviewState, config: RunnableConfig) -> Intervi
         timeout=8.0,
         variables={
             "goal_title": _heaviest_goal_hint(state),
-            "turn_index": str(state["total_turns"]),
+            "answered_context": _answered_context(state),
             "ambiguous_slot": slot_key,
             # 슬롯 의도(라벨)·형식·보기를 실어 LLM 이 정확한 질문을 만들게 한다.
             "slot_label": str(meta.get("label") or _DEFAULT_SLOT_QUESTIONS.get(slot_key, slot_key)),
@@ -384,6 +413,83 @@ async def validate_answer(state: InterviewState, config: RunnableConfig) -> Inte
         "last_answer": None,  # 소비 완료 — 다음 턴 답과 섞이지 않게
         "last_slot_key": None,
         "used_fallback": state["used_fallback"] or result.fell_back,
+    }
+
+
+def _harvest_slot_line(slot_key: str, meta: dict[str, Any]) -> str:
+    """하베스팅 프롬프트에 실을 '미충족 슬롯' 한 줄 (key | 라벨 | 형식 | 보기)."""
+    label = str(meta.get("label") or _DEFAULT_SLOT_QUESTIONS.get(slot_key, slot_key))
+    answer_type = str(meta.get("answer_type") or "text")
+    opts = meta.get("options") or []
+    opts_str = ", ".join(str(o) for o in opts) or "(자유 입력)"
+    return f"- {slot_key} | {label} | {answer_type} | {opts_str}"
+
+
+async def harvest_slots(
+    state: InterviewState,
+    config: RunnableConfig,
+    *,
+    answer_text: str,
+    answered_slot: str,
+) -> InterviewState:
+    """LLM(선택) — 직전 자유서술 답에서 **다른 미충족 슬롯**을 함께 추출해 미리 채운다.
+
+    사용자가 한 답에 여러 항목을 흘렸을 때(예: "3학년 방학이고 캡스톤 8월 마감") 같은 걸 다시
+    묻지 않도록, 아직 비어 있는 슬롯을 confidence 게이트(`HARVEST_MIN_CONFIDENCE`)로만 미리
+    채운다. runner 가 자유서술 답일 때만 호출한다(chip/range 는 단일 구조화 값이라 무의미).
+
+    실패/빈 추출이면 아무것도 안 채운다(빈 배열 fallback). 이미 채워진 슬롯은 덮지 않는다.
+    """
+    open_slots = [
+        k
+        for k in REQUIRED_SLOT_SEQUENCE
+        if k != answered_slot
+        and k not in _HARVEST_EXCLUDE
+        and not _is_filled(state["slot_answers"].get(k))
+    ]
+    if not open_slots or not answer_text.strip():
+        return {**state, "harvested": []}
+
+    meta = _slot_meta(config)
+    listing = "\n".join(_harvest_slot_line(k, meta.get(k) or {}) for k in open_slots)
+    result = await aiClient.run(
+        module="interview",
+        schema=SlotHarvest,
+        prompt_id="interview/slot_extraction",
+        fallback=lambda: SlotHarvest(slots=[]),
+        timeout=8.0,
+        variables={
+            "answer": answer_text,
+            "answered_slot": answered_slot,
+            "today": now_kst().date().isoformat(),
+            "open_slots": listing,
+        },
+        user_id=state["user_id"],
+        session=_session(config),
+        tone_mode=_tone_mode(config),
+    )
+
+    slot_answers = dict(state["slot_answers"])
+    open_set = set(open_slots)
+    prefilled: list[str] = []
+    for h in result.value.slots:
+        if h.slot_key not in open_set or _is_filled(slot_answers.get(h.slot_key)):
+            continue
+        if h.confidence < HARVEST_MIN_CONFIDENCE:
+            continue
+        answer_type = (meta.get(h.slot_key) or {}).get("answer_type")
+        stored = _coerce_normalized(
+            answer_type if isinstance(answer_type, str) else None, h.normalized_value
+        )
+        if stored is not None:
+            slot_answers[h.slot_key] = stored
+            prefilled.append(h.slot_key)
+
+    return {
+        **state,
+        "slot_answers": slot_answers,
+        "used_fallback": state["used_fallback"] or result.fell_back,
+        "harvested": prefilled,
     }
 
 
@@ -616,6 +722,23 @@ def _answer_text(answer: dict[str, Any] | None) -> str:
     if answer.get("type") == "range":
         return f"{answer.get('start', '')}~{answer.get('end', '')}"
     return ""
+
+
+def _answered_context(state: InterviewState) -> str:
+    """앞서 채워진 슬롯 → 다음 질문용 짧은 러닝 요약("태그=값 / …").
+
+    아직 답이 없으면 명시 문구. LLM 이 이전 답을 이어받아(맥락 반복 없이) 자연스럽게 묻게 한다.
+    """
+    answers = state["slot_answers"]
+    parts: list[str] = []
+    for slot_key, tag in _CONTEXT_LABELS.items():
+        value = answers.get(slot_key)
+        if not _is_filled(value):
+            continue
+        text = _answer_text(value).strip()
+        if text:
+            parts.append(f"{tag}={text}")
+    return " / ".join(parts) if parts else "(아직 답한 내용 없음)"
 
 
 def _heaviest_goal_hint(state: InterviewState) -> str:

@@ -36,6 +36,7 @@ from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.period_summary import PeriodSummary
 from reaction_backend.db.models.plan_draft import PlanDraft
+from reaction_backend.db.models.policy_snapshot import PolicySnapshot
 from reaction_backend.db.models.recovery_attempt import RecoveryAttempt
 from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
@@ -57,6 +58,7 @@ from reaction_backend.repositories.inbox_repo import get_inbox_repo
 from reaction_backend.repositories.interview_repo import get_interview_repo
 from reaction_backend.repositories.notification_repo import get_notification_repo
 from reaction_backend.repositories.plan_draft_repo import get_plan_draft_repo
+from reaction_backend.repositories.policy_snapshot_repo import get_policy_snapshot_repo
 from reaction_backend.repositories.privacy_repo import get_privacy_repo
 from reaction_backend.repositories.recovery_repo import get_recovery_repo
 from reaction_backend.repositories.review_repo import get_review_repo
@@ -1072,6 +1074,18 @@ class FakeExecutionRepo:
         self._interruptions[row.id] = row
         return row
 
+    async def list_pending_reflection(
+        self, user_id: UUID, *, since: datetime
+    ) -> list[ExecutionEvent]:
+        pending = [
+            e
+            for e in self._executions.values()
+            if e.user_id == user_id
+            and e.completion_status == "in_progress"
+            and e.plan_start_at >= since
+        ]
+        return sorted(pending, key=lambda e: e.plan_start_at)
+
 
 class FakeDailyBriefRepo:
     """in-memory DailyBriefRepo — Issue #19-A (조회만)."""
@@ -1584,6 +1598,25 @@ def fake_review_repo() -> FakeReviewRepo:
     return FakeReviewRepo()
 
 
+class FakePolicySnapshotRepo:
+    """in-memory PolicySnapshotRepo — #83 §14 (조회만)."""
+
+    def __init__(self) -> None:
+        self._items: list[PolicySnapshot] = []
+
+    def seed(self, snapshot: PolicySnapshot) -> None:
+        self._items.append(snapshot)
+
+    async def get_active(self, user_id: UUID) -> PolicySnapshot | None:
+        actives = [s for s in self._items if s.user_id == user_id and s.is_active]
+        return max(actives, key=lambda s: s.version) if actives else None
+
+
+@pytest.fixture
+def fake_policy_snapshot_repo() -> FakePolicySnapshotRepo:
+    return FakePolicySnapshotRepo()
+
+
 @pytest.fixture
 def fake_scheduled_block_repo() -> FakeScheduledBlockRepo:
     return FakeScheduledBlockRepo()
@@ -1615,6 +1648,7 @@ def client(
     fake_privacy_repo: FakePrivacyRepo,
     fake_review_repo: FakeReviewRepo,
     fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_policy_snapshot_repo: FakePolicySnapshotRepo,
 ) -> Iterator[TestClient]:
     """기본 client — 인증된 demo user + 도메인 fake repo + fake session."""
     _reset_process_singletons()
@@ -1644,6 +1678,7 @@ def client(
     app.dependency_overrides[get_privacy_repo] = lambda: fake_privacy_repo
     app.dependency_overrides[get_review_repo] = lambda: fake_review_repo
     app.dependency_overrides[get_scheduled_block_repo] = lambda: fake_scheduled_block_repo
+    app.dependency_overrides[get_policy_snapshot_repo] = lambda: fake_policy_snapshot_repo
     with TestClient(app) as test_client:
         yield test_client
 
