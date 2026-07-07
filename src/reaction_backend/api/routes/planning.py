@@ -41,6 +41,7 @@ from langchain_core.runnables import RunnableConfig
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
+from reaction_backend.db.models.interview_session import InterviewSession
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.session import get_db
@@ -125,13 +126,29 @@ def _resolve_target_date(raw: str | None) -> str:
         ) from exc
 
 
+async def _project_session_outcome(row: InterviewSession, repo: InterviewRepo) -> InterviewOutcome:
+    """종료된 인터뷰 세션의 slot_answers 를 outcome 으로 결정적 투영 (LLM 0회)."""
+    slot_rows = await repo.list_slot_answers(row.id)
+    slot_answers = {r.slot_key: r.value for r in slot_rows if r.value is not None}
+    return interview_adapter.build_outcome(
+        session_id=str(row.id),
+        slot_answers=slot_answers,
+        ambiguity_final=(float(row.ambiguity_final) if row.ambiguity_final is not None else 0.0),
+        end_reason=cast(InterviewEndReason, row.end_reason or "completed"),
+        # 인터뷰 정규화가 LLM 이었는지 룰 fallback 이었는지 (세션에 영속된 플래그).
+        analysis_source="rule" if row.used_fallback else "llm",
+    )
+
+
 async def _resolve_outcome(
     body: FirstPlanGenerateRequest, user_id: UUID, repo: InterviewRepo
 ) -> InterviewOutcome:
     """요청에서 First Plan 시드 `InterviewOutcome` 을 확정한다.
 
-    온보딩 인라인 전달(`outcome`)을 우선하고, 없으면 `interviewSessionId` 로 종료된 세션의
-    slot_answers 를 결정적으로 투영한다(LLM 0회, `interview_adapter.build_outcome`).
+    우선순위: ① 인라인 `outcome` → ② `interviewSessionId` 로 종료 세션 투영 →
+    ③ **빈 본문이면 최근 '정상 종료' 인터뷰 세션으로 자동 복구** — FE 가 새로고침 등으로
+    sessionId(메모리 보관)를 잃어도 계획 생성이 가능하도록 (abandoned 제외).
+    셋 다 불가하면 422.
     """
     if body.outcome is not None:
         return body.outcome
@@ -143,21 +160,13 @@ async def _resolve_outcome(
         row = await repo.get_active(user_id, session_uuid)
         if row is None:
             raise _interview_not_found()
-        slot_rows = await repo.list_slot_answers(row.id)
-        slot_answers = {r.slot_key: r.value for r in slot_rows if r.value is not None}
-        return interview_adapter.build_outcome(
-            session_id=str(row.id),
-            slot_answers=slot_answers,
-            ambiguity_final=(
-                float(row.ambiguity_final) if row.ambiguity_final is not None else 0.0
-            ),
-            end_reason=cast(InterviewEndReason, row.end_reason or "completed"),
-            # 인터뷰 정규화가 LLM 이었는지 룰 fallback 이었는지 (세션에 영속된 플래그).
-            analysis_source="rule" if row.used_fallback else "llm",
-        )
+        return await _project_session_outcome(row, repo)
+    latest = await repo.get_latest_finished(user_id)
+    if latest is not None:
+        return await _project_session_outcome(latest, repo)
     raise ApiError(
         ErrorCode.COMMON_VALIDATION_ERROR,
-        "outcome 또는 interviewSessionId 중 하나가 필요해요.",
+        "완료된 인터뷰가 없어요. 인터뷰를 먼저 진행하거나 outcome/interviewSessionId 를 보내주세요.",
         http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
     )
 

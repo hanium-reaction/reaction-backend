@@ -253,7 +253,7 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 | Method | Path | 설명 |
 | --- | --- | --- |
-| POST | `/plans/generate` | First Plan orchestrator(LangGraph) 실행. 입력: `outcome`(InterviewOutcome 인라인) 또는 `interviewSessionId`(+`targetDate` 선택). Focus≤3/Maintain≤5 초과 시 422 `GOAL_TIER_LIMIT_EXCEEDED`. Draft 를 `plan_drafts`(72h)에 저장하고 실제 `planId` 반환. 응답 `isDraft=true` (#32/#62) |
+| POST | `/plans/generate` | First Plan orchestrator(LangGraph) 실행. 입력: `outcome`(InterviewOutcome 인라인) 또는 `interviewSessionId`(+`targetDate` 선택). **빈 본문이면 최근 '정상 종료' 인터뷰(abandoned 제외)로 자동 복구** — FE 가 sessionId 를 잃어도 생성 가능(완료 인터뷰가 없으면 422). Focus≤3/Maintain≤5 초과 시 422 `GOAL_TIER_LIMIT_EXCEEDED`. Draft 를 `plan_drafts`(72h)에 저장하고 실제 `planId` 반환. 응답 `isDraft=true` (#32/#62) |
 | GET | `/plans/{planId}` | 저장된 Draft 미리보기 재구성(LLM 0회). 없으면 404 `PLAN_DRAFT_NOT_FOUND` (#62) |
 | POST | `/plans/{planId}/approve` | HITL [수락] → SAVING. **`planId` 로 저장된 Draft 로드**(body 불필요, #62 FE 계약 변경). goals/goal_nodes/action_items/scheduled_blocks 단일 트랜잭션 영속화(+3회 재시도). 정책 위반 422 `PLAN_POLICY_VIOLATION` / 저장 실패 500 `PLAN_SAVE_FAILED` / 만료 410 `PLAN_DRAFT_EXPIRED`. 응답 `isDraft=false`. 부수: onboarding `ONBOARDING_FIRST_PLAN→ONBOARDING_NOTIFICATIONS` 전이(멱등) (#32/#62) |
 | PATCH | `/plans/{planId}/blocks/{blockId}` | 15분 snap 직접 편집 (S15) — ✅ #21-B |
@@ -261,7 +261,7 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | POST | `/plans/{planId}/ai-edit/apply` | diff 적용 (사용자 승인 후) |
 | GET | `/plans/weekly?weekStart=YYYY-MM-DD` | 주간 그리드 (S14) — ✅ #21-B |
 
-> `/plans/generate`·`/plans/{planId}`·`approve`·`ai-edit` 는 #18/#32 (First Plan) — 현재 `generate` 만 501 스텁.
+> `generate`·`/plans/{planId}`·`approve`·`weekly`·블록 편집은 구현 완료. `ai-edit`/`ai-edit/apply` 만 미구현(P1, 라우트 없음).
 
 응답 예 `POST /plans/generate` (#32, `FirstPlanResponse` — Draft Layer):
 ```json

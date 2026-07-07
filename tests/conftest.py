@@ -1303,6 +1303,18 @@ class FakeInterviewRepo:
             return None
         return s
 
+    async def get_latest_finished(self, user_id: UUID) -> InterviewSessionModel | None:
+        """정상 종료(abandoned 제외) 세션 중 ended_at 최신 1개 — 실 repo 와 동일 규칙."""
+        finished = [
+            s
+            for s in self._sessions.values()
+            if s.user_id == user_id and s.end_reason is not None and s.end_reason != "abandoned"
+        ]
+        with_ended = [s for s in finished if s.ended_at is not None]
+        if with_ended:
+            return max(with_ended, key=lambda s: s.ended_at)
+        return finished[-1] if finished else None
+
     async def list_slot_answers(self, session_id: UUID) -> list[InterviewSlotAnswer]:
         return list(self._answers.get(session_id, {}).values())
 

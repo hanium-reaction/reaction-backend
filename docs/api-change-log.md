@@ -7,6 +7,12 @@
 
 ---
 
+## v1.16 — 2026-07-07 (`POST /plans/generate` 빈 본문 자동 복구)
+
+- 빈 본문(`{}`) 시 422 대신 **그 유저의 최근 '정상 종료' 인터뷰 세션(abandoned 제외)으로 자동 복구**해 계획 생성 — FE 가 새로고침/재진입으로 메모리의 sessionId 를 잃으면 온보딩 4/4 주간 계획이 빈 화면이 되던 문제의 서버측 해결
+- 완료된 인터뷰가 아예 없으면 기존대로 422 `COMMON_VALIDATION_ERROR`(메시지 개선). `outcome`/`interviewSessionId` 경로는 불변(하위호환)
+- `InterviewRepo.get_latest_finished` 추가. §8 표의 낡은 "generate 만 501 스텁" 주석 정정(구현 완료 상태 반영)
+
 ## v1.15 — 2026-07-07 (#20 — `POST /reflection/batch` 실구현)
 
 - `POST /reflection/batch` 501 스텁 → **실구현**. S17 저녁 일괄 회고: 미체크(in_progress) 카드들을 한 번에 종결.
