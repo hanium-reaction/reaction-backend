@@ -36,12 +36,20 @@ def test_cors_preflight_allows_frontend_origin(client: TestClient) -> None:
     assert response.headers.get("access-control-allow-origin") == "http://localhost:5173"
 
 
-def test_placeholder_routes_return_501(client: TestClient) -> None:
-    """미구현 도메인 라우터는 501. 인증된 사용자 기준.
+def test_reflection_batch_is_implemented(client: TestClient) -> None:
+    """`POST /reflection/batch` 는 이제 실구현 — 더 이상 501 placeholder 가 아니다.
 
-    /today/agenda 는 #19-A, /settings 는 #23-A, /recovery/proposals/generate 는 #20-A,
-    /plans/generate 는 #32, /reviews/weekly 는 #21-A, /replan/* 은 #20-B,
-    /policy-snapshot/current 은 #83 에서 구현됨 — placeholder 목록서 제외.
+    과거 미구현 도메인 라우터들은 순차 구현됨: /today/agenda(#19-A) · /settings(#23-A)
+    · /recovery/proposals/generate(#20-A) · /plans/generate(#32) · /reviews/weekly(#21-A)
+    · /replan/*(#20-B) · /policy-snapshot/current(#83) · /reflection/batch(본 PR).
+    남은 501 은 calendar connect/disconnect(P1, 의도적) 뿐 — test_calendar 에서 검증.
     """
-    resp = client.post("/reflection/batch", headers={"Idempotency-Key": "placeholder-batch"})
-    assert resp.status_code == 501, f"POST /reflection/batch should be 501, got {resp.status_code}"
+    resp = client.post(
+        "/reflection/batch",
+        json={"items": []},
+        headers={"Idempotency-Key": "placeholder-batch"},
+    )
+    assert resp.status_code == 200, (
+        f"POST /reflection/batch should be implemented, got {resp.status_code}"
+    )
+    assert resp.json()["processedCount"] == 0

@@ -7,6 +7,12 @@
 
 ---
 
+## v1.15 — 2026-07-07 (#20 — `POST /reflection/batch` 실구현)
+
+- `POST /reflection/batch` 501 스텁 → **실구현**. S17 저녁 일괄 회고: 미체크(in_progress) 카드들을 한 번에 종결.
+- 요청 `{ items: [{ executionId, completionStatus, failureTags?(0~2), memo? }] }`(빈 배열 no-op, 상한 50). 응답 `{ processedCount, taggedCount, needsFailureTags[] }`.
+- 각 항목은 `POST /today/check-ins` 와 동일 전이 + failed/partial_done 은 실패 사유 동시 기록. **전량 검증 후 단일 트랜잭션**(하나라도 무효면 전체 롤백). Idempotency-Key 필수(미들웨어). 신규 에러코드 없음(기존 재사용).
+
 ## v1.14 — 2026-07-02 (인터뷰 재시작 승리 — staging FE 연동 실측 후속)
 
 - ⚠️ `POST /interview/sessions` 동작 변경: 진행 중 세션이 있으면 **409 `INTERVIEW_SESSION_EXISTS` 대신 그 세션을 `endReason=abandoned` 로 닫고 새 세션 생성(항상 201)** — 재시작 승리(restart-wins)

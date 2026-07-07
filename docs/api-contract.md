@@ -345,10 +345,19 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 | Method | Path | 설명 | 상태 |
 | --- | --- | --- | --- |
-| GET | `/reflection/pending` | 오늘+어제+그제 미체크 카드 (3일 누적) | 🔴 후속 |
-| POST | `/reflection/batch` | 일괄 처리 (Idempotency-Key 필수). 트랜잭션 | 🚧 501 |
+| GET | `/reflection/pending` | 오늘+어제+그제 미체크 카드 (3일 누적) | ✅ #83 |
+| POST | `/reflection/batch` | 미체크 카드 일괄 종결 (Idempotency-Key 필수). 트랜잭션 | ✅ #20 |
 | GET | `/reflection/failure-tags` | 13종 마스터 (`is_active=true`) | ✅ #19-B |
 | POST | `/reflection/failure-tags/{executionId}` | 0~2개 태깅 + `memoEncrypted` | ✅ #19-B |
+
+`POST /reflection/batch` — S17 저녁 일괄 회고. 요청 `{ items: [{ executionId, completionStatus(4칩),
+failureTags?(0~2), memo? }] }` (빈 배열 no-op, 상한 50건). 각 항목을 `POST /today/check-ins` 와
+동일하게 종결(execution + 블록 finished + `action_item.status`)하고 failed/partial_done 항목엔
+실패 사유를 함께 기록한다. **전량 사전 검증 후 단일 트랜잭션 적용** — 하나라도 무효(없음
+404 `TODAY_EXECUTION_NOT_FOUND` · 이미 체크인 409 `TODAY_ALREADY_CHECKED_IN` · 중복 executionId 422
+`COMMON_VALIDATION_ERROR` · non-failure 에 태그 422 `REFLECT_NOT_FAILED` · 무효 태그 422 `REFLECT_INVALID_TAG`
+· 재태깅 409 `REFLECT_ALREADY_TAGGED`)면 **전체 롤백(부분 적용 없음)**. 응답
+`{ processedCount, taggedCount, needsFailureTags[] }`(사유 미기록 실패 항목의 executionId). `memo` 는 서버 at-rest 암호화.
 
 #19-B 태깅 메모: failed/partial_done 실행만 허용 (422 `REFLECT_NOT_FAILED`), 무효 코드 422
 `REFLECT_INVALID_TAG`, 재태깅 409 `REFLECT_ALREADY_TAGGED` (hard delete 회피), memo 는
