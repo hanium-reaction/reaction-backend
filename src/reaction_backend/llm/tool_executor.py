@@ -144,6 +144,8 @@ class LLMToolExecutor:
             thinking 을 켠다 (provider._thinking_config). timeout 도 함께 상향 권장.
         """
         settings = get_settings()
+        # task 별 모델 — 계획·회복은 상위 모델, 그 외는 base (config.model_for_module).
+        resolved_model = settings.model_for_module(module)
         started = time.monotonic()
         prompt_version = "unknown"
         resolved_prompt_id = prompt_id
@@ -208,6 +210,7 @@ class LLMToolExecutor:
                         prompt_text=prompt_text,
                         timeout=timeout,
                         thinking_budget=thinking_budget,
+                        model=resolved_model,
                     ),
                     timeout=timeout,
                 )
@@ -352,7 +355,7 @@ class LLMToolExecutor:
                 session,
                 LlmRunRecord(
                     module=module,
-                    model=get_settings().llm_model,
+                    model=get_settings().model_for_module(module),
                     prompt_id=prompt_id,
                     prompt_version=prompt_version,
                     tokens_in=tokens_in,

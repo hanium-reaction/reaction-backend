@@ -40,9 +40,15 @@ def _patch_render(monkeypatch: pytest.MonkeyPatch, body: str = "원문 프롬프
     )
 
     async def _fake_gen(
-        *, schema: Any, prompt_text: str, timeout: float, thinking_budget: int | None = None
+        *,
+        schema: Any,
+        prompt_text: str,
+        timeout: float,
+        thinking_budget: int | None = None,
+        model: str | None = None,
     ) -> Any:
         captured["prompt"] = prompt_text
+        captured["model"] = model
         raise ProviderUnavailable("no key (test)")
 
     monkeypatch.setattr(tool_executor, "generate_structured", _fake_gen)
@@ -91,6 +97,28 @@ async def test_run_unknown_tone_keeps_prompt(monkeypatch: pytest.MonkeyPatch) ->
         tone_mode="bogus",
     )
     assert captured["prompt"] == "원문 프롬프트"  # 미지원 값 → prefix 없음
+
+
+@pytest.mark.asyncio
+async def test_run_routes_upper_model_by_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    """module 에 따라 상위/base 모델이 provider 로 전달된다 (계획·회복 = 상위)."""
+    from reaction_backend.config import get_settings
+
+    captured = _patch_render(monkeypatch)
+    await tool_executor.aiClient.run(
+        module="planning", schema=_Schema, prompt_id="test/tone", fallback=lambda: _Schema()
+    )
+    settings = get_settings()
+    assert captured["model"] == settings.model_for_module("planning")
+
+    captured2 = _patch_render(monkeypatch)
+    await tool_executor.aiClient.run(
+        module="interview", schema=_Schema, prompt_id="test/tone", fallback=lambda: _Schema()
+    )
+    assert captured2["model"] == settings.model_for_module("interview")
+    # 상위 모델 오버라이드가 설정돼 있으면 계획과 인터뷰 모델은 실제로 갈린다
+    if settings.llm_model_planning and settings.llm_model_planning != settings.llm_model:
+        assert captured["model"] != captured2["model"]
 
 
 # ───────────────────────── morning_brief cron 전달 ─────────────────────────
