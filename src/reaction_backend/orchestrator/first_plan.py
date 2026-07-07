@@ -37,10 +37,9 @@ from reaction_backend.config import get_settings
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator import first_plan_adapter
 from reaction_backend.orchestrator.goal_structuring import (
-    compute_free_blocks,
-    reserve_habit_sessions,
     time_policies_to_busy,
 )
+from reaction_backend.orchestrator.plan_scheduler import schedule_actions_multiday
 from reaction_backend.schemas.interview import InterviewOutcome
 from reaction_backend.schemas.planning import (
     GoalDecomposition,
@@ -214,26 +213,39 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
 
 
 async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> FirstPlanState:
-    """PLANNING (룰 only, LLM 0회) — goal_structuring.py free/busy + 배치 알고리즘 재사용.
+    """PLANNING (룰 only, LLM 0회) — 분해 action_item 을 다일 스케줄러로 배치한다.
 
-    분해된 action_item 을 outcome 가용 시간(free/busy)에 실제로 배치한다.
-    - `time_policies_to_busy` + `compute_free_blocks`: 활동 윈도우/노터치를 제외한 가용 구간.
-    - `reserve_habit_sessions`: priority 오름차순 + 길이 맞는 가장 이른 free 슬롯 배치
-      (분해 순서를 priority, estimated_minutes 를 길이로 환원 — `action_placements`).
+    이전에는 `reserve_habit_sessions`(습관 하루 1세션)를 재사용해 `target_date` 하루에
+    모든 카드를 몰아넣었다(#calendar-cramming). 이제 `plan_scheduler.schedule_actions_multiday`
+    로 **target_date ~ horizon** 범위에 걸쳐 배치한다:
+    - 하루 집중 총량 상한을 채우면 다음 날로 넘기고(다일 분산),
+    - 피크 시간대 free 를 먼저 쓰고(없으면 폴백),
+    - 긴 카드는 focus_duration 세션으로 쪼개며 카드 사이 휴식(break_pattern)을 둔다.
+    busy(수면/노터치)는 날짜별로 `time_policies_to_busy` 콜백으로 파생한다.
+
     배치 못 한 항목은 `schedule_warnings` 로 남겨 REVIEWING 의 conflict_report 에 합류한다.
     산출물은 미영속 미리보기(`ScheduledBlockPreview`) — 자동 적용 금지(AGENTS §1.4).
     """
     gp = state["goal_plan"]
     action_items = list(gp.action_items) if gp is not None else []
+    outcome = state["outcome"]
 
-    day = date.fromisoformat(state["target_date"])
-    policies = first_plan_adapter.time_policies_from_outcome(state["outcome"])
-    placements = first_plan_adapter.action_placements(action_items)
-    node_by_placement = {p.id: getattr(p, "node_id", "") for p in placements}
+    start_day = date.fromisoformat(state["target_date"])
+    horizon_day = date.fromisoformat(outcome.horizon) if outcome.horizon else start_day
+    policies = first_plan_adapter.time_policies_from_outcome(outcome)
+    actions = first_plan_adapter.plan_actions_from_decomposition(action_items)
+    node_by_action = {a.id: a.node_id for a in actions}
 
-    busy = time_policies_to_busy(day, policies)
-    free = compute_free_blocks(day, busy)
-    placed, _remaining = reserve_habit_sessions(day, free, placements)
+    placed, warnings = schedule_actions_multiday(
+        start_day=start_day,
+        horizon_day=horizon_day,
+        actions=actions,
+        busy_for_day=lambda d: time_policies_to_busy(d, policies),
+        peak_windows=first_plan_adapter.peak_windows_from_outcome(outcome),
+        focus_chunk_min=first_plan_adapter.focus_chunk_min_from_outcome(outcome),
+        break_min=first_plan_adapter.break_min_from_outcome(outcome),
+        daily_focus_cap_min=first_plan_adapter.DEFAULT_DAILY_FOCUS_CAP_MIN,
+    )
 
     blocks = [
         ScheduledBlockPreview(
@@ -242,17 +254,11 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
             title=b.title,
             category=b.category,
             origin="goal",
-            origin_id=(node_by_placement.get(b.origin_id) or None)
+            origin_id=(node_by_action.get(b.origin_id) or None)
             if b.origin_id is not None
             else None,
         )
         for b in placed
-    ]
-    placed_ids = {b.origin_id for b in placed}
-    warnings = [
-        f"'{p.title}' 을(를) 배치할 가용 시간을 찾지 못했어요. 다른 시간으로 옮겨볼까요?"
-        for p in placements
-        if p.id not in placed_ids
     ]
     return {**state, "scheduled_blocks": blocks, "schedule_warnings": warnings}
 
