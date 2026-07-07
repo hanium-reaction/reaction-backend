@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import (
@@ -40,7 +41,7 @@ from reaction_backend.orchestrator.goal_structuring import (
 )
 from reaction_backend.orchestrator.interview_adapter import is_placeholder_goal
 from reaction_backend.schemas.common import now_kst
-from reaction_backend.schemas.interview import InterviewOutcome
+from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome
 from reaction_backend.schemas.planning import (
     ActionItemDraft,
     GoalNodeDraft,
@@ -244,6 +245,50 @@ def _node_depths(goal_nodes: Sequence[GoalNodeDraft]) -> dict[str, int]:
     return depths
 
 
+async def _active_goals(session: AsyncSession, user_id: uuid.UUID) -> list[Goal]:
+    stmt = select(Goal).where(Goal.user_id == user_id, Goal.archived_at.is_(None))
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def materialize_goals(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    core_goals: Sequence[GoalCandidate],
+) -> tuple[list[Goal], Goal | None]:
+    """core_goals → 영속 Goal 목록 + heaviest. 이미 있는 제목은 재사용(중복 생성 방지).
+
+    딥 인터뷰 완료(#96)와 계획 승인(#62)이 공유한다: 인터뷰가 먼저 목표를 저장해
+    분류 화면(GET /goals)에 노출·재분류할 수 있게 하고, 이후 계획 승인은 같은 목표를
+    **재사용**(신규 생성 X)해 중복을 막는다. 미입력 placeholder(#88)는 제외.
+    """
+    existing = {g.title: g for g in await _active_goals(session, user_id)}
+    goal_rows: list[Goal] = []
+    heaviest: Goal | None = None
+    for gc in core_goals:
+        if is_placeholder_goal(gc):
+            continue
+        g = existing.get(gc.title)
+        if g is None:
+            g = Goal()
+            g.user_id = user_id
+            g.title = gc.title
+            g.category = _normalize_goal_category(gc.category)
+            g.goal_tier = _normalize_goal_tier(gc.tentative_tier)
+            g.deadline = date.fromisoformat(gc.deadline) if gc.deadline else None
+            g.status = "active"
+            g.why_now = gc.why_now
+            session.add(g)
+            existing[gc.title] = g
+        goal_rows.append(g)
+        if gc.is_heaviest and heaviest is None:
+            heaviest = g
+    if heaviest is None and goal_rows:
+        heaviest = goal_rows[0]
+    await session.flush()
+    return goal_rows, heaviest
+
+
 async def _apply_once(
     session: AsyncSession,
     *,
@@ -275,27 +320,11 @@ async def _apply_once(
     )
 
     async with policy_guarded_transaction(session, guard_plan, time_policies):
-        # 1) goals — 실제 목표만 영속화. 미입력 placeholder(#88)는 제외해 '(미입력 목표)'
-        #    카드가 목표 관리 화면에 뜨지 않게 한다. heaviest 가 분해 트리의 소속 goal.
-        real_goals = [gc for gc in outcome.core_goals if not is_placeholder_goal(gc)]
-        goal_rows: list[Goal] = []
-        heaviest: Goal | None = None
-        for gc in real_goals:
-            g = Goal()
-            g.user_id = user_id
-            g.title = gc.title
-            g.category = _normalize_goal_category(gc.category)
-            g.goal_tier = _normalize_goal_tier(gc.tentative_tier)
-            g.deadline = date.fromisoformat(gc.deadline) if gc.deadline else None
-            g.status = "active"
-            g.why_now = gc.why_now
-            session.add(g)
-            goal_rows.append(g)
-            if gc.is_heaviest and heaviest is None:
-                heaviest = g
-        if heaviest is None and goal_rows:
-            heaviest = goal_rows[0]
-        await session.flush()  # goal.id 확보
+        # 1) goals — 인터뷰 완료 시 이미 저장된 목표를 재사용(중복 방지, #96), placeholder 제외(#88).
+        #    heaviest 가 분해 트리의 소속 goal.
+        goal_rows, heaviest = await materialize_goals(
+            session, user_id=user_id, core_goals=outcome.core_goals
+        )
 
         # 실제 목표가 없으면(=goals.list 미입력) 트리/액션도 만들지 않는다: placeholder 로부터
         # 분해된 노드는 소속시킬 goal 이 없고(GoalNode.goal_id 는 NOT NULL) 의미도 없다.

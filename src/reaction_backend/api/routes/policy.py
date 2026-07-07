@@ -23,15 +23,44 @@ DB: policy_snapshots (버전 이력), behavioral_profiles, interaction_styles
 구현 위치: agents/policy_update_agent.py
 """
 
-from fastapi import APIRouter, HTTPException, status
+from http import HTTPStatus
+from typing import Annotated
+
+from fastapi import APIRouter, Depends
+
+from reaction_backend.api.deps import CurrentUser
+from reaction_backend.repositories.policy_snapshot_repo import (
+    PolicySnapshotRepo,
+    get_policy_snapshot_repo,
+)
+from reaction_backend.schemas.errors import ApiError, ErrorCode
+from reaction_backend.schemas.policy import PolicySnapshotResponse
 
 router = APIRouter(prefix="/policy-snapshot", tags=["policy"])
 
+PolicySnapshotRepoDep = Annotated[PolicySnapshotRepo, Depends(get_policy_snapshot_repo)]
 
-@router.get("/current", status_code=status.HTTP_501_NOT_IMPLEMENTED)
-async def get_current_policy() -> None:
-    """현재 활성 PolicySnapshot."""
-    raise HTTPException(
-        status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Defined in api-contract.md §14 — to be implemented in a follow-up.",
+
+@router.get("/current")
+async def get_current_policy(
+    user: CurrentUser,
+    repo: PolicySnapshotRepoDep,
+) -> PolicySnapshotResponse:
+    """현재 활성 PolicySnapshot (#83) — 없으면 404 (FE 는 카운트-only 폴백 유지)."""
+    snapshot = await repo.get_active(user.id)
+    if snapshot is None:
+        raise ApiError(
+            ErrorCode.POLICY_NOT_FOUND,
+            "아직 활성 정책 스냅샷이 없어요.",
+            http_status=HTTPStatus.NOT_FOUND,
+        )
+    return PolicySnapshotResponse(
+        version=snapshot.version,
+        source=snapshot.source,
+        behavioral_profile=snapshot.behavioral_profile,
+        execution_constraints=snapshot.execution_constraints,
+        interaction_style=snapshot.interaction_style,
+        recovery_policy=snapshot.recovery_policy,
+        reason_for_update=snapshot.reason_for_update,
+        valid_from=snapshot.valid_from,
     )

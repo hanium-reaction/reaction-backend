@@ -4,6 +4,12 @@
 > 우리 백엔드는 Docker 컨테이너라 어디든 동작 → 그 중 **AWS** 선택.
 > 배포 절차(Render, 임시/대체)는 [`DEPLOY.md`](DEPLOY.md) 참고. 본 문서는 **한이음 AWS 계정 수령 후** 운영 배포 기준.
 
+> ⚠️ **현재 실배포 상태 (2026-07-07 확인) — 아래 본문보다 이 요약이 우선**
+> - **staging = EC2 + AWS RDS** (Lightsail 아님). 앱: EC2 `54.184.8.149` (Ubuntu, systemd `reaction-backend`, uvicorn 0.0.0.0:8000). DB: **AWS RDS PostgreSQL** (`…us-west-2.rds.amazonaws.com`, 오레곤).
+> - **배포·마이그레이션 = self-hosted runner CD** ([`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml), PR #80): main 머지 → rsync(`.env`·`.venv` 제외) → `uv sync` → `alembic upgrade head`(서버 `.env` 의 RDS URL 대상) → `systemctl restart` → `/health` 폴링.
+> - **로컬 개발 `.env` 만 아직 Supabase** (ap-northeast-2). 즉 로컬=Supabase, staging=RDS 로 서로 다르다.
+> - 아래 §1~§9(Lightsail Containers 권장 등)와 [`DEPLOY.md`](DEPLOY.md)(Render)·[`cicd.md`](cicd.md)(Supabase `migrate.yml`)·[`BUDGET.md`](BUDGET.md)("Supabase 유지")·[`architecture.md`](architecture.md) 일부는 **이 전환 이전 계획**이라 낡았다.
+
 ---
 
 ## 0. 한이음 클라우드 계정 흐름 (먼저 이해)
@@ -103,8 +109,8 @@ aws lightsail create-container-service-deployment \
 
 ## 5. DB·마이그레이션·CORS
 
-- **DB(Supabase) 그대로** — AWS로 옮기지 않음(외부 연결). `DATABASE_URL` 동일.
-- **마이그레이션**: 기존 CD(`.github/workflows/migrate.yml`)가 Supabase 에 `alembic upgrade head` — 변경 없음.
+- **DB = AWS RDS PostgreSQL** (`…us-west-2.rds.amazonaws.com`, 오레곤). ⚠️ 과거 본 문서는 "DB(Supabase) 그대로 — AWS로 옮기지 않음"이었으나 staging 은 RDS 로 전환됨 (2026-07-07 확인). 로컬 개발 `.env` 는 아직 Supabase.
+- **마이그레이션**: [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml)(self-hosted runner)가 main 머지마다 서버 `.env` 의 RDS URL 로 `alembic upgrade head` 를 적용(전/후 리비전 로그). 기존 `migrate.yml`(Supabase `STAGING_DATABASE_URL` 대상)은 superseded/dormant.
 - **CORS**: FE(Vercel) 도메인 유지.
 
 ## 6. (대안) EC2 + Docker
