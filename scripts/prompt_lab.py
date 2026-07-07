@@ -76,6 +76,11 @@ class PromptSpec:
     fallback_factory: Callable[[type], Any]
     headline_field: str  # 요약 테이블에 보여줄 핵심 필드
     scenarios: list[Scenario] = field(default_factory=list)
+    # 계획(분해·검토)처럼 thinking 이 필요한 프롬프트는 기본 예산을 싣는다 (프로덕션 배선과 동일).
+    # None 이면 인터뷰와 같은 기본(flash=0). `--thinking N` 으로 언제든 오버라이드해 A/B.
+    thinking_budget: int | None = None
+    # thinking 이 붙으면 단일 호출이 길어지므로 기본 timeout 상향. None 이면 8.0.
+    timeout: float | None = None
 
 
 def _import_schema(path: str) -> type:
@@ -113,6 +118,65 @@ def _brief_fallback(schema: type) -> Any:
         reason_why_now="",
         adjustment_hints=[],
     )
+
+
+def _next_question_fallback(schema: type) -> Any:
+    return schema(
+        question="(fallback) 조금만 더 구체적으로 알려주실 수 있을까요?",
+        empathy_one_liner="천천히 알려주셔도 괜찮아요.",
+        suggested_answers=[],
+    )
+
+
+def _ambiguity_fallback(schema: type) -> Any:
+    return schema(
+        slot_key="goals.list",
+        clarity_score=0.5,
+        new_ambiguity=0.5,
+        normalized_value=None,
+    )
+
+
+def _summary_fallback(schema: type) -> Any:
+    return schema(
+        headline="(fallback) 요약",
+        goal_summary="핵심 목표를 정리했어요.",
+        time_summary="가용 시간대를 확인했어요.",
+        preference_summary="선호하는 방식을 확인했어요.",
+        confirm_question="이대로 계획을 세워볼까요?",
+    )
+
+
+def _decompose_fallback(schema: type) -> Any:
+    from reaction_backend.schemas.planning import GoalNodeDraft
+
+    return schema(
+        goal_nodes=[
+            GoalNodeDraft(
+                node_id="tmp-root",
+                parent_id=None,
+                title="캡스톤 프로젝트",
+                node_type="root",
+                order_index=0,
+                is_leaf=True,
+            )
+        ],
+        action_items=[],
+        policy_violations=[],
+    )
+
+
+def _plan_review_fallback(schema: type) -> Any:
+    return schema(approved=True, feedback=[])
+
+
+def _slot_harvest_fallback(schema: type) -> Any:
+    return schema(slots=[])
+
+
+# 계획 프롬프트 기본 thinking 예산 — config 기본과 동일(프로덕션 배선 미러). `--thinking` 로 A/B.
+_PLANNING_THINKING = 2048
+_PLANNING_TIMEOUT = 20.0
 
 
 SPECS: dict[str, PromptSpec] = {
@@ -271,6 +335,266 @@ SPECS: dict[str, PromptSpec] = {
             ),
         ],
     ),
+    "interview_q": PromptSpec(
+        key="interview_q",
+        prompt_id="interview/next_question",
+        module="interview",
+        schema_path="reaction_backend.schemas.interview:NextQuestionSchema",
+        fallback_factory=_next_question_fallback,
+        headline_field="question",
+        scenarios=[
+            Scenario(
+                name="goals_list",
+                note="정체성 답한 뒤 목표 묻기 — 앞 답을 이어받고 자유서술 추천카드가 붙어야",
+                variables={
+                    "goal_title": "당신의 목표",
+                    "answered_context": "학년/시기=3학년 / 학기=방학",
+                    "ambiguous_slot": "goals.list",
+                    "slot_label": "지금 머릿속에 있는 일들을 편하게 알려주세요",
+                    "answer_type": "text",
+                    "options": "(자유 입력)",
+                    "last_answer": "방학",
+                    "retry": "",
+                },
+            ),
+            Scenario(
+                name="heaviest",
+                note="가장 무거운 목표 — 보기 하나를 지목하지 말고 '이 중에서'로 물어야",
+                variables={
+                    "goal_title": "캡스톤 프로젝트",
+                    "answered_context": "학년/시기=3학년 / 학기=방학 / 목표=캡스톤, 토익",
+                    "ambiguous_slot": "goals.heaviest",
+                    "slot_label": "그중 가장 무겁게 느끼는 건 어떤 거예요?",
+                    "answer_type": "select",
+                    "options": "캡스톤, 토익",
+                    "last_answer": "캡스톤 마무리하고 토익 준비",
+                    "retry": "",
+                },
+            ),
+            Scenario(
+                name="reask_success_image",
+                note="재질문 — 같은 질문 반복 말고 예시로 답하기 쉽게",
+                variables={
+                    "goal_title": "캡스톤 프로젝트",
+                    "answered_context": "학년/시기=3학년 / 목표=캡스톤, 토익 / 가장 무거운 목표=캡스톤",
+                    "ambiguous_slot": "goals.success_image",
+                    "slot_label": "이번 주 끝에 어떤 모습이면 좋을까요?",
+                    "answer_type": "text",
+                    "options": "(자유 입력)",
+                    "last_answer": "음 잘 모르겠어",
+                    "retry": "재질문: 직전 답이 조금 모호했다. 같은 말 반복 말고 예시·보기를 들어 답하기 쉽게 물어라.",
+                },
+            ),
+        ],
+    ),
+    "interview_score": PromptSpec(
+        key="interview_score",
+        prompt_id="interview/ambiguity_score",
+        module="interview",
+        schema_path="reaction_backend.schemas.interview:AmbiguityUpdate",
+        fallback_factory=_ambiguity_fallback,
+        headline_field="normalized_value",
+        scenarios=[
+            Scenario(
+                name="chip_role",
+                note="자유서술 속 학년을 보기로 매핑 — normalized_value='3학년', clarity 높게",
+                variables={
+                    "slot_key": "identity.role",
+                    "answer": "나는 컴퓨터공학과 3학년이야",
+                    "answer_type": "chip",
+                    "options": "1학년, 2학년, 3학년, 4학년, 졸업유예, 대학원, 기타",
+                    "today": "2026-07-06",
+                },
+                expect_field="normalized_value",
+                expect_starts_with=("3",),
+            ),
+            Scenario(
+                name="text_goals",
+                note="자유서술 목표 여러 개 — 핵심값 배열 추출",
+                variables={
+                    "slot_key": "goals.list",
+                    "answer": "캡스톤 마무리하고 토익 900점 준비",
+                    "answer_type": "text",
+                    "options": "(자유 입력)",
+                    "today": "2026-07-06",
+                },
+            ),
+            Scenario(
+                name="date_relative",
+                note="상대 표현 마감 → 오늘 기준 YYYY-MM-DD",
+                variables={
+                    "slot_key": "goals.deadlines",
+                    "answer": "이번 학기 말까지",
+                    "answer_type": "date_picker",
+                    "options": "(자유 입력)",
+                    "today": "2026-07-06",
+                },
+            ),
+            Scenario(
+                name="skip_fixed",
+                note="'딱히 없어' → 유효한 스킵(빈 값), clarity 0.7+ (무한 재질문 금지)",
+                variables={
+                    "slot_key": "time.fixed_blocks",
+                    "answer": "딱히 없어",
+                    "answer_type": "text",
+                    "options": "(자유 입력)",
+                    "today": "2026-07-06",
+                },
+            ),
+        ],
+    ),
+    "interview_summary": PromptSpec(
+        key="interview_summary",
+        prompt_id="interview/summary",
+        module="interview",
+        schema_path="reaction_backend.schemas.interview:InterviewSummary",
+        fallback_factory=_summary_fallback,
+        headline_field="headline",
+        scenarios=[
+            Scenario(
+                name="rich",
+                note="다 답한 경우 — 마감·성공 이미지·노터치·휴식·최소 단위까지 요약에 녹아야",
+                variables={
+                    "identity": "3학년 방학",
+                    "goals": "캡스톤, 토익",
+                    "heaviest": "캡스톤",
+                    "deadlines": "2026-08-20",
+                    "success_image": "데모가 매끄럽게 동작",
+                    "time_window": "09:00~23:00",
+                    "peak_window": "오전, 저녁",
+                    "no_touch": "수면, 식사",
+                    "tone": "담백",
+                    "rest_ok": "네",
+                    "downscope_unit": "10분",
+                },
+            ),
+            Scenario(
+                name="sparse",
+                note="빈 항목은 지어내지 말고 '아직 정하지 않음'으로 — 환각 금지 체크",
+                variables={
+                    "identity": "3학년 방학",
+                    "goals": "캡스톤",
+                    "heaviest": "캡스톤",
+                    "deadlines": "아직 정하지 않음",
+                    "success_image": "아직 정하지 않음",
+                    "time_window": "09:00~23:00",
+                    "peak_window": "오전",
+                    "no_touch": "아직 정하지 않음",
+                    "tone": "담백",
+                    "rest_ok": "아직 정하지 않음",
+                    "downscope_unit": "아직 정하지 않음",
+                },
+            ),
+        ],
+    ),
+    "interview_harvest": PromptSpec(
+        key="interview_harvest",
+        prompt_id="interview/slot_extraction",
+        module="interview",
+        schema_path="reaction_backend.schemas.interview:SlotHarvest",
+        fallback_factory=_slot_harvest_fallback,
+        headline_field="slots",
+        scenarios=[
+            Scenario(
+                name="rich_multi",
+                note="한 답에 학기·마감·집중시간이 섞임 → 3개 슬롯 미리 추출되어야 (재질문 감소)",
+                variables={
+                    "answered_slot": "identity.role",
+                    "answer": "난 컴공 3학년인데 지금 방학이야. 캡스톤이 8월 20일 마감이고 보통 오전에 집중이 잘 돼.",
+                    "today": "2026-07-07",
+                    "open_slots": (
+                        "- identity.season | 지금 학기 중이에요, 방학이에요? | chip | 학기 중, 방학, 계절학기\n"
+                        "- goals.deadlines | 마감일이 정해진 게 있어요? | date_picker | (자유 입력)\n"
+                        "- goals.success_image | 이번 주 끝에 어떤 모습이면 좋을까요? | text | (자유 입력)\n"
+                        "- time.peak_window | 가장 잘 집중되는 시간대는요? | chip | 오전, 오후, 저녁, 심야, 변동\n"
+                        "- recovery.tone | 못 한 날 어떤 톤이 좋아요? | chip | 담백, 따뜻, 유머, 코치처럼"
+                    ),
+                },
+            ),
+            Scenario(
+                name="single_slot_only",
+                note="답이 한 항목만 담으면 다른 슬롯은 추출하지 말 것 (빈 배열이 정상)",
+                variables={
+                    "answered_slot": "goals.list",
+                    "answer": "캡스톤 프로젝트랑 토익 준비",
+                    "today": "2026-07-07",
+                    "open_slots": (
+                        "- time.peak_window | 가장 잘 집중되는 시간대는요? | chip | 오전, 오후, 저녁, 심야, 변동\n"
+                        "- recovery.tone | 못 한 날 어떤 톤이 좋아요? | chip | 담백, 따뜻, 유머, 코치처럼"
+                    ),
+                },
+            ),
+        ],
+    ),
+    "planning_decompose": PromptSpec(
+        key="planning_decompose",
+        prompt_id="planning/goal_decompose",
+        module="planning",
+        schema_path="reaction_backend.schemas.planning:GoalDecomposition",
+        fallback_factory=_decompose_fallback,
+        headline_field="goal_nodes",
+        thinking_budget=_PLANNING_THINKING,
+        timeout=_PLANNING_TIMEOUT,
+        scenarios=[
+            Scenario(
+                name="first",
+                note="첫 분해 — SMART leaf(≤60분), 시간 충돌은 추측하지 말 것",
+                variables={
+                    "goal_title": "캡스톤 프로젝트 마무리",
+                    "why_now": "이번 학기 졸업요건",
+                    "horizon": "2026-08-20",
+                    "behavioral_summary": "회복 톤: 담백 / 휴식 수용: True / 집중 지속: 50분",
+                    "time_policy_summary": "활동: 09:00~23:00 / 피크: 오전, 저녁",
+                    "review_feedback": "(첫 분해 — 이전 피드백 없음)",
+                },
+            ),
+            Scenario(
+                name="replan",
+                note="재분해 — 아래 피드백을 실제로 반영해 더 잘게/뒤로 미뤄야 (P0-2)",
+                variables={
+                    "goal_title": "캡스톤 프로젝트 마무리",
+                    "why_now": "이번 학기 졸업요건",
+                    "horizon": "2026-08-20",
+                    "behavioral_summary": "회복 톤: 담백 / 휴식 수용: True / 집중 지속: 50분",
+                    "time_policy_summary": "활동: 09:00~23:00 / 피크: 오전, 저녁",
+                    "review_feedback": (
+                        "- '캡스톤 설계' leaf 가 90분이라 60분 초과 — 더 잘게 쪼개기\n"
+                        "- 첫 주에 5개는 많음 — 우선순위 낮은 2개는 다음 주로"
+                    ),
+                },
+            ),
+        ],
+    ),
+    "planning_review": PromptSpec(
+        key="planning_review",
+        prompt_id="planning/plan_quality",
+        module="planning",
+        schema_path="reaction_backend.schemas.planning:PlanReview",
+        fallback_factory=_plan_review_fallback,
+        headline_field="approved",
+        thinking_budget=_PLANNING_THINKING,
+        timeout=_PLANNING_TIMEOUT,
+        scenarios=[
+            Scenario(
+                name="over_60min",
+                note="60분 초과 leaf 가 있으면 approved=false + 사람이 읽을 다듬기 제안",
+                variables={
+                    "goal_nodes_json": (
+                        '[{"node_id":"r","parent_id":null,"title":"캡스톤",'
+                        '"node_type":"root","order_index":0,"is_leaf":false},'
+                        '{"node_id":"l1","parent_id":"r","title":"설계 문서",'
+                        '"node_type":"leaf","order_index":0,"is_leaf":true}]'
+                    ),
+                    "action_items_json": (
+                        '[{"node_id":"l1","title":"ERD 전체 작성","estimated_minutes":90,'
+                        '"category":"project","first_step":"엔티티 목록부터"}]'
+                    ),
+                    "time_policy_summary": "활동: 09:00~23:00 / 피크: 오전",
+                    "conflict_report": "충돌 없음",
+                },
+            ),
+        ],
+    ),
 }
 
 
@@ -299,6 +623,7 @@ class CallOutcome:
     banned_hits: tuple[str, ...]
     value: Any
     prompt_version: str
+    thinking_budget: int | None = None
 
 
 async def _call(
@@ -307,6 +632,7 @@ async def _call(
     variables: Mapping[str, str],
     *,
     timeout: float,
+    thinking_budget: int | None,
     price_in: float | None,
     price_out: float | None,
 ) -> CallOutcome:
@@ -325,6 +651,7 @@ async def _call(
         timeout=timeout,
         variables=dict(variables),
         session=None,  # DB/budget/llm_runs 우회 — 순수 프롬프트 실측
+        thinking_budget=thinking_budget,
     )
 
     if price_in is not None or price_out is not None:
@@ -344,6 +671,7 @@ async def _call(
         banned_hits=result.banned_hits,
         value=result.value,
         prompt_version=result.prompt_version,
+        thinking_budget=thinking_budget,
     )
 
 
@@ -383,9 +711,10 @@ def _print_outcome(
         print(_c(f"│  기대: {scn.note}", DIM, on=color))
 
     cost = "무료(0)" if outcome.cost_cents == 0 else f"{outcome.cost_cents}¢"
+    think = "기본(flash=0)" if outcome.thinking_budget is None else f"{outcome.thinking_budget} tok"
     print(
         f"│  토큰 in/out: {outcome.tokens_in}/{outcome.tokens_out}"
-        f"  ·  {outcome.latency_ms}ms  ·  비용 {cost}"
+        f"  ·  {outcome.latency_ms}ms  ·  thinking {think}  ·  비용 {cost}"
     )
 
     if outcome.banned_hits:
@@ -467,6 +796,10 @@ async def _run_spec(
             print("└" + "─" * 40)
             continue
 
+        # thinking/timeout 유효값: CLI 오버라이드(--thinking) > 스펙 기본 > 전역 기본.
+        eff_thinking = args.thinking if args.thinking is not None else spec.thinking_budget
+        eff_timeout = args.timeout if args.timeout is not None else (spec.timeout or 8.0)
+
         # --repeat: 변동성 점검 (fallback 은 결정적이라 1회로 강제)
         n = max(1, args.repeat)
         first_outcome: CallOutcome | None = None
@@ -475,7 +808,8 @@ async def _run_spec(
                 spec,
                 schema,
                 scn.variables,
-                timeout=args.timeout,
+                timeout=eff_timeout,
+                thinking_budget=eff_thinking,
                 price_in=args.price_in,
                 price_out=args.price_out,
             )
@@ -541,14 +875,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         "target",
         nargs="?",
         default="list",
-        help="recovery | inbox | brief | all | list (기본: list)",
+        help="recovery | inbox | brief | interview_q | interview_score | interview_harvest "
+        "| interview_summary | planning_decompose | planning_review | all | list (기본: list)",
     )
     parser.add_argument("--list", action="store_true", help="프롬프트·시나리오 목록만 출력")
     parser.add_argument("--scenario", help="한 시나리오만 실행")
     parser.add_argument("--repeat", type=int, default=1, help="같은 입력 N회 (변동성 점검)")
     parser.add_argument("--raw", action="store_true", help="렌더된 프롬프트 + raw JSON 출력")
     parser.add_argument("--show-prompt", action="store_true", help="호출 없이 렌더된 프롬프트만")
-    parser.add_argument("--timeout", type=float, default=8.0, help="단일 호출 timeout(초)")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="단일 호출 timeout(초). 미지정이면 스펙 기본(계획=상향) 또는 8.0",
+    )
+    parser.add_argument(
+        "--thinking",
+        type=int,
+        default=None,
+        help="Gemini thinking 예산(토큰) 오버라이드 — A/B 용. 0=끔, 예:2048=켬. "
+        "미지정이면 스펙 기본(계획만 켜짐).",
+    )
     parser.add_argument("--price-in", type=float, help="1K 입력토큰당 ¢ (유료 환산 미리보기)")
     parser.add_argument("--price-out", type=float, help="1K 출력토큰당 ¢")
     parser.add_argument("--api-key", help="일회성 GEMINI_API_KEY 주입 (.env 우선이 일반적)")
