@@ -15,7 +15,7 @@ Envelope-less: 반환은 도메인 객체(`NextQuestionSchema` / `InterviewOutco
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
@@ -46,6 +46,7 @@ class TurnResult:
     summary: InterviewSummary | None = None  # 요약 확인 카드 (done=True 일 때)
     outcome: InterviewOutcome | None = None  # 경계 계약 (done=True 일 때)
     end_reason: str | None = None
+    harvested: list[str] = field(default_factory=list)  # 이번 턴에 미리 채운 슬롯키들
 
 
 def _config(
@@ -122,16 +123,26 @@ async def submit_and_advance(
     config = _config(
         session, tone_mode, answer_type=answer_type, options=options, slot_meta=slot_meta
     )
-    state = {**state, "last_answer": _coerce_answer(answer_value), "last_slot_key": slot_key}
+    coerced = _coerce_answer(answer_value)
+    state = {**state, "last_answer": coerced, "last_slot_key": slot_key}
 
     state = await interview.receive_answer(state, config)
     state = await interview.validate_answer(state, config)
 
+    # 자유서술 답이면, 같은 답에 섞여 들어온 다른 미충족 슬롯을 미리 채워 재질문을 줄인다.
+    # (chip/range 등 단일 구조화 답은 다른 슬롯 정보를 담을 수 없어 건너뛴다.)
+    harvested: list[str] = []
+    if coerced.get("type") == "text":
+        state = await interview.harvest_slots(
+            state, config, answer_text=str(coerced.get("raw", "")), answered_slot=slot_key
+        )
+        harvested = list(state.get("harvested", []))
+
     if interview.should_continue(state) == "finish":
-        return await _finalize(state, config)
+        return await _finalize(state, config, harvested=harvested)
 
     state = await interview.ask_question(state, config)
-    return TurnResult(state=state, done=False, question=state["next_question"])
+    return TurnResult(state=state, done=False, question=state["next_question"], harvested=harvested)
 
 
 async def finish_early(
@@ -149,7 +160,9 @@ async def finish_early(
     return await _finalize(state, config)
 
 
-async def _finalize(state: InterviewState, config: RunnableConfig) -> TurnResult:
+async def _finalize(
+    state: InterviewState, config: RunnableConfig, *, harvested: list[str] | None = None
+) -> TurnResult:
     state = await interview.summarize_interview(state, config)
     state = await interview.finalize_outcome(state, config)
     return TurnResult(
@@ -158,4 +171,5 @@ async def _finalize(state: InterviewState, config: RunnableConfig) -> TurnResult
         summary=state["summary"],
         outcome=state["outcome"],
         end_reason=state["end_reason"],
+        harvested=harvested or [],
     )
