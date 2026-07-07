@@ -61,13 +61,15 @@ def context_from_outcome(outcome: InterviewOutcome) -> dict[str, Any]:
     goals = outcome.core_goals
     heaviest = next((g for g in goals if g.is_heaviest), goals[0])
 
+    # 시간 배치·일정 충돌은 룰 스케줄러(schedule_blocks)가 전담하므로 decompose 프롬프트에
+    # freebusy 를 싣지 않는다 (과거 "" 빈 값이라 LLM 에 무의미했다). review_feedback 은
+    # 재분해(replan) 시 first_plan.decompose_goal 이 직전 리뷰 피드백으로 채운다.
     prompt_vars: dict[str, str] = {
         "goal_title": heaviest.title,
         "why_now": heaviest.why_now or "",
         "horizon": outcome.horizon or "",
         "behavioral_summary": _behavioral_summary(outcome),
         "time_policy_summary": _time_policy_summary(outcome),
-        "freebusy_summary": "",  # 캘린더 freebusy 는 라우터가 로드해 채움(별도 IO)
     }
 
     return {

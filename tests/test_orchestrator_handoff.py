@@ -330,3 +330,94 @@ async def test_review_plan_wires_prompt_variables(monkeypatch: pytest.MonkeyPatc
     }
     assert captured["goal_nodes_json"] != "[]"  # 실제 노드 직렬화됨
     assert captured["conflict_report"]  # 비어있지 않음
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# decompose → review → replan 피드백 배선 (P0-2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _capture_decompose_vars(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) -> None:
+    """decompose(goal_decompose) 호출의 variables 를 잡는 aiClient.run stub 설치."""
+
+    async def fake_run(**kwargs: Any) -> RunResult[Any]:
+        if kwargs["schema"] is GoalDecomposition:
+            captured.update(kwargs["variables"])
+        return RunResult(
+            value=kwargs["fallback"](),
+            fell_back=True,
+            reason=None,
+            prompt_id=kwargs["prompt_id"],
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", fake_run)
+
+
+async def test_decompose_first_pass_has_no_prior_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """첫 분해(리뷰 이전)에는 review_feedback 이 '없음' 신호 — 실제 지적은 실리지 않는다."""
+    captured: dict[str, Any] = {}
+    _capture_decompose_vars(monkeypatch, captured)
+
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_fb0",
+        slot_answers=SLOT_ANSWERS,
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    cfg: Any = {"configurable": {}}
+    state = first_plan.initial_state(user_id=uuid4(), outcome=outcome, target_date="2026-06-01")
+    state = await first_plan.validate_inputs(state, cfg)
+    await first_plan.decompose_goal(state, cfg)
+
+    assert captured["review_feedback"] == "(첫 분해 — 이전 피드백 없음)"
+
+
+async def test_decompose_replan_threads_review_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """replan 재진입 시 직전 리뷰 피드백이 decompose 프롬프트 변수로 실린다 (P0-2).
+
+    회귀: 과거엔 review 피드백이 재분해로 전달되지 않아 같은 프롬프트를 반복 실행,
+    cycle 이 계획을 개선하지 못했다.
+    """
+    captured: dict[str, Any] = {}
+    _capture_decompose_vars(monkeypatch, captured)
+
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_fb1",
+        slot_answers=SLOT_ANSWERS,
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    cfg: Any = {"configurable": {}}
+    state = first_plan.initial_state(user_id=uuid4(), outcome=outcome, target_date="2026-06-01")
+    state = await first_plan.validate_inputs(state, cfg)
+    # review_plan 이 미승인 피드백을 남긴 상태를 모사 (replan 엣지 재진입 직전)
+    state = {
+        **state,
+        "review": PlanReview(
+            approved=False,
+            feedback=["캡스톤 설계 leaf 를 30분 이내로 더 쪼개기", "토익은 다음 주로 미루기"],
+        ),
+    }
+
+    await first_plan.decompose_goal(state, cfg)  # type: ignore[arg-type]
+
+    fb = captured["review_feedback"]
+    assert "캡스톤 설계 leaf 를 30분 이내로 더 쪼개기" in fb
+    assert "토익은 다음 주로 미루기" in fb
+    assert fb != "(첫 분해 — 이전 피드백 없음)"
+
+
+def test_goal_decompose_prompt_drops_freebusy_adds_feedback() -> None:
+    """프롬프트 계약 잠금 — 무의미하던 freebusy 변수 제거, review_feedback 변수 추가."""
+    from reaction_backend.prompts import registry as prompt_registry
+
+    body = prompt_registry.get("planning/goal_decompose").body
+    assert "freebusy" not in body  # 항상 빈 값이라 LLM 에 무의미했던 변수 제거
+    assert "{{review_feedback}}" in body  # replan 피드백 주입 지점

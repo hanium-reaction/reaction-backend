@@ -142,6 +142,19 @@ def _rule_review(state: FirstPlanState) -> PlanReview:
     return PlanReview(approved=True, feedback=[])
 
 
+def _replan_feedback(state: FirstPlanState) -> str:
+    """직전 REVIEWING 피드백 → decompose 프롬프트 변수(`{{review_feedback}}`).
+
+    replan 엣지(review_plan → decompose_goal)로 재진입할 때 직전 리뷰의 미승인 사유를 실어,
+    재분해가 **동일 결과를 반복하지 않고 실제로 다듬어지게** 한다(과거엔 같은 프롬프트를
+    그대로 재실행해 cycle 이 무의미했다). 첫 분해(리뷰 이전)엔 피드백이 없으므로 빈 신호.
+    """
+    review = state.get("review")
+    if review is None or not review.feedback:
+        return "(첫 분해 — 이전 피드백 없음)"
+    return "\n".join(f"- {item}" for item in review.feedback)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Nodes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,7 +185,11 @@ async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> Firs
 
 
 async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> FirstPlanState:
-    """PLANNING (LLM ②③) — goal_node 트리 + action_item 분해."""
+    """PLANNING (LLM ②③) — goal_node 트리 + action_item 분해.
+
+    replan 재진입 시엔 직전 리뷰 피드백(`_replan_feedback`)을 프롬프트에 실어, 재분해가
+    같은 결과를 반복하지 않고 검토 지적을 반영하도록 닫힌 루프를 만든다.
+    """
     ctx = state["planning_context"]
     prompt_vars = ctx.get("prompt_vars", {}) if isinstance(ctx, dict) else {}
     result = await aiClient.run(
@@ -181,7 +198,7 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
         prompt_id="planning/goal_decompose",
         fallback=lambda: _rule_decomposition(state),
         timeout=8.0,
-        variables=prompt_vars,
+        variables={**prompt_vars, "review_feedback": _replan_feedback(state)},
         user_id=state["user_id"],
         session=_session(config),
         tone_mode=_tone_mode(config),
