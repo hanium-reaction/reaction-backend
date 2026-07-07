@@ -43,7 +43,12 @@ from reaction_backend.config import get_settings
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionRow
 from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.session import get_db
-from reaction_backend.orchestrator import interview, interview_adapter, interview_runner
+from reaction_backend.orchestrator import (
+    first_plan_adapter,
+    interview,
+    interview_adapter,
+    interview_runner,
+)
 from reaction_backend.orchestrator._common import user_agent_lock
 from reaction_backend.orchestrator.interview import InterviewState
 from reaction_backend.repositories.interview_repo import InterviewRepo, get_interview_repo
@@ -357,6 +362,12 @@ async def submit_answer(
                 ambiguity_final=result.state["ambiguity_score"],
                 used_fallback=result.state["used_fallback"],
             )
+            # 인터뷰에서 추출한 목표를 즉시 영속(#96) → 목표 분류 화면(GET /goals)이 표시·
+            # 재분류할 수 있게 한다. 이후 계획 승인은 같은 목표를 재사용(중복 X).
+            if result.outcome is not None:
+                await first_plan_adapter.materialize_goals(
+                    session, user_id=user.id, core_goals=result.outcome.core_goals
+                )
             await session.commit()
             return _response(
                 row.id,
