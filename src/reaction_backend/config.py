@@ -47,10 +47,11 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     # 호출 모델(base). 인터뷰/인박스/brief 등 지연 민감·경량 태스크가 이 모델을 쓴다.
     llm_model: str = "gemini-2.5-flash"
-    # task 별 상위 모델 오버라이드 — 추론 품질이 산출물을 좌우하는 계획·회복은 상위 모델을 쓴다.
+    # task 별 상위 모델 오버라이드 — 추론 품질이 산출물을 좌우하는 계획·회복은 중간 티어를 쓴다.
+    # 비용/토큰 균형상 pro 가 아니라 flash. 성능이 부족하면 gemini-2.5-pro 로 상향 가능.
     # 빈 문자열이면 llm_model 로 폴백. (module → model 매핑은 `model_for_module`.)
-    llm_model_planning: str = "gemini-2.5-pro"
-    llm_model_recovery: str = "gemini-2.5-pro"
+    llm_model_planning: str = "gemini-2.5-flash"
+    llm_model_recovery: str = "gemini-2.5-flash"
     # 단일 호출 timeout (초). ADR-0003 §1 동결값.
     llm_timeout_seconds: float = 8.0
     # 재시도 횟수 (지수 backoff). Tool Executor §1.
