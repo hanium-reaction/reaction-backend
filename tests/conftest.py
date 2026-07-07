@@ -1072,6 +1072,18 @@ class FakeExecutionRepo:
         self._interruptions[row.id] = row
         return row
 
+    async def list_pending_reflection(
+        self, user_id: UUID, *, since: datetime
+    ) -> list[ExecutionEvent]:
+        pending = [
+            e
+            for e in self._executions.values()
+            if e.user_id == user_id
+            and e.completion_status == "in_progress"
+            and e.plan_start_at >= since
+        ]
+        return sorted(pending, key=lambda e: e.plan_start_at)
+
 
 class FakeDailyBriefRepo:
     """in-memory DailyBriefRepo — Issue #19-A (조회만)."""
