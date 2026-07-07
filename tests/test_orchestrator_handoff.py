@@ -22,9 +22,11 @@ from reaction_backend.orchestrator import (
 )
 from reaction_backend.schemas.interview import (
     AmbiguityUpdate,
+    HarvestedSlot,
     InterviewOutcome,
     InterviewSummary,
     NextQuestionSchema,
+    SlotHarvest,
 )
 from reaction_backend.schemas.planning import GoalDecomposition, PlanReview
 
@@ -538,3 +540,102 @@ def test_answered_context_empty_when_no_answers() -> None:
     """아직 아무 답도 없으면 명시 문구 — 프롬프트가 빈 맥락을 오해하지 않게."""
     state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
     assert interview._answered_context(state) == "(아직 답한 내용 없음)"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 슬롯 하베스팅 — 한 답에 섞인 다른 슬롯 미리 채우기 (재질문 감소)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_HARVEST_META = {
+    "goals.deadlines": {"label": "마감", "answer_type": "date_picker", "options": []},
+    "time.peak_window": {
+        "label": "집중 시간대",
+        "answer_type": "chip",
+        "options": ["오전", "오후", "저녁", "심야", "변동"],
+    },
+    "recovery.tone": {
+        "label": "회복 톤",
+        "answer_type": "chip",
+        "options": ["담백", "따뜻", "유머", "코치처럼"],
+    },
+    "identity.role": {
+        "label": "학년/시기",
+        "answer_type": "chip",
+        "options": ["1학년", "2학년", "3학년", "4학년", "졸업유예", "대학원", "기타"],
+    },
+}
+
+
+async def test_harvest_prefills_confident_unfilled_slots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """자유서술 답에서 확신 있는 다른 슬롯을 미리 채운다 — answer_type 별 구조화 + 신뢰도 게이트."""
+
+    async def fake_run(**kwargs: Any) -> RunResult[Any]:
+        assert kwargs["schema"] is SlotHarvest  # 이 노드는 하베스팅만 호출
+        return RunResult(
+            value=SlotHarvest(
+                slots=[
+                    HarvestedSlot(
+                        slot_key="goals.deadlines", normalized_value="2026-08-20", confidence=0.9
+                    ),
+                    HarvestedSlot(
+                        slot_key="time.peak_window", normalized_value=["오전"], confidence=0.85
+                    ),
+                    # 신뢰도 낮음 → 채우지 않는다 (재질문보다 나쁜 오채움 방지)
+                    HarvestedSlot(
+                        slot_key="recovery.tone", normalized_value="담백", confidence=0.4
+                    ),
+                    HarvestedSlot(
+                        slot_key="identity.role", normalized_value="3학년", confidence=0.95
+                    ),
+                ]
+            ),
+            fell_back=False,
+            reason=None,
+            prompt_id="interview/slot_extraction",
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", fake_run)
+
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = {
+        "goals.list": {"type": "text", "raw": "캡스톤", "normalized": ["캡스톤"]}
+    }
+    config: Any = {"configurable": {"session": None, "slot_meta": _HARVEST_META}}
+
+    new_state = await interview.harvest_slots(
+        state,
+        config,
+        answer_text="캡스톤은 8월 20일 마감이고 난 3학년이고 오전에 집중이 잘돼",
+        answered_slot="goals.list",
+    )
+
+    sa = new_state["slot_answers"]
+    assert new_state["harvested"] == ["goals.deadlines", "time.peak_window", "identity.role"]
+    assert sa["goals.deadlines"] == {"type": "text", "raw": "2026-08-20"}  # date_picker 구조화
+    assert sa["time.peak_window"] == {"type": "chip", "values": ["오전"]}  # chip 구조화
+    assert sa["identity.role"] == {"type": "chip", "values": ["3학년"]}
+    assert "recovery.tone" not in sa  # 신뢰도 0.4 < 0.7 → 스킵
+
+
+async def test_harvest_noop_when_no_open_slots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """채울 미충족 슬롯이 없으면 LLM 호출 없이 빈 결과 — 불필요한 호출/비용 방지."""
+    called = {"n": 0}
+
+    async def fake_run(**kwargs: Any) -> RunResult[Any]:  # pragma: no cover - 호출되면 실패
+        called["n"] += 1
+        raise AssertionError("harvest should not call LLM when no open slots")
+
+    monkeypatch.setattr(aiClient, "run", fake_run)
+
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = {
+        k: {"type": "text", "raw": "x"} for k in interview.REQUIRED_SLOT_SEQUENCE
+    }
+    config: Any = {"configurable": {"session": None, "slot_meta": {}}}
+
+    new_state = await interview.harvest_slots(
+        state, config, answer_text="뭐든", answered_slot="goals.list"
+    )
+    assert new_state["harvested"] == []
+    assert called["n"] == 0
