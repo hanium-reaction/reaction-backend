@@ -111,6 +111,23 @@ def _retry_hint(slot_key: str, attempts: int) -> str:
 # 핵심 목표(goals.*) / 가용 시간(time.*) / 선호 방식(recovery.*) 그룹을 모두 포함.
 REQUIRED_SLOT_SEQUENCE: tuple[str, ...] = interview_adapter.REQUIRED_SLOT_KEYS
 
+# 러닝 컨텍스트용 짧은 태그 — 앞서 답한 슬롯을 다음 질문 프롬프트에 실어(ask_question) LLM 이
+# 이전 답을 이어받아 자연스럽게 묻게 한다(맥락 없이 슬롯키만 보고 추측하던 문제 보완).
+_CONTEXT_LABELS: dict[str, str] = {
+    "identity.role": "학년/시기",
+    "identity.season": "학기",
+    "goals.list": "목표",
+    "goals.heaviest": "가장 무거운 목표",
+    "goals.deadlines": "마감",
+    "goals.success_image": "이번 주 목표 모습",
+    "time.activity_window": "활동 시간대",
+    "time.peak_window": "집중 시간대",
+    "time.no_touch": "노터치",
+    "recovery.tone": "회복 톤",
+    "recovery.rest_ok": "휴식 수용",
+    "recovery.downscope_unit": "최소 실행 단위",
+}
+
 
 class InterviewState(TypedDict):
     """LangGraph 가 Node 간 전달하는 상태. DB(`interview_sessions`)와 별도 short-lived.
@@ -298,7 +315,7 @@ async def ask_question(state: InterviewState, config: RunnableConfig) -> Intervi
         timeout=8.0,
         variables={
             "goal_title": _heaviest_goal_hint(state),
-            "turn_index": str(state["total_turns"]),
+            "answered_context": _answered_context(state),
             "ambiguous_slot": slot_key,
             # 슬롯 의도(라벨)·형식·보기를 실어 LLM 이 정확한 질문을 만들게 한다.
             "slot_label": str(meta.get("label") or _DEFAULT_SLOT_QUESTIONS.get(slot_key, slot_key)),
@@ -616,6 +633,23 @@ def _answer_text(answer: dict[str, Any] | None) -> str:
     if answer.get("type") == "range":
         return f"{answer.get('start', '')}~{answer.get('end', '')}"
     return ""
+
+
+def _answered_context(state: InterviewState) -> str:
+    """앞서 채워진 슬롯 → 다음 질문용 짧은 러닝 요약("태그=값 / …").
+
+    아직 답이 없으면 명시 문구. LLM 이 이전 답을 이어받아(맥락 반복 없이) 자연스럽게 묻게 한다.
+    """
+    answers = state["slot_answers"]
+    parts: list[str] = []
+    for slot_key, tag in _CONTEXT_LABELS.items():
+        value = answers.get(slot_key)
+        if not _is_filled(value):
+            continue
+        text = _answer_text(value).strip()
+        if text:
+            parts.append(f"{tag}={text}")
+    return " / ".join(parts) if parts else "(아직 답한 내용 없음)"
 
 
 def _heaviest_goal_hint(state: InterviewState) -> str:

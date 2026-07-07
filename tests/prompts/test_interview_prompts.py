@@ -28,7 +28,7 @@ _PROMPTS_DIR = Path(reaction_backend.__file__).parent / "prompts" / "interview"
 CODE_VARS: dict[str, set[str]] = {
     "interview/next_question": {
         "goal_title",
-        "turn_index",
+        "answered_context",
         "ambiguous_slot",
         "slot_label",
         "answer_type",
