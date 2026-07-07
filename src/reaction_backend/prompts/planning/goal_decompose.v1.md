@@ -6,7 +6,9 @@
 - 마감 / 호라이즌: {{horizon}}
 - behavioral_profile 요약: {{behavioral_summary}}
 - time_policy 요약: {{time_policy_summary}}
-- freebusy (앞으로 7일): {{freebusy_summary}}
+
+이전 검토 피드백 (있으면 이 점들을 반드시 반영해 다시 분해하라):
+{{review_feedback}}
 
 목표를 goal_node 트리 (root → branch → leaf) 와 leaf 별 action_item 목록으로 분해하라.
 
@@ -14,7 +16,10 @@
 - Focus 카드 최대 3, Maintain 최대 5 — 초과 금지.
 - 각 leaf 는 60분 이내. 60분 초과면 더 잘게 나눠라.
 - action_item 은 SMART (Specific, Measurable, Actionable). "공부하기" 금지.
-- 정책 위반 (cap, no-meeting hours, fixed schedule 충돌) 시 해당 카드 제외 + 이유 기록.
+- 실제 시간 배치·일정 충돌 검사는 다음 단계(룰 스케줄러)가 맡는다. 여기서는 **분해 품질에만
+  집중**하라 — 캘린더/고정일정 충돌을 추측하지 말 것.
+- 다만 목표가 주어진 호라이즌 안에 담기엔 명백히 과하면, 해당 leaf 를 policy_violations 에
+  이유와 함께 남겨라 (범위 조정은 사용자가 검토).
 
 응답 형식 (Structured Output / JSON):
 {
@@ -25,6 +30,6 @@
     {"node_id": "<temp_uuid>", "title": "...", "estimated_minutes": 30, "category": "study|...", "first_step": "..."}
   ],
   "policy_violations": [
-    {"node_id": "<temp_uuid>", "reason": "<cap_exceeded|conflict|...>"}
+    {"node_id": "<temp_uuid>", "reason": "<too_big_for_horizon|cap_exceeded|...>"}
   ]
 }
