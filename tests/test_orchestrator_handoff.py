@@ -514,3 +514,27 @@ def test_rule_summary_omits_unset_optional_fields() -> None:
     assert "모습을 그리셨어요" not in s.goal_summary
     assert "휴식 제안은" not in s.preference_summary
     assert "단위로 줄여" not in s.preference_summary
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 다음 질문 러닝 컨텍스트 (P2-a)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_answered_context_summarizes_filled_slots() -> None:
+    """앞서 채워진 슬롯이 '태그=값' 러닝 요약으로 next_question 에 실린다 (P2-a)."""
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = {
+        "identity.role": {"type": "chip", "values": ["3학년"]},
+        "goals.list": {"type": "text", "raw": "캡스톤, 토익", "normalized": ["캡스톤", "토익"]},
+    }
+
+    ctx = interview._answered_context(state)
+    assert "학년/시기=3학년" in ctx
+    assert "목표=캡스톤, 토익" in ctx
+
+
+def test_answered_context_empty_when_no_answers() -> None:
+    """아직 아무 답도 없으면 명시 문구 — 프롬프트가 빈 맥락을 오해하지 않게."""
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    assert interview._answered_context(state) == "(아직 답한 내용 없음)"
