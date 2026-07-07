@@ -144,6 +144,25 @@ class ExecutionRepo:
         await self._session.refresh(row)
         return row
 
+    async def list_pending_reflection(
+        self, user_id: UUID, *, since: datetime
+    ) -> list[ExecutionEvent]:
+        """미체크(in_progress) 실행 — plan_start_at >= since, 오래된 순 (#83 S17 회고).
+
+        시작만 하고 체크인하지 않은 실행 = 저녁 회고에서 소급 처리할 대상.
+        """
+        stmt = (
+            select(ExecutionEvent)
+            .where(
+                ExecutionEvent.user_id == user_id,
+                ExecutionEvent.completion_status == "in_progress",
+                ExecutionEvent.plan_start_at >= since,
+            )
+            .order_by(ExecutionEvent.plan_start_at)
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     # ── failure tags ──
     async def list_active_failure_tags(self) -> list[FailureReasonTag]:
         stmt = (
