@@ -39,7 +39,9 @@ def _patch_render(monkeypatch: pytest.MonkeyPatch, body: str = "원문 프롬프
         tool_executor.prompt_registry, "render", lambda pid, variables: (body, _Tmpl())
     )
 
-    async def _fake_gen(*, schema: Any, prompt_text: str, timeout: float) -> Any:
+    async def _fake_gen(
+        *, schema: Any, prompt_text: str, timeout: float, thinking_budget: int | None = None
+    ) -> Any:
         captured["prompt"] = prompt_text
         raise ProviderUnavailable("no key (test)")
 

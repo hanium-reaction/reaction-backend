@@ -111,8 +111,9 @@ class LLMToolExecutor:
         trace_id: str | None = None,
         log_payloads: bool = False,
         tone_mode: str | None = None,
+        thinking_budget: int | None = None,
     ) -> RunResult[T]:
-        """ADR-0003 동결 시그니처 (+ #23 tone_mode addendum).
+        """ADR-0003 동결 시그니처 (+ #23 tone_mode addendum + thinking_budget addendum).
 
         Parameters
         ----------
@@ -137,6 +138,10 @@ class LLMToolExecutor:
         tone_mode:
             gentle/strict/encouraging. 주어지면 렌더된 시스템 프롬프트 앞에 톤 prefix 1줄을
             덧붙인다 (ADR-0003 addendum, #23). None/미지원 값이면 prefix 없음 = 기존 동작.
+        thinking_budget:
+            호출별 Gemini thinking 예산(토큰). None(기본)이면 flash 계열 0(비활성) — 지연
+            민감 호출(인터뷰 턴 등)용. 계획 분해·검토처럼 추론이 필요한 호출만 양수로 넘겨
+            thinking 을 켠다 (provider._thinking_config). timeout 도 함께 상향 권장.
         """
         settings = get_settings()
         started = time.monotonic()
@@ -198,7 +203,12 @@ class LLMToolExecutor:
         for attempt in range(1, max_attempts + 1):
             try:
                 validated, provider_resp = await asyncio.wait_for(
-                    generate_structured(schema=schema, prompt_text=prompt_text, timeout=timeout),
+                    generate_structured(
+                        schema=schema,
+                        prompt_text=prompt_text,
+                        timeout=timeout,
+                        thinking_budget=thinking_budget,
+                    ),
                     timeout=timeout,
                 )
                 break
