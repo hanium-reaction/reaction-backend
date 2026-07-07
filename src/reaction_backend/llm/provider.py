@@ -69,17 +69,36 @@ def _get_client() -> Any:
     return genai.Client(api_key=api_key)
 
 
+def _thinking_config(model_name: str, thinking_budget: int | None) -> dict[str, int] | None:
+    """호출별 thinking 예산 → Gemini `thinking_config` (없으면 None = SDK 기본).
+
+    - `thinking_budget=None`(대다수 호출): 워크로드가 분류·짧은 구조화 출력이라 thinking 이
+      품질 이득 대비 지연 손해가 크고, 그 지연이 agent lock 점유를 늘려 동시성 충돌을
+      유발한다(#76). 그래서 `gemini-2.5-flash` 계열은 기본 0(비활성). (2.5-pro 는 budget 0
+      미지원이라 손대지 않음 → None.)
+    - `thinking_budget` 지정(계획 분해·검토 등 추론 필요): 그 예산을 그대로 적용한다. 0 이면
+      명시적 비활성, 양수면 thinking 활성.
+    """
+    if thinking_budget is not None:
+        return {"thinking_budget": thinking_budget}
+    if "2.5-flash" in model_name:
+        return {"thinking_budget": 0}
+    return None
+
+
 async def generate_structured[T: BaseModel](
     *,
     schema: type[T],
     prompt_text: str,
     timeout: float,
+    thinking_budget: int | None = None,
 ) -> tuple[T, ProviderResponse]:
     """Gemini 한 번 호출 → schema 인스턴스로 검증.
 
     - timeout 은 호출자(`tool_executor`)가 asyncio.wait_for 로 래핑.
     - Structured Output 은 Gemini 의 `response_schema` 기능을 활용,
       그래도 모델이 schema 를 어기면 `ProviderValidationError`.
+    - thinking_budget 은 호출별 thinking 예산(`_thinking_config`). None 이면 모델 기본 정책.
     """
     client = _get_client()
     model_name = get_settings().llm_model
@@ -88,12 +107,9 @@ async def generate_structured[T: BaseModel](
         "response_mime_type": "application/json",
         "response_schema": schema,
     }
-    # gemini-2.5-flash 계열은 기본으로 내부 thinking 을 수행해 단일 호출이 4~8s+ 로
-    # 늘어난다 — 우리 워크로드(분류·짧은 구조화 출력)에선 품질 이득 대비 지연 손해가
-    # 크고, 이 지연이 agent lock 점유 시간을 늘려 동시성 충돌의 트리거가 된다(#76).
-    # thinking_budget=0 으로 비활성화. 2.5-pro 는 budget 0 미지원이라 flash 만 적용.
-    if "2.5-flash" in model_name:
-        config["thinking_config"] = {"thinking_budget": 0}
+    tcfg = _thinking_config(model_name, thinking_budget)
+    if tcfg is not None:
+        config["thinking_config"] = tcfg
 
     try:
         # `google-genai` 2.x 비동기 API

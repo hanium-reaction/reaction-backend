@@ -33,6 +33,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from reaction_backend.config import get_settings
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator import first_plan_adapter
 from reaction_backend.orchestrator.goal_structuring import (
@@ -192,16 +193,18 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
     """
     ctx = state["planning_context"]
     prompt_vars = ctx.get("prompt_vars", {}) if isinstance(ctx, dict) else {}
+    settings = get_settings()
     result = await aiClient.run(
         module="planning",
         schema=GoalDecomposition,
         prompt_id="planning/goal_decompose",
         fallback=lambda: _rule_decomposition(state),
-        timeout=8.0,
+        timeout=settings.llm_planning_timeout_seconds,
         variables={**prompt_vars, "review_feedback": _replan_feedback(state)},
         user_id=state["user_id"],
         session=_session(config),
         tone_mode=_tone_mode(config),
+        thinking_budget=settings.llm_planning_thinking_budget,
     )
     return {
         **state,
@@ -291,16 +294,18 @@ async def review_plan(state: FirstPlanState, config: RunnableConfig) -> FirstPla
     `planning/plan_quality` 변수 계약을 `_review_variables` 로 채운다 → 리뷰 LLM 실제 실행
     (과거 `variables={}` 는 render 실패로 항상 룰 승인 fallback 이었다).
     """
+    settings = get_settings()
     result = await aiClient.run(
         module="planning",
         schema=PlanReview,
         prompt_id="planning/plan_quality",
         fallback=lambda: _rule_review(state),
-        timeout=8.0,
+        timeout=settings.llm_planning_timeout_seconds,
         variables=_review_variables(state),
         user_id=state["user_id"],
         session=_session(config),
         tone_mode=_tone_mode(config),
+        thinking_budget=settings.llm_planning_thinking_budget,
     )
     return {
         **state,

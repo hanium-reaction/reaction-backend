@@ -208,14 +208,37 @@ def _rule_ambiguity_update(state: InterviewState, slot_key: str) -> AmbiguityUpd
 
 
 def _rule_summary(state: InterviewState) -> InterviewSummary:
-    """슬롯에서 결정적으로 빌드한 룰 요약 — LLM 실패 시 그대로 노출."""
+    """슬롯에서 결정적으로 빌드한 룰 요약 — LLM 실패 시 그대로 노출.
+
+    LLM 요약과 같은 슬롯 소스를 쓰되, 값이 있는 항목(마감·성공 이미지·노터치·휴식·다운스코프)만
+    골라 문장에 덧붙인다 — "아직 정하지 않음" 은 지어내지 않으려 생략.
+    """
     v = _summary_variables(state)
-    goals = v["goals"] or "아직 정하지 않음"
+    goals = v["goals"]
+
+    goal_summary = f"가장 무겁게 느끼는 일은 '{v['heaviest']}' 이고, 정리한 목표는 {goals} 예요."
+    if v["deadlines"] != _NOT_SET:
+        goal_summary += f" 마감은 {v['deadlines']} 예요."
+    if v["success_image"] != _NOT_SET:
+        goal_summary += f" 이번 주엔 '{v['success_image']}' 모습을 그리셨어요."
+
+    time_summary = (
+        f"활동 시간대는 {v['time_window']}, 집중은 {v['peak_window']} 가 좋다고 하셨어요."
+    )
+    if v["no_touch"] != _NOT_SET:
+        time_summary += f" '{v['no_touch']}' 시간은 비워둘게요."
+
+    preference_summary = f"못 한 날엔 '{v['tone']}' 톤을 선호하세요."
+    if v["rest_ok"] != _NOT_SET:
+        preference_summary += f" 휴식 제안은 '{v['rest_ok']}'."
+    if v["downscope_unit"] != _NOT_SET:
+        preference_summary += f" 밀리면 {v['downscope_unit']} 단위로 줄여볼게요."
+
     return InterviewSummary(
         headline=f"{v['identity']} · 핵심 목표 {goals}",
-        goal_summary=f"가장 무겁게 느끼는 일은 '{v['heaviest']}' 이고, 정리한 목표는 {goals} 예요.",
-        time_summary=f"활동 시간대는 {v['time_window']}, 집중은 {v['peak_window']} 가 좋다고 하셨어요.",
-        preference_summary=f"못 한 날엔 '{v['tone']}' 톤을 선호하세요.",
+        goal_summary=goal_summary,
+        time_summary=time_summary,
+        preference_summary=preference_summary,
         confirm_question="이대로 계획을 세워볼까요?",
     )
 
@@ -605,33 +628,51 @@ def _heaviest_goal_hint(state: InterviewState) -> str:
     return items[0] if items else "당신의 목표"
 
 
+_NOT_SET = "아직 정하지 않음"
+
+
 def _summary_variables(state: InterviewState) -> dict[str, str]:
-    """요약 프롬프트 변수 — 슬롯에서 사람이 읽을 문자열로 추출 (룰)."""
+    """요약 프롬프트 변수 — 슬롯에서 사람이 읽을 문자열로 추출 (룰).
+
+    확인 카드(Analysis Confirm)가 사용자가 실제로 답한 내용을 최대한 반영하도록, 목표·시간뿐
+    아니라 마감·성공 이미지·노터치·휴식 수용·다운스코프 단위까지 함께 싣는다(빈 항목은
+    "아직 정하지 않음"). 미입력 항목을 지어내지 않게 프롬프트가 이 default 를 그대로 노출.
+    """
     answers = state["slot_answers"]
     role = _slot_first_chip(answers.get("identity.role")) or "미상"
     season = _slot_first_chip(answers.get("identity.season")) or ""
-    goals = ", ".join(_slot_items(answers.get("goals.list"))) or "아직 정하지 않음"
+    goals = ", ".join(_slot_items(answers.get("goals.list"))) or _NOT_SET
     heaviest = (
         _slot_text(answers.get("goals.heaviest"))
         or _slot_first_chip(answers.get("goals.heaviest"))
-        or "아직 정하지 않음"
+        or _NOT_SET
     )
+    deadlines = _slot_text(answers.get("goals.deadlines")) or _NOT_SET
+    success_image = _slot_text(answers.get("goals.success_image")) or _NOT_SET
     window = answers.get("time.activity_window")
     time_window = (
         f"{window.get('start')}~{window.get('end')}"
         if window and window.get("type") == "range"
-        else "아직 정하지 않음"
+        else _NOT_SET
     )
-    peak = ", ".join(_slot_chips(answers.get("time.peak_window"))) or "아직 정하지 않음"
+    peak = ", ".join(_slot_chips(answers.get("time.peak_window"))) or _NOT_SET
+    no_touch = ", ".join(_slot_chips(answers.get("time.no_touch"))) or _NOT_SET
     tone = _slot_first_chip(answers.get("recovery.tone")) or "담백"
+    rest_ok = _slot_first_chip(answers.get("recovery.rest_ok")) or _NOT_SET
+    downscope_unit = _slot_first_chip(answers.get("recovery.downscope_unit")) or _NOT_SET
     identity = f"{role} {season}".strip()
     return {
         "identity": identity,
         "goals": goals,
         "heaviest": heaviest,
+        "deadlines": deadlines,
+        "success_image": success_image,
         "time_window": time_window,
         "peak_window": peak,
+        "no_touch": no_touch,
         "tone": tone,
+        "rest_ok": rest_ok,
+        "downscope_unit": downscope_unit,
     }
 
 

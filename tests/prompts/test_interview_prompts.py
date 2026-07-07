@@ -37,7 +37,19 @@ CODE_VARS: dict[str, set[str]] = {
         "retry",
     },
     "interview/ambiguity_score": {"slot_key", "answer", "answer_type", "options", "today"},
-    "interview/summary": {"identity", "goals", "heaviest", "time_window", "peak_window", "tone"},
+    "interview/summary": {
+        "identity",
+        "goals",
+        "heaviest",
+        "deadlines",
+        "success_image",
+        "time_window",
+        "peak_window",
+        "no_touch",
+        "tone",
+        "rest_ok",
+        "downscope_unit",
+    },
 }
 
 _FILES = {

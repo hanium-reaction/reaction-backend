@@ -421,3 +421,96 @@ def test_goal_decompose_prompt_drops_freebusy_adds_feedback() -> None:
     body = prompt_registry.get("planning/goal_decompose").body
     assert "freebusy" not in body  # 항상 빈 값이라 LLM 에 무의미했던 변수 제거
     assert "{{review_feedback}}" in body  # replan 피드백 주입 지점
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 계획 호출 thinking 예산 배선 (P1-3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_planning_calls_enable_thinking_with_longer_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """decompose·review 는 인터뷰와 달리 thinking 을 켜고 timeout 을 상향해 호출한다 (P1-3).
+
+    인터뷰 턴은 thinking_budget=None(=flash 0) 을 유지하고, 계획 분해·검토만 settings 의
+    planning 예산/타임아웃으로 넘어가는지 aiClient.run kwargs 로 검증한다.
+    """
+    from reaction_backend.config import get_settings
+
+    calls: dict[str, dict[str, Any]] = {}
+
+    async def fake_run(**kwargs: Any) -> RunResult[Any]:
+        calls[kwargs["prompt_id"]] = kwargs
+        return RunResult(
+            value=kwargs["fallback"](),
+            fell_back=True,
+            reason=None,
+            prompt_id=kwargs["prompt_id"],
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", fake_run)
+    settings = get_settings()
+
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_think",
+        slot_answers=SLOT_ANSWERS,
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    cfg: Any = {"configurable": {}}
+    state = first_plan.initial_state(user_id=uuid4(), outcome=outcome, target_date="2026-06-01")
+    state = await first_plan.validate_inputs(state, cfg)
+    state = await first_plan.decompose_goal(state, cfg)
+    await first_plan.review_plan(state, cfg)
+
+    for pid in ("planning/goal_decompose", "planning/plan_quality"):
+        assert calls[pid]["thinking_budget"] == settings.llm_planning_thinking_budget
+        assert calls[pid]["timeout"] == settings.llm_planning_timeout_seconds
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 인터뷰 요약 충실도 (P1-4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_summary_variables_include_deadline_and_prefs() -> None:
+    """요약 변수가 마감·성공 이미지·노터치·휴식 수용·다운스코프 단위까지 실어낸다 (P1-4)."""
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = dict(SLOT_ANSWERS)
+
+    v = interview._summary_variables(state)
+    assert v["deadlines"] == "2026-06-20"
+    assert v["success_image"] == "데모 동작"
+    assert v["no_touch"] == "일요일"
+    assert v["rest_ok"] == "네"
+    assert v["downscope_unit"] == "10분"
+
+
+def test_rule_summary_weaves_answered_fields() -> None:
+    """룰 요약도 값이 있는 항목(마감·휴식·다운스코프)을 문장에 반영한다 (fallback 충실도)."""
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = dict(SLOT_ANSWERS)
+
+    s = interview._rule_summary(state)
+    assert "2026-06-20" in s.goal_summary  # 마감 반영
+    assert "10분" in s.preference_summary  # 다운스코프 단위 반영
+
+
+def test_rule_summary_omits_unset_optional_fields() -> None:
+    """미입력 선택 항목은 지어내지 않고 생략 — 마감·휴식·다운스코프 절이 붙지 않는다."""
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = {
+        "goals.list": {"type": "text", "raw": "캡스톤", "normalized": ["캡스톤"]},
+        "goals.heaviest": {"type": "chip", "values": ["캡스톤"]},
+        "recovery.tone": {"type": "chip", "values": ["담백"]},
+    }
+
+    s = interview._rule_summary(state)
+    # 마감/성공 이미지/휴식/다운스코프는 미입력 → 해당 절이 문장에 추가되지 않는다
+    assert "마감은" not in s.goal_summary
+    assert "모습을 그리셨어요" not in s.goal_summary
+    assert "휴식 제안은" not in s.preference_summary
+    assert "단위로 줄여" not in s.preference_summary

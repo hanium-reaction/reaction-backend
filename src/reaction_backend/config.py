@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 8.0
     # 재시도 횟수 (지수 backoff). Tool Executor §1.
     llm_max_retries: int = 3
+    # 계획(First Plan) 분해·검토 전용 — 인터뷰 턴은 지연 민감(#76)이라 thinking 0 을 유지하되,
+    # 분해(goal_decompose)·검토(plan_quality)는 진짜 추론이 필요해 modest thinking 을 허용한다.
+    # gemini-2.5-flash 기준 thinking_budget(토큰). 0 이면 비활성(인터뷰와 동일). 로컬 튜닝용 env.
+    llm_planning_thinking_budget: int = 2048
+    # thinking 이 붙어 단일 호출이 길어지므로 계획 호출 timeout 은 별도로 상향(초).
+    llm_planning_timeout_seconds: float = 20.0
     # 일일 토큰 예산 (in + out 합산, 사용자당). 0 이면 무제한.
     llm_daily_token_budget: int = 200_000
     # 1K 입력/출력 토큰당 USD ¢. Flash 무료 티어 기본 0, 유료 환산용.
