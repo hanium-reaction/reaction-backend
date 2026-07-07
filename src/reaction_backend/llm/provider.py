@@ -92,6 +92,7 @@ async def generate_structured[T: BaseModel](
     prompt_text: str,
     timeout: float,
     thinking_budget: int | None = None,
+    model: str | None = None,
 ) -> tuple[T, ProviderResponse]:
     """Gemini 한 번 호출 → schema 인스턴스로 검증.
 
@@ -99,9 +100,10 @@ async def generate_structured[T: BaseModel](
     - Structured Output 은 Gemini 의 `response_schema` 기능을 활용,
       그래도 모델이 schema 를 어기면 `ProviderValidationError`.
     - thinking_budget 은 호출별 thinking 예산(`_thinking_config`). None 이면 모델 기본 정책.
+    - model 은 task 별 모델 오버라이드(`tool_executor` 가 module→model 로 결정). None 이면 base.
     """
     client = _get_client()
-    model_name = get_settings().llm_model
+    model_name = model or get_settings().llm_model
 
     config: dict[str, Any] = {
         "response_mime_type": "application/json",
