@@ -14,7 +14,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import ActionItem
@@ -112,6 +112,63 @@ class ScheduledBlockRepo:
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def list_scheduled_between(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[tuple[ScheduledBlock, ActionItem]]:
+        """[start_dt, end_dt) 의 **미착수('scheduled')** 블록 + 그 ActionItem.
+
+        주간 forward 재계획의 재배치 대상 — 이 블록들을 취소하고 같은 액션을 다시 배치한다.
+        시작/완료된 블록은 제외(불변 보존)한다.
+        """
+        stmt = (
+            select(ScheduledBlock, ActionItem)
+            .join(ActionItem, ScheduledBlock.action_item_id == ActionItem.id)
+            .where(
+                ScheduledBlock.user_id == user_id,
+                ScheduledBlock.block_status == "scheduled",
+                ScheduledBlock.start_at >= start_dt,
+                ScheduledBlock.start_at < end_dt,
+                ActionItem.archived_at.is_(None),
+            )
+            .order_by(ScheduledBlock.start_at)
+        )
+        result = await self._session.execute(stmt)
+        return [(block, action) for block, action in result.all()]
+
+    async def list_committed_between(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[ScheduledBlock]:
+        """[start_dt, end_dt) 의 이미 **시작/완료된** 블록 — 재계획이 회피할 확정 일정(fit-around)."""
+        stmt = select(ScheduledBlock).where(
+            ScheduledBlock.user_id == user_id,
+            ScheduledBlock.block_status.in_(("started", "finished")),
+            ScheduledBlock.start_at >= start_dt,
+            ScheduledBlock.start_at < end_dt,
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def cancel_scheduled_between(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> int:
+        """[start_dt, end_dt) 의 **미착수** 블록을 cancelled 로 전이 — 재계획 승인 시 미래 교체.
+
+        시작/완료된 블록·과거 블록은 건드리지 않는다(불변). soft state(status 전이)라 hard delete
+        아님. 반환값은 취소된 행 수.
+        """
+        stmt = (
+            update(ScheduledBlock)
+            .where(
+                ScheduledBlock.user_id == user_id,
+                ScheduledBlock.block_status == "scheduled",
+                ScheduledBlock.start_at >= start_dt,
+                ScheduledBlock.start_at < end_dt,
+            )
+            .values(block_status="cancelled")
+        )
+        result = await self._session.execute(stmt)
+        return int(getattr(result, "rowcount", 0) or 0)
 
     async def list_busy_between(
         self, user_id: UUID, start_dt: datetime, end_dt: datetime
