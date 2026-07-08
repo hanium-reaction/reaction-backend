@@ -40,10 +40,13 @@ from reaction_backend.orchestrator import first_plan_adapter
 from reaction_backend.orchestrator.goal_structuring import (
     BusyBlock,
     TimeInterval,
+    fixed_schedules_to_busy,
     time_policies_to_busy,
 )
 from reaction_backend.orchestrator.plan_scheduler import schedule_actions_multiday
+from reaction_backend.repositories.fixed_schedule_repo import FixedScheduleRepo
 from reaction_backend.repositories.scheduled_block_repo import ScheduledBlockRepo
+from reaction_backend.repositories.time_policy_repo import TimePolicyRepo
 from reaction_backend.schemas.common import KST, to_kst
 from reaction_backend.schemas.interview import InterviewOutcome
 from reaction_backend.schemas.planning import (
@@ -264,6 +267,28 @@ async def _existing_busy_by_day(
     return busy
 
 
+async def _db_time_policies(config: RunnableConfig, user_id: UUID) -> list[Any]:
+    """활성 DB `time_policies`(S07, 온보딩 후 수정 포함) — outcome 스냅샷과 합쳐 busy 로.
+
+    session 이 없으면(단위 테스트/시스템) 빈 리스트 → outcome 정책만 사용.
+    """
+    session = _session(config)
+    if session is None:
+        return []
+    return list(await TimePolicyRepo(session).list_active(user_id))
+
+
+async def _fixed_schedules(config: RunnableConfig, user_id: UUID) -> list[Any]:
+    """활성 `fixed_schedules`(수업·알바, S05) — AI 블록이 그 위에 겹치지 않도록 busy 로.
+
+    session 이 없으면 빈 리스트.
+    """
+    session = _session(config)
+    if session is None:
+        return []
+    return list(await FixedScheduleRepo(session).list_active(user_id))
+
+
 async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> FirstPlanState:
     """PLANNING (룰 only, LLM 0회) — 분해 action_item 을 다일 스케줄러로 배치한다.
 
@@ -276,8 +301,9 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
     - 하루 집중 총량 상한을 채우면 다음 날로 넘기고, 피크 시간대 free 를 먼저 쓰며,
       긴 카드는 focus_duration 세션으로 쪼개고 카드 사이 휴식(break_pattern)을 둔다.
 
-    busy 는 (1) 수면/노터치(`time_policies_to_busy`) + (2) **이미 승인된 scheduled_blocks**
-    를 합친다 → 기존·수정된 일정 위에 겹쳐 잡지 않는다(비파괴 fit-around, HITL 승인 보존).
+    busy 는 (1) 수면/노터치(outcome + **DB `time_policies`**, 온보딩 후 수정 반영) +
+    (2) **이미 승인된 `scheduled_blocks`** + (3) **`fixed_schedules`(수업·알바)** 를 모두 합친다
+    → 기존·고정·수정된 일정 위에 겹쳐 잡지 않는다(비파괴 fit-around, HITL 승인 보존). (#112)
 
     배치 못 한 항목은 `schedule_warnings` 로 남겨 REVIEWING 의 conflict_report 에 합류한다.
     산출물은 미영속 미리보기(`ScheduledBlockPreview`) — 자동 적용 금지(AGENTS §1.4).
@@ -285,17 +311,27 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
     gp = state["goal_plan"]
     action_items = list(gp.action_items) if gp is not None else []
     outcome = state["outcome"]
+    user_id = state["user_id"]
 
     start_day = date.fromisoformat(state["target_date"])
     schedule_end = _schedule_end(start_day, outcome.horizon, state["scope"])
-    policies = first_plan_adapter.time_policies_from_outcome(outcome)
+    # 정책 = outcome 스냅샷 + DB 정책(온보딩 후 수정 포함). union → compute_free_blocks 가 병합.
+    policies = [
+        *first_plan_adapter.time_policies_from_outcome(outcome),
+        *await _db_time_policies(config, user_id),
+    ]
+    fixed = await _fixed_schedules(config, user_id)
     actions = first_plan_adapter.plan_actions_from_decomposition(action_items)
     node_by_action = {a.id: a.node_id for a in actions}
 
-    existing_busy = await _existing_busy_by_day(config, state["user_id"], start_day, schedule_end)
+    existing_busy = await _existing_busy_by_day(config, user_id, start_day, schedule_end)
 
     def busy_for_day(day: date) -> list[BusyBlock]:
-        return [*time_policies_to_busy(day, policies), *existing_busy.get(day, [])]
+        return [
+            *time_policies_to_busy(day, policies),
+            *fixed_schedules_to_busy(day, fixed),
+            *existing_busy.get(day, []),
+        ]
 
     placed, warnings = schedule_actions_multiday(
         start_day=start_day,
