@@ -374,12 +374,16 @@ def _parse_block_dt(raw: str, field: str) -> datetime:
     return parsed
 
 
-def _block_view(block: ScheduledBlock, title: str, category: str) -> WeeklyBlock:
+def _block_view(
+    block: ScheduledBlock, title: str, category: str, goal_id: UUID | None
+) -> WeeklyBlock:
     return WeeklyBlock(
         block_id=f"{_BLOCK_PREFIX}{block.id}",
         action_id=f"{_ACTION_PREFIX}{block.action_item_id}",
         title=title,
         category=category,
+        # 블록 → 목표 연결 (action_item.goal_id 경유) — FE 가 목표 분류/색을 붙일 수 있게.
+        goal_id=f"goal_{goal_id}" if goal_id is not None else None,
         start_at=block.start_at,
         end_at=block.end_at,
         block_status=block.block_status,
@@ -403,10 +407,10 @@ async def get_weekly_plan(
         for offset in range(7)
     ]
     by_date = {d.date: d for d in days}
-    for block, title, category in rows:
+    for block, title, category, goal_id in rows:
         bucket = by_date.get(to_kst(block.start_at).date())
         if bucket is not None:
-            bucket.blocks.append(_block_view(block, title, category))
+            bucket.blocks.append(_block_view(block, title, category, goal_id))
 
     return WeeklyPlanResponse(
         plan_id=f"plan_{monday.isoformat()}",
@@ -477,6 +481,10 @@ async def edit_block(
         action_id=f"{_ACTION_PREFIX}{block.action_item_id}",
         title=action.title if action is not None else "",
         category=category,
+        # GET /plans/weekly 와 동일하게 목표 연결을 에코 — 이동 후에도 FE 분류/색 유지.
+        goal_id=(
+            f"goal_{action.goal_id}" if action is not None and action.goal_id is not None else None
+        ),
         start_at=block.start_at,
         end_at=block.end_at,
         block_status=block.block_status,

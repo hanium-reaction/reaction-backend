@@ -290,7 +290,9 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 #21-B 구현 메모 (S14/S15 — 영속 `scheduled_blocks` 읽기/이동):
 - Plan 테이블 없음 — `planId` 는 주(週) 논리 식별자(`plan_<weekStart>`). 편집 권한은 `blockId`.
 - `GET /plans/weekly?weekStart=` — 그 주 월요일로 정규화(생략 시 이번 주). 7일 × `blocks[]`
-  (blockId/actionId/title/category/startAt/endAt/blockStatus/source), KST 직렬화.
+  (blockId/actionId/title/category/**goalId**/startAt/endAt/blockStatus/source), KST 직렬화.
+  `goalId` = 블록이 매달린 action_item 의 goal FK(`goal_<uuid>`, 미연결이면 null) — FE 가
+  블록을 목표 분류(집중/유지)·색상과 연결할 수 있게 한다 (마이그레이션 없음, 기존 컬럼 노출).
 - `PATCH /plans/{planId}/blocks/{blockId}` — `{ startAt, endAt? }`. **15분 snap**(가장 가까운 경계),
   `endAt` 생략 시 기존 길이 보존. 시간 충돌 422 `PLAN_BLOCK_CONFLICT`(cancelled·자기 제외),
   정책 위반 422 `POLICY_VIOLATION`(sleep/lunch/late_night_block 윈도우), 잘못된 시각 422

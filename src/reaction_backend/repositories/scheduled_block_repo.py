@@ -30,10 +30,14 @@ class ScheduledBlockRepo:
 
     async def list_week(
         self, user_id: UUID, start_dt: datetime, end_dt: datetime
-    ) -> list[tuple[ScheduledBlock, str, str]]:
-        """[start_dt, end_dt) 의 블록을 (블록, action 제목, 카테고리) 로 — start_at 오름차순."""
+    ) -> list[tuple[ScheduledBlock, str, str, UUID | None]]:
+        """[start_dt, end_dt) 의 블록을 (블록, action 제목, 카테고리, goal_id) 로 — start_at 오름차순.
+
+        goal_id 는 블록이 매달린 action_item 의 goal FK — 주간 그리드가 블록을 목표와
+        연결(분류/색상)할 수 있게 함께 내려준다. 목표 미연결 액션(inbox 등)은 None.
+        """
         stmt = (
-            select(ScheduledBlock, ActionItem.title, ActionItem.category)
+            select(ScheduledBlock, ActionItem.title, ActionItem.category, ActionItem.goal_id)
             .join(ActionItem, ScheduledBlock.action_item_id == ActionItem.id)
             .where(
                 ScheduledBlock.user_id == user_id,
@@ -43,7 +47,9 @@ class ScheduledBlockRepo:
             .order_by(ScheduledBlock.start_at)
         )
         result = await self._session.execute(stmt)
-        return [(block, title, category) for block, title, category in result.all()]
+        return [
+            (block, title, category, goal_id) for block, title, category, goal_id in result.all()
+        ]
 
     async def get_block(self, user_id: UUID, block_id: UUID) -> ScheduledBlock | None:
         stmt = select(ScheduledBlock).where(
