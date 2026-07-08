@@ -506,8 +506,10 @@ async def approve_plan(
     절대 시간 정책 위반 시 롤백 → 422 `PLAN_POLICY_VIOLATION`, 그 외 실패는 롤백 후 500
     `PLAN_SAVE_FAILED`. 만료된 Draft 는 410 `PLAN_DRAFT_EXPIRED`. 이미 승인된 Draft 는 멱등.
 
-    부수 효과: onboarding `ONBOARDING_FIRST_PLAN → ONBOARDING_NOTIFICATIONS` 전이(멱등) —
-    Issue #17 이 "#9(First Plan) 다음에" 로 First Plan 에 위임 (api-contract §3).
+    부수 효과: 첫 계획 승인 = 온보딩 완료 → onboarding_state 를 `ACTIVE` 로 전이(멱등,
+    어느 온보딩 단계에서든). 원설계(FIRST_PLAN → NOTIFICATIONS)는 실제 FE 흐름에서 상태가
+    WELCOME 에 고정돼 새로고침 시 재-온보딩되던 문제가 있어 승인에서 ACTIVE 로 마감
+    (api-contract §3).
     응답은 명시 승인이므로 `is_draft=false` (ADR-0005 §7.2).
     """
     draft = await _load_draft(draft_repo, user.id, plan_id)
@@ -554,11 +556,25 @@ async def approve_plan(
             ) from exc
 
         await draft_repo.mark_approved(draft, approved_at=now_kst())
-        # First Plan 단계 완료 → 다음 온보딩 단계(알림 설정)로 전이. 멱등(이미 진행/ACTIVE 면 no-op).
+        # 첫 계획 승인 = 온보딩 완료 신호 → onboarding_state 를 ACTIVE 로 마감(멱등).
+        # 원설계는 FIRST_PLAN→NOTIFICATIONS(그 뒤 알림 설정에서 ACTIVE)였으나, 실제 FE
+        # 흐름은 (a) 알림 설정이 계획 승인보다 먼저 끝나고 (b) 인터뷰~캘린더 단계 전이가
+        # 항상 트리거되지 않아 onboarding_state 가 WELCOME 에 고정 → 새로고침 시 재-온보딩·
+        # 계획 중복 누적 문제가 있었다. 승인 시점에 어느 온보딩 단계에 있든 ACTIVE 로 올려
+        # 이를 없앤다. 이미 ACTIVE 면 no-op(재계획 승인 등에서 후퇴 없음).
         await user_repo.advance_onboarding(
             user,
-            expected_from="ONBOARDING_FIRST_PLAN",
-            to="ONBOARDING_NOTIFICATIONS",
+            expected_from=(
+                "WELCOME",
+                "ONBOARDING_INTERVIEW",
+                "ONBOARDING_CONFIRM",
+                "ONBOARDING_CALENDAR",
+                "ONBOARDING_MANUAL_SCHEDULE",
+                "ONBOARDING_POLICIES",
+                "ONBOARDING_FIRST_PLAN",
+                "ONBOARDING_NOTIFICATIONS",
+            ),
+            to="ACTIVE",
         )
         await session.commit()
 

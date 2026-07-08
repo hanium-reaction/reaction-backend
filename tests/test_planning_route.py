@@ -538,17 +538,34 @@ def test_approve_expired_draft_returns_410(
     assert res.json()["code"] == "PLAN_DRAFT_EXPIRED"
 
 
-def test_approve_advances_onboarding_first_plan_to_notifications(
+def test_approve_completes_onboarding_to_active(
     client: TestClient, demo_user_orm: Any, monkeypatch: Any
 ) -> None:
-    """승인 → onboarding ONBOARDING_FIRST_PLAN → ONBOARDING_NOTIFICATIONS (Issue #17 규약)."""
+    """승인 = 온보딩 완료 신호 → onboarding_state 를 ACTIVE 로 마감(FIRST_PLAN 에서)."""
     demo_user_orm.onboarding_state = "ONBOARDING_FIRST_PLAN"
     monkeypatch.setattr(aiClient, "run", _stub())
     plan_id = client.post("/plans/generate", json=_body(_outcome())).json()["planId"]
 
     res = client.post(f"/plans/{plan_id}/approve")
     assert res.status_code == 200
-    assert demo_user_orm.onboarding_state == "ONBOARDING_NOTIFICATIONS"
+    assert demo_user_orm.onboarding_state == "ACTIVE"
+
+
+def test_approve_completes_onboarding_from_welcome(
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
+) -> None:
+    """상류 전이(WELCOME→…)가 트리거되지 않아 WELCOME 에 머문 사용자도 승인 시 ACTIVE 로 마감.
+
+    실제 FE 흐름에서 onboarding_state 가 WELCOME 에 고정돼 새로고침 시 재-온보딩되고
+    계획이 중복 누적되던 문제를 막는다.
+    """
+    demo_user_orm.onboarding_state = "WELCOME"
+    monkeypatch.setattr(aiClient, "run", _stub())
+    plan_id = client.post("/plans/generate", json=_body(_outcome())).json()["planId"]
+
+    res = client.post(f"/plans/{plan_id}/approve")
+    assert res.status_code == 200
+    assert demo_user_orm.onboarding_state == "ACTIVE"
 
 
 def test_approve_does_not_regress_onboarding_when_active(
