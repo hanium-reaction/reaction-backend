@@ -82,6 +82,33 @@ def test_spreads_across_days_instead_of_cramming_one_day() -> None:
         assert total <= 180
 
 
+def test_spreads_toward_deadline_not_front_loaded() -> None:
+    """마감까지 **균등 분산** — 첫 며칠에 몰리지 않고 마지막 세션이 호라이즌 후반부에 놓인다.
+
+    front-fill(오늘부터 cap 채우기)이면 6×50분=300분이 앞 2일에 끝나 뒤가 텅 빈다.
+    stride 분산이면 세션이 [start, horizon] 전 구간에 흩어진다.
+    """
+    actions = [_action(f"작업{i}", 50) for i in range(6)]
+    horizon = date(2026, 7, 22)  # START(7/8) 기준 +14일
+    blocks, warnings = schedule_actions_multiday(
+        start_day=START,
+        horizon_day=horizon,
+        actions=actions,
+        busy_for_day=_busy_09_2330,
+        peak_windows=[],
+        focus_chunk_min=60,
+        break_min=10,
+        daily_focus_cap_min=180,
+    )
+    assert not warnings
+    assert len(blocks) == 6
+    days = sorted({b.interval.start.date() for b in blocks})
+    # 마지막 세션이 호라이즌 후반부(중간 이후)에 — front-fill 이면 전부 7/8~7/9 에 몰린다.
+    assert max(days) >= date(2026, 7, 17)
+    # 시작~끝이 최소 한 주 이상 벌어져 있다(넓게 분산).
+    assert (max(days) - min(days)).days >= 7
+
+
 def test_respects_peak_window_preference() -> None:
     """피크=오후(12~18)면 첫 블록이 활동창 시작(09:00)이 아니라 12:00 이후에 놓인다."""
     actions = [_action("집중 작업", 50)]
