@@ -538,17 +538,34 @@ def test_approve_expired_draft_returns_410(
     assert res.json()["code"] == "PLAN_DRAFT_EXPIRED"
 
 
-def test_approve_advances_onboarding_first_plan_to_notifications(
+def test_approve_completes_onboarding_to_active(
     client: TestClient, demo_user_orm: Any, monkeypatch: Any
 ) -> None:
-    """승인 → onboarding ONBOARDING_FIRST_PLAN → ONBOARDING_NOTIFICATIONS (Issue #17 규약)."""
+    """승인 = 온보딩 완료 신호 → onboarding_state 를 ACTIVE 로 마감(FIRST_PLAN 에서)."""
     demo_user_orm.onboarding_state = "ONBOARDING_FIRST_PLAN"
     monkeypatch.setattr(aiClient, "run", _stub())
     plan_id = client.post("/plans/generate", json=_body(_outcome())).json()["planId"]
 
     res = client.post(f"/plans/{plan_id}/approve")
     assert res.status_code == 200
-    assert demo_user_orm.onboarding_state == "ONBOARDING_NOTIFICATIONS"
+    assert demo_user_orm.onboarding_state == "ACTIVE"
+
+
+def test_approve_completes_onboarding_from_welcome(
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
+) -> None:
+    """상류 전이(WELCOME→…)가 트리거되지 않아 WELCOME 에 머문 사용자도 승인 시 ACTIVE 로 마감.
+
+    실제 FE 흐름에서 onboarding_state 가 WELCOME 에 고정돼 새로고침 시 재-온보딩되고
+    계획이 중복 누적되던 문제를 막는다.
+    """
+    demo_user_orm.onboarding_state = "WELCOME"
+    monkeypatch.setattr(aiClient, "run", _stub())
+    plan_id = client.post("/plans/generate", json=_body(_outcome())).json()["planId"]
+
+    res = client.post(f"/plans/{plan_id}/approve")
+    assert res.status_code == 200
+    assert demo_user_orm.onboarding_state == "ACTIVE"
 
 
 def test_approve_does_not_regress_onboarding_when_active(
@@ -602,3 +619,41 @@ def test_approve_save_failure_returns_500(
     res = client.post(f"/plans/{plan_id}/approve")
     assert res.status_code == 500
     assert res.json()["code"] == "PLAN_SAVE_FAILED"
+
+
+def test_approve_already_approved_is_idempotent_without_reapply(
+    client: TestClient, fake_plan_draft_repo: FakePlanDraftRepo
+) -> None:
+    """이미 승인된 Draft 재승인 → 스냅샷 카운트만 반환, 재영속화(INSERT) 없음.
+
+    재승인이 매번 INSERT 되면 같은 날짜에 카드/블록이 겹겹이 누적된다(중복 블록 버그).
+    """
+    cap = _CapturingSession()
+    _use_session(client, cap)
+    plan_id = _seed_draft(fake_plan_draft_repo, blocks=[_block(10)], status="approved")
+
+    res = client.post(f"/plans/{plan_id}/approve")
+    assert res.status_code == 200
+    j = res.json()
+    assert j["activatedActionItems"] == 1  # 저장 스냅샷 길이 기반
+    assert j["activatedBlocks"] == 1
+    assert cap.added == []  # 아무것도 다시 영속화하지 않음
+
+
+def test_approve_requires_lock_before_checks(
+    client: TestClient, fake_plan_draft_repo: FakePlanDraftRepo
+) -> None:
+    """Draft 검사도 lock 안 — lock 미획득이면 어떤 검사·응답도 없이 409.
+
+    검사(status)와 영속화 사이에 다른 요청이 끼면 같은 Draft 가 이중 영속화되던
+    race(동시 더블 승인)를 lock 순서로 봉합했는지 확인한다. **approved** Draft 를 쓰는
+    이유: 검사가 lock 밖이던 과거 코드는 lock 이전에 200(멱등)을 반환해 버려서,
+    draft 상태로는 신·구 코드가 구분되지 않는다 — approved+lock 미획득 → 409 여야
+    검사가 lock 뒤로 이동했음이 증명된다.
+    """
+    _use_session(client, _FakeSession(lock_acquired=False))
+    plan_id = _seed_draft(fake_plan_draft_repo, blocks=[_block(10)], status="approved")
+
+    res = client.post(f"/plans/{plan_id}/approve")
+    assert res.status_code == 409
+    assert res.json()["code"] == "AGENT_CONCURRENT_ACCESS"

@@ -127,8 +127,12 @@ def test_policy_inactive_skipped() -> None:
 def test_get_weekly_groups_by_day(
     client: TestClient, fake_scheduled_block_repo: FakeScheduledBlockRepo
 ) -> None:
+    goal_uuid = uuid4()
     fake_scheduled_block_repo.seed(
-        _block(_dt(1, 9, 0), _dt(1, 10, 0)), title="화요일 카드", category="study"
+        _block(_dt(1, 9, 0), _dt(1, 10, 0)),
+        title="화요일 카드",
+        category="study",
+        goal_id=goal_uuid,
     )
     fake_scheduled_block_repo.seed(
         _block(_dt(2, 14, 0), _dt(2, 15, 0)), title="수요일 카드", category="project"
@@ -142,13 +146,35 @@ def test_get_weekly_groups_by_day(
     assert tue["weekday"] == "tuesday"
     assert len(tue["blocks"]) == 1
     assert tue["blocks"][0]["blockId"].startswith("block_")
+    # 블록 → 목표 연결: action_item.goal_id 가 goal_<uuid> 로 내려온다 (FE 분류/색 연결용).
+    assert tue["blocks"][0]["goalId"] == f"goal_{goal_uuid}"
     assert body["days"][2]["blocks"][0]["title"] == "수요일 카드"
+    # 목표 미연결 액션(inbox 등)은 null.
+    assert body["days"][2]["blocks"][0]["goalId"] is None
 
 
 def test_get_weekly_empty(client: TestClient) -> None:
     resp = client.get("/plans/weekly", params={"weekStart": MON.isoformat()})
     assert resp.status_code == 200
     assert all(len(d["blocks"]) == 0 for d in resp.json()["days"])
+
+
+def test_get_weekly_excludes_cancelled(
+    client: TestClient, fake_scheduled_block_repo: FakeScheduledBlockRepo
+) -> None:
+    """계획 교체(승인) 등으로 cancelled 된 블록은 주간 그리드에서 제외."""
+    fake_scheduled_block_repo.seed(
+        _block(_dt(1, 9, 0), _dt(1, 10, 0), status="cancelled"),
+        title="취소된 카드",
+        category="study",
+    )
+    fake_scheduled_block_repo.seed(
+        _block(_dt(1, 11, 0), _dt(1, 12, 0)), title="유효 카드", category="study"
+    )
+    resp = client.get("/plans/weekly", params={"weekStart": MON.isoformat()})
+    assert resp.status_code == 200
+    tue = resp.json()["days"][1]
+    assert [b["title"] for b in tue["blocks"]] == ["유효 카드"]
 
 
 def test_get_weekly_invalid(client: TestClient) -> None:
@@ -174,9 +200,12 @@ def test_edit_block_moves_and_snaps(
     fake_action_item_repo: FakeActionItemRepo,
 ) -> None:
     action = _action()
+    action.goal_id = uuid4()
     fake_action_item_repo.seed(action)
     block = _block(_dt(1, 9, 0), _dt(1, 10, 0), action_id=action.id)
-    fake_scheduled_block_repo.seed(block, title=action.title, category=action.category)
+    fake_scheduled_block_repo.seed(
+        block, title=action.title, category=action.category, goal_id=action.goal_id
+    )
 
     resp = _patch(client, f"block_{block.id}", {"startAt": _dt(1, 11, 7).isoformat()})
     assert resp.status_code == 200
@@ -185,6 +214,8 @@ def test_edit_block_moves_and_snaps(
     # 11:07 → 11:00 스냅, 길이(1h) 보존 → 12:00
     assert body["startAt"].startswith(f"{(MON + timedelta(days=1)).isoformat()}T11:00")
     assert body["endAt"].startswith(f"{(MON + timedelta(days=1)).isoformat()}T12:00")
+    # 이동 응답도 목표 연결을 에코 — null 이면 FE 그리드에서 블록이 '기타' 로 되돌아간다.
+    assert body["goalId"] == f"goal_{action.goal_id}"
 
 
 def test_edit_block_conflict(

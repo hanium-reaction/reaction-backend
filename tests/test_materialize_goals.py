@@ -10,7 +10,10 @@ from typing import Any
 from uuid import uuid4
 
 from reaction_backend.db.models.goal import Goal
-from reaction_backend.orchestrator.first_plan_adapter import materialize_goals
+from reaction_backend.orchestrator.first_plan_adapter import (
+    _derive_goal_category,
+    materialize_goals,
+)
 from reaction_backend.orchestrator.interview_adapter import PLACEHOLDER_GOAL_TITLE
 from reaction_backend.schemas.interview import GoalCandidate
 
@@ -100,3 +103,22 @@ async def test_placeholder_only_yields_no_goals() -> None:
     assert rows == []
     assert heaviest is None
     assert sess.added == []
+
+
+# ───────────────────── _derive_goal_category (순수) ─────────────────────
+# 인터뷰가 목표 카테고리를 분류하지 않아 'other' 로 저장되던 것을,
+# 분해된 액션 카테고리 다수결로 파생한다 (블록/목표가 전부 '기타' 로 뜨던 문제).
+
+
+def test_derive_goal_category_majority() -> None:
+    assert _derive_goal_category(["study", "study", "health"]) == "study"
+
+
+def test_derive_goal_category_ignores_other() -> None:
+    # 'other' 는 표에서 제외 — 실카테고리 소수라도 그것을 채택.
+    assert _derive_goal_category(["other", "other", "study"]) == "study"
+
+
+def test_derive_goal_category_all_other_returns_none() -> None:
+    assert _derive_goal_category(["other", "other"]) is None
+    assert _derive_goal_category([]) is None
