@@ -425,6 +425,21 @@ def test_goal_decompose_prompt_drops_freebusy_adds_feedback() -> None:
     assert "{{review_feedback}}" in body  # replan 피드백 주입 지점
 
 
+def test_goal_decompose_prompt_locks_category_enum() -> None:
+    """프롬프트 계약 잠금 — action_item.category 전체 enum 명시 + 게으른 'other' 금지 규칙.
+
+    enum 이 빠지면 LLM 이 대부분 'other' 를 반환해 주간 그리드가 전부 '기타' 로
+    렌더되던 문제가 조용히 재발한다 (api-change-log v1.17).
+    """
+    from reaction_backend.db.models.action_item import ACTION_CATEGORY_VALUES
+    from reaction_backend.prompts import registry as prompt_registry
+
+    body = prompt_registry.get("planning/goal_decompose").body
+    for value in ACTION_CATEGORY_VALUES:
+        assert value in body  # 응답 형식/규칙 어딘가에 전체 enum 이 명시돼 있어야 한다
+    assert "other 를 쓰지 마라" in body  # 게으른 기본값 방지 규칙
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 계획 호출 thinking 예산 배선 (P1-3)
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1195,19 +1195,29 @@ class FakeScheduledBlockRepo:
 
     def __init__(self) -> None:
         self._blocks: dict[UUID, ScheduledBlock] = {}
-        self._meta: dict[UUID, tuple[str, str]] = {}
+        self._meta: dict[UUID, tuple[str, str, UUID | None]] = {}
 
-    def seed(self, block: ScheduledBlock, *, title: str, category: str) -> None:
+    def seed(
+        self,
+        block: ScheduledBlock,
+        *,
+        title: str,
+        category: str,
+        goal_id: UUID | None = None,
+    ) -> None:
         self._blocks[block.id] = block
-        self._meta[block.id] = (title, category)
+        self._meta[block.id] = (title, category, goal_id)
 
     async def list_week(
         self, user_id: UUID, start_dt: datetime, end_dt: datetime
-    ) -> list[tuple[ScheduledBlock, str, str]]:
+    ) -> list[tuple[ScheduledBlock, str, str, UUID | None]]:
+        # 실제 repo 와 동일하게 cancelled(계획 교체로 취소 등) 블록은 그리드에서 제외.
         rows = [
             (b, *self._meta[b.id])
             for b in self._blocks.values()
-            if b.user_id == user_id and start_dt <= b.start_at < end_dt
+            if b.user_id == user_id
+            and b.block_status != "cancelled"
+            and start_dt <= b.start_at < end_dt
         ]
         return sorted(rows, key=lambda r: r[0].start_at)
 
@@ -1248,7 +1258,7 @@ class FakeScheduledBlockRepo:
         b.source = source
         b.external_calendar_event_id = None
         self._blocks[b.id] = b
-        self._meta[b.id] = ("회복 블록", "recovery")
+        self._meta[b.id] = ("회복 블록", "recovery", None)
         return b
 
     async def list_overlapping(

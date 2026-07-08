@@ -384,12 +384,16 @@ def _parse_block_dt(raw: str, field: str) -> datetime:
     return parsed
 
 
-def _block_view(block: ScheduledBlock, title: str, category: str) -> WeeklyBlock:
+def _block_view(
+    block: ScheduledBlock, title: str, category: str, goal_id: UUID | None
+) -> WeeklyBlock:
     return WeeklyBlock(
         block_id=f"{_BLOCK_PREFIX}{block.id}",
         action_id=f"{_ACTION_PREFIX}{block.action_item_id}",
         title=title,
         category=category,
+        # 블록 → 목표 연결 (action_item.goal_id 경유) — FE 가 목표 분류/색을 붙일 수 있게.
+        goal_id=f"goal_{goal_id}" if goal_id is not None else None,
         start_at=block.start_at,
         end_at=block.end_at,
         block_status=block.block_status,
@@ -413,10 +417,10 @@ async def get_weekly_plan(
         for offset in range(7)
     ]
     by_date = {d.date: d for d in days}
-    for block, title, category in rows:
+    for block, title, category, goal_id in rows:
         bucket = by_date.get(to_kst(block.start_at).date())
         if bucket is not None:
-            bucket.blocks.append(_block_view(block, title, category))
+            bucket.blocks.append(_block_view(block, title, category, goal_id))
 
     return WeeklyPlanResponse(
         plan_id=f"plan_{monday.isoformat()}",
@@ -487,6 +491,10 @@ async def edit_block(
         action_id=f"{_ACTION_PREFIX}{block.action_item_id}",
         title=action.title if action is not None else "",
         category=category,
+        # GET /plans/weekly 와 동일하게 목표 연결을 에코 — 이동 후에도 FE 분류/색 유지.
+        goal_id=(
+            f"goal_{action.goal_id}" if action is not None and action.goal_id is not None else None
+        ),
         start_at=block.start_at,
         end_at=block.end_at,
         block_status=block.block_status,
@@ -516,70 +524,114 @@ async def approve_plan(
     절대 시간 정책 위반 시 롤백 → 422 `PLAN_POLICY_VIOLATION`, 그 외 실패는 롤백 후 500
     `PLAN_SAVE_FAILED`. 만료된 Draft 는 410 `PLAN_DRAFT_EXPIRED`. 이미 승인된 Draft 는 멱등.
 
-    부수 효과: onboarding `ONBOARDING_FIRST_PLAN → ONBOARDING_NOTIFICATIONS` 전이(멱등) —
-    Issue #17 이 "#9(First Plan) 다음에" 로 First Plan 에 위임 (api-contract §3).
+    승인 = 교체: 같은 target_date 의 이전 AI 계획 산출물 중 사용자가 손대지 않은
+    카드(source=goal·status=planned, user_edit 블록 없는 것)와 그 블록을 soft 정리
+    (archived/cancelled)하고, heaviest goal 의 기존 분해 트리도 보관한 뒤 새 계획을
+    영속화한다 — 재생성→재승인 반복으로 같은 날짜에 카드/블록/노드가 겹겹이 누적되던
+    문제 방지 (`first_plan_adapter.supersede_previous_plan`).
+
+    동시성(더블클릭·다중 디바이스 동시 승인): advisory lock 은 **트랜잭션 스코프**
+    (`pg_advisory_xact_lock`) 라 commit/rollback 마다 풀린다. 그래서 시도(attempt)마다
+    lock 을 새로 잡고, Draft 로드·만료·멱등 검사 → 영속화 → Draft 승인 마킹·온보딩
+    전이(`on_success` — 가드 트랜잭션 내부)까지를 **한 트랜잭션 단일 commit** 으로 묶는다.
+    lock 이 풀리는 순간엔 항상 status=approved 가 이미 커밋돼 있어, 대기하던 요청은
+    멱등 응답으로 빠진다. 재시도(ADR-0005 §2.5.1, 3회)는 이 라우터 루프가 담당한다
+    (adapter 내부 재시도는 rollback 으로 lock 을 잃은 채 돌게 되므로 `max_retries=1`).
+
+    부수 효과: 첫 계획 승인 = 온보딩 완료 → onboarding_state 를 `ACTIVE` 로 전이(멱등,
+    어느 온보딩 단계에서든). 원설계(FIRST_PLAN → NOTIFICATIONS)는 실제 FE 흐름에서 상태가
+    WELCOME 에 고정돼 새로고침 시 재-온보딩되던 문제가 있어 승인에서 ACTIVE 로 마감
+    (api-contract §3).
     응답은 명시 승인이므로 `is_draft=false` (ADR-0005 §7.2).
     """
-    draft = await _load_draft(draft_repo, user.id, plan_id)
-    if draft.status == "expired" or draft.expires_at < now_kst():
-        raise ApiError(
-            ErrorCode.PLAN_DRAFT_EXPIRED,
-            "오래 두신 계획 초안이 만료됐어요. 다시 만들어 볼까요?",
-            http_status=HTTPStatus.GONE,
-        )
+    last_exc: Exception | None = None
+    for _attempt in range(first_plan_adapter.MAX_SAVE_RETRIES):
+        async with user_agent_lock(session, user.id, _LOCK_AGENT):
+            # 검사→영속화→승인 마킹이 lock 을 쥔 한 트랜잭션 — 이중 영속화 방지.
+            draft = await _load_draft(draft_repo, user.id, plan_id)
+            if draft.status == "expired" or draft.expires_at < now_kst():
+                raise ApiError(
+                    ErrorCode.PLAN_DRAFT_EXPIRED,
+                    "오래 두신 계획 초안이 만료됐어요. 다시 만들어 볼까요?",
+                    http_status=HTTPStatus.GONE,
+                )
 
-    payload = draft.payload
-    if draft.status == "approved":  # 멱등 — 이미 영속화됨, 재저장하지 않음
-        return _approved_response(plan_id, payload)
+            payload = draft.payload
+            if draft.status == "approved":  # 멱등 — 이미 영속화됨, 재저장하지 않음
+                return _approved_response(plan_id, payload)
 
-    outcome = InterviewOutcome.model_validate(payload["outcome"])
-    goal_nodes = [GoalNodeDraft.model_validate(n) for n in payload["goal_nodes"]]
-    action_items = [ActionItemDraft.model_validate(a) for a in payload["action_items"]]
-    blocks = [ScheduledBlockPreview.model_validate(b) for b in payload["blocks"]]
-    policies = first_plan_adapter.time_policies_from_outcome(outcome)
+            outcome = InterviewOutcome.model_validate(payload["outcome"])
+            goal_nodes = [GoalNodeDraft.model_validate(n) for n in payload["goal_nodes"]]
+            action_items = [ActionItemDraft.model_validate(a) for a in payload["action_items"]]
+            blocks = [ScheduledBlockPreview.model_validate(b) for b in payload["blocks"]]
+            policies = first_plan_adapter.time_policies_from_outcome(outcome)
 
-    async with user_agent_lock(session, user.id, _LOCK_AGENT):
-        try:
-            result = await first_plan_adapter.db_apply_first_plan(
-                session,
-                user_id=user.id,
-                target_date=draft.target_date,
-                outcome=outcome,
-                goal_nodes=goal_nodes,
-                action_items=action_items,
-                blocks=blocks,
-                time_policies=policies,
+            async def _finalize(draft: PlanDraft = draft) -> None:
+                """영속화와 같은 가드 트랜잭션(단일 commit) 안에서 실행되는 부수 기록.
+
+                첫 계획 승인 = 온보딩 완료 신호 → onboarding_state 를 ACTIVE 로 마감(멱등).
+                원설계는 FIRST_PLAN→NOTIFICATIONS(그 뒤 알림 설정에서 ACTIVE)였으나, 실제
+                FE 흐름은 (a) 알림 설정이 계획 승인보다 먼저 끝나고 (b) 인터뷰~캘린더 단계
+                전이가 항상 트리거되지 않아 onboarding_state 가 WELCOME 에 고정 → 새로고침
+                시 재-온보딩·계획 중복 누적 문제가 있었다. 승인 시점에 어느 온보딩 단계에
+                있든 ACTIVE 로 올려 이를 없앤다. 이미 ACTIVE 면 no-op.
+                """
+                await draft_repo.mark_approved(draft, approved_at=now_kst())
+                await user_repo.advance_onboarding(
+                    user,
+                    expected_from=(
+                        "WELCOME",
+                        "ONBOARDING_INTERVIEW",
+                        "ONBOARDING_CONFIRM",
+                        "ONBOARDING_CALENDAR",
+                        "ONBOARDING_MANUAL_SCHEDULE",
+                        "ONBOARDING_POLICIES",
+                        "ONBOARDING_FIRST_PLAN",
+                        "ONBOARDING_NOTIFICATIONS",
+                    ),
+                    to="ACTIVE",
+                )
+
+            try:
+                result = await first_plan_adapter.db_apply_first_plan(
+                    session,
+                    user_id=user.id,
+                    target_date=draft.target_date,
+                    outcome=outcome,
+                    goal_nodes=goal_nodes,
+                    action_items=action_items,
+                    blocks=blocks,
+                    time_policies=policies,
+                    max_retries=1,  # 재시도는 이 라우터 루프가 lock 재획득과 함께 수행
+                    on_success=_finalize,
+                )
+            except PolicyViolationError as exc:
+                raise ApiError(
+                    ErrorCode.PLAN_POLICY_VIOLATION,
+                    "계획에 수면·노터치 같은 보호 시간과 겹치는 블록이 있어요. 시간을 옮겨 다시 시도해 주세요.",
+                    http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                ) from exc
+            except (
+                Exception
+            ) as exc:  # 이 시도 실패 — 이미 롤백됨(가드 트랜잭션), lock 재획득 후 재시도
+                last_exc = exc
+                continue
+
+            return FirstPlanApproveResponse(
+                plan_id=plan_id,
+                activated_goals=result.goals,
+                activated_goal_nodes=result.goal_nodes,
+                activated_action_items=result.action_items,
+                activated_blocks=result.scheduled_blocks,
+                activated_at=now_kst(),
             )
-        except PolicyViolationError as exc:
-            raise ApiError(
-                ErrorCode.PLAN_POLICY_VIOLATION,
-                "계획에 수면·노터치 같은 보호 시간과 겹치는 블록이 있어요. 시간을 옮겨 다시 시도해 주세요.",
-                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-            ) from exc
-        except Exception as exc:  # 영속화 실패(3회 재시도 후) — 이미 롤백됨(가드 트랜잭션)
-            raise ApiError(
-                ErrorCode.PLAN_SAVE_FAILED,
-                "계획 저장에 잠시 문제가 있어요. 잠시 후 다시 시도해 주세요.",
-                http_status=HTTPStatus.INTERNAL_SERVER_ERROR,
-            ) from exc
 
-        await draft_repo.mark_approved(draft, approved_at=now_kst())
-        # First Plan 단계 완료 → 다음 온보딩 단계(알림 설정)로 전이. 멱등(이미 진행/ACTIVE 면 no-op).
-        await user_repo.advance_onboarding(
-            user,
-            expected_from="ONBOARDING_FIRST_PLAN",
-            to="ONBOARDING_NOTIFICATIONS",
-        )
-        await session.commit()
-
-    return FirstPlanApproveResponse(
-        plan_id=plan_id,
-        activated_goals=result.goals,
-        activated_goal_nodes=result.goal_nodes,
-        activated_action_items=result.action_items,
-        activated_blocks=result.scheduled_blocks,
-        activated_at=now_kst(),
-    )
+    # MAX_SAVE_RETRIES 회 모두 실패 (ADR-0005 §2.5.1)
+    raise ApiError(
+        ErrorCode.PLAN_SAVE_FAILED,
+        "계획 저장에 잠시 문제가 있어요. 잠시 후 다시 시도해 주세요.",
+        http_status=HTTPStatus.INTERNAL_SERVER_ERROR,
+    ) from last_exc
 
 
 def _approved_response(plan_id: str, payload: dict[str, Any]) -> FirstPlanApproveResponse:

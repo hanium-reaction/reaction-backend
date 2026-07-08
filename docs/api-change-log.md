@@ -7,19 +7,27 @@
 
 ---
 
-## v1.18 — 2026-07-08 (주간 forward 재계획 — `POST /plans/replan`)
+## v1.19 — 2026-07-08 (주간 forward 재계획 — `POST /plans/replan`)
 
 - 신규 `POST /plans/replan` — 직전 완료 주의 주간 리포트를 작성하고, **다음 주부터 마감까지** 남은 작업을 다시 배치한 Draft 생성(항상 `isDraft=true` · `aiSource=rule`, LLM 0회)
 - 대상 = 다음 주 이후 **미착수 블록의 액션** + **활성 블록 없는 planned 백로그**(수락한 회복 카드 포함). 과거·시작/완료된 블록·실패 원본은 불변(회복 수락분만 재편입, 원본 `action_item.status` 변경 없음). 이미 확정·시작된 일정은 피해 배치(비파괴 fit-around). **기존 goal/node/action 재사용 → 중복 0**
 - 신규 `POST /plans/replan/{planId}/approve` — 미래 미착수 블록 취소 + 기존 action 에 새 블록 삽입. 응답 `{cancelledBlocks, createdBlocks}`. 이미 승인 시 멱등. 만료 410 / 재계획 Draft 아니면 404
 - 신규 에러코드 없음(기존 `PLAN_DRAFT_EXPIRED`/`PLAN_DRAFT_NOT_FOUND` 재사용). 기존 endpoint·envelope 불변
 
-## v1.17 — 2026-07-08 (다일 계획 스케줄러 + `scope` + 기존 일정 회피)
+## v1.18 — 2026-07-08 (다일 계획 스케줄러 + `scope` + DB 상태 busy 통합, #112)
 
 - `POST /plans/generate` 요청에 `scope`(선택, 기본 `"horizon"`) 추가: `"horizon"`=**마감까지** 전 구간(실행이 마감 전 여러 날에 분배) / `"week"`=`targetDate` 가 속한 **달력 주(월~일)** 만. 미지정 시 `"horizon"` — 기존 동작(마감까지 배치)과 동일해 하위호환
 - ⚠️ 배치 동작 변경: 이전에는 `reserve_habit_sessions`(습관 하루 1세션) 재사용으로 모든 카드가 `targetDate` **하루에 백투백**으로 몰렸다. 이제 다일 스케줄러가 **여러 날에 분산**(하루 집중 상한 + 피크 시간대 우선 + 카드 간 휴식 + 긴 카드 세션 분할)
-- 어느 scope 든 **이미 승인된 `scheduled_blocks` + 고정 일정(`fixed_schedules`, 수업·알바) + DB `time_policies`(온보딩 후 수정 포함)** 를 모두 busy 로 반영해 그 위에 겹쳐 잡지 않는다(비파괴 fit-around — 사용자가 손댄 일정·완료 카드 보존). #112 완전 해결. 캘린더 freebusy 회피는 후속(P1)
+- 어느 scope 든 **이미 승인된 `scheduled_blocks` + 고정 일정(`fixed_schedules`, 수업·알바) + DB `time_policies`(온보딩 후 수정 포함)** 를 모두 busy 로 반영해 그 위에 겹쳐 잡지 않는다(비파괴 fit-around — 사용자가 손댄 일정·완료 카드 보존). **#112 완전 해결**. 캘린더 freebusy 회피는 후속(P1)
 - 응답 envelope/필드 불변(`blocks` 시각만 분산). 신규 에러코드 없음
+
+## v1.17 — 2026-07-08 (주간 블록 목표 연결 `goalId` + 카테고리 실분류)
+
+- `GET /plans/weekly` 의 `blocks[]` 와 `PATCH /plans/{planId}/blocks/{blockId}` 응답에 **`goalId`** (`goal_<uuid>` | null) 추가 — 블록이 매달린 `action_item.goal_id` 노출(마이그레이션 없음). FE 가 블록을 목표 분류(집중/유지)·색상과 연결할 수 있게 함. additive — 기존 클라이언트 영향 없음
+- 배경: 주간 시간표 블록이 전부 "기타" 로 렌더 — 블록에 목표 연결 정보가 없고 category 도 대부분 `other`(라이브 실측 other 29/study 5/health 4)
+- `goal_decompose.v1.md` 프롬프트에 category enum 전체 명시 + "분류 명확하면 other 금지" 규칙 — 신규 생성 계획의 액션/블록 카테고리 실분류 유도
+- 계획 승인 시 heaviest goal 의 category 가 `other`(인터뷰 미분류 기본값)면 분해된 액션 카테고리 **다수결로 파생** — 실카테고리가 이미 있으면 불변
+- ⚠️ 기존 저장 데이터의 `other` 는 그대로(신규 생성분부터 개선)
 
 ## v1.16 — 2026-07-07 (`POST /plans/generate` 빈 본문 자동 복구)
 
