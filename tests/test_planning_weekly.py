@@ -159,6 +159,24 @@ def test_get_weekly_empty(client: TestClient) -> None:
     assert all(len(d["blocks"]) == 0 for d in resp.json()["days"])
 
 
+def test_get_weekly_excludes_cancelled(
+    client: TestClient, fake_scheduled_block_repo: FakeScheduledBlockRepo
+) -> None:
+    """계획 교체(승인) 등으로 cancelled 된 블록은 주간 그리드에서 제외."""
+    fake_scheduled_block_repo.seed(
+        _block(_dt(1, 9, 0), _dt(1, 10, 0), status="cancelled"),
+        title="취소된 카드",
+        category="study",
+    )
+    fake_scheduled_block_repo.seed(
+        _block(_dt(1, 11, 0), _dt(1, 12, 0)), title="유효 카드", category="study"
+    )
+    resp = client.get("/plans/weekly", params={"weekStart": MON.isoformat()})
+    assert resp.status_code == 200
+    tue = resp.json()["days"][1]
+    assert [b["title"] for b in tue["blocks"]] == ["유효 카드"]
+
+
 def test_get_weekly_invalid(client: TestClient) -> None:
     resp = client.get("/plans/weekly", params={"weekStart": "2026/06/15"})
     assert resp.status_code == 422
