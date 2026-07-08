@@ -1,0 +1,63 @@
+name: Cleanup duplicate plans (EC2)
+
+# 과거 계획 중복 누적(#111, PR #113 이전 데이터) 소급 정리 — 수동 실행 전용.
+# deploy.yml 과 같은 self-hosted EC2 runner 에서 돌아 prod .env(RDS DATABASE_URL)를 쓴다.
+# scripts/cleanup_duplicate_plans.py 는 최신 main 이 deploy.yml 로 $APP_DIR 에 동기화된 것.
+#
+# 안전:
+# - workflow_dispatch 전용 (push/PR 로는 절대 트리거되지 않음)
+# - 기본 mode=dry-run (아무것도 쓰지 않고 보고만) — apply 는 명시 선택
+# - soft delete only (archived_at / block_status=cancelled), hard delete 없음
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run(보고만) 또는 apply(실제 적용)"
+        type: choice
+        options:
+          - dry-run
+          - apply
+        default: dry-run
+      user_email:
+        description: "특정 사용자만 (비우면 전체)"
+        required: false
+        default: ""
+      since:
+        description: "이 날짜 이후만 (YYYY-MM-DD, 비우면 전체)"
+        required: false
+        default: ""
+
+concurrency:
+  # deploy 와 같은 앱 디렉터리를 쓰므로 배포와 겹치지 않게 직렬화.
+  group: deploy-ec2
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: "cleanup (${{ inputs.mode }})"
+    runs-on: [self-hosted, ec2, reaction-backend]
+    timeout-minutes: 10
+
+    env:
+      APP_DIR: /home/ubuntu/reaction-backend
+
+    steps:
+      - name: Run cleanup
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.mode }}" = "apply" ]; then ARGS="$ARGS --apply"; fi
+          if [ -n "${{ inputs.user_email }}" ]; then ARGS="$ARGS --user-email ${{ inputs.user_email }}"; fi
+          if [ -n "${{ inputs.since }}" ]; then ARGS="$ARGS --since ${{ inputs.since }}"; fi
+          echo "mode=${{ inputs.mode }} args=$ARGS"
+          ~/.local/bin/uv run --no-dev python -m scripts.cleanup_duplicate_plans $ARGS | tee /tmp/cleanup.out
+
+      - name: Summary
+        if: always()
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          echo "### Cleanup (${{ inputs.mode }})" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 40 /tmp/cleanup.out >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
