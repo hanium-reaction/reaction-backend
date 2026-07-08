@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -217,6 +217,106 @@ class FirstPlanSaveResult:
     scheduled_blocks: int
 
 
+def _replaceable_action(action: ActionItem, target_date: date) -> bool:
+    """이전 AI 계획 산출물 중 '사용자가 손대지 않은' 교체 대상인지.
+
+    source='goal'(계획 분해 산출) + status='planned'(시작/체크인 이력 없음) + 미보관 +
+    같은 target_date 만 교체한다. 시작·완료·실패 카드와 inbox/manual/recovery 카드는
+    이력·사용자 의도 보존을 위해 남긴다 (AGENTS §2 원본 status 불변 원칙과 일관).
+    """
+    return (
+        action.source == "goal"
+        and action.status == "planned"
+        and action.archived_at is None
+        and action.target_date == target_date
+    )
+
+
+async def supersede_previous_plan(
+    session: AsyncSession, *, user_id: uuid.UUID, target_date: date
+) -> int:
+    """같은 날짜의 이전 First Plan 산출물을 정리(soft) — 승인 = "이 계획으로 교체".
+
+    generate 는 기존 블록을 busy 로 보지 않고(후속: 스케줄러 DB busy 통합 이슈) approve 는
+    무조건 INSERT 만 해서, 재생성→재승인을 반복하면 같은 날짜에 카드/블록이 계속 누적됐다
+    (같은 제목 ×5, 같은 시각 4중첩). 승인 시점에 같은 target_date 의 이전 AI 계획 산출물 중
+    사용자가 손대지 않은 것만 정리해 "마지막 승인 = 그 날짜의 계획"이 되게 한다.
+
+    "손대지 않은" 판정은 두 층이다:
+    - 카드 층: `_replaceable_action` (source=goal · status=planned · 미보관 · 같은 날짜)
+    - 블록 층: 카드의 블록 중 `source='user_edit'`(S15 직접 이동)가 하나라도 있으면
+      그 카드는 **통째로 보존** — 사용자가 시간을 옮긴 계획을 승인이 지우면 안 된다.
+
+    hard delete 금지(AGENTS §2) — action_item 은 archived_at(soft delete),
+    scheduled_block 은 block_status='cancelled' 로 마킹한다. 반환값은 교체된 카드 수.
+
+    카드 SELECT 는 FOR UPDATE — 같은 카드를 동시에 [시작]하는 요청(today/start)이
+    status 를 in_progress 로 바꾸는 것과 교차해 '보관됐는데 실행 중'인 유령 카드가
+    생기지 않게 행 잠금으로 직렬화한다. SQL WHERE 로 좁히고 파이썬 술어로 한 번 더
+    거른다 — WHERE 를 평가하지 않는 구조적 fake session(테스트)에서도 규칙 유지.
+    """
+    stmt = (
+        select(ActionItem)
+        .where(
+            ActionItem.user_id == user_id,
+            ActionItem.target_date == target_date,
+            ActionItem.source == "goal",
+            ActionItem.status == "planned",
+            ActionItem.archived_at.is_(None),
+        )
+        .with_for_update()
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    candidates = [a for a in rows if _replaceable_action(a, target_date)]
+    if not candidates:
+        return 0
+
+    candidate_ids = {a.id for a in candidates}
+    block_stmt = select(ScheduledBlock).where(
+        ScheduledBlock.user_id == user_id,
+        ScheduledBlock.action_item_id.in_(candidate_ids),
+        ScheduledBlock.block_status != "cancelled",
+    )
+    fetched = (await session.execute(block_stmt)).scalars().all()
+    live_blocks = [
+        b for b in fetched if b.action_item_id in candidate_ids and b.block_status != "cancelled"
+    ]
+    # 사용자가 직접 옮긴(user_edit) 블록을 가진 카드는 교체 대상에서 제외.
+    protected_ids = {b.action_item_id for b in live_blocks if b.source == "user_edit"}
+    stale = [a for a in candidates if a.id not in protected_ids]
+    if not stale:
+        return 0
+
+    archived_at = now_kst()
+    stale_ids = {a.id for a in stale}
+    for action in stale:
+        action.archived_at = archived_at
+    for block in live_blocks:
+        if block.action_item_id in stale_ids:
+            block.block_status = "cancelled"
+    return len(stale)
+
+
+async def _archive_goal_nodes(session: AsyncSession, *, goal_id: uuid.UUID) -> int:
+    """goal 의 기존 활성 분해 트리를 보관 — 새 승인 트리가 '현재 트리'가 되게.
+
+    매 승인이 heaviest goal 아래에 goal_nodes 트리를 새로 INSERT 하므로, 이전 트리를
+    archived_at 으로 보관하지 않으면 승인 반복 시 동일 트리가 무한 누적된다(카드/블록과
+    같은 뿌리의 세 번째 테이블). 보관된 노드를 가리키는 기존 action_item 의
+    goal_node_id 는 계보(lineage)로 유지된다. 반환값은 보관한 노드 수.
+    """
+    stmt = select(GoalNode).where(
+        GoalNode.goal_id == goal_id,
+        GoalNode.archived_at.is_(None),
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    stale = [n for n in rows if n.goal_id == goal_id and n.archived_at is None]
+    archived_at = now_kst()
+    for node in stale:
+        node.archived_at = archived_at
+    return len(stale)
+
+
 def _normalize_category(raw: str) -> str:
     """ActionItem.category enum 으로 정규화 — 미지원 카테고리는 'other'."""
     return raw if raw in ACTION_CATEGORY_VALUES else "other"
@@ -313,8 +413,14 @@ async def _apply_once(
     action_items: Sequence[ActionItemDraft],
     blocks: Sequence[ScheduledBlockPreview],
     time_policies: Sequence[TimePolicyLike],
+    on_success: Callable[[], Awaitable[None]] | None = None,
 ) -> FirstPlanSaveResult:
-    """단일 가드 트랜잭션 1회 시도 — goals → goal_nodes → action_items → scheduled_blocks."""
+    """단일 가드 트랜잭션 1회 시도 — goals → goal_nodes → action_items → scheduled_blocks.
+
+    `on_success` 는 영속화 직후 **같은 가드 트랜잭션 안**에서 호출된다 — 호출자가
+    Draft 상태 전이 등 부수 기록을 계획 영속화와 원자적으로(단일 commit) 묶을 수 있게.
+    실패 시 롤백에 함께 쓸려 나간다.
+    """
     guard_plan = DraftPlan(
         target_date=target_date,
         blocks=tuple(
@@ -346,7 +452,19 @@ async def _apply_once(
         action_by_node: dict[str, ActionItem] = {}
         block_count = 0
         if heaviest is None:
+            # 빈 계획도 승인 자체는 성립 — 부수 기록(Draft 승인 등)은 같은 트랜잭션으로.
+            if on_success is not None:
+                await on_success()
             return FirstPlanSaveResult(goals=0, goal_nodes=0, action_items=0, scheduled_blocks=0)
+
+        # 1.5) 교체(supersede) — 같은 날짜의 이전 AI 계획 산출물(미시작 카드+블록)을 soft
+        #      정리하고 이 계획으로 대체. 재생성→재승인 반복 시 같은 날짜에 카드/블록이
+        #      겹겹이 누적되던 문제를 막는다. 빈 계획(heaviest 없음)은 위에서 이미 반환
+        #      → 아무것도 지우지 않는다.
+        await supersede_previous_plan(session, user_id=user_id, target_date=target_date)
+        # 1.6) heaviest goal 의 기존 분해 트리 보관 — 노드도 카드/블록처럼 승인마다
+        #      새로 INSERT 되므로, 보관하지 않으면 같은 트리가 무한 누적된다.
+        await _archive_goal_nodes(session, goal_id=heaviest.id)
 
         # 2) goal_nodes — heaviest goal 트리. temp node_id → GoalNode (parent 는 relationship).
         depths = _node_depths(goal_nodes)
@@ -409,6 +527,12 @@ async def _apply_once(
             block_count += 1
         # dependency_links: GoalDecomposition 에 의존성 소스 데이터 없음 → 후속(#62 제외 범위).
 
+        # 5) 호출자 부수 기록(Draft 승인 마킹·온보딩 전이 등) — 같은 트랜잭션, 같은 commit.
+        #    가드 트랜잭션의 commit 이 advisory lock(트랜잭션 스코프)을 해제하므로, 부수
+        #    기록을 트랜잭션 밖(별도 commit)으로 빼면 그 사이가 무락 구간이 된다.
+        if on_success is not None:
+            await on_success()
+
     return FirstPlanSaveResult(
         goals=len(goal_rows),
         goal_nodes=len(goal_nodes),
@@ -428,12 +552,19 @@ async def db_apply_first_plan(
     blocks: Sequence[ScheduledBlockPreview],
     time_policies: Sequence[TimePolicyLike],
     max_retries: int = MAX_SAVE_RETRIES,
+    on_success: Callable[[], Awaitable[None]] | None = None,
 ) -> FirstPlanSaveResult:
-    """승인된 Draft 를 goal 트리까지 단일 트랜잭션 영속화 + 최대 3회 재시도(ADR-0005 §2.5.1).
+    """승인된 Draft 를 goal 트리까지 단일 트랜잭션 영속화 + 최대 `max_retries` 회 재시도.
 
     정책 위반(`PolicyViolationError`)은 결정적이라 재시도하지 않고 즉시 전파한다. 그 외
-    영속화 예외(IntegrityError 등)는 가드 트랜잭션이 롤백 후, 최대 `max_retries` 회 재시도하고
-    마지막 실패는 원 예외를 전파한다(라우터가 `PLAN_SAVE_FAILED` 로 매핑).
+    영속화 예외(IntegrityError 등)는 가드 트랜잭션이 롤백 후 재시도하고, 마지막 실패는
+    원 예외를 전파한다(라우터가 `PLAN_SAVE_FAILED` 로 매핑).
+
+    ⚠️ 가드 트랜잭션의 commit/rollback 은 트랜잭션 스코프 advisory lock 을 해제한다.
+    호출자가 lock 으로 임계 구역을 보호한다면 **시도(attempt)당 lock 을 다시 잡아야**
+    하므로, 재시도 루프는 라우터가 소유하고 여기엔 `max_retries=1` 을 넘기는 것을
+    권장한다 (ADR-0005 §2.5.1 의 3회 재시도는 라우터 루프가 담당). `on_success` 는
+    영속화와 같은 트랜잭션(같은 commit)으로 실행할 부수 기록 훅.
 
     Raises:
         PolicyViolationError: block 이 절대 시간 정책(수면/노터치 등)을 침범한 경우.
@@ -451,6 +582,7 @@ async def db_apply_first_plan(
                 action_items=action_items,
                 blocks=blocks,
                 time_policies=time_policies,
+                on_success=on_success,
             )
         except PolicyViolationError:
             raise  # 결정적 — 재시도 무의미

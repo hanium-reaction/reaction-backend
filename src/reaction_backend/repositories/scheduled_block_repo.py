@@ -3,6 +3,7 @@
 규칙:
 - user_id scope 자동.
 - 주간 조회는 action_items 와 join 해 (블록, 제목, 카테고리) 를 함께 반환.
+  cancelled 블록(계획 교체로 취소 등)은 그리드에 표시하지 않으므로 제외.
 - 충돌 검사는 자기 자신과 cancelled 블록을 제외한 시간 겹침.
 - commit 은 호출자 책임.
 """
@@ -35,12 +36,14 @@ class ScheduledBlockRepo:
 
         goal_id 는 블록이 매달린 action_item 의 goal FK — 주간 그리드가 블록을 목표와
         연결(분류/색상)할 수 있게 함께 내려준다. 목표 미연결 액션(inbox 등)은 None.
+        cancelled 블록(계획 교체로 취소 등)은 제외 — 취소 이력은 남되 그리드엔 안 보인다.
         """
         stmt = (
             select(ScheduledBlock, ActionItem.title, ActionItem.category, ActionItem.goal_id)
             .join(ActionItem, ScheduledBlock.action_item_id == ActionItem.id)
             .where(
                 ScheduledBlock.user_id == user_id,
+                ScheduledBlock.block_status != "cancelled",
                 ScheduledBlock.start_at >= start_dt,
                 ScheduledBlock.start_at < end_dt,
             )
