@@ -823,35 +823,38 @@ async def approve_replan(
 ) -> ReplanApproveResponse:
     """재계획 Draft 승인 → **미래 미착수 블록 취소 + 기존 action 에 새 블록 삽입**.
 
-    과거·시작/완료 블록은 불변. goal/node/action 은 재사용(중복 생성 없음). 이미 승인된
-    Draft 는 멱등(재적용 없음). 만료 Draft 는 410.
+    과거·시작/완료 블록·사용자가 옮긴(user_edit) 블록은 불변(교체·취소 대상에서 제외).
+    goal/node/action 은 재사용(중복 생성 없음). 이미 승인된 Draft 는 멱등. 만료 Draft 는 410.
+
+    동시성(ADR-0005 §7.6, #113 정합): Draft 로드·검사(만료/멱등)~영속화~승인 마킹을 모두
+    `user_agent_lock`(xact-scoped) **안**에서 단일 commit 으로 원자화한다. 검사가 lock 밖에
+    있으면 동시 더블 승인 시 둘 다 통과해 이중 취소·삽입되던 무락 구간이 생긴다.
     """
-    draft = await _load_draft(draft_repo, user.id, plan_id)
-    payload = draft.payload
-    if payload.get("kind") != "replan":
-        raise ApiError(
-            ErrorCode.PLAN_DRAFT_NOT_FOUND,
-            "재계획 초안을 찾을 수 없어요.",
-            http_status=HTTPStatus.NOT_FOUND,
-        )
-    if draft.status == "expired" or draft.expires_at < now_kst():
-        raise ApiError(
-            ErrorCode.PLAN_DRAFT_EXPIRED,
-            "오래 두신 재계획 초안이 만료됐어요. 다시 만들어 볼까요?",
-            http_status=HTTPStatus.GONE,
-        )
-    if draft.status == "approved":  # 멱등 — 이미 적용됨
-        return ReplanApproveResponse(
-            plan_id=plan_id,
-            cancelled_blocks=0,
-            created_blocks=len(payload.get("blocks", [])),
-            activated_at=now_kst(),
-        )
-
-    window_start = date.fromisoformat(str(payload["window_start"]))
-    deadline = date.fromisoformat(str(payload["horizon"]))
-
     async with user_agent_lock(session, user.id, _LOCK_AGENT):
+        draft = await _load_draft(draft_repo, user.id, plan_id)
+        payload = draft.payload
+        if payload.get("kind") != "replan":
+            raise ApiError(
+                ErrorCode.PLAN_DRAFT_NOT_FOUND,
+                "재계획 초안을 찾을 수 없어요.",
+                http_status=HTTPStatus.NOT_FOUND,
+            )
+        if draft.status == "expired" or draft.expires_at < now_kst():
+            raise ApiError(
+                ErrorCode.PLAN_DRAFT_EXPIRED,
+                "오래 두신 재계획 초안이 만료됐어요. 다시 만들어 볼까요?",
+                http_status=HTTPStatus.GONE,
+            )
+        if draft.status == "approved":  # 멱등 — lock 안 확인이라 동시 승인이 직렬화됨
+            return ReplanApproveResponse(
+                plan_id=plan_id,
+                cancelled_blocks=0,
+                created_blocks=len(payload.get("blocks", [])),
+                activated_at=now_kst(),
+            )
+
+        window_start = date.fromisoformat(str(payload["window_start"]))
+        deadline = date.fromisoformat(str(payload["horizon"]))
         cancel_start, cancel_end = replan.day_bounds_kst(window_start, deadline)
         cancelled = await block_repo.cancel_scheduled_between(user.id, cancel_start, cancel_end)
         created = 0
@@ -868,9 +871,9 @@ async def approve_replan(
         await draft_repo.mark_approved(draft, approved_at=now_kst())
         await session.commit()
 
-    return ReplanApproveResponse(
-        plan_id=plan_id,
-        cancelled_blocks=cancelled,
-        created_blocks=created,
-        activated_at=now_kst(),
-    )
+        return ReplanApproveResponse(
+            plan_id=plan_id,
+            cancelled_blocks=cancelled,
+            created_blocks=created,
+            activated_at=now_kst(),
+        )
