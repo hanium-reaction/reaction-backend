@@ -113,6 +113,23 @@ class ScheduledBlockRepo:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_busy_between(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[ScheduledBlock]:
+        """[start_dt, end_dt) 와 겹치는 모든 블록 (cancelled 제외) — 재계획 시 회피할 기존 일정.
+
+        First Plan 스케줄러가 이미 승인된 블록을 busy 로 반영해 그 위에 겹쳐 잡지 않게 한다
+        (비파괴 fit-around). `list_overlapping` 과 달리 자기 자신 제외 인자가 없다.
+        """
+        stmt = select(ScheduledBlock).where(
+            ScheduledBlock.user_id == user_id,
+            ScheduledBlock.block_status != "cancelled",
+            ScheduledBlock.start_at < end_dt,
+            ScheduledBlock.end_at > start_dt,
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
 
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 

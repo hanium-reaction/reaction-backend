@@ -91,6 +91,9 @@ class FirstPlanGenerateRequest(CamelModel):
     interview_session_id: str | None = None
     outcome: InterviewOutcome | None = None
     target_date: str | None = None  # "YYYY-MM-DD" — 미지정 시 오늘(KST) 기준
+    # 배치 범위: "horizon"(기본, 마감까지 전 구간 — 실행이 마감 전 여러 날에 분배되고, 주간
+    # 재계획이 이후를 다시 씀) | "week"(target_date 가 속한 달력 주만 — 가벼운 단기 계획).
+    scope: Literal["week", "horizon"] = "horizon"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

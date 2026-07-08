@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, time
+from datetime import date, datetime, time
 
+from reaction_backend.orchestrator.first_plan import _schedule_end
 from reaction_backend.orchestrator.goal_structuring import (
     BusyBlock,
+    TimeInterval,
     time_policies_to_busy,
 )
 from reaction_backend.orchestrator.plan_scheduler import (
@@ -17,8 +19,13 @@ from reaction_backend.orchestrator.plan_scheduler import (
     PlanWindow,
     schedule_actions_multiday,
 )
+from reaction_backend.schemas.common import KST
 
-START = date(2026, 7, 8)
+START = date(2026, 7, 8)  # 수요일
+
+
+def _dt(day: date, hh: int, mm: int = 0) -> datetime:
+    return datetime.combine(day, time(hh, mm), tzinfo=KST)
 
 
 def _action(title: str, minutes: int) -> PlanAction:
@@ -173,3 +180,52 @@ def test_blocks_stay_within_free_and_are_ordered() -> None:
         assert b.interval.end.time() <= time(23, 30)
     starts = [b.interval.start for b in blocks]
     assert starts == sorted(starts)
+
+
+def test_fits_around_existing_busy_block() -> None:
+    """이미 잡힌 일정(13:00~15:00)이 busy 로 들어오면 그 구간을 피해 배치한다 (비파괴 fit-around)."""
+    occupied = BusyBlock(
+        TimeInterval(_dt(START, 13, 0), _dt(START, 15, 0)), "scheduled_block", "기존"
+    )
+
+    def busy(day: date) -> list[BusyBlock]:
+        base = list(_busy_09_2330(day))
+        if day == START:
+            base.append(occupied)
+        return base
+
+    blocks, _ = schedule_actions_multiday(
+        start_day=START,
+        horizon_day=START,
+        actions=[_action("새 카드", 50)],
+        busy_for_day=busy,
+        peak_windows=[PlanWindow(time(12, 0), time(18, 0))],  # 오후 피크
+        focus_chunk_min=60,
+        break_min=10,
+        daily_focus_cap_min=180,
+    )
+    assert len(blocks) == 1
+    iv = blocks[0].interval
+    # 기존 일정(13~15)과 겹치지 않아야 한다.
+    assert not (iv.start < _dt(START, 15, 0) and _dt(START, 13, 0) < iv.end)
+
+
+# ── scope 종료일 계산 (first_plan._schedule_end) ─────────────────────────────
+
+
+def test_schedule_end_week_bounds_to_sunday() -> None:
+    # 2026-07-08(수) 이 속한 주의 일요일 = 2026-07-12. 마감이 더 멀어도 이번 주까지만.
+    assert _schedule_end(date(2026, 7, 8), "2026-07-21", "week") == date(2026, 7, 12)
+
+
+def test_schedule_end_week_caps_at_earlier_deadline() -> None:
+    # 마감(7/10)이 이번 주 일요일(7/12)보다 이르면 마감으로 캡.
+    assert _schedule_end(date(2026, 7, 8), "2026-07-10", "week") == date(2026, 7, 10)
+
+
+def test_schedule_end_horizon_uses_deadline() -> None:
+    assert _schedule_end(date(2026, 7, 8), "2026-07-21", "horizon") == date(2026, 7, 21)
+
+
+def test_schedule_end_horizon_without_deadline_is_single_day() -> None:
+    assert _schedule_end(date(2026, 7, 8), None, "horizon") == date(2026, 7, 8)
