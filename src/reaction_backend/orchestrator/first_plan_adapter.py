@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
@@ -225,6 +226,19 @@ def _normalize_goal_category(raw: str) -> str:
     return raw if raw in GOAL_CATEGORY_VALUES else "other"
 
 
+def _derive_goal_category(action_categories: Sequence[str]) -> str | None:
+    """액션 카테고리 다수결로 목표 카테고리 파생 — 전부 'other'거나 비면 None.
+
+    인터뷰는 목표 카테고리를 분류하지 않아 'other' 로 저장되므로
+    (interview_adapter._build_goals), 분해된 액션들의 실카테고리에서 역산한다.
+    ACTION_CATEGORY_VALUES ⊆ GOAL_CATEGORY_VALUES (동일 enum) 이라 그대로 대입 가능.
+    """
+    counts = Counter(c for c in action_categories if c != "other")
+    if not counts:
+        return None
+    return counts.most_common(1)[0][0]
+
+
 def _normalize_goal_tier(raw: str) -> str:
     return raw if raw in GOAL_TIER_VALUES else "maintain"
 
@@ -370,6 +384,13 @@ async def _apply_once(
             session.add(row)
             action_by_node[item.node_id] = row
         await session.flush()  # action_item.id 확보 (block FK)
+
+        # 3.5) heaviest goal 카테고리 보정 — 'other'(인터뷰 미분류) 일 때만 액션 다수결로
+        #      파생. 사용자가 이미 실카테고리를 설정했다면 덮어쓰지 않는다.
+        if heaviest.category == "other":
+            derived = _derive_goal_category([a.category for a in action_by_node.values()])
+            if derived is not None:
+                heaviest.category = derived
 
         # 4) scheduled_blocks — action_item 에 연결
         block_count = 0

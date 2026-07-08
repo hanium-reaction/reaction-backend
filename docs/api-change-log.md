@@ -7,6 +7,14 @@
 
 ---
 
+## v1.17 — 2026-07-08 (주간 블록 목표 연결 `goalId` + 카테고리 실분류)
+
+- `GET /plans/weekly` 의 `blocks[]` 와 `PATCH /plans/{planId}/blocks/{blockId}` 응답에 **`goalId`** (`goal_<uuid>` | null) 추가 — 블록이 매달린 `action_item.goal_id` 노출(마이그레이션 없음). FE 가 블록을 목표 분류(집중/유지)·색상과 연결할 수 있게 함. additive — 기존 클라이언트 영향 없음
+- 배경: 주간 시간표 블록이 전부 "기타" 로 렌더 — 블록에 목표 연결 정보가 없고 category 도 대부분 `other`(라이브 실측 other 29/study 5/health 4)
+- `goal_decompose.v1.md` 프롬프트에 category enum 전체 명시 + "분류 명확하면 other 금지" 규칙 — 신규 생성 계획의 액션/블록 카테고리 실분류 유도
+- 계획 승인 시 heaviest goal 의 category 가 `other`(인터뷰 미분류 기본값)면 분해된 액션 카테고리 **다수결로 파생** — 실카테고리가 이미 있으면 불변
+- ⚠️ 기존 저장 데이터의 `other` 는 그대로(신규 생성분부터 개선)
+
 ## v1.16 — 2026-07-07 (`POST /plans/generate` 빈 본문 자동 복구)
 
 - 빈 본문(`{}`) 시 422 대신 **그 유저의 최근 '정상 종료' 인터뷰 세션(abandoned 제외)으로 자동 복구**해 계획 생성 — FE 가 새로고침/재진입으로 메모리의 sessionId 를 잃으면 온보딩 4/4 주간 계획이 빈 화면이 되던 문제의 서버측 해결

@@ -154,6 +154,9 @@ class WeeklyBlock(CamelModel):
     action_id: str  # action_<uuid>
     title: str
     category: str
+    # goal_<uuid> — 블록이 속한 목표 (action_item.goal_id 경유). 목표 미연결이면 null.
+    # FE 주간 그리드가 블록을 목표 분류(집중/유지)·색상과 연결할 수 있게 한다.
+    goal_id: str | None = None
     start_at: KstDatetime
     end_at: KstDatetime
     block_status: str
