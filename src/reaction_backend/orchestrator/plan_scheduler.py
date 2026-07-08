@@ -125,6 +125,17 @@ def _earliest_fit(
     return None
 
 
+def _search_order(target: int, total: int) -> list[int]:
+    """목표일 인덱스에서 가까운 날 탐색 순서 — 목표일→뒤로, 그다음 목표일 앞으로.
+
+    stride 로 계산한 이상적 날짜(target)에 우선 놓되, cap·가용시간에 막히면 뒤 날을 먼저
+    시도(분산 유지)하고, 그래도 없으면 앞 날로 폴백한다. 순서 보존(뒤 우선)에 유리.
+    """
+    forward = list(range(target, total))
+    backward = list(range(target - 1, -1, -1))
+    return forward + backward
+
+
 def _subtract(
     free_blocks: Sequence[TimeInterval], index: int, placed: TimeInterval, gap: timedelta
 ) -> list[TimeInterval]:
@@ -200,49 +211,57 @@ def schedule_actions_multiday(
             free_by_day[day] = cached
         return cached
 
+    # 세션 평탄화 — 분해 순서 보존(앞 작업이 앞 인덱스). 긴 카드는 여러 세션으로 쪼갬.
+    flat: list[tuple[PlanAction, int, int, int]] = []
+    for action in actions:
+        parts = _split_minutes(action.estimated_minutes, chunk)
+        for si, m in enumerate(parts):
+            flat.append((action, m, si, len(parts)))
+    n_sessions = len(flat)
+
     blocks: list[DraftScheduledBlock] = []
     warnings: list[str] = []
-    cursor = 0  # 이 인덱스 이전 날짜는 cap 이 찼다고 보고 건너뛴다.
 
-    for action in actions:
-        sessions = _split_minutes(action.estimated_minutes, chunk)
-        multi = len(sessions) > 1
-        for si, minutes in enumerate(sessions):
-            need = timedelta(minutes=minutes)
-            placed_flag = False
-            for di in range(cursor, total_days):
-                day = days[di]
-                # 하루 집중 상한 — 빈 날이면 단일 세션이 상한을 넘어도 1개는 허용(드롭 방지).
-                if used_by_day[day] > 0 and used_by_day[day] + minutes > cap:
-                    continue
-                free = free_of(day)
-                slot = _earliest_fit(free, need, _peak_intervals(day, peak_windows))
-                if slot is None:
-                    continue
-                index, start = slot
-                interval = TimeInterval(start, start + need)
-                title = f"{action.title} ({si + 1}/{len(sessions)})" if multi else action.title
-                blocks.append(
-                    DraftScheduledBlock(
-                        interval=interval,
-                        origin="goal",
-                        origin_id=action.id,
-                        title=title,
-                        category=action.category,
-                    )
+    for idx, (action, minutes, si, n) in enumerate(flat):
+        # 마감까지 **균등 분산**(stride): idx 0 → 첫날, 마지막 idx → 마지막 날. front-fill(오늘부터
+        # 몰기) 대신 세션을 [start, horizon] 전 구간에 고르게 흩뿌린다(#exam-plan-clustering).
+        if total_days <= 1 or n_sessions <= 1:
+            target = 0
+        else:
+            target = round(idx * (total_days - 1) / (n_sessions - 1))
+        need = timedelta(minutes=minutes)
+        placed_flag = False
+        # 목표일부터 가까운 날 순으로(뒤 우선, 없으면 앞) — cap/가용시간에 막히면 이웃 날로.
+        for di in _search_order(target, total_days):
+            day = days[di]
+            # 하루 집중 상한(가드) — 빈 날이면 단일 세션이 상한을 넘어도 1개는 허용(드롭 방지).
+            if used_by_day[day] > 0 and used_by_day[day] + minutes > cap:
+                continue
+            free = free_of(day)
+            slot = _earliest_fit(free, need, _peak_intervals(day, peak_windows))
+            if slot is None:
+                continue
+            index, start = slot
+            interval = TimeInterval(start, start + need)
+            title = f"{action.title} ({si + 1}/{n})" if n > 1 else action.title
+            blocks.append(
+                DraftScheduledBlock(
+                    interval=interval,
+                    origin="goal",
+                    origin_id=action.id,
+                    title=title,
+                    category=action.category,
                 )
-                free_by_day[day] = _subtract(free, index, interval, gap)
-                used_by_day[day] += minutes
-                # 이 날의 상한이 찼으면 다음 세션은 다음 날부터 탐색.
-                if used_by_day[day] >= cap:
-                    cursor = di + 1
-                placed_flag = True
-                break
-            if not placed_flag:
-                label = f"{action.title} ({si + 1}/{len(sessions)})" if multi else action.title
-                warnings.append(
-                    f"'{label}' 을(를) 배치할 가용 시간을 찾지 못했어요. 다른 시간으로 옮겨볼까요?"
-                )
+            )
+            free_by_day[day] = _subtract(free, index, interval, gap)
+            used_by_day[day] += minutes
+            placed_flag = True
+            break
+        if not placed_flag:
+            label = f"{action.title} ({si + 1}/{n})" if n > 1 else action.title
+            warnings.append(
+                f"'{label}' 을(를) 배치할 가용 시간을 찾지 못했어요. 다른 시간으로 옮겨볼까요?"
+            )
 
     blocks.sort(key=lambda b: b.interval.start)
     return blocks, warnings
