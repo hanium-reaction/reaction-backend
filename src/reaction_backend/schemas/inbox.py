@@ -25,6 +25,9 @@ class InboxItem(CamelModel):
     user_category: str | None
     status: str
     promoted_goal_id: str | None
+    # 승격 대상 구분 — status=promoted 일 때만 'goal'/'action', 그 외 null.
+    # goal 은 promoted_goal_id 로 딥링크, action 은 오늘 실행 화면으로 이동.
+    promoted_to: Literal["goal", "action"] | None = None
 
 
 class InboxCreateRequest(CamelModel):

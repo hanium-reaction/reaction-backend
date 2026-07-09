@@ -7,6 +7,13 @@
 
 ---
 
+## v1.19 — 2026-07-08 (Inbox 보관함 조회·복원 + 승격 대상 구분)
+
+- **버그 픽스**: `GET /inbox` 가 모든 쿼리에 `archived_at IS NULL` 을 하드코딩해 **보관(archived) 항목이 어떤 필터로도 조회 불가**하던 문제 수정. `?status=archived` 로 보관함 조회 가능(기본 목록은 여전히 archived 제외).
+- 신규 `POST /inbox/{id}/restore` — 보관 취소(`archived_at` 클리어 + `status`→classified/captured). 활성 항목이면 멱등, 없으면 404 `INBOX_NOT_FOUND`. hard delete 없음.
+- `InboxItem` 응답에 **파생 필드 `promotedTo`** 추가: `status=promoted` 일 때 `"goal"`/`"action"`(promotedGoalId 유무로 계산). FE 가 "목표로/할 일로" 배지를 정확히 구분하고 action 딥링크를 걸 수 있게 함. **DB 컬럼·마이그레이션 없음**(순수 파생).
+- 신규 에러코드 없음. 테스트: 보관함 조회·복원(멱등)·promotedTo 구분 5종 추가.
+
 ## v1.18 — 2026-07-08 (다일 계획 스케줄러 + `scope` + DB 상태 busy 통합, #112)
 
 - `POST /plans/generate` 요청에 `scope`(선택, 기본 `"horizon"`) 추가: `"horizon"`=**마감까지** 전 구간(실행이 마감 전 여러 날에 분배) / `"week"`=`targetDate` 가 속한 **달력 주(월~일)** 만. 미지정 시 `"horizon"` — 기존 동작(마감까지 배치)과 동일해 하위호환
