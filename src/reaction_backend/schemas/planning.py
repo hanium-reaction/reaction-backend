@@ -145,6 +145,53 @@ class FirstPlanResponse(DraftMixin):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 주간 forward 재계획 (POST /plans/replan) — 남은 작업을 이후로 다시 배치.
+# 기존 goal/node/action 재사용, 미래 미착수 블록만 교체(중복 0). 항상 Draft.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class ReplanBlockPreview(CamelModel):
+    """재계획 미리보기 블록 — 기존 ActionItem 에 연결(actionId). 시각은 KST.
+
+    `replacesBlockId` 는 이 새 블록이 '교체하는 옛 미래 블록' id(있으면). approve 가 그 블록만
+    현재 DB 상태로 재조정 취소한다(blanket-cancel 없이, #117) — 없으면 미배치 백로그.
+    """
+
+    action_id: str  # action_<uuid>
+    title: str
+    category: str
+    start: KstDatetime
+    end: KstDatetime
+    replaces_block_id: str | None = None  # block_<uuid> | null (백로그)
+
+
+class ReplanResponse(DraftMixin):
+    """주간 재계획 미리보기 — 항상 Draft. 승인은 `/plans/replan/{planId}/approve`."""
+
+    plan_id: str
+    window_start: str  # "YYYY-MM-DD" — 재배치 시작(다음 주 월요일)
+    horizon: str | None
+    blocks: list[ReplanBlockPreview]
+    warnings: list[str] = Field(default_factory=list)
+    generated_at: KstDatetime
+
+
+class ReplanApproveResponse(CamelModel):
+    """재계획 승인 결과 — 재조정 카운트. `is_draft=False`.
+
+    started/finished 로 바뀐 옛 블록·다른 계획 승인분은 건드리지 않으므로(재조정),
+    `skipped` 는 그렇게 보존된 항목 수다.
+    """
+
+    plan_id: str
+    is_draft: Literal[False] = False
+    cancelled_blocks: int
+    created_blocks: int
+    skipped_blocks: int
+    activated_at: KstDatetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # S14 Weekly Plan View + S15 직접 편집 (#21-B). 영속 scheduled_blocks 를 읽고/옮긴다.
 # Plan 테이블은 없음 — planId 는 주(週) 논리 식별자(`plan_<weekStart>`), 편집 권한은 blockId.
 # ─────────────────────────────────────────────────────────────────────────────

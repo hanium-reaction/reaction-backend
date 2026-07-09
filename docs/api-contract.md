@@ -260,8 +260,10 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | POST | `/plans/{planId}/ai-edit` | 자연어 수정 (S16, P1) — diff 반환만, apply는 별도 |
 | POST | `/plans/{planId}/ai-edit/apply` | diff 적용 (사용자 승인 후) |
 | GET | `/plans/weekly?weekStart=YYYY-MM-DD` | 주간 그리드 (S14) — cancelled 블록(계획 교체로 취소 등)은 제외 ✅ #21-B |
+| POST | `/plans/replan` | **주간 forward 재계획** (S21 후속). 먼저 직전 완료 주의 주간 리포트를 작성(그 회복 수락분이 백로그로 상류 반영)하고, **다음 주 월요일(`windowStart`)부터 마감까지** 남은 작업을 다시 배치. 대상 = 다음 주 이후 **미착수(`scheduled`) 블록**의 액션(actionId dedup) + **활성 블록 없는 `planned` 백로그**(수락한 회복 포함). 과거·시작/완료·`user_edit` 블록은 불변(실패 원본은 미래 블록이 없어 자동 제외). busy = 확정(시작/완료·`user_edit`) 블록 + DB `time_policies` + **고정 일정(`fixed_schedules`, #112 정합)**. 각 새 블록에 '교체할 옛 미래 블록' `replacesBlockId`(없으면 백로그라 `null`)를 실어 승인이 재조정하게 한다. Draft 를 `plan_drafts` 에 저장, `isDraft=true`. 동시성 lock 미획득 409 `AGENT_CONCURRENT_ACCESS` (#117) |
+| POST | `/plans/replan/{planId}/approve` | 재계획 Draft 승인 → **block-id 재조정**으로 미래 블록 교체(blanket-cancel 없음). payload 의 각 블록마다 `replacesBlockId` 를 **현재 DB 상태로 재조정**: 여전히 `scheduled` → 그 블록만 취소+새 블록 생성 / 그새 `started`·`finished`·`cancelled`(다른 계획이 취소)·삭제 → 취소·생성 **모두 skip**(데이터 손실·중복 방지) / 백로그(옛 블록 없음)인데 그새 활성 블록이 생김 → 생성 skip. payload 에 없는 블록(드롭된 후보의 옛 블록)은 손대지 않아 **보존**. Draft 로드·검사~쓰기를 `user_agent_lock`(xact-scoped) 안 **단일 commit** 으로 원자화(동시 더블 승인 봉합, #113 패턴). 만료 410 `PLAN_DRAFT_EXPIRED`. 응답 `isDraft=false` + `{cancelledBlocks, createdBlocks, skippedBlocks}` (#117) |
 
-> `generate`·`/plans/{planId}`·`approve`·`weekly`·블록 편집은 구현 완료. `ai-edit`/`ai-edit/apply` 만 미구현(P1, 라우트 없음).
+> `generate`·`/plans/{planId}`·`approve`·`weekly`·블록 편집·`replan`(+`replan/{id}/approve`)은 구현 완료. `ai-edit`/`ai-edit/apply` 만 미구현(P1, 라우트 없음).
 
 응답 예 `POST /plans/generate` (#32, `FirstPlanResponse` — Draft Layer):
 ```json
@@ -286,6 +288,26 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 }
 ```
 > `planId` 는 `plan_drafts` 에 저장된 Draft 의 실제 UUID (#62) — `GET /plans/{planId}` 로 재조회, `POST /plans/{planId}/approve` 로 승인. `aiSource` 는 LLM 분해/검토가 룰 fallback 됐으면 `"rule"`.
+
+응답 예 `POST /plans/replan` (#117, `ReplanResponse` — Draft Layer). 각 블록은 기존 `actionId` 에 연결되고, `replacesBlockId` 는 이 새 블록이 교체하는 옛 미래 블록(없으면 백로그라 `null`):
+```json
+{
+  "isDraft": true,
+  "aiSource": "rule",
+  "planId": "3f8c…",
+  "windowStart": "2026-07-13",
+  "horizon": "2026-07-17",
+  "blocks": [
+    {"actionId": "action_5a1b…", "title": "챕터 3 정리", "category": "study",
+     "start": "2026-07-14T08:00:00+09:00", "end": "2026-07-14T08:30:00+09:00", "replacesBlockId": "block_9c2d…"},
+    {"actionId": "action_7e4f…", "title": "회복: 5분만 시작", "category": "study",
+     "start": "2026-07-14T18:00:00+09:00", "end": "2026-07-14T18:30:00+09:00", "replacesBlockId": null}
+  ],
+  "warnings": [],
+  "generatedAt": "2026-07-09T12:00:00+09:00"
+}
+```
+> 승인(`POST /plans/replan/{planId}/approve`)은 `{planId, isDraft:false, cancelledBlocks, createdBlocks, skippedBlocks, activatedAt}` 반환 — `skippedBlocks` 는 재조정으로 보존(옛 블록이 그새 시작/취소되어 교체 skip)되거나 중복 방지로 생성 skip 된 항목 수.
 
 #21-B 구현 메모 (S14/S15 — 영속 `scheduled_blocks` 읽기/이동):
 - Plan 테이블 없음 — `planId` 는 주(週) 논리 식별자(`plan_<weekStart>`). 편집 권한은 `blockId`.

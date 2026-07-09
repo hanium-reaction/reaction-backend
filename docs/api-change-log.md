@@ -7,6 +7,13 @@
 
 ---
 
+## v1.19 — 2026-07-09 (주간 forward 재계획 `POST /plans/replan` + block-id 재조정 승인, #117)
+
+- **신규** `POST /plans/replan` — 주간 리포트를 먼저 작성하고(직전 완료 주), **다음 주 월요일부터 마감까지** 남은 작업 + 수락한 회복을 다시 배치. 대상 = 다음 주 이후 **미착수(`scheduled`) 블록**의 액션(actionId dedup) + **활성 블록 없는 `planned` 백로그**. 과거·시작/완료·`user_edit` 블록은 불변. busy = 확정(시작/완료·`user_edit`) 블록 + DB `time_policies` + **고정 일정(`fixed_schedules`, #112 정합)**. 응답 `ReplanResponse`(Draft): `{planId, windowStart, horizon, blocks[]{actionId,title,category,start,end,replacesBlockId}, warnings, generatedAt, isDraft:true}`. 각 블록의 `replacesBlockId` 는 교체할 옛 미래 블록(없으면 백로그라 `null`)
+- **신규** `POST /plans/replan/{planId}/approve` — **block-id 재조정** 승인(blanket-cancel 없음): `replacesBlockId` 를 현재 DB 상태로 재조정 — 여전히 `scheduled` → 그 블록만 취소+생성 / 그새 `started`·`finished`·`cancelled`·삭제 → 취소·생성 **모두 skip**(손실·중복 방지) / 백로그인데 그새 활성 블록 생김 → 생성 skip. payload 에 없는 블록(드롭 후보)은 손대지 않아 **보존**. Draft 로드~쓰기를 `user_agent_lock` 단일 commit 으로 원자화(#113 패턴). 응답 `{planId, isDraft:false, cancelledBlocks, createdBlocks, skippedBlocks, activatedAt}`
+- 배경(#117 재작업): 이전 설계의 blanket-cancel(창 안 미래 블록 일괄 취소 후 재생성)은 생성~승인 사이 사용자가 시작/이동한 블록을 지우거나 중복 생성할 수 있었다. 승인 시점 재조정으로 그 창을 봉합
+- 기존 goal/node/action **재사용**(새 목표 트리 생성 없음) — additive endpoint 라 기존 계약 불변. 신규 에러코드 없음(409 `AGENT_CONCURRENT_ACCESS` / 410 `PLAN_DRAFT_EXPIRED` / 404 `PLAN_DRAFT_NOT_FOUND` 재사용)
+
 ## v1.18 — 2026-07-08 (다일 계획 스케줄러 + `scope` + DB 상태 busy 통합, #112)
 
 - `POST /plans/generate` 요청에 `scope`(선택, 기본 `"horizon"`) 추가: `"horizon"`=**마감까지** 전 구간(실행이 마감 전 여러 날에 분배) / `"week"`=`targetDate` 가 속한 **달력 주(월~일)** 만. 미지정 시 `"horizon"` — 기존 동작(마감까지 배치)과 동일해 하위호환

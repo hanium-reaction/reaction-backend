@@ -45,19 +45,34 @@ from reaction_backend.db.models.interview_session import InterviewSession
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.session import get_db
-from reaction_backend.orchestrator import first_plan, first_plan_adapter, interview_adapter
+from reaction_backend.orchestrator import (
+    first_plan,
+    first_plan_adapter,
+    interview_adapter,
+    replan,
+)
 from reaction_backend.orchestrator._common import user_agent_lock
-from reaction_backend.orchestrator.goal_structuring import PolicyViolationError
+from reaction_backend.orchestrator.goal_structuring import (
+    PolicyViolationError,
+    fixed_schedules_to_busy,
+    time_policies_to_busy,
+)
 from reaction_backend.orchestrator.plan_edit import find_policy_violation, snap_to_15min
 from reaction_backend.repositories.action_item_repo import ActionItemRepo, get_action_item_repo
+from reaction_backend.repositories.fixed_schedule_repo import (
+    FixedScheduleRepo,
+    get_fixed_schedule_repo,
+)
 from reaction_backend.repositories.interview_repo import InterviewRepo, get_interview_repo
 from reaction_backend.repositories.plan_draft_repo import PlanDraftRepo, get_plan_draft_repo
+from reaction_backend.repositories.review_repo import ReviewRepo, get_review_repo
 from reaction_backend.repositories.scheduled_block_repo import (
     ScheduledBlockRepo,
     get_scheduled_block_repo,
 )
 from reaction_backend.repositories.time_policy_repo import TimePolicyRepo, get_time_policy_repo
 from reaction_backend.repositories.user_repo import UserRepo, get_user_repo
+from reaction_backend.scheduler.weekly_review_precompute import run_weekly_review_for_user
 from reaction_backend.schemas.common import KST, now_kst, to_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.interview import InterviewEndReason, InterviewOutcome
@@ -70,6 +85,9 @@ from reaction_backend.schemas.planning import (
     FirstPlanResponse,
     GoalNodeDraft,
     PolicyViolation,
+    ReplanApproveResponse,
+    ReplanBlockPreview,
+    ReplanResponse,
     ScheduledBlockPreview,
     WeeklyBlock,
     WeeklyPlanDay,
@@ -637,3 +655,260 @@ def _approved_response(plan_id: str, payload: dict[str, Any]) -> FirstPlanApprov
         activated_blocks=len(payload.get("blocks", [])),
         activated_at=now_kst(),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 주간 forward 재계획 (S21 후속) — 남은 작업을 이후 구간에 다시 배치.
+# 주간 리포트를 먼저 작성하고, 다음 주부터 마감까지 재배치한다. 기존 goal/node/action 재사용,
+# 미래 미착수 블록만 교체(중복 0). 승인은 blanket-cancel 없이 **block-id 재조정**(#117).
+# ─────────────────────────────────────────────────────────────────────────────
+
+ReviewRepoDep = Annotated[ReviewRepo, Depends(get_review_repo)]
+FixedRepoDep = Annotated[FixedScheduleRepo, Depends(get_fixed_schedule_repo)]
+
+# 재계획 튜닝 기본값 — 피크/세션/휴식 개인화(behavioral_profile 반영)는 후속.
+_REPLAN_TUNING = replan.ReplanTuning(
+    peak_windows=(),
+    focus_chunk_min=60,
+    break_min=10,
+    daily_focus_cap_min=first_plan_adapter.DEFAULT_DAILY_FOCUS_CAP_MIN,
+)
+
+
+class _RulePolicy:
+    """`TimePolicyLike` 최소 구현 — 정책 미설정 유저의 기본 수면창용."""
+
+    def __init__(self, policy_type: str, payload: dict[str, Any]) -> None:
+        self.policy_type = policy_type
+        self.payload = payload
+        self.is_active = True
+
+
+def _active_or_default_policies(rows: list[Any]) -> list[Any]:
+    """활성 time_policies. 하나도 없으면 기본 수면창(23:00~08:00)만 적용해 주간 시간대 배치."""
+    if rows:
+        return list(rows)
+    return [_RulePolicy("sleep", {"start_time": "23:00", "end_time": "08:00"})]
+
+
+def _replan_response(draft: PlanDraft) -> ReplanResponse:
+    """저장된 재계획 Draft → 응답(재조회·생성 공용)."""
+    payload = draft.payload
+    blocks = [
+        ReplanBlockPreview(
+            action_id=str(b["actionId"]),
+            title=str(b["title"]),
+            category=str(b["category"]),
+            start=datetime.fromisoformat(str(b["start"])),
+            end=datetime.fromisoformat(str(b["end"])),
+            replaces_block_id=b.get("replacesBlockId"),
+        )
+        for b in payload.get("blocks", [])
+    ]
+    return ReplanResponse(
+        plan_id=str(draft.id),
+        ai_source="rule",
+        window_start=str(payload.get("window_start", "")),
+        horizon=payload.get("horizon"),
+        blocks=blocks,
+        warnings=list(payload.get("warnings", [])),
+        generated_at=now_kst(),
+    )
+
+
+@router.post("/replan", status_code=201)
+async def generate_replan(
+    user: CurrentUser,
+    block_repo: BlockRepoDep,
+    action_repo: ActionRepoDep,
+    policy_repo: PolicyRepoDep,
+    fixed_repo: FixedRepoDep,
+    draft_repo: DraftRepoDep,
+    review_repo: ReviewRepoDep,
+    session: SessionDep,
+) -> ReplanResponse:
+    """주간 리포트를 작성하고, 남은 작업 + 수락한 회복을 **다음 주부터 마감까지** 다시 배치.
+
+    - 대상: 다음 주 이후 미착수 블록의 액션 + 활성 블록 없는 planned 백로그(수락한 회복 포함).
+      과거·시작/완료·user_edit 블록은 불변. 실패 원본은 미래 블록이 없어 자동 제외.
+    - busy = 확정(시작/완료·user_edit) 블록 + DB 시간정책 + **고정일정(#112 정합)**.
+    - 각 새 블록에 '교체할 옛 블록 id'(replacesBlockId)를 실어, 승인이 blanket-cancel 없이
+      그 블록만 현재 상태로 재조정 취소하게 한다(#117). 산출물은 Draft — 자동 적용 금지.
+    """
+    async with user_agent_lock(session, user.id, _LOCK_AGENT):
+        today = now_kst().date()
+        this_monday = today - timedelta(days=today.weekday())
+        # 직전 완료 주의 주간 리포트 작성(그 데이터가 회복 수락→백로그로 상류 반영됨).
+        await run_weekly_review_for_user(
+            user.id, this_monday - timedelta(days=7), now_kst(), repo=review_repo, force=True
+        )
+
+        window_start = replan.next_week_start(today)
+        scan_start, scan_end = replan.day_bounds_kst(window_start, window_start + timedelta(days=365))
+        scheduled_pairs = await block_repo.list_scheduled_between(user.id, scan_start, scan_end)
+        backlog = await action_repo.list_planned_without_block(user.id)
+        committed_blocks = await block_repo.list_committed_between(user.id, scan_start, scan_end)
+
+        # 후보(action_id dedup) + 각 후보가 교체할 옛 미래 블록 id.
+        cand: dict[UUID, replan.ReplanCandidate] = {}
+        old_block_by_action: dict[UUID, UUID] = {}
+        for block, action in scheduled_pairs:
+            cand[action.id] = replan.ReplanCandidate(
+                action_id=action.id,
+                title=action.title,
+                category=action.category,
+                estimated_minutes=action.estimated_minutes or 30,
+            )
+            old_block_by_action[action.id] = block.id
+        for action in backlog:
+            cand.setdefault(
+                action.id,
+                replan.ReplanCandidate(
+                    action_id=action.id,
+                    title=action.title,
+                    category=action.category,
+                    estimated_minutes=action.estimated_minutes or 30,
+                ),
+            )
+        candidates = list(cand.values())
+
+        deadline = window_start
+        for block, _action in scheduled_pairs:
+            deadline = max(deadline, to_kst(block.start_at).date())
+        for action in backlog:
+            if action.target_date is not None:
+                deadline = max(deadline, action.target_date)
+
+        policies = _active_or_default_policies(await policy_repo.list_active(user.id))
+        fixed: list[Any] = list(await fixed_repo.list_active(user.id))
+        committed = replan.committed_busy_from_blocks(
+            [(b.start_at, b.end_at) for b in committed_blocks]
+        )
+        day = window_start
+        while day <= deadline:
+            committed.extend(time_policies_to_busy(day, policies))
+            committed.extend(fixed_schedules_to_busy(day, fixed))
+            day += timedelta(days=1)
+
+        blocks, warnings = replan.build_forward_replan(
+            window_start=window_start,
+            horizon_day=deadline,
+            candidates=candidates,
+            committed_busy=committed,
+            tuning=_REPLAN_TUNING,
+        )
+
+        payload: dict[str, Any] = {
+            "kind": "replan",
+            "window_start": window_start.isoformat(),
+            "horizon": deadline.isoformat(),
+            "blocks": [
+                {
+                    "actionId": f"{_ACTION_PREFIX}{b.action_id}",
+                    "title": b.title,
+                    "category": b.category,
+                    "start": b.start.isoformat(),
+                    "end": b.end.isoformat(),
+                    "replacesBlockId": (
+                        f"{_BLOCK_PREFIX}{old_block_by_action[b.action_id]}"
+                        if b.action_id in old_block_by_action
+                        else None
+                    ),
+                }
+                for b in blocks
+            ],
+            "warnings": warnings,
+        }
+        draft = await draft_repo.create(
+            user.id,
+            target_date=window_start,
+            horizon=deadline.isoformat(),
+            ai_source="rule",
+            payload=payload,
+            expires_at=now_kst() + _DRAFT_TTL,
+        )
+        await session.commit()
+
+    return _replan_response(draft)
+
+
+@router.post("/replan/{plan_id}/approve")
+async def approve_replan(
+    plan_id: str,
+    user: CurrentUser,
+    block_repo: BlockRepoDep,
+    draft_repo: DraftRepoDep,
+    session: SessionDep,
+) -> ReplanApproveResponse:
+    """재계획 Draft 승인 → **block-id 재조정**으로 미래 블록 교체(#117 재작업).
+
+    payload 의 각 블록마다 '교체할 옛 블록'(replacesBlockId)을 **현재 DB 상태로 재조정**:
+    - 여전히 `scheduled` → 그 블록만 취소 + 새 블록 생성 (정상 교체).
+    - `started/finished/cancelled`(그새 시작·처리·다른 계획이 취소) → **취소·생성 둘 다 skip**
+      (데이터 손실 방지 + 중복 방지). 드롭된 후보의 옛 블록은 payload 에 없어 보존됨.
+    - 백로그(옛 블록 없음): 그새 그 action 이 활성 블록을 얻었으면 생성 skip.
+
+    Draft 로드·검사~쓰기를 `user_agent_lock`(xact-scoped) 안에서 단일 commit 으로 원자화한다
+    (동시 더블 승인 봉합, #113 패턴). 과거·시작/완료·user_edit 블록은 불변. 항상 Draft→HITL.
+    """
+    async with user_agent_lock(session, user.id, _LOCK_AGENT):
+        draft = await _load_draft(draft_repo, user.id, plan_id)
+        payload = draft.payload
+        if payload.get("kind") != "replan":
+            raise ApiError(
+                ErrorCode.PLAN_DRAFT_NOT_FOUND,
+                "재계획 초안을 찾을 수 없어요.",
+                http_status=HTTPStatus.NOT_FOUND,
+            )
+        if draft.status == "expired" or draft.expires_at < now_kst():
+            raise ApiError(
+                ErrorCode.PLAN_DRAFT_EXPIRED,
+                "오래 두신 재계획 초안이 만료됐어요. 다시 만들어 볼까요?",
+                http_status=HTTPStatus.GONE,
+            )
+        if draft.status == "approved":  # 멱등 — lock 안 확인이라 동시 승인이 직렬화됨
+            return ReplanApproveResponse(
+                plan_id=plan_id,
+                cancelled_blocks=0,
+                created_blocks=len(payload.get("blocks", [])),
+                skipped_blocks=0,
+                activated_at=now_kst(),
+            )
+
+        cancelled = created = skipped = 0
+        for b in payload.get("blocks", []):
+            action_id = UUID(str(b["actionId"]).removeprefix(_ACTION_PREFIX))
+            replaces = b.get("replacesBlockId")
+            if replaces:
+                old = await block_repo.get_block(
+                    user.id, UUID(str(replaces).removeprefix(_BLOCK_PREFIX))
+                )
+                # 옛 블록이 그새 시작/완료/취소됐거나 사라졌으면 이 항목은 통째 skip(보존).
+                if old is None or old.block_status != "scheduled":
+                    skipped += 1
+                    continue
+                old.block_status = "cancelled"
+                cancelled += 1
+            elif await block_repo.list_by_action_item(user.id, action_id):
+                # 백로그인데 그새 활성 블록이 생겼으면 중복 방지로 skip.
+                skipped += 1
+                continue
+            await block_repo.create_block(
+                user_id=user.id,
+                action_item_id=action_id,
+                start_at=datetime.fromisoformat(str(b["start"])),
+                end_at=datetime.fromisoformat(str(b["end"])),
+                source="ai_plan",
+            )
+            created += 1
+
+        await draft_repo.mark_approved(draft, approved_at=now_kst())
+        await session.commit()
+
+        return ReplanApproveResponse(
+            plan_id=plan_id,
+            cancelled_blocks=cancelled,
+            created_blocks=created,
+            skipped_blocks=skipped,
+            activated_at=now_kst(),
+        )

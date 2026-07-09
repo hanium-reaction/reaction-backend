@@ -621,6 +621,28 @@ class FakeActionItemRepo:
 
     def __init__(self) -> None:
         self._items: dict[UUID, ActionItem] = {}
+        self._block_repo: FakeScheduledBlockRepo | None = None
+
+    def link_blocks(self, block_repo: FakeScheduledBlockRepo) -> None:
+        """활성 블록 유무로 백로그를 걸러내도록 block repo 를 연결(list_planned_without_block)."""
+        self._block_repo = block_repo
+
+    async def list_planned_without_block(self, user_id: UUID) -> list[ActionItem]:
+        """활성 블록이 하나도 없는 planned 카드 — 미배치 백로그 (실 repo 규칙 미러)."""
+        blocked: set[UUID] = set()
+        if self._block_repo is not None:
+            for b in self._block_repo._blocks.values():
+                if b.user_id == user_id and b.block_status != "cancelled":
+                    blocked.add(b.action_item_id)
+        items = [
+            a
+            for a in self._items.values()
+            if a.user_id == user_id
+            and a.archived_at is None
+            and a.status == "planned"
+            and a.id not in blocked
+        ]
+        return sorted(items, key=lambda a: a.priority)
 
     async def list_by_date(self, user_id: UUID, target_date: date) -> list[ActionItem]:
         items = [
@@ -1196,6 +1218,11 @@ class FakeScheduledBlockRepo:
     def __init__(self) -> None:
         self._blocks: dict[UUID, ScheduledBlock] = {}
         self._meta: dict[UUID, tuple[str, str, UUID | None]] = {}
+        self._action_repo: FakeActionItemRepo | None = None
+
+    def link_actions(self, action_repo: FakeActionItemRepo) -> None:
+        """재계획 조회(list_scheduled_between)가 ActionItem 을 되찾도록 action repo 를 연결."""
+        self._action_repo = action_repo
 
     def seed(
         self,
@@ -1275,6 +1302,44 @@ class FakeScheduledBlockRepo:
             if b.user_id == user_id
             and b.id != exclude_block_id
             and b.block_status != "cancelled"
+            and b.start_at < end_dt
+            and b.end_at > start_dt
+        ]
+
+    async def list_scheduled_between(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[tuple[ScheduledBlock, ActionItem]]:
+        """미착수('scheduled', source!='user_edit') 블록 + ActionItem — 재계획 재배치 대상.
+
+        실 repo 의 join 규칙(#117) 미러: 시작/완료·user_edit·archived action 은 제외.
+        ActionItem 은 `link_actions` 로 연결된 FakeActionItemRepo 에서 되찾는다.
+        """
+        rows: list[tuple[ScheduledBlock, ActionItem]] = []
+        for b in self._blocks.values():
+            if not (
+                b.user_id == user_id
+                and b.block_status == "scheduled"
+                and b.source != "user_edit"
+                and start_dt <= b.start_at < end_dt
+            ):
+                continue
+            action = None
+            if self._action_repo is not None:
+                action = await self._action_repo.get_by_id(user_id, b.action_item_id)
+            if action is not None:
+                rows.append((b, action))
+        return sorted(rows, key=lambda r: r[0].start_at)
+
+    async def list_committed_between(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[ScheduledBlock]:
+        """확정(시작/완료 + user_edit) 블록 — 재계획이 회피할 busy (실 repo 규칙 미러)."""
+        return [
+            b
+            for b in self._blocks.values()
+            if b.user_id == user_id
+            and b.block_status != "cancelled"
+            and (b.block_status in ("started", "finished") or b.source == "user_edit")
             and b.start_at < end_dt
             and b.end_at > start_dt
         ]
@@ -1675,6 +1740,9 @@ def client(
     """기본 client — 인증된 demo user + 도메인 fake repo + fake session."""
     _reset_process_singletons()
     fake_user_repo.register(demo_user_orm)
+    # 재계획 조회는 block↔action repo 상호 참조(join/백로그 필터)를 쓴다.
+    fake_scheduled_block_repo.link_actions(fake_action_item_repo)
+    fake_action_item_repo.link_blocks(fake_scheduled_block_repo)
     app = create_app()
 
     async def _fake_session_gen() -> AsyncIterator[_FakeSession]:
