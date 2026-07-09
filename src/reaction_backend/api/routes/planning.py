@@ -567,6 +567,14 @@ async def approve_plan(
                 )
 
             payload = draft.payload
+            # 재계획 Draft(kind=replan)를 이 First Plan 승인에 넣으면 payload["outcome"] 가 없어
+            # KeyError→500 이 난다. 전용 endpoint(/plans/replan/{id}/approve)로 안내(#117).
+            if payload.get("kind") == "replan":
+                raise ApiError(
+                    ErrorCode.PLAN_DRAFT_NOT_FOUND,
+                    "이 초안은 재계획 초안이에요. 재계획 승인으로 진행해 주세요.",
+                    http_status=HTTPStatus.NOT_FOUND,
+                )
             if draft.status == "approved":  # 멱등 — 이미 영속화됨, 재저장하지 않음
                 return _approved_response(plan_id, payload)
 
@@ -778,6 +786,14 @@ async def generate_replan(
         for action in backlog:
             if action.target_date is not None:
                 deadline = max(deadline, action.target_date)
+        # 미래 블록이 없고 backlog target_date 가 전부 과거/None 이면 deadline 이 window_start
+        # 에 머물러 창이 '하루'로 붕괴 → 남은 일이 next Monday 하루에 몰린다(cramming). 마감
+        # 신호가 없을 때는 최소 한 주(다음 주 월~일)에 걸쳐 분산하도록 지평을 넓힌다(#117).
+        if deadline <= window_start:
+            deadline = window_start + timedelta(days=6)
+        # 먼 미래 backlog target_date 로 지평이 몇 년까지 벌어져 busy 루프·분산이 폭주하지
+        # 않도록 스캔 창(1년)으로 상한. 그보다 먼 카드는 다음 재계획이 다시 당겨온다.
+        deadline = min(deadline, window_start + timedelta(days=365))
 
         policies = _active_or_default_policies(await policy_repo.list_active(user.id))
         fixed: list[Any] = list(await fixed_repo.list_active(user.id))
@@ -837,6 +853,7 @@ async def approve_replan(
     plan_id: str,
     user: CurrentUser,
     block_repo: BlockRepoDep,
+    action_repo: ActionRepoDep,
     draft_repo: DraftRepoDep,
     session: SessionDep,
 ) -> ReplanApproveResponse:
@@ -847,6 +864,7 @@ async def approve_replan(
     - `started/finished/cancelled`(그새 시작·처리·다른 계획이 취소) → **취소·생성 둘 다 skip**
       (데이터 손실 방지 + 중복 방지). 드롭된 후보의 옛 블록은 payload 에 없어 보존됨.
     - 백로그(옛 블록 없음): 그새 그 action 이 활성 블록을 얻었으면 생성 skip.
+    - action 이 그새 아카이브/삭제됐으면(예: #113 First Plan 교체) 항목 전체 skip(좀비 블록 방지).
 
     Draft 로드·검사~쓰기를 `user_agent_lock`(xact-scoped) 안에서 단일 commit 으로 원자화한다
     (동시 더블 승인 봉합, #113 패턴). 과거·시작/완료·user_edit 블록은 불변. 항상 Draft→HITL.
@@ -879,6 +897,11 @@ async def approve_replan(
         for b in payload.get("blocks", []):
             action_id = UUID(str(b["actionId"]).removeprefix(_ACTION_PREFIX))
             replaces = b.get("replacesBlockId")
+            # generate~approve 사이 action 이 아카이브/삭제됐으면(예: #113 First Plan 교체가
+            # 그 카드를 supersede) 이 항목 전체 skip — 아카이브된 카드에 좀비 블록을 만들지 않는다.
+            if await action_repo.get_by_id(user.id, action_id) is None:
+                skipped += 1
+                continue
             if replaces:
                 old = await block_repo.get_block(
                     user.id, UUID(str(replaces).removeprefix(_BLOCK_PREFIX))

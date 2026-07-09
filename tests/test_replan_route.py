@@ -202,6 +202,36 @@ def test_generate_wires_replaces_id_and_backlog(
     assert by_action[f"action_{action_b.id}"]["replacesBlockId"] is None
 
 
+def test_generate_backlog_only_spreads_over_week_not_one_day(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """마감 신호 없는 백로그만 있을 때, 창이 하루로 붕괴하지 않고 한 주에 분산된다(#117 fix#4).
+
+    미래 블록 0 + target_date 과거/None → deadline 이 window_start 로 축소되면 다음 주
+    월요일 하루에 몰린다. 최소 한 주 지평 가드가 있어야 여러 날에 흩어진다.
+    """
+    _freeze_now(monkeypatch)
+    # 6개 × 45분 = 270분 > 하루 집중 상한(180분): 하루면 일부가 warnings 로 드롭된다.
+    for i in range(6):
+        _seed_action(
+            fake_action_item_repo,
+            title=f"백로그{i}",
+            est=45,
+            target=date(2026, 7, 1),  # 과거 — deadline 을 밀지 못함
+        )
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    # window_start(07-13, 월)~그 주 일요일(07-19) 안에서 배치되고, 하루에 다 몰리지 않는다.
+    assert body["horizon"] == "2026-07-19"
+    days = {datetime.fromisoformat(b["start"]).date() for b in body["blocks"]}
+    assert len(body["blocks"]) == 6  # 전량 배치(드롭 없음)
+    assert len(days) >= 3  # 최소 3일에 분산
+
+
 def test_generate_avoids_committed_and_fixed_busy(
     monkeypatch: Any,
     client: TestClient,
@@ -430,6 +460,66 @@ def test_approve_skips_backlog_when_active_block_appeared(
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 0, 1)
+
+
+def test_approve_skips_when_action_archived_meanwhile(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_plan_draft_repo: FakePlanDraftRepo,
+) -> None:
+    """generate~approve 사이 action 이 아카이브되면(예: #113 supersede) 항목 전체 skip."""
+    _freeze_now(monkeypatch)
+    action_a = _seed_action(fake_action_item_repo, title="A", archived=True)
+    draft_id = _seed_replan_draft(
+        fake_plan_draft_repo,
+        blocks=[
+            _pblock(
+                action_id=action_a.id,
+                start=_kst(2026, 7, 14, 8, 0),
+                end=_kst(2026, 7, 14, 8, 30),
+                replaces=None,
+            )
+        ],
+    )
+
+    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 0, 1)
+    # 아카이브된 카드에 좀비 블록이 생기지 않는다.
+    assert not [
+        b
+        for b in fake_scheduled_block_repo._blocks.values()
+        if b.action_item_id == action_a.id
+    ]
+
+
+def test_first_plan_approve_rejects_replan_draft(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_plan_draft_repo: FakePlanDraftRepo,
+) -> None:
+    """재계획 Draft 를 First Plan 승인(`/plans/{id}/approve`)에 넣으면 500 대신 404 로 안내."""
+    _freeze_now(monkeypatch)
+    action_a = _seed_action(fake_action_item_repo, title="A")
+    draft_id = _seed_replan_draft(
+        fake_plan_draft_repo,
+        blocks=[
+            _pblock(
+                action_id=action_a.id,
+                start=_kst(2026, 7, 14, 8, 0),
+                end=_kst(2026, 7, 14, 8, 30),
+                replaces=None,
+            )
+        ],
+    )
+
+    resp = client.post(f"/plans/{draft_id}/approve")
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["code"] == "PLAN_DRAFT_NOT_FOUND"
 
 
 def test_approve_idempotent_when_already_approved(
