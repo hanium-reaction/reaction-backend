@@ -31,11 +31,17 @@ class InboxRepo:
     async def list_by_status(self, user_id: UUID, status: str | None = None) -> list[InboxItem]:
         stmt = (
             select(InboxItem)
-            .where(InboxItem.user_id == user_id, InboxItem.archived_at.is_(None))
+            .where(InboxItem.user_id == user_id)
             .order_by(InboxItem.created_at.desc())
         )
-        if status is not None:
-            stmt = stmt.where(InboxItem.status == status)
+        if status == "archived":
+            # 보관함 조회 — soft-deleted(archived) 항목만. 기본 활성 필터를 적용하지 않는다.
+            stmt = stmt.where(InboxItem.status == "archived")
+        else:
+            # 활성 항목만(기본). status 지정 시 그 상태로 추가 필터.
+            stmt = stmt.where(InboxItem.archived_at.is_(None))
+            if status is not None:
+                stmt = stmt.where(InboxItem.status == status)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
@@ -44,6 +50,15 @@ class InboxRepo:
             InboxItem.id == inbox_id,
             InboxItem.user_id == user_id,
             InboxItem.archived_at.is_(None),
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_by_id_any(self, user_id: UUID, inbox_id: UUID) -> InboxItem | None:
+        """archived 포함 조회 — 복원(restore) 진입점 전용."""
+        stmt = select(InboxItem).where(
+            InboxItem.id == inbox_id,
+            InboxItem.user_id == user_id,
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
@@ -100,6 +115,18 @@ class InboxRepo:
         item.archived_at = datetime.now(UTC)
         item.status = "archived"
         await self._session.flush()
+
+    async def restore(self, item: InboxItem) -> InboxItem:
+        """보관 해제 — archived_at 클리어 + status 를 활성 상태로 복원. 이미 활성이면 no-op(멱등).
+
+        AI 분류가 있던 항목은 classified 로, 아니면 captured 로 되돌린다(분류 결과 보존).
+        """
+        if item.archived_at is None:
+            return item
+        item.archived_at = None
+        item.status = "classified" if item.ai_category_guess is not None else "captured"
+        await self._session.flush()
+        return item
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_db)]

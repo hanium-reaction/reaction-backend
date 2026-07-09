@@ -65,7 +65,7 @@ def test_list_filter_by_status(client: TestClient) -> None:
     classified = client.get("/inbox", params={"status": "classified"}).json()
     archived = client.get("/inbox", params={"status": "archived"}).json()
     assert len(classified) == 2
-    assert archived == []
+    assert archived == []  # 아직 보관한 항목 없음
 
 
 def test_patch_user_category(client: TestClient) -> None:
@@ -103,6 +103,7 @@ def test_convert_to_goal(client: TestClient, fake_goal_repo: Any) -> None:
     assert body["status"] == "promoted"
     assert body["promotedGoalId"] is not None
     assert body["promotedGoalId"].startswith("goal_")
+    assert body["promotedTo"] == "goal"  # FE 배지 구분용
     # Goal 실제 생성 확인
     goals = client.get("/goals").json()
     assert len(goals["maintain"]) == 1
@@ -148,6 +149,7 @@ def test_convert_to_action(client: TestClient, fake_action_item_repo: Any) -> No
     body = resp.json()
     assert body["status"] == "promoted"
     assert body["promotedGoalId"] is None  # action 변환은 goal 미연결
+    assert body["promotedTo"] == "action"  # FE 배지 구분용
     # ActionItem 실제 생성 확인
     actions = list(fake_action_item_repo._items.values())
     assert len(actions) == 1
@@ -176,3 +178,42 @@ def test_archive_not_found(client: TestClient) -> None:
 def test_archive_bad_id_format(client: TestClient) -> None:
     resp = client.post("/inbox/nonexistent/archive")
     assert resp.status_code == 404
+
+
+def test_archived_item_visible_in_archive_filter(client: TestClient) -> None:
+    """보관한 항목은 기본 목록에서 빠지되 `?status=archived` 로는 조회된다."""
+    created = _capture(client, "나중에 볼 것")
+    client.post(f"/inbox/{created['inboxId']}/archive")
+
+    assert client.get("/inbox").json() == []  # 활성 목록엔 없음
+    archived = client.get("/inbox", params={"status": "archived"}).json()
+    assert len(archived) == 1
+    assert archived[0]["inboxId"] == created["inboxId"]
+    assert archived[0]["status"] == "archived"
+
+
+def test_restore_unarchives_item(client: TestClient) -> None:
+    """복원하면 활성 목록으로 돌아오고 보관함에서 빠진다 (status=classified 복원)."""
+    created = _capture(client, "다시 살릴 것")
+    client.post(f"/inbox/{created['inboxId']}/archive")
+
+    resp = client.post(f"/inbox/{created['inboxId']}/restore")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "classified"
+
+    assert len(client.get("/inbox").json()) == 1  # 활성 목록 복귀
+    assert client.get("/inbox", params={"status": "archived"}).json() == []  # 보관함 비었음
+
+
+def test_restore_is_idempotent_on_active_item(client: TestClient) -> None:
+    """활성 항목에 restore 해도 에러 없이 현재 상태 그대로 반환 (멱등)."""
+    created = _capture(client, "이미 활성")
+    resp = client.post(f"/inbox/{created['inboxId']}/restore")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "classified"
+
+
+def test_restore_not_found(client: TestClient) -> None:
+    resp = client.post("/inbox/inbox_99999999-9999-4999-8999-999999999999/restore")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "INBOX_NOT_FOUND"
