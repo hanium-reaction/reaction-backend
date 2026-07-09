@@ -218,6 +218,68 @@ def test_edit_block_moves_and_snaps(
     assert body["goalId"] == f"goal_{action.goal_id}"
 
 
+def test_edit_block_updates_category_and_title(
+    client: TestClient,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """목표(category)/제목 변경이 action_item 에 영속되고 응답에 반영된다."""
+    action = _action(category="other")
+    action.goal_id = uuid4()
+    fake_action_item_repo.seed(action)
+    block = _block(_dt(1, 9, 0), _dt(1, 10, 0), action_id=action.id)
+    fake_scheduled_block_repo.seed(block, title=action.title, category=action.category)
+
+    resp = _patch(
+        client,
+        f"block_{block.id}",
+        {"startAt": _dt(1, 9, 0).isoformat(), "category": "study", "title": "정렬 복습"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["category"] == "study"
+    assert body["title"] == "정렬 복습"
+    # action_item 자체가 갱신됨 → 같은 액션의 다른 세션 블록도 새 값으로 조회된다.
+    assert action.category == "study"
+    assert action.title == "정렬 복습"
+
+
+def test_edit_block_unknown_category_normalized_to_other(
+    client: TestClient,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """enum 밖 category 는 'other' 로 정규화 (DB enum 위반 방지)."""
+    action = _action(category="study")
+    fake_action_item_repo.seed(action)
+    block = _block(_dt(1, 9, 0), _dt(1, 10, 0), action_id=action.id)
+    fake_scheduled_block_repo.seed(block, title=action.title, category=action.category)
+
+    resp = _patch(
+        client, f"block_{block.id}", {"startAt": _dt(1, 9, 0).isoformat(), "category": "여행"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["category"] == "other"
+    assert action.category == "other"
+
+
+def test_edit_block_time_only_keeps_category(
+    client: TestClient,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """category/title 미지정 시 기존 값 유지 (시간만 이동해도 분류가 사라지지 않음)."""
+    action = _action(category="health")
+    fake_action_item_repo.seed(action)
+    block = _block(_dt(1, 9, 0), _dt(1, 10, 0), action_id=action.id)
+    fake_scheduled_block_repo.seed(block, title=action.title, category=action.category)
+
+    resp = _patch(client, f"block_{block.id}", {"startAt": _dt(1, 11, 0).isoformat()})
+    assert resp.status_code == 200
+    assert resp.json()["category"] == "health"
+    assert action.category == "health"
+
+
 def test_edit_block_conflict(
     client: TestClient,
     fake_scheduled_block_repo: FakeScheduledBlockRepo,
