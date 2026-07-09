@@ -7,6 +7,13 @@
 
 ---
 
+## v1.19 — 2026-07-08 (주간 forward 재계획 — `POST /plans/replan`)
+
+- 신규 `POST /plans/replan` — 직전 완료 주의 주간 리포트를 작성하고, **다음 주부터 마감까지** 남은 작업을 다시 배치한 Draft 생성(항상 `isDraft=true` · `aiSource=rule`, LLM 0회)
+- 대상 = 다음 주 이후 **미착수 블록의 액션** + **활성 블록 없는 planned 백로그**(수락한 회복 카드 포함). 과거·시작/완료된 블록·실패 원본은 불변(회복 수락분만 재편입, 원본 `action_item.status` 변경 없음). 이미 확정·시작된 일정은 피해 배치(비파괴 fit-around). **기존 goal/node/action 재사용 → 중복 0**
+- 신규 `POST /plans/replan/{planId}/approve` — 미래 미착수 블록 취소 + 기존 action 에 새 블록 삽입. 응답 `{cancelledBlocks, createdBlocks}`. 이미 승인 시 멱등. 만료 410 / 재계획 Draft 아니면 404
+- 신규 에러코드 없음(기존 `PLAN_DRAFT_EXPIRED`/`PLAN_DRAFT_NOT_FOUND` 재사용). 기존 endpoint·envelope 불변
+
 ## v1.18 — 2026-07-08 (다일 계획 스케줄러 + `scope` + DB 상태 busy 통합, #112)
 
 - `POST /plans/generate` 요청에 `scope`(선택, 기본 `"horizon"`) 추가: `"horizon"`=**마감까지** 전 구간(실행이 마감 전 여러 날에 분배) / `"week"`=`targetDate` 가 속한 **달력 주(월~일)** 만. 미지정 시 `"horizon"` — 기존 동작(마감까지 배치)과 동일해 하위호환

@@ -259,6 +259,8 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | PATCH | `/plans/{planId}/blocks/{blockId}` | 15분 snap 직접 편집 (S15) — ✅ #21-B |
 | POST | `/plans/{planId}/ai-edit` | 자연어 수정 (S16, P1) — diff 반환만, apply는 별도 |
 | POST | `/plans/{planId}/ai-edit/apply` | diff 적용 (사용자 승인 후) |
+| POST | `/plans/replan` | **주간 forward 재계획** (S21 후속). 직전 완료 주의 주간 리포트를 작성하고, **다음 주부터 마감까지** 남은 작업을 다시 배치. 대상 = 다음 주 이후 미착수 블록의 액션 + 활성 블록 없는 planned 백로그(수락한 회복 포함). 과거·시작/완료 블록·실패 원본은 불변(회복 수락분만 재편입). 이미 시작·확정된 일정은 피해 배치(비파괴). **기존 goal/node/action 재사용**(중복 0). Draft 를 `plan_drafts`(72h)에 저장, 응답 `isDraft=true` · `aiSource=rule`(룰만, LLM 0회). 201 |
+| POST | `/plans/replan/{planId}/approve` | 재계획 [수락] → **미래 미착수 블록 취소 + 기존 action 에 새 블록 삽입**. 시작/완료·과거 블록 불변. 이미 승인 시 멱등. 만료 410 `PLAN_DRAFT_EXPIRED` / 재계획 Draft 아니면 404. 응답 `{cancelledBlocks, createdBlocks}`, `isDraft=false` |
 | GET | `/plans/weekly?weekStart=YYYY-MM-DD` | 주간 그리드 (S14) — cancelled 블록(계획 교체로 취소 등)은 제외 ✅ #21-B |
 
 > `generate`·`/plans/{planId}`·`approve`·`weekly`·블록 편집은 구현 완료. `ai-edit`/`ai-edit/apply` 만 미구현(P1, 라우트 없음).

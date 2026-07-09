@@ -145,6 +145,43 @@ class FirstPlanResponse(DraftMixin):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 주간 forward 재계획 (POST /plans/replan) — 남은 작업을 이후로 다시 배치.
+# 기존 goal/node/action 재사용, 미래 미착수 블록만 교체 (중복 0). 항상 Draft.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class ReplanBlockPreview(CamelModel):
+    """재계획 미리보기 블록 — 기존 ActionItem 에 연결(actionId). 시각은 KST."""
+
+    action_id: str  # action_<uuid>
+    title: str
+    category: str
+    start: KstDatetime
+    end: KstDatetime
+
+
+class ReplanResponse(DraftMixin):
+    """주간 재계획 미리보기 — 항상 Draft. 승인은 `/plans/replan/{planId}/approve`."""
+
+    plan_id: str
+    window_start: str  # "YYYY-MM-DD" — 재배치 시작(다음 주 월요일)
+    horizon: str | None
+    blocks: list[ReplanBlockPreview]
+    warnings: list[str] = Field(default_factory=list)
+    generated_at: KstDatetime
+
+
+class ReplanApproveResponse(CamelModel):
+    """재계획 승인 결과 — 미래 미착수 블록 취소 + 새 블록 삽입 카운트. `is_draft=False`."""
+
+    plan_id: str
+    is_draft: Literal[False] = False
+    cancelled_blocks: int
+    created_blocks: int
+    activated_at: KstDatetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # S14 Weekly Plan View + S15 직접 편집 (#21-B). 영속 scheduled_blocks 를 읽고/옮긴다.
 # Plan 테이블은 없음 — planId 는 주(週) 논리 식별자(`plan_<weekStart>`), 편집 권한은 blockId.
 # ─────────────────────────────────────────────────────────────────────────────

@@ -657,3 +657,73 @@ def test_approve_requires_lock_before_checks(
     res = client.post(f"/plans/{plan_id}/approve")
     assert res.status_code == 409
     assert res.json()["code"] == "AGENT_CONCURRENT_ACCESS"
+
+
+# ── 주간 forward 재계획 승인(POST /plans/replan/{id}/approve) — #113 정합 ──
+
+
+def _seed_replan_draft(
+    repo: FakePlanDraftRepo, *, status: str = "draft", n_blocks: int = 1
+) -> UUID:
+    """fake repo 에 재계획(kind=replan) Draft 직접 주입."""
+    start = datetime(2026, 7, 13, 12, 0, tzinfo=KST)
+    payload = {
+        "kind": "replan",
+        "window_start": "2026-07-13",
+        "horizon": "2026-07-17",
+        "blocks": [
+            {
+                "actionId": f"action_{uuid4()}",
+                "title": "남은 작업",
+                "category": "study",
+                "start": (start + timedelta(hours=i)).isoformat(),
+                "end": (start + timedelta(hours=i, minutes=45)).isoformat(),
+            }
+            for i in range(n_blocks)
+        ],
+        "warnings": [],
+    }
+    d = PlanDraft()
+    d.id = uuid4()
+    d.user_id = DEMO_USER_UUID
+    d.status = status
+    d.target_date = date(2026, 7, 13)
+    d.horizon = "2026-07-17"
+    d.ai_source = "rule"
+    d.payload = payload
+    d.expires_at = now_kst() + timedelta(hours=1)
+    d.approved_at = None
+    repo._items[d.id] = d
+    return d.id
+
+
+def test_replan_approve_requires_lock_before_checks(
+    client: TestClient, fake_plan_draft_repo: FakePlanDraftRepo
+) -> None:
+    """재계획 승인도 Draft 검사가 lock 안 — lock 미획득이면 409 (동시 더블 승인 봉합, #113 정합).
+
+    **approved** Draft 로 확인: 검사가 lock 밖이던 코드는 lock 이전에 200(멱등)을 반환해
+    구분되지 않는다. approved + lock 미획득 → 409 여야 검사가 lock 뒤로 이동했음이 증명된다.
+    """
+    _use_session(client, _FakeSession(lock_acquired=False))
+    plan_id = _seed_replan_draft(fake_plan_draft_repo, status="approved")
+
+    res = client.post(f"/plans/replan/{plan_id}/approve")
+    assert res.status_code == 409
+    assert res.json()["code"] == "AGENT_CONCURRENT_ACCESS"
+
+
+def test_replan_approve_already_approved_is_idempotent(
+    client: TestClient, fake_plan_draft_repo: FakePlanDraftRepo
+) -> None:
+    """이미 승인된 재계획 Draft 재승인 → 카운트만 반환, 재적용(취소·삽입) 없음."""
+    cap = _CapturingSession()
+    _use_session(client, cap)
+    plan_id = _seed_replan_draft(fake_plan_draft_repo, status="approved", n_blocks=2)
+
+    res = client.post(f"/plans/replan/{plan_id}/approve")
+    assert res.status_code == 200
+    j = res.json()
+    assert j["createdBlocks"] == 2
+    assert j["cancelledBlocks"] == 0
+    assert cap.added == []  # 아무 블록도 다시 만들지 않음
