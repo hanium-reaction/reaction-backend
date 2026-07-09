@@ -1,0 +1,54 @@
+name: Classify goals (EC2)
+
+# 목표 category 백필 — category='other' 목표를 액션 다수결로 분류. 수동 실행 전용.
+# deploy.yml 과 같은 self-hosted EC2 runner 에서 돌아 prod .env(RDS DATABASE_URL)를 쓴다.
+# scripts/classify_goals.py 는 최신 main 이 deploy.yml 로 $APP_DIR 에 동기화된 것.
+#
+# 안전: workflow_dispatch 전용, 기본 mode=dry-run(보고만), category UPDATE 만(hard delete 없음).
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run(보고만) 또는 apply(실제 적용)"
+        type: choice
+        options:
+          - dry-run
+          - apply
+        default: dry-run
+      user_email:
+        description: "특정 사용자만 (비우면 전체)"
+        required: false
+        default: ""
+
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: false
+
+jobs:
+  classify:
+    name: "classify goals (${{ inputs.mode }})"
+    runs-on: [self-hosted, ec2, reaction-backend]
+    timeout-minutes: 10
+
+    env:
+      APP_DIR: /home/ubuntu/reaction-backend
+
+    steps:
+      - name: Run classify
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.mode }}" = "apply" ]; then ARGS="$ARGS --apply"; fi
+          if [ -n "${{ inputs.user_email }}" ]; then ARGS="$ARGS --user-email ${{ inputs.user_email }}"; fi
+          echo "mode=${{ inputs.mode }} args=$ARGS"
+          ~/.local/bin/uv run --no-dev python -m scripts.classify_goals $ARGS | tee /tmp/classify.out
+
+      - name: Summary
+        if: always()
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          echo "### Classify goals (${{ inputs.mode }})" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 60 /tmp/classify.out >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
