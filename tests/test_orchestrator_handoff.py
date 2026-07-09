@@ -284,6 +284,80 @@ async def test_first_plan_graph_runs_to_approval(monkeypatch: pytest.MonkeyPatch
     assert final["used_fallback"] is False
 
 
+async def test_schedule_blocks_does_not_place_today_sessions_in_the_past(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """저녁에 만든 계획이 '오늘 이미 지난 시간대'에 세션을 잡지 않는다 (now-clamp).
+
+    생성 시각이 20:00 인데 활동창(09:00~23:00) 앞부분에 세션이 배치되면 시작 불가.
+    오늘의 [00:00, 지금) 을 busy 로 막으므로 모든 오늘 블록은 20:00 이후에 놓여야 한다.
+    """
+    from datetime import datetime, time
+
+    from reaction_backend.schemas.common import KST
+
+    today = "2026-06-20"  # == SLOT_ANSWERS goals.deadlines → horizon 이 오늘 하루로 수렴
+    frozen = datetime(2026, 6, 20, 20, 0, tzinfo=KST)  # 저녁 8시 생성
+    monkeypatch.setattr(first_plan, "now_kst", lambda: frozen)
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        schema = kwargs["schema"]
+        if schema is GoalDecomposition:
+            value: Any = GoalDecomposition(
+                goal_nodes=[
+                    {
+                        "node_id": "n1",
+                        "parent_id": None,
+                        "title": "캡스톤",
+                        "node_type": "root",
+                        "order_index": 0,
+                        "is_leaf": True,
+                    }
+                ],
+                action_items=[
+                    {
+                        "node_id": "n1",
+                        "title": f"작업{i}",
+                        "estimated_minutes": 30,
+                        "category": "study",
+                        "first_step": "시작",
+                    }
+                    for i in range(3)
+                ],
+                policy_violations=[],
+            )
+        elif schema is PlanReview:
+            value = PlanReview(approved=True, feedback=[])
+        else:  # pragma: no cover - 방어
+            raise AssertionError(f"unexpected schema {schema}")
+        return RunResult(
+            value=value,
+            fell_back=False,
+            reason=None,
+            prompt_id=kwargs["prompt_id"],
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_x",
+        slot_answers=SLOT_ANSWERS,
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    graph = first_plan.build_first_plan_graph()
+    state = first_plan.initial_state(user_id=uuid4(), outcome=outcome, target_date=today)
+
+    final = await graph.ainvoke(state)
+
+    blocks = final["scheduled_blocks"]
+    assert blocks, "오늘 활동창 후반(20:00~23:00)에 세션이 배치돼야 한다"
+    for b in blocks:
+        assert b.start.date().isoformat() == today
+        assert b.start.time() >= time(20, 0), f"과거 시각에 배치됨: {b.start}"
+
+
 async def test_review_plan_wires_prompt_variables(monkeypatch: pytest.MonkeyPatch) -> None:
     """review_plan 이 planning/plan_quality 변수 4종을 채워 LLM 을 실제 호출 (#32, PR #44).
 

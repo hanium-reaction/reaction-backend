@@ -7,7 +7,7 @@
 
 ---
 
-## v1.19 — 2026-07-09 (주간 forward 재계획 `POST /plans/replan` + block-id 재조정 승인, #117)
+## v1.20 — 2026-07-09 (주간 forward 재계획 `POST /plans/replan` + block-id 재조정 승인, #117)
 
 - **신규** `POST /plans/replan` — 주간 리포트를 먼저 작성하고(직전 완료 주), **다음 주 월요일부터 마감까지** 남은 작업 + 수락한 회복을 다시 배치. 대상 = 다음 주 이후 **미착수(`scheduled`) 블록**의 액션(actionId dedup) + **활성 블록 없는 `planned` 백로그**. 과거·시작/완료·`user_edit` 블록은 불변. busy = 확정(시작/완료·`user_edit`) 블록 + DB `time_policies` + **고정 일정(`fixed_schedules`, #112 정합)**. 응답 `ReplanResponse`(Draft): `{planId, windowStart, horizon, blocks[]{actionId,title,category,start,end,replacesBlockId}, warnings, generatedAt, isDraft:true}`. 각 블록의 `replacesBlockId` 는 교체할 옛 미래 블록(없으면 백로그라 `null`)
 - **신규** `POST /plans/replan/{planId}/approve` — **block-id 재조정** 승인(blanket-cancel 없음): `replacesBlockId` 를 현재 DB 상태로 재조정 — 여전히 `scheduled` → 그 블록만 취소+생성 / 그새 `started`·`finished`·`cancelled`·삭제 → 취소·생성 **모두 skip**(손실·중복 방지) / 백로그인데 그새 활성 블록 생김 → 생성 skip. payload 에 없는 블록(드롭 후보)은 손대지 않아 **보존**. Draft 로드~쓰기를 `user_agent_lock` 단일 commit 으로 원자화(#113 패턴). 응답 `{planId, isDraft:false, cancelledBlocks, createdBlocks, skippedBlocks, activatedAt}`
@@ -15,6 +15,13 @@
 - 기존 goal/node/action **재사용**(새 목표 트리 생성 없음) — additive endpoint 라 기존 계약 불변. 신규 에러코드 없음(409 `AGENT_CONCURRENT_ACCESS` / 410 `PLAN_DRAFT_EXPIRED` / 404 `PLAN_DRAFT_NOT_FOUND` 재사용)
 - 지평 붕괴 방지: 미래 블록이 없고 backlog `target_date` 가 전부 과거/None 이면 지평이 `windowStart` 하루로 축소돼 next Monday 에 몰리던 문제 → **최소 한 주(다음 주 월~일)** 로 분산. 먼 미래 backlog 는 스캔 창(1년)으로 상한
 - ⚠️ 방어: **재계획 Draft 를 First Plan 승인(`POST /plans/{planId}/approve`)에 넣으면** 이전엔 `payload["outcome"]` KeyError→500 이었으나, 이제 404 `PLAN_DRAFT_NOT_FOUND` 로 안내(전용 `POST /plans/replan/{planId}/approve` 사용). approve 시 action 이 그새 아카이브(#113 supersede)됐으면 좀비 블록 방지로 skip
+
+## v1.19 — 2026-07-08 (Inbox 보관함 조회·복원 + 승격 대상 구분)
+
+- **버그 픽스**: `GET /inbox` 가 모든 쿼리에 `archived_at IS NULL` 을 하드코딩해 **보관(archived) 항목이 어떤 필터로도 조회 불가**하던 문제 수정. `?status=archived` 로 보관함 조회 가능(기본 목록은 여전히 archived 제외).
+- 신규 `POST /inbox/{id}/restore` — 보관 취소(`archived_at` 클리어 + `status`→classified/captured). 활성 항목이면 멱등, 없으면 404 `INBOX_NOT_FOUND`. hard delete 없음.
+- `InboxItem` 응답에 **파생 필드 `promotedTo`** 추가: `status=promoted` 일 때 `"goal"`/`"action"`(promotedGoalId 유무로 계산). FE 가 "목표로/할 일로" 배지를 정확히 구분하고 action 딥링크를 걸 수 있게 함. **DB 컬럼·마이그레이션 없음**(순수 파생).
+- 신규 에러코드 없음. 테스트: 보관함 조회·복원(멱등)·promotedTo 구분 5종 추가.
 
 ## v1.18 — 2026-07-08 (다일 계획 스케줄러 + `scope` + DB 상태 busy 통합, #112)
 

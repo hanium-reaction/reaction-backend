@@ -231,13 +231,17 @@ class WeeklyPlanResponse(CamelModel):
 
 
 class BlockEditRequest(CamelModel):
-    """PATCH /plans/{planId}/blocks/{blockId} — 15분 snap 이동.
+    """PATCH /plans/{planId}/blocks/{blockId} — 15분 snap 이동 + 목표(category)/제목 수정.
 
     `endAt` 생략 시 기존 길이를 보존한 채 시작만 옮긴다. 시각은 KST ISO 8601.
+    `category`/`title` 을 주면 블록이 매달린 action_item 을 갱신한다 — 같은 액션의 모든
+    세션 블록에 반영되며, 미지원 category 는 'other' 로 정규화한다. 미지정 필드는 유지.
     """
 
     start_at: str  # ISO 8601 (KST)
     end_at: str | None = None
+    category: str | None = None  # 목표 카테고리 변경 (블록 색/분류) — 없으면 유지
+    title: str | None = None  # 카드 제목 변경 — 없으면 유지
 
 
 class BlockEditResponse(WeeklyBlock):

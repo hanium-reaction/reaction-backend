@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from http import HTTPStatus
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
@@ -89,6 +89,10 @@ def _rule_fallback_classify(raw_text: str) -> InboxClassification:
 
 
 def _to_schema(item: InboxItemModel) -> InboxItem:
+    # 승격 대상 파생 — promoted 인데 goal_id 있으면 goal, 없으면 action(convert-to-action 경로).
+    promoted_to: Literal["goal", "action"] | None = None
+    if item.status == "promoted":
+        promoted_to = "goal" if item.promoted_goal_id is not None else "action"
     return InboxItem(
         inbox_id=f"{_ID_PREFIX}{item.id}",
         raw_text=decrypt_inbox_text(item.raw_text_encrypted),
@@ -98,6 +102,7 @@ def _to_schema(item: InboxItemModel) -> InboxItem:
         promoted_goal_id=(
             f"goal_{item.promoted_goal_id}" if item.promoted_goal_id is not None else None
         ),
+        promoted_to=promoted_to,
     )
 
 
@@ -134,7 +139,11 @@ async def list_inbox(
     repo: RepoDep,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
 ) -> list[InboxItem]:
-    """내 inbox 항목. `?status=captured|classified|promoted` 필터."""
+    """내 inbox 항목. `?status=captured|classified|promoted|archived` 필터.
+
+    `status` 미지정 시 활성 항목(archived 제외)만. `status=archived` 는 보관함(soft-deleted)
+    조회 — `POST /inbox/{id}/restore` 로 되살릴 수 있다.
+    """
     items = await repo.list_by_status(user.id, status_filter)
     return [_to_schema(i) for i in items]
 
@@ -274,3 +283,24 @@ async def archive_inbox(
     await repo.soft_delete(item)
     await session.commit()
     return None
+
+
+@router.post("/{inbox_id}/restore")
+async def restore_inbox(
+    inbox_id: str,
+    user: CurrentUser,
+    repo: RepoDep,
+    session: SessionDep,
+) -> InboxItem:
+    """보관 취소 — `archived_at` 클리어 + status 를 활성(classified/captured)으로 복원.
+
+    보관함(`status=archived`)에서만 의미. 이미 활성이면 멱등(현재 상태 그대로 반환).
+    존재하지 않으면 404 `INBOX_NOT_FOUND`. hard delete 는 없으므로 언제든 되살릴 수 있다.
+    """
+    item = await repo.get_by_id_any(user.id, _parse_inbox_id(inbox_id))
+    if item is None:
+        raise _not_found()
+    await repo.restore(item)
+    await session.commit()
+    await session.refresh(item)
+    return _to_schema(item)

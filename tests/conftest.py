@@ -556,9 +556,13 @@ class FakeInboxRepo:
         self._items: dict[UUID, InboxItem] = {}
 
     async def list_by_status(self, user_id: UUID, status: str | None = None) -> list[InboxItem]:
-        items = [i for i in self._items.values() if i.user_id == user_id and i.archived_at is None]
-        if status is not None:
-            items = [i for i in items if i.status == status]
+        mine = [i for i in self._items.values() if i.user_id == user_id]
+        if status == "archived":
+            items = [i for i in mine if i.status == "archived"]
+        else:
+            items = [i for i in mine if i.archived_at is None]
+            if status is not None:
+                items = [i for i in items if i.status == status]
         return sorted(items, key=lambda i: i.id, reverse=True)
 
     async def get_by_id(self, user_id: UUID, inbox_id: UUID) -> InboxItem | None:
@@ -566,6 +570,19 @@ class FakeInboxRepo:
         if i is None or i.user_id != user_id or i.archived_at is not None:
             return None
         return i
+
+    async def get_by_id_any(self, user_id: UUID, inbox_id: UUID) -> InboxItem | None:
+        i = self._items.get(inbox_id)
+        if i is None or i.user_id != user_id:
+            return None
+        return i
+
+    async def restore(self, item: InboxItem) -> InboxItem:
+        if item.archived_at is None:
+            return item
+        item.archived_at = None
+        item.status = "classified" if item.ai_category_guess is not None else "captured"
+        return item
 
     async def create(
         self,

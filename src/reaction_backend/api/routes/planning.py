@@ -41,6 +41,7 @@ from langchain_core.runnables import RunnableConfig
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
+from reaction_backend.db.models.action_item import ACTION_CATEGORY_VALUES
 from reaction_backend.db.models.interview_session import InterviewSession
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
@@ -451,7 +452,12 @@ async def edit_block(
     policy_repo: PolicyRepoDep,
     session: SessionDep,
 ) -> BlockEditResponse:
-    """블록 15분 snap 이동 (S15). 충돌 422 `PLAN_BLOCK_CONFLICT` / 정책 422 `POLICY_VIOLATION`."""
+    """블록 15분 snap 이동 + 목표(category)/제목 수정 (S15).
+
+    충돌 422 `PLAN_BLOCK_CONFLICT` / 정책 422 `POLICY_VIOLATION`. `category`/`title` 을 주면
+    블록이 매달린 action_item 을 갱신한다(같은 액션의 모든 세션 블록 공유). 정책 검사는
+    **변경된 category** 로 수행하고, 변경 반영은 성공 commit 시에만 영속된다(422 면 롤백).
+    """
     block = await repo.get_block(user.id, _parse_block_id(block_id))
     if block is None:
         raise _block_not_found()
@@ -480,6 +486,13 @@ async def edit_block(
         )
 
     action = await action_repo.get_by_id(user.id, block.action_item_id)
+    # 목표(category)/제목 변경을 action_item 에 반영 — 미지정 필드는 유지. 정책 검사·응답이
+    # 새 값을 쓰도록 커밋 전에 적용(422 면 커밋 안 돼 롤백). category 미지원값은 'other'.
+    if action is not None:
+        if body.category is not None:
+            action.category = body.category if body.category in ACTION_CATEGORY_VALUES else "other"
+        if body.title is not None and body.title.strip():
+            action.title = body.title.strip()
     category = action.category if action is not None else "other"
     policies = await policy_repo.list_active(user.id)
     violated = find_policy_violation(to_kst(new_start), to_kst(new_end), category, policies)
