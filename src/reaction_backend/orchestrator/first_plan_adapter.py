@@ -303,6 +303,54 @@ def _replaceable_action(action: ActionItem, target_date: date) -> bool:
     )
 
 
+def _protected_card_ids(live_blocks: Sequence[ScheduledBlock]) -> set[uuid.UUID]:
+    """user_edit 블록(S15 직접 이동)을 가진 카드 id — 교체 대상에서 제외(보존).
+
+    supersede_previous_plan(취소)과 superseded_card_ids(재생성 busy 제외)가 공유하는
+    블록층 보호 규칙 — 한 곳에서만 정의해 두 경로가 어긋나지 않게 한다.
+    """
+    return {b.action_item_id for b in live_blocks if b.source == "user_edit"}
+
+
+async def superseded_card_ids(
+    session: AsyncSession, *, user_id: uuid.UUID, target_date: date
+) -> set[uuid.UUID]:
+    """approve 시 supersede_previous_plan 이 '교체'할 카드 id 집합 (read-only).
+
+    supersede 와 **완전히 같은 규칙**(카드층 `_replaceable_action` + 블록층
+    `_protected_card_ids`)을 쓰되 아무것도 변형하지 않고 FOR UPDATE 도 걸지 않는다.
+    generate(재생성)가 '곧 자기 승인으로 비워질' 같은 날짜 이전 계획의 블록을 busy 에서
+    제외하는 데 쓴다(#118) — 재생성 계획이 그 슬롯을 피해 나쁘게 배치되지 않도록.
+    첫 계획(교체 대상 없음)이면 빈 집합이라 busy 제외가 no-op.
+    """
+    stmt = select(ActionItem).where(
+        ActionItem.user_id == user_id,
+        ActionItem.target_date == target_date,
+        ActionItem.source == "goal",
+        ActionItem.status == "planned",
+        ActionItem.archived_at.is_(None),
+    )
+    candidates = [
+        a
+        for a in (await session.execute(stmt)).scalars().all()
+        if _replaceable_action(a, target_date)
+    ]
+    if not candidates:
+        return set()
+    candidate_ids = {a.id for a in candidates}
+    block_stmt = select(ScheduledBlock).where(
+        ScheduledBlock.user_id == user_id,
+        ScheduledBlock.action_item_id.in_(candidate_ids),
+        ScheduledBlock.block_status != "cancelled",
+    )
+    live_blocks = [
+        b
+        for b in (await session.execute(block_stmt)).scalars().all()
+        if b.action_item_id in candidate_ids and b.block_status != "cancelled"
+    ]
+    return candidate_ids - _protected_card_ids(live_blocks)
+
+
 async def supersede_previous_plan(
     session: AsyncSession, *, user_id: uuid.UUID, target_date: date
 ) -> int:
@@ -352,8 +400,8 @@ async def supersede_previous_plan(
     live_blocks = [
         b for b in fetched if b.action_item_id in candidate_ids and b.block_status != "cancelled"
     ]
-    # 사용자가 직접 옮긴(user_edit) 블록을 가진 카드는 교체 대상에서 제외.
-    protected_ids = {b.action_item_id for b in live_blocks if b.source == "user_edit"}
+    # 사용자가 직접 옮긴(user_edit) 블록을 가진 카드는 교체 대상에서 제외 (superseded_card_ids 와 공유).
+    protected_ids = _protected_card_ids(live_blocks)
     stale = [a for a in candidates if a.id not in protected_ids]
     if not stale:
         return 0

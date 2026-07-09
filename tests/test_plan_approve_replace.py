@@ -19,9 +19,11 @@ from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
+from reaction_backend.orchestrator.first_plan import _existing_busy_by_day
 from reaction_backend.orchestrator.first_plan_adapter import (
     db_apply_first_plan,
     supersede_previous_plan,
+    superseded_card_ids,
 )
 from reaction_backend.orchestrator.interview_adapter import PLACEHOLDER_GOAL_TITLE
 from reaction_backend.schemas.common import KST, now_kst
@@ -397,3 +399,49 @@ async def test_db_apply_placeholder_plan_does_not_supersede() -> None:
 
     assert result.goals == 0
     assert stale.archived_at is None  # 아무것도 지우지 않음
+
+
+# ───────────────── 재생성 시 자기 이전 계획 busy 제외 (#118) ─────────────────
+# superseded_card_ids = approve 시 supersede 가 교체할 카드 (같은 규칙, read-only).
+# generate 는 이 카드들의 블록을 busy 에서 빼, 재생성 계획이 곧 비워질 슬롯을 피하지 않게.
+
+
+async def test_superseded_card_ids_matches_supersede_rule() -> None:
+    """교체 대상(goal·planned·미보관·같은날·user_edit 없음) 카드만 반환 — supersede 와 동일."""
+    stale = _action()  # 교체 대상
+    started = _action(status="in_progress")  # 실행 이력 → 제외
+    moved = _action()  # user_edit 블록 보유 → 보존(제외)
+    other_day = _action(target=TARGET - timedelta(days=1))  # 다른 날짜 → 제외
+    sess = _EntitySession(
+        actions=[stale, started, moved, other_day],
+        blocks=[_sched_block(stale), _sched_block(moved, source="user_edit")],
+    )
+
+    ids = await superseded_card_ids(sess, user_id=UID, target_date=TARGET)  # type: ignore[arg-type]
+
+    assert ids == {stale.id}
+
+
+async def test_superseded_card_ids_empty_on_first_plan() -> None:
+    """교체 대상이 없으면(첫 계획) 빈 집합 → busy 제외 no-op."""
+    sess = _EntitySession(actions=[_action(status="in_progress")], blocks=[])
+    ids = await superseded_card_ids(sess, user_id=UID, target_date=TARGET)  # type: ignore[arg-type]
+    assert ids == set()
+
+
+async def test_existing_busy_excludes_own_superseded_plan() -> None:
+    """generate busy: 자기 이전 계획(교체 대상) 블록은 빠지고, 시작된 카드 블록은 남는다."""
+    prev = _action()  # 이전 계획(goal/planned/오늘) → 승인 시 supersede
+    prev_block = _sched_block(prev)  # scheduled·ai_plan
+    started = _action(status="in_progress")  # 실행 중 → busy 유지
+    started_block = _sched_block(started, status="started")
+    sess = _EntitySession(actions=[prev, started], blocks=[prev_block, started_block])
+    config: Any = {"configurable": {"session": sess}}
+
+    busy = await _existing_busy_by_day(config, UID, TARGET, TARGET, exclude_target_date=TARGET)
+    kept = [b for blist in busy.values() for b in blist]
+    assert len(kept) == 1  # started 만 busy, prev 는 제외
+
+    # exclude 안 하면 둘 다 busy (제외 로직이 실제로 동작함을 대조).
+    busy_all = await _existing_busy_by_day(config, UID, TARGET, TARGET)
+    assert sum(len(v) for v in busy_all.values()) == 2

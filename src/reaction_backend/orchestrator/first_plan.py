@@ -246,20 +246,34 @@ def _schedule_end(start_day: date, horizon: str | None, scope: str) -> date:
 
 
 async def _existing_busy_by_day(
-    config: RunnableConfig, user_id: UUID, start_day: date, end_day: date
+    config: RunnableConfig,
+    user_id: UUID,
+    start_day: date,
+    end_day: date,
+    exclude_target_date: date | None = None,
 ) -> dict[date, list[BusyBlock]]:
     """승인된 `scheduled_blocks` 를 날짜별 busy 로 — 재계획 시 비파괴 fit-around 용.
 
-    session 이 없으면(시스템 호출/단위 테스트) 빈 dict → 기존 블록 회피 없이 동작.
+    `exclude_target_date` 가 주어지면 그 날짜 승인 시 supersede 로 취소될 **자기 이전 First
+    Plan** 산출물의 블록은 busy 에서 뺀다(#118) — 재생성 계획이 '곧 자기 손으로 비울'
+    슬롯을 피해 나쁘게(또는 빈 채로) 배치되지 않게. 시작된 카드·user_edit·다른 날짜·다른
+    소스(inbox/recovery) 블록은 그대로 busy(회피 유지). session 이 없으면 빈 dict.
     """
     session = _session(config)
     if session is None:
         return {}
+    stale_ids: set[UUID] = set()
+    if exclude_target_date is not None:
+        stale_ids = await first_plan_adapter.superseded_card_ids(
+            session, user_id=user_id, target_date=exclude_target_date
+        )
     start_dt = datetime.combine(start_day, time(0, 0), tzinfo=KST)
     end_dt = datetime.combine(end_day + timedelta(days=1), time(0, 0), tzinfo=KST)
     rows = await ScheduledBlockRepo(session).list_busy_between(user_id, start_dt, end_dt)
     busy: dict[date, list[BusyBlock]] = defaultdict(list)
     for row in rows:
+        if row.action_item_id in stale_ids:
+            continue  # 승인 시 supersede 될 자기 이전 계획 — busy 로 세지 않음(#118)
         s, e = to_kst(row.start_at), to_kst(row.end_at)
         if e <= s:
             continue
@@ -304,6 +318,8 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
     busy 는 (1) 수면/노터치(outcome + **DB `time_policies`**, 온보딩 후 수정 반영) +
     (2) **이미 승인된 `scheduled_blocks`** + (3) **`fixed_schedules`(수업·알바)** 를 모두 합친다
     → 기존·고정·수정된 일정 위에 겹쳐 잡지 않는다(비파괴 fit-around, HITL 승인 보존). (#112)
+    단 **재생성**이면 승인 시 supersede 로 취소될 자기 같은-날짜 이전 계획은 busy 에서 뺀다
+    (#118) — 그렇지 않으면 새 계획이 곧 비워질 슬롯을 피해 나쁘게 배치된다.
 
     배치 못 한 항목은 `schedule_warnings` 로 남겨 REVIEWING 의 conflict_report 에 합류한다.
     산출물은 미영속 미리보기(`ScheduledBlockPreview`) — 자동 적용 금지(AGENTS §1.4).
@@ -324,7 +340,11 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
     actions = first_plan_adapter.plan_actions_from_decomposition(action_items)
     node_by_action = {a.id: a.node_id for a in actions}
 
-    existing_busy = await _existing_busy_by_day(config, user_id, start_day, schedule_end)
+    # exclude_target_date=start_day: 재생성 시 승인이 곧 supersede 할 자기 이전 계획을
+    # busy 에서 제외 (#118). 첫 계획이면 교체 대상이 없어 no-op.
+    existing_busy = await _existing_busy_by_day(
+        config, user_id, start_day, schedule_end, exclude_target_date=start_day
+    )
 
     def busy_for_day(day: date) -> list[BusyBlock]:
         return [
