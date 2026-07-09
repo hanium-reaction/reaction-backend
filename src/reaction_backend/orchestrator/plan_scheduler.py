@@ -219,7 +219,8 @@ def schedule_actions_multiday(
             flat.append((action, m, si, len(parts)))
     n_sessions = len(flat)
 
-    blocks: list[DraftScheduledBlock] = []
+    # 배치 결과는 (interval, action, 총세션수) 로 모으고, (i/n) 라벨은 **정렬 후** 부여한다.
+    placements: list[tuple[TimeInterval, PlanAction, int]] = []
     warnings: list[str] = []
 
     for idx, (action, minutes, si, n) in enumerate(flat):
@@ -243,16 +244,7 @@ def schedule_actions_multiday(
                 continue
             index, start = slot
             interval = TimeInterval(start, start + need)
-            title = f"{action.title} ({si + 1}/{n})" if n > 1 else action.title
-            blocks.append(
-                DraftScheduledBlock(
-                    interval=interval,
-                    origin="goal",
-                    origin_id=action.id,
-                    title=title,
-                    category=action.category,
-                )
-            )
+            placements.append((interval, action, n))
             free_by_day[day] = _subtract(free, index, interval, gap)
             used_by_day[day] += minutes
             placed_flag = True
@@ -263,5 +255,24 @@ def schedule_actions_multiday(
                 f"'{label}' 을(를) 배치할 가용 시간을 찾지 못했어요. 다른 시간으로 옮겨볼까요?"
             )
 
-    blocks.sort(key=lambda b: b.interval.start)
+    # 시각순 정렬 후 분할 카드의 (i/n) 라벨을 **실제 시각 순서대로** 부여한다 → 뒤 세션이 피크 밖
+    # 이른 슬롯으로 폴백해도 '(2/2)'가 '(1/2)' 앞에 오지 않는다(캘린더 시각순 렌더 역전 방지, #118).
+    placements.sort(key=lambda p: p[0].start)
+    session_no: dict[uuid.UUID, int] = {}
+    blocks: list[DraftScheduledBlock] = []
+    for interval, action, n in placements:
+        if n > 1:
+            session_no[action.id] = session_no.get(action.id, 0) + 1
+            title = f"{action.title} ({session_no[action.id]}/{n})"
+        else:
+            title = action.title
+        blocks.append(
+            DraftScheduledBlock(
+                interval=interval,
+                origin="goal",
+                origin_id=action.id,
+                title=title,
+                category=action.category,
+            )
+        )
     return blocks, warnings
