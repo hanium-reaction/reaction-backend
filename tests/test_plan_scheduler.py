@@ -109,6 +109,31 @@ def test_spreads_toward_deadline_not_front_loaded() -> None:
     assert (max(days) - min(days)).days >= 7
 
 
+def test_split_session_labels_ascend_with_time() -> None:
+    """분할 세션 (i/n) 라벨이 실제 시각 순서와 일치 — 뒤 세션이 이른 슬롯으로 폴백해도
+    '(2/2)'가 '(1/2)' 앞에 오지 않는다(캘린더 시각순 렌더 역전 방지, #118).
+
+    단일일·심야 피크(22:00~) + 100분(50+50) 카드: (첫 배치)는 22:00 피크, (두 번째)는 피크
+    잔여 부족 → 이른 슬롯 폴백. 라벨은 정렬 후 부여하므로 09:00=(1/2), 22:00=(2/2).
+    """
+    blocks, _ = schedule_actions_multiday(
+        start_day=START,
+        horizon_day=START,  # 단일일
+        actions=[_action("긴 카드", 100)],
+        busy_for_day=_busy_09_2330,
+        peak_windows=[PlanWindow(time(22, 0), time(23, 59))],
+        focus_chunk_min=50,
+        break_min=10,
+        daily_focus_cap_min=180,
+    )
+    assert len(blocks) == 2
+    # 반환 순서 = 시각 오름차순, 라벨도 그 순서대로 (1/2)→(2/2).
+    starts = [b.interval.start for b in blocks]
+    assert starts == sorted(starts)
+    assert "(1/2)" in blocks[0].title
+    assert "(2/2)" in blocks[1].title
+
+
 def test_respects_peak_window_preference() -> None:
     """피크=오후(12~18)면 첫 블록이 활동창 시작(09:00)이 아니라 12:00 이후에 놓인다."""
     actions = [_action("집중 작업", 50)]
