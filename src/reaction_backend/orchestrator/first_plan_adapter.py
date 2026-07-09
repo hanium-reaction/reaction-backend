@@ -18,7 +18,7 @@ import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, time
 from typing import Any
 
 from sqlalchemy import select
@@ -41,6 +41,7 @@ from reaction_backend.orchestrator.goal_structuring import (
     policy_guarded_transaction,
 )
 from reaction_backend.orchestrator.interview_adapter import is_placeholder_goal
+from reaction_backend.orchestrator.plan_scheduler import PlanAction, PlanWindow
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome
 from reaction_backend.schemas.planning import (
@@ -192,6 +193,76 @@ def action_placements(action_items: list[ActionItemDraft]) -> list[HabitLike]:
             )
         )
     return placements
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 다일(multi-day) 스케줄러 입력 환원 (`orchestrator/plan_scheduler.py`)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 하루에 배치할 집중 작업 총량 상한(분). 이 상한을 채우면 스케줄러가 다음 날로 넘어간다.
+# 활동창(수 시간)을 통째로 한 목표로 채우지 않고 삶의 여백을 남기기 위한 기본값.
+DEFAULT_DAILY_FOCUS_CAP_MIN = 180
+
+# time.peak_window chip → 하루 선호 윈도우. '변동' 은 선호 없음(폴백)으로 처리.
+_PEAK_CHIP_WINDOWS: dict[str, tuple[time, time]] = {
+    "오전": (time(6, 0), time(12, 0)),
+    "오후": (time(12, 0), time(18, 0)),
+    "저녁": (time(18, 0), time(23, 0)),
+    "심야": (time(22, 0), time(23, 59)),
+}
+
+# energy.break_pattern chip → 카드 사이 최소 휴식(분).
+_BREAK_PATTERN_MIN: dict[str, int] = {
+    "짧게 자주": 10,
+    "길게 가끔": 20,
+    "거의 안 쉼": 5,
+}
+_DEFAULT_BREAK_MIN = 10
+
+# focus_duration 이 없을 때의 세션 분할 기준(분) — 분해 규칙상 leaf 는 대개 60분 이내.
+_DEFAULT_FOCUS_CHUNK_MIN = 60
+
+
+def plan_actions_from_decomposition(action_items: list[ActionItemDraft]) -> list[PlanAction]:
+    """분해된 action_item → 다일 스케줄러 배치 단위(`PlanAction`).
+
+    분해 순서(= 의도된 진행 순서)를 유지한다. `id` 는 배치 블록의 `origin_id` 로 실려
+    호출자가 node_id 를 복원하는 키다(중복 세션도 같은 node_id 로 매핑).
+    """
+    return [
+        PlanAction(
+            id=uuid.uuid4(),
+            node_id=item.node_id,
+            title=item.title,
+            category=item.category,
+            estimated_minutes=item.estimated_minutes,
+        )
+        for item in action_items
+    ]
+
+
+def peak_windows_from_outcome(outcome: InterviewOutcome) -> list[PlanWindow]:
+    """피크 시간대 chip → 선호 윈도우. '변동'만 있거나 비면 선호 없음([])."""
+    windows: list[PlanWindow] = []
+    for chip in outcome.availability.peak_window:
+        bounds = _PEAK_CHIP_WINDOWS.get(chip.strip())
+        if bounds is not None:
+            windows.append(PlanWindow(start=bounds[0], end=bounds[1]))
+    return windows
+
+
+def focus_chunk_min_from_outcome(outcome: InterviewOutcome) -> int:
+    """한 세션 최대 길이(분) — energy.focus_duration, 없으면 기본값."""
+    fd = outcome.preferences.focus_duration_min
+    return fd if fd and fd > 0 else _DEFAULT_FOCUS_CHUNK_MIN
+
+
+def break_min_from_outcome(outcome: InterviewOutcome) -> int:
+    """카드 사이 최소 휴식(분) — energy.break_pattern, 없으면 기본값."""
+    pattern = outcome.preferences.break_pattern
+    if pattern is None:
+        return _DEFAULT_BREAK_MIN
+    return _BREAK_PATTERN_MIN.get(pattern.strip(), _DEFAULT_BREAK_MIN)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
