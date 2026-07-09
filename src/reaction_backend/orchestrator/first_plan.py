@@ -47,7 +47,7 @@ from reaction_backend.orchestrator.plan_scheduler import schedule_actions_multid
 from reaction_backend.repositories.fixed_schedule_repo import FixedScheduleRepo
 from reaction_backend.repositories.scheduled_block_repo import ScheduledBlockRepo
 from reaction_backend.repositories.time_policy_repo import TimePolicyRepo
-from reaction_backend.schemas.common import KST, to_kst
+from reaction_backend.schemas.common import KST, now_kst, to_kst
 from reaction_backend.schemas.interview import InterviewOutcome
 from reaction_backend.schemas.planning import (
     GoalDecomposition,
@@ -303,6 +303,13 @@ async def _fixed_schedules(config: RunnableConfig, user_id: UUID) -> list[Any]:
     return list(await FixedScheduleRepo(session).list_active(user_id))
 
 
+def _ceil_quarter(dt: datetime) -> datetime:
+    """15분 경계로 올림 — 오늘 '지금' 이후 배치의 깔끔한 시작 경계."""
+    dt = dt.replace(second=0, microsecond=0)
+    rem = dt.minute % 15
+    return dt if rem == 0 else dt + timedelta(minutes=15 - rem)
+
+
 async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> FirstPlanState:
     """PLANNING (룰 only, LLM 0회) — 분해 action_item 을 다일 스케줄러로 배치한다.
 
@@ -346,11 +353,21 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         config, user_id, start_day, schedule_end, exclude_target_date=start_day
     )
 
+    # 오늘 계획을 저녁에 만들어도 이미 지난 시간대(예: 18:40 생성 → 12:00)에 세션이 잡히지
+    # 않도록, '오늘'의 [00:00, 지금(15분 올림)) 구간을 busy 로 넣어 과거 배치를 막는다.
+    now = now_kst()
+    past_cutoff = _ceil_quarter(now)
+    day_zero = datetime.combine(now.date(), time(0, 0), tzinfo=KST)
+
     def busy_for_day(day: date) -> list[BusyBlock]:
+        extra: list[BusyBlock] = []
+        if day == now.date() and past_cutoff > day_zero:
+            extra.append(BusyBlock(TimeInterval(day_zero, past_cutoff), "past", "지난 시간"))
         return [
             *time_policies_to_busy(day, policies),
             *fixed_schedules_to_busy(day, fixed),
             *existing_busy.get(day, []),
+            *extra,
         ]
 
     placed, warnings = schedule_actions_multiday(
