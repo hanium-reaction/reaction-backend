@@ -217,12 +217,21 @@ def _at(day: date, t: time) -> datetime:
 
 
 def _parse_hhmm(raw: str) -> time:
-    """\"HH:MM\" 문자열을 time 으로. 형식 오류는 ValueError."""
+    """\"HH:MM\" 문자열을 time 으로. 형식 오류는 ValueError.
+
+    `"24:00"`(자정 = 하루 끝)은 흔한 사용자 입력("밤 12시까지")이지만 `time` 은 24:00 을
+    담지 못한다. 이를 거부해 계획 생성이 500 으로 죽던 문제를 막기 위해 그날의 **마지막
+    순간**(`time.max`)으로 표현한다 — 활동창 종료로 쓰이면 [start, 자정) 윈도우가, 수면
+    정책 시작으로 쓰이면 자정 넘김이 올바르게 계산된다(`_window_intervals`).
+    """
     try:
-        hh, mm = raw.split(":")
-        return time(int(hh), int(mm))
+        hh_s, mm_s = raw.split(":")
+        hh, mm = int(hh_s), int(mm_s)
     except (ValueError, AttributeError) as exc:
         raise ValueError(f"잘못된 시각 형식: {raw!r} (HH:MM 기대)") from exc
+    if hh == 24 and mm == 0:
+        return time.max  # 23:59:59.999999 — 하루 끝(자정) 표현
+    return time(hh, mm)
 
 
 def _payload_time(payload: Mapping[str, Any], key: str, policy_type: str) -> time:
