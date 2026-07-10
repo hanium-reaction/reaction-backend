@@ -490,9 +490,7 @@ def test_approve_skips_when_action_archived_meanwhile(
     assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 0, 1)
     # 아카이브된 카드에 좀비 블록이 생기지 않는다.
     assert not [
-        b
-        for b in fake_scheduled_block_repo._blocks.values()
-        if b.action_item_id == action_a.id
+        b for b in fake_scheduled_block_repo._blocks.values() if b.action_item_id == action_a.id
     ]
 
 

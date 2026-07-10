@@ -765,7 +765,9 @@ async def generate_replan(
         )
 
         window_start = replan.next_week_start(today)
-        scan_start, scan_end = replan.day_bounds_kst(window_start, window_start + timedelta(days=365))
+        scan_start, scan_end = replan.day_bounds_kst(
+            window_start, window_start + timedelta(days=365)
+        )
         scheduled_pairs = await block_repo.list_scheduled_between(user.id, scan_start, scan_end)
         backlog = await action_repo.list_planned_without_block(user.id)
         committed_blocks = await block_repo.list_committed_between(user.id, scan_start, scan_end)
