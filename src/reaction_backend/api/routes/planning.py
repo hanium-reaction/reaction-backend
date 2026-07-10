@@ -772,9 +772,11 @@ async def generate_replan(
         backlog = await action_repo.list_planned_without_block(user.id)
         committed_blocks = await block_repo.list_committed_between(user.id, scan_start, scan_end)
 
-        # 후보(action_id dedup) + 각 후보가 교체할 옛 미래 블록 id.
+        # 후보(action_id dedup) + 각 후보가 교체할 옛 미래 블록 **전부**.
+        # #115 스케줄러가 긴 액션을 여러 세션 블록으로 쪼개므로 한 액션에 옛 블록이 여러 개일
+        # 수 있다. 1개만 잡으면 승인 때 나머지가 유령으로 남거나 새 세션이 드롭된다(리뷰 지적).
         cand: dict[UUID, replan.ReplanCandidate] = {}
-        old_block_by_action: dict[UUID, UUID] = {}
+        old_blocks_by_action: dict[UUID, list[UUID]] = {}
         for block, action in scheduled_pairs:
             cand[action.id] = replan.ReplanCandidate(
                 action_id=action.id,
@@ -782,7 +784,7 @@ async def generate_replan(
                 category=action.category,
                 estimated_minutes=action.estimated_minutes or 30,
             )
-            old_block_by_action[action.id] = block.id
+            old_blocks_by_action.setdefault(action.id, []).append(block.id)
         for action in backlog:
             cand.setdefault(
                 action.id,
@@ -840,14 +842,20 @@ async def generate_replan(
                     "category": b.category,
                     "start": b.start.isoformat(),
                     "end": b.end.isoformat(),
-                    "replacesBlockId": (
-                        f"{_BLOCK_PREFIX}{old_block_by_action[b.action_id]}"
-                        if b.action_id in old_block_by_action
+                    "replacesBlockId": (  # 미리보기용(대표 1개) — 재조정 권위는 아래 oldBlocks.
+                        f"{_BLOCK_PREFIX}{old_blocks_by_action[b.action_id][0]}"
+                        if b.action_id in old_blocks_by_action
                         else None
                     ),
                 }
                 for b in blocks
             ],
+            # 재조정 권위 소스: 액션당 교체할 옛 블록 **전부**. 승인이 액션 단위로 옛 블록 집합을
+            # 통째 취소하고 새 세션 블록을 전부 생성한다(#117 다중 세션 손실·유령 봉합, 리뷰 대응).
+            "oldBlocks": {
+                f"{_ACTION_PREFIX}{aid}": [f"{_BLOCK_PREFIX}{bid}" for bid in bids]
+                for aid, bids in old_blocks_by_action.items()
+            },
             "warnings": warnings,
         }
         draft = await draft_repo.create(
@@ -872,14 +880,16 @@ async def approve_replan(
     draft_repo: DraftRepoDep,
     session: SessionDep,
 ) -> ReplanApproveResponse:
-    """재계획 Draft 승인 → **block-id 재조정**으로 미래 블록 교체(#117 재작업).
+    """재계획 Draft 승인 → **action 단위 재조정**으로 미래 블록 교체(#117 재작업).
 
-    payload 의 각 블록마다 '교체할 옛 블록'(replacesBlockId)을 **현재 DB 상태로 재조정**:
-    - 여전히 `scheduled` → 그 블록만 취소 + 새 블록 생성 (정상 교체).
-    - `started/finished/cancelled`(그새 시작·처리·다른 계획이 취소) → **취소·생성 둘 다 skip**
-      (데이터 손실 방지 + 중복 방지). 드롭된 후보의 옛 블록은 payload 에 없어 보존됨.
+    #115 스케줄러가 긴 액션을 **여러 세션 블록**으로 쪼개므로, 재조정은 개별 블록이 아니라
+    **액션당 '옛 블록 집합'(payload `oldBlocks`)** 을 통째 다룬다 — 옛 블록 1개만 취소하면
+    나머지가 유령으로 남거나 새 세션이 드롭되던 문제 방지(리뷰 대응). 액션마다 현재 DB 상태로:
+    - 옛 블록 집합 중 하나라도 `started/finished`(사용자 착수) → 이 액션 **전체 보존**(skip).
+    - 활성(`scheduled`) 옛 블록이 하나도 없음(그새 전부 취소·삭제) → 중복 방지 skip.
+    - 그 외 → 활성 옛 블록 **전부 취소** + 새 세션 블록 **전부 생성**.
     - 백로그(옛 블록 없음): 그새 그 action 이 활성 블록을 얻었으면 생성 skip.
-    - action 이 그새 아카이브/삭제됐으면(예: #113 First Plan 교체) 항목 전체 skip(좀비 블록 방지).
+    - action 이 그새 아카이브/삭제됐으면(예: #113 First Plan 교체) 전체 skip(좀비 블록 방지).
 
     Draft 로드·검사~쓰기를 `user_agent_lock`(xact-scoped) 안에서 단일 commit 으로 원자화한다
     (동시 더블 승인 봉합, #113 패턴). 과거·시작/완료·user_edit 블록은 불변. 항상 Draft→HITL.
@@ -908,37 +918,55 @@ async def approve_replan(
                 activated_at=now_kst(),
             )
 
-        cancelled = created = skipped = 0
+        # payload 새 블록을 액션 단위로 묶는다 — 한 액션이 여러 세션 블록으로 나뉠 수 있으므로
+        # (분할). 재조정은 '액션당 옛 블록 집합'을 통째 다루어 손실·유령을 막는다.
+        new_by_action: dict[UUID, list[dict[str, Any]]] = {}
         for b in payload.get("blocks", []):
-            action_id = UUID(str(b["actionId"]).removeprefix(_ACTION_PREFIX))
-            replaces = b.get("replacesBlockId")
-            # generate~approve 사이 action 이 아카이브/삭제됐으면(예: #113 First Plan 교체가
-            # 그 카드를 supersede) 이 항목 전체 skip — 아카이브된 카드에 좀비 블록을 만들지 않는다.
+            aid = UUID(str(b["actionId"]).removeprefix(_ACTION_PREFIX))
+            new_by_action.setdefault(aid, []).append(b)
+        old_map: dict[str, list[str]] = payload.get("oldBlocks", {})
+
+        cancelled = created = skipped = 0
+        for action_id, new_blocks in new_by_action.items():
+            n = len(new_blocks)
+            # generate~approve 사이 action 이 아카이브/삭제됐으면(#113 supersede) 전체 skip.
             if await action_repo.get_by_id(user.id, action_id) is None:
-                skipped += 1
+                skipped += n
                 continue
-            if replaces:
-                old = await block_repo.get_block(
-                    user.id, UUID(str(replaces).removeprefix(_BLOCK_PREFIX))
-                )
-                # 옛 블록이 그새 시작/완료/취소됐거나 사라졌으면 이 항목은 통째 skip(보존).
-                if old is None or old.block_status != "scheduled":
-                    skipped += 1
+            old_ids = [
+                UUID(str(x).removeprefix(_BLOCK_PREFIX))
+                for x in old_map.get(f"{_ACTION_PREFIX}{action_id}", [])
+            ]
+            if old_ids:  # 교체 경로 — 옛 블록 집합을 재조정
+                # 취소 전에 옛 블록을 **모두** 먼저 로드(autoflush 로 앞 취소가 뒤 조회에 새는
+                # 것 방지). 하나라도 시작/완료면 액션 전체 보존.
+                olds = [await block_repo.get_block(user.id, bid) for bid in old_ids]
+                present = [o for o in olds if o is not None]
+                if any(o.block_status in ("started", "finished") for o in present):
+                    skipped += n
                     continue
-                old.block_status = "cancelled"
-                cancelled += 1
+                active = [o for o in present if o.block_status == "scheduled"]
+                # 활성 옛 블록이 하나도 없으면(그새 전부 취소·삭제) 중복 방지로 skip.
+                if not active:
+                    skipped += n
+                    continue
+                for o in active:
+                    o.block_status = "cancelled"
+                    cancelled += 1
             elif await block_repo.list_by_action_item(user.id, action_id):
                 # 백로그인데 그새 활성 블록이 생겼으면 중복 방지로 skip.
-                skipped += 1
+                skipped += n
                 continue
-            await block_repo.create_block(
-                user_id=user.id,
-                action_item_id=action_id,
-                start_at=datetime.fromisoformat(str(b["start"])),
-                end_at=datetime.fromisoformat(str(b["end"])),
-                source="ai_plan",
-            )
-            created += 1
+            # 이 액션의 새 세션 블록을 전부 생성.
+            for nb in new_blocks:
+                await block_repo.create_block(
+                    user_id=user.id,
+                    action_item_id=action_id,
+                    start_at=datetime.fromisoformat(str(nb["start"])),
+                    end_at=datetime.fromisoformat(str(nb["end"])),
+                    source="ai_plan",
+                )
+                created += 1
 
         await draft_repo.mark_approved(draft, approved_at=now_kst())
         await session.commit()

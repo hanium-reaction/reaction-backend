@@ -153,8 +153,9 @@ class FirstPlanResponse(DraftMixin):
 class ReplanBlockPreview(CamelModel):
     """재계획 미리보기 블록 — 기존 ActionItem 에 연결(actionId). 시각은 KST.
 
-    `replacesBlockId` 는 이 새 블록이 '교체하는 옛 미래 블록' id(있으면). approve 가 그 블록만
-    현재 DB 상태로 재조정 취소한다(blanket-cancel 없이, #117) — 없으면 미배치 백로그.
+    `replacesBlockId` 는 이 새 블록이 교체하는 옛 미래 블록의 **대표 id**(미리보기용, 없으면
+    백로그라 null). 실제 승인 재조정은 payload 의 `oldBlocks`(액션당 옛 블록 **전부**)를 권위로
+    삼아 액션 단위로 취소·생성한다 — 한 액션이 여러 세션으로 쪼개진 경우까지 정확히(#117).
     """
 
     action_id: str  # action_<uuid>
@@ -162,7 +163,7 @@ class ReplanBlockPreview(CamelModel):
     category: str
     start: KstDatetime
     end: KstDatetime
-    replaces_block_id: str | None = None  # block_<uuid> | null (백로그)
+    replaces_block_id: str | None = None  # block_<uuid> 대표 1개 | null (백로그)
 
 
 class ReplanResponse(DraftMixin):

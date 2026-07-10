@@ -127,6 +127,7 @@ def _seed_replan_draft(
     *,
     blocks: list[dict[str, Any]],
     status: str = "draft",
+    old_blocks: dict[str, list[str]] | None = None,
 ) -> str:
     d = PlanDraft()
     d.id = uuid4()
@@ -135,11 +136,21 @@ def _seed_replan_draft(
     d.target_date = WINDOW_START
     d.horizon = "2026-07-17"
     d.ai_source = "rule"
+    # oldBlocks(재조정 권위 맵): 미지정이면 블록의 replacesBlockId 에서 액션당 파생.
+    if old_blocks is None:
+        old_blocks = {}
+        for b in blocks:
+            rid = b.get("replacesBlockId")
+            if rid:
+                lst = old_blocks.setdefault(b["actionId"], [])
+                if rid not in lst:
+                    lst.append(rid)
     d.payload = {
         "kind": "replan",
         "window_start": WINDOW_START.isoformat(),
         "horizon": "2026-07-17",
         "blocks": blocks,
+        "oldBlocks": old_blocks,
         "warnings": [],
     }
     d.expires_at = FROZEN_NOW + timedelta(days=1)
@@ -518,6 +529,150 @@ def test_first_plan_approve_rejects_replan_draft(
     resp = client.post(f"/plans/{draft_id}/approve")
     assert resp.status_code == 404, resp.text
     assert resp.json()["code"] == "PLAN_DRAFT_NOT_FOUND"
+
+
+def test_approve_replaces_all_split_session_blocks(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_plan_draft_repo: FakePlanDraftRepo,
+) -> None:
+    """분할(다중 세션): 옛 블록 2개 + 새 세션 2개 → 옛 것 **전부** 취소·새 것 **전부** 생성.
+
+    #115 스케줄러가 긴 액션을 여러 세션으로 쪼갠 경우. 액션당 옛 블록 1개만 재조정하면
+    나머지가 유령으로 남거나(중복) 새 세션이 드롭(손실)되던 리뷰 지적을 봉합.
+    """
+    _freeze_now(monkeypatch)
+    action_a = _seed_action(fake_action_item_repo, title="긴 작업")
+    b1 = _seed_block(
+        fake_scheduled_block_repo,
+        action_id=action_a.id,
+        start=_kst(2026, 7, 15, 10, 0),
+        end=_kst(2026, 7, 15, 10, 50),
+    )
+    b2 = _seed_block(
+        fake_scheduled_block_repo,
+        action_id=action_a.id,
+        start=_kst(2026, 7, 15, 11, 0),
+        end=_kst(2026, 7, 15, 11, 50),
+    )
+    draft_id = _seed_replan_draft(
+        fake_plan_draft_repo,
+        old_blocks={f"action_{action_a.id}": [f"block_{b1.id}", f"block_{b2.id}"]},
+        blocks=[
+            _pblock(
+                action_id=action_a.id,
+                start=_kst(2026, 7, 14, 8, 0),
+                end=_kst(2026, 7, 14, 8, 50),
+                replaces=b1.id,
+            ),
+            _pblock(
+                action_id=action_a.id,
+                start=_kst(2026, 7, 14, 9, 0),
+                end=_kst(2026, 7, 14, 9, 50),
+                replaces=b1.id,
+            ),
+        ],
+    )
+
+    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (2, 2, 0)
+    # 옛 블록 둘 다 취소(유령 없음), 새 scheduled 세션 2개.
+    assert fake_scheduled_block_repo._blocks[b1.id].block_status == "cancelled"
+    assert fake_scheduled_block_repo._blocks[b2.id].block_status == "cancelled"
+    new = [
+        b
+        for b in fake_scheduled_block_repo._blocks.values()
+        if b.action_item_id == action_a.id and b.block_status == "scheduled"
+    ]
+    assert len(new) == 2
+
+
+def test_approve_preserves_split_action_when_one_session_started(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_plan_draft_repo: FakePlanDraftRepo,
+) -> None:
+    """분할 액션의 한 세션이 그새 started 면 액션 **전체 보존**(취소·생성 skip)."""
+    _freeze_now(monkeypatch)
+    action_a = _seed_action(fake_action_item_repo, title="긴 작업")
+    b1 = _seed_block(
+        fake_scheduled_block_repo,
+        action_id=action_a.id,
+        start=_kst(2026, 7, 15, 10, 0),
+        end=_kst(2026, 7, 15, 10, 50),
+        status="started",
+    )
+    b2 = _seed_block(
+        fake_scheduled_block_repo,
+        action_id=action_a.id,
+        start=_kst(2026, 7, 15, 11, 0),
+        end=_kst(2026, 7, 15, 11, 50),
+    )
+    draft_id = _seed_replan_draft(
+        fake_plan_draft_repo,
+        old_blocks={f"action_{action_a.id}": [f"block_{b1.id}", f"block_{b2.id}"]},
+        blocks=[
+            _pblock(
+                action_id=action_a.id,
+                start=_kst(2026, 7, 14, 8, 0),
+                end=_kst(2026, 7, 14, 8, 50),
+                replaces=b1.id,
+            ),
+            _pblock(
+                action_id=action_a.id,
+                start=_kst(2026, 7, 14, 9, 0),
+                end=_kst(2026, 7, 14, 9, 50),
+                replaces=b1.id,
+            ),
+        ],
+    )
+
+    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 0, 2)
+    # 착수한 액션은 옛 블록 둘 다 그대로 보존.
+    assert fake_scheduled_block_repo._blocks[b1.id].block_status == "started"
+    assert fake_scheduled_block_repo._blocks[b2.id].block_status == "scheduled"
+
+
+def test_generate_captures_all_split_old_blocks(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_plan_draft_repo: FakePlanDraftRepo,
+) -> None:
+    """generate: 한 액션에 미래 scheduled 블록이 2개면 oldBlocks 맵이 **둘 다** 담아야 한다."""
+    _freeze_now(monkeypatch)
+    action_a = _seed_action(fake_action_item_repo, title="A")
+    b1 = _seed_block(
+        fake_scheduled_block_repo,
+        action_id=action_a.id,
+        start=_kst(2026, 7, 15, 10, 0),
+        end=_kst(2026, 7, 15, 10, 50),
+    )
+    b2 = _seed_block(
+        fake_scheduled_block_repo,
+        action_id=action_a.id,
+        start=_kst(2026, 7, 16, 10, 0),
+        end=_kst(2026, 7, 16, 10, 50),
+    )
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    # 응답엔 대표 1개만 노출되지만, 저장된 draft payload 의 oldBlocks 는 둘 다 담아야 한다.
+    draft = next(iter(fake_plan_draft_repo._items.values()))
+    old_map = draft.payload["oldBlocks"]
+    key = f"action_{action_a.id}"
+    assert key in old_map
+    assert {f"block_{b1.id}", f"block_{b2.id}"} == set(old_map[key])
 
 
 def test_approve_idempotent_when_already_approved(

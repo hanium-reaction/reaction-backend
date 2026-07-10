@@ -15,6 +15,7 @@
 - 기존 goal/node/action **재사용**(새 목표 트리 생성 없음) — additive endpoint 라 기존 계약 불변. 신규 에러코드 없음(409 `AGENT_CONCURRENT_ACCESS` / 410 `PLAN_DRAFT_EXPIRED` / 404 `PLAN_DRAFT_NOT_FOUND` 재사용)
 - 지평 붕괴 방지: 미래 블록이 없고 backlog `target_date` 가 전부 과거/None 이면 지평이 `windowStart` 하루로 축소돼 next Monday 에 몰리던 문제 → **최소 한 주(다음 주 월~일)** 로 분산. 먼 미래 backlog 는 스캔 창(1년)으로 상한
 - ⚠️ 방어: **재계획 Draft 를 First Plan 승인(`POST /plans/{planId}/approve`)에 넣으면** 이전엔 `payload["outcome"]` KeyError→500 이었으나, 이제 404 `PLAN_DRAFT_NOT_FOUND` 로 안내(전용 `POST /plans/replan/{planId}/approve` 사용). approve 시 action 이 그새 아카이브(#113 supersede)됐으면 좀비 블록 방지로 skip
+- **다중 세션 재조정**(리뷰 대응): #115 스케줄러가 긴 액션을 여러 세션 블록으로 쪼개므로, 재조정을 개별 블록이 아니라 **액션당 옛 블록 '집합'(payload `oldBlocks`)** 단위로 처리. 옛 블록 1개만 잡으면 나머지가 유령으로 남거나(중복) 새 세션이 드롭(손실)되던 것을 봉합 — 액션당 활성 옛 블록 전부 취소 + 새 세션 블록 전부 생성(하나라도 started/finished 면 액션 전체 보존). `replacesBlockId` 는 미리보기용 대표 1개로 남음
 
 ## v1.19 — 2026-07-08 (Inbox 보관함 조회·복원 + 승격 대상 구분)
 
