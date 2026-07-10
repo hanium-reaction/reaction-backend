@@ -209,7 +209,11 @@ async def generate_recovery_proposals(
             then_clause=texts[top.strategy_type],
             rationale="",
         ),
-        timeout=8.0,
+        # 회복 personalize 는 템플릿 한 문장을 맥락에 맞게 다듬는 가벼운 작업이라 thinking 불필요.
+        # thinking 을 끄지 않으면 상위 모델(flash-latest)이 SDK 기본 추론으로 8s 를 넘겨 매번
+        # timeout→룰 폴백됐다(회복 카드가 항상 템플릿). thinking 0 으로 빠르게 + timeout 여유.
+        thinking_budget=0,
+        timeout=12.0,
         variables={
             "failure_type": ", ".join(failure_tags) if failure_tags else "UNKNOWN",
             "confidence": "n/a",
