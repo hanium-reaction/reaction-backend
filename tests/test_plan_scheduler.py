@@ -12,6 +12,8 @@ from reaction_backend.orchestrator.first_plan import _schedule_end
 from reaction_backend.orchestrator.goal_structuring import (
     BusyBlock,
     TimeInterval,
+    _parse_hhmm,
+    compute_free_blocks,
     time_policies_to_busy,
 )
 from reaction_backend.orchestrator.plan_scheduler import (
@@ -281,3 +283,50 @@ def test_schedule_end_horizon_uses_deadline() -> None:
 
 def test_schedule_end_horizon_without_deadline_is_single_day() -> None:
     assert _schedule_end(date(2026, 7, 8), None, "horizon") == date(2026, 7, 8)
+
+
+# ── 자정(24:00) 시각 파싱 — "밤 12시까지" 활동창이 500 으로 죽던 버그 ──────────────
+
+
+def test_parse_hhmm_accepts_2400_as_end_of_day() -> None:
+    """'24:00'(자정)은 time 이 못 담으므로 그날의 마지막 순간(time.max)으로 표현."""
+    assert _parse_hhmm("24:00") == time.max  # 23:59:59.999999
+    assert _parse_hhmm("09:30") == time(9, 30)
+    assert _parse_hhmm("00:00") == time(0, 0)
+
+
+def test_parse_hhmm_rejects_other_out_of_range() -> None:
+    """24:00 만 특례 — 24:30·25:00 등 진짜 무효값은 여전히 ValueError."""
+    import pytest
+
+    for bad in ("24:30", "25:00", "9am", "10"):
+        with pytest.raises(ValueError):
+            _parse_hhmm(bad)
+
+
+def _sleep_policy(start_hhmm: str, end_hhmm: str) -> object:
+    return type(
+        "P",
+        (),
+        {
+            "policy_type": "sleep",
+            "payload": {"start_time": start_hhmm, "end_time": end_hhmm},
+            "is_active": True,
+        },
+    )()
+
+
+def test_activity_window_until_midnight_does_not_crash() -> None:
+    """활동창 09:00~24:00(밤 12시) → 수면정책 start_time='24:00' 이어도 500 없이 배치.
+
+    회귀: `_parse_hhmm('24:00')` 이 ValueError 를 던져 계획 생성이 통째로 500 이던 버그.
+    자정까지 활동창이면 free 구간이 09:00~자정 근처로 잡혀야 한다.
+    """
+    # 활동창 [09:00, 24:00) 밖 = 수면 [24:00 → 09:00] (start=활동종료, end=활동시작).
+    busy = time_policies_to_busy(START, [_sleep_policy("24:00", "09:00")])
+    free = compute_free_blocks(START, busy)
+    assert free, "자정까지 활동창이면 free 구간이 있어야 한다"
+    # free 최대 구간은 09:00 에 시작해 그날 끝 근처까지.
+    span = max(free, key=lambda iv: iv.duration_minutes)
+    assert span.start.time() == time(9, 0)
+    assert span.end.time() >= time(23, 59)
