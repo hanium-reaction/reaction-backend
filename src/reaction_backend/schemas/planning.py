@@ -94,6 +94,9 @@ class FirstPlanGenerateRequest(CamelModel):
     # 배치 범위: "horizon"(기본, 마감까지 전 구간 — 실행이 마감 전 여러 날에 분배되고, 주간
     # 재계획이 이후를 다시 씀) | "week"(target_date 가 속한 달력 주만 — 가벼운 단기 계획).
     scope: Literal["week", "horizon"] = "horizon"
+    # 계획 분량(밀도) — 사용자가 재생성 시 조절. 분해(LLM) 프롬프트에 '주당 목표 세션 수'로
+    # 전달돼 생성되는 action_item 수의 하한 가이드가 된다. light≈3 / standard≈5 / intense≈8 세션/주.
+    density: Literal["light", "standard", "intense"] = "standard"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
