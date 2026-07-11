@@ -48,6 +48,7 @@ from reaction_backend.orchestrator import (
     interview,
     interview_adapter,
     interview_runner,
+    profile_memory,
 )
 from reaction_backend.orchestrator._common import user_agent_lock
 from reaction_backend.orchestrator.interview import InterviewState
@@ -368,6 +369,11 @@ async def submit_answer(
                 await first_plan_adapter.materialize_goals(
                     session, user_id=user.id, core_goals=result.outcome.core_goals
                 )
+                # 지속형 선호(에너지/톤/시간/회복)를 프로필 메모리에 영속 (#A-1) — 그동안 첫
+                # 계획에만 쓰이고 버려지던 Policy Snapshot 레이어를 채운다. 설정에서 편집(#A-2).
+                await profile_memory.persist_profile_from_outcome(
+                    session, user=user, outcome=result.outcome
+                )
             await session.commit()
             return _response(
                 row.id,
@@ -429,6 +435,11 @@ async def finish_session(
             ambiguity_final=result.state["ambiguity_score"],
             used_fallback=result.state["used_fallback"],
         )
+        # 조기 종료([충분해요])도 지속형 선호를 프로필 메모리에 영속 (#A-1).
+        if result.outcome is not None:
+            await profile_memory.persist_profile_from_outcome(
+                session, user=user, outcome=result.outcome
+            )
         await session.commit()
         return _response(
             row.id, result.state, end_reason=reason, summary=result.summary, outcome=result.outcome

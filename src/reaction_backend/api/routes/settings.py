@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from datetime import time
 from http import HTTPStatus
 from typing import Annotated
 
@@ -26,6 +27,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
 from reaction_backend.auth.confirm import issue_confirmation_token, verify_confirmation_token
+from reaction_backend.db.models.behavioral_profile import BehavioralProfile
+from reaction_backend.db.models.interaction_style import InteractionStyle
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.user import User
 from reaction_backend.db.models.user_consent import UserConsent
@@ -36,6 +39,7 @@ from reaction_backend.repositories.notification_repo import (
     get_notification_repo,
 )
 from reaction_backend.repositories.privacy_repo import PrivacyRepo, get_privacy_repo
+from reaction_backend.repositories.profile_repo import ProfileRepo, get_profile_repo
 from reaction_backend.repositories.user_repo import UserRepo, get_user_repo
 from reaction_backend.safety.encryption import ANONYMIZED_SENTINEL
 from reaction_backend.schemas.common import now_kst
@@ -43,10 +47,14 @@ from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.settings import (
     AnonymizeRequest,
     AnonymizeResponse,
+    BehavioralProfileView,
     ConsentCreateRequest,
     ConsentItem,
     ConsentListResponse,
+    InteractionStyleView,
     NotificationSummary,
+    ProfileResponse,
+    ProfileUpdateRequest,
     SettingsResponse,
     ToneModeUpdateRequest,
 )
@@ -55,6 +63,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 router_privacy = APIRouter(prefix="/privacy", tags=["privacy"])
 
 NotifRepoDep = Annotated[NotificationRepo, Depends(get_notification_repo)]
+ProfileRepoDep = Annotated[ProfileRepo, Depends(get_profile_repo)]
 UserRepoDep = Annotated[UserRepo, Depends(get_user_repo)]
 ConsentRepoDep = Annotated[ConsentRepo, Depends(get_consent_repo)]
 PrivacyRepoDep = Annotated[PrivacyRepo, Depends(get_privacy_repo)]
@@ -110,6 +119,94 @@ async def update_tone_mode(
     setting = await notif_repo.get_by_user(user.id)
     await session.commit()
     return _to_settings(user, setting)
+
+
+# ───── 프로필 메모리 (Policy Snapshot 레이어) — #A-1·A-2 ─────
+
+
+def _hhmm(value: time | None) -> str | None:
+    return value.strftime("%H:%M") if value is not None else None
+
+
+def _behavioral_view(row: BehavioralProfile | None) -> BehavioralProfileView | None:
+    if row is None:
+        return None
+    return BehavioralProfileView(
+        energy_cycle=row.energy_cycle,  # type: ignore[arg-type]
+        attention_span=row.attention_span,
+        time_chunk_preference=row.time_chunk_preference,  # type: ignore[arg-type]
+        preferred_start_time=_hhmm(row.preferred_start_time),
+        preferred_end_time=_hhmm(row.preferred_end_time),
+    )
+
+
+def _interaction_view(row: InteractionStyle | None) -> InteractionStyleView | None:
+    if row is None:
+        return None
+    return InteractionStyleView(
+        recovery_tone=row.recovery_tone,  # type: ignore[arg-type]
+        suggestion_style=row.suggestion_style,  # type: ignore[arg-type]
+        explanation_depth=row.explanation_depth,  # type: ignore[arg-type]
+        reminder_frequency=row.reminder_frequency,  # type: ignore[arg-type]
+    )
+
+
+async def _profile_response(user: User, repo: ProfileRepo) -> ProfileResponse:
+    fmp = user.focus_mode_preferences or {}
+    return ProfileResponse(
+        behavioral=_behavioral_view(await repo.get_behavioral(user.id)),
+        interaction=_interaction_view(await repo.get_interaction(user.id)),
+        downscope_unit_min=fmp.get("downscope_unit_min"),
+        rest_ok=fmp.get("rest_ok"),
+    )
+
+
+@router.get("/profile")
+async def get_profile(user: CurrentUser, repo: ProfileRepoDep) -> ProfileResponse:
+    """지속형 프로필 메모리 — 에너지/시간(behavioral) + 톤/빈도(interaction) + 회복 선호.
+
+    인터뷰가 아직 안 채웠으면 해당 항목 null (행/키를 생성하지 않는다).
+    """
+    return await _profile_response(user, repo)
+
+
+@router.patch("/profile")
+async def update_profile(
+    body: ProfileUpdateRequest,
+    user: CurrentUser,
+    repo: ProfileRepoDep,
+    session: SessionDep,
+) -> ProfileResponse:
+    """프로필 메모리 부분 수정 — 지정 필드만 갱신(미지정 유지). 행/키 없으면 생성.
+
+    enum 검증은 스키마 Literal (그 외 값 → 422 `COMMON_VALIDATION_ERROR`).
+    회복 선호(downscopeUnitMin·restOk)는 `users.focus_mode_preferences`(JSONB)에 병합 저장.
+    """
+    behavioral_fields = {
+        "energy_cycle": body.energy_cycle,
+        "attention_span": body.attention_span,
+        "time_chunk_preference": body.time_chunk_preference,
+    }
+    interaction_fields = {
+        "recovery_tone": body.recovery_tone,
+        "suggestion_style": body.suggestion_style,
+        "explanation_depth": body.explanation_depth,
+        "reminder_frequency": body.reminder_frequency,
+    }
+    if any(v is not None for v in behavioral_fields.values()):
+        await repo.upsert_behavioral(user.id, fields=behavioral_fields)
+    if any(v is not None for v in interaction_fields.values()):
+        await repo.upsert_interaction(user.id, fields=interaction_fields)
+    if body.downscope_unit_min is not None or body.rest_ok is not None:
+        fmp = dict(user.focus_mode_preferences or {})
+        if body.downscope_unit_min is not None:
+            fmp["downscope_unit_min"] = body.downscope_unit_min
+        if body.rest_ok is not None:
+            fmp["rest_ok"] = body.rest_ok
+        user.focus_mode_preferences = fmp  # 새 dict 재대입 → JSONB 변경 감지
+    await session.commit()
+
+    return await _profile_response(user, repo)
 
 
 # ───── S28 Privacy — Issue #23-B ─────
