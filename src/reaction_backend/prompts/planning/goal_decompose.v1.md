@@ -13,6 +13,11 @@
 목표를 goal_node 트리 (root → branch → leaf) 와 leaf 별 action_item 목록으로 분해하라.
 
 규칙:
+- 분량(중요): 이 목표를 **주당 약 {{sessions_per_week}}개의 실행 세션(action_item)** 이 나오도록
+  충분히 분해하라. 호라이즌이 여러 주에 걸치면 그 주 수에 비례해 더 많이 만든다
+  (예: 주당 {{sessions_per_week}}개 × 남은 주 수). 각 세션은 서로 다른 구체 작업이어야 하고
+  (같은 내용 반복 나열 금지), 쉬움→어려움·준비→적용의 자연스러운 진행 순서를 따른다.
+  다만 목표 자체가 그만큼의 분량이 안 되면 억지로 채우지 말고 policy_violations 에 사유를 남겨라.
 - Focus 카드 최대 3, Maintain 최대 5 — 초과 금지.
 - 각 leaf 는 60분 이내. 60분 초과면 더 잘게 나눠라.
 - action_item 은 SMART (Specific, Measurable, Actionable). "공부하기" 금지.

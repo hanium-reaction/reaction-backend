@@ -178,6 +178,56 @@ def test_context_from_outcome_builds_prompt_vars() -> None:
     assert ctx["prompt_vars"]["horizon"] == "2026-06-20"
     assert "활동: 09:00~23:00" in ctx["prompt_vars"]["time_policy_summary"]
     assert ctx["horizon"] == "2026-06-20"
+    # density 미지정 시 표준(5세션/주)이 프롬프트 변수로 실린다.
+    assert ctx["prompt_vars"]["sessions_per_week"] == "5"
+
+
+def test_density_maps_to_sessions_per_week() -> None:
+    """계획 분량 프리셋(density) → decompose 프롬프트의 '주당 세션 수' 하한."""
+    assert first_plan_adapter.sessions_per_week_for("light") == 3
+    assert first_plan_adapter.sessions_per_week_for("standard") == 5
+    assert first_plan_adapter.sessions_per_week_for("intense") == 8
+    assert first_plan_adapter.sessions_per_week_for("bogus") == 5  # 폴백=표준
+
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_density",
+        slot_answers=SLOT_ANSWERS,
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    for density, expected in (("light", "3"), ("standard", "5"), ("intense", "8")):
+        ctx = first_plan_adapter.context_from_outcome(outcome, density=density)
+        assert ctx["prompt_vars"]["sessions_per_week"] == expected
+
+
+def test_daily_cap_scales_with_density() -> None:
+    """하루 집중 총량 상한(분)도 density 에 연동 — standard 는 기존 기본값."""
+    assert first_plan_adapter.daily_cap_for("light") == 120
+    assert first_plan_adapter.daily_cap_for("standard") == 180
+    assert first_plan_adapter.daily_cap_for("intense") == 240
+    assert (
+        first_plan_adapter.daily_cap_for("bogus") == first_plan_adapter.DEFAULT_DAILY_FOCUS_CAP_MIN
+    )
+
+
+def test_rule_fallback_respects_density() -> None:
+    """Gemini 폴백(_rule_decomposition)도 density 만큼 '회차' 세션을 만든다 (빈 계획 방지)."""
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_fbden",
+        slot_answers=SLOT_ANSWERS,
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    for density, n in (("light", 3), ("standard", 5), ("intense", 8)):
+        state = first_plan.initial_state(
+            user_id=uuid4(), outcome=outcome, target_date="2026-06-01", density=density
+        )
+        decomp = first_plan._rule_decomposition(state)
+        assert len(decomp.action_items) == n  # density 만큼 세션
+        assert len(decomp.goal_nodes) == n + 1  # root + n leaves
+        assert all(a.estimated_minutes <= 60 for a in decomp.action_items)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

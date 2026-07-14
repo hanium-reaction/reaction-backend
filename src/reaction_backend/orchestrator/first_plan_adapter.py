@@ -53,12 +53,33 @@ from reaction_backend.schemas.planning import (
 # GoalNodeDraft.node_type(root/branch/leaf, LLM) → goal_nodes.node_type enum(core/subgoal/.../leaf).
 _NODE_TYPE_MAP = {"root": "core", "branch": "subgoal", "leaf": "leaf"}
 
+# 계획 분량(밀도) 프리셋 → decompose 프롬프트에 넘길 '주당 목표 세션 수' 하한.
+# 사용자가 재생성 시 고른 density 를 여기서 구체 숫자로 환원한다(FE 는 라벨만 안다).
+_DENSITY_SESSIONS_PER_WEEK: dict[str, int] = {"light": 3, "standard": 5, "intense": 8}
+_DEFAULT_SESSIONS_PER_WEEK = 5
 
-def context_from_outcome(outcome: InterviewOutcome) -> dict[str, Any]:
+# 하루 집중 총량 상한(분)도 density 에 연동한다. 분해가 세션을 더 만들어도 캡이 그대로면
+# 초과분이 뒷날로만 밀리므로(특히 scope="week"), 사용자가 고른 분량만큼 하루 밀도도 함께 올린다.
+# standard=180 은 기존 기본값(DEFAULT_DAILY_FOCUS_CAP_MIN)과 동일 — 하위호환.
+_DENSITY_DAILY_CAP_MIN: dict[str, int] = {"light": 120, "standard": 180, "intense": 240}
+
+
+def sessions_per_week_for(density: str) -> int:
+    """density 프리셋 → 주당 목표 세션 수. 미지원 값은 표준(5)으로 폴백."""
+    return _DENSITY_SESSIONS_PER_WEEK.get(density, _DEFAULT_SESSIONS_PER_WEEK)
+
+
+def daily_cap_for(density: str) -> int:
+    """density 프리셋 → 하루 집중 총량 상한(분). 미지원 값은 표준(180)으로 폴백."""
+    return _DENSITY_DAILY_CAP_MIN.get(density, DEFAULT_DAILY_FOCUS_CAP_MIN)
+
+
+def context_from_outcome(outcome: InterviewOutcome, *, density: str = "standard") -> dict[str, Any]:
     """InterviewOutcome → First Plan 컨텍스트 dict.
 
     LLM 프롬프트 변수는 모두 문자열로 평탄화한다(`prompts.registry` 의 {{var}} 치환 계약).
     availability / preferences 원본 객체도 함께 실어 룰 스케줄러 어댑터가 재사용.
+    `density` 는 생성 요청에서 온 계획 분량 프리셋 — '주당 세션 수' 하한으로 프롬프트에 전개.
     """
     goals = outcome.core_goals
     heaviest = next((g for g in goals if g.is_heaviest), goals[0])
@@ -72,6 +93,7 @@ def context_from_outcome(outcome: InterviewOutcome) -> dict[str, Any]:
         "horizon": outcome.horizon or "",
         "behavioral_summary": _behavioral_summary(outcome),
         "time_policy_summary": _time_policy_summary(outcome),
+        "sessions_per_week": str(sessions_per_week_for(density)),
     }
 
     return {
