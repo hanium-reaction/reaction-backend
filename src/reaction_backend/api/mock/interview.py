@@ -54,6 +54,13 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
     InterviewSlot(
         "goals.heaviest", "그중 가장 무겁게 느끼는 건 어떤 거예요?", "select", True, "goals"
     ),
+    InterviewSlot(
+        "goals.current_level",
+        "그 목표, 지금 어느 정도까지 해봤어요? (처음이면 '처음이에요' 라고 알려주세요)",
+        "text",
+        True,
+        "goals",
+    ),
     InterviewSlot("goals.deadlines", "마감일이 정해진 게 있어요?", "date_picker", True, "goals"),
     InterviewSlot(
         "goals.why_now", "그건 이번 학기에 꼭 끝내야 하는 이유가 있나요?", "text", False, "goals"

@@ -79,7 +79,7 @@ def test_start_returns_first_question(client: TestClient, monkeypatch: Any) -> N
     assert body["currentQuestion"]["slotKey"] == "identity.role"
     assert body["currentQuestion"]["answerType"] == "chip"
     assert "1학년" in body["currentQuestion"]["options"]  # 카탈로그 보기 매핑
-    assert body["ambiguityScore"] == 13  # 미해결 필수 슬롯 수
+    assert body["ambiguityScore"] == 14  # 미해결 필수 슬롯 수 (goals.current_level 추가 #B)
     assert body["endReason"] is None
 
 
@@ -99,7 +99,7 @@ def test_submit_advances_and_persists(
     assert res.status_code == 200
     body = res.json()
     assert body["currentQuestion"]["slotKey"] == "identity.season"  # 다음 필수 슬롯
-    assert body["ambiguityScore"] == 12  # 하나 채워져 감소
+    assert body["ambiguityScore"] == 13  # 하나 채워져 감소 (필수 14개, #B)
 
     # 영속화 검증 — fake repo 에 세션 1개 + identity.role 답 저장
     assert len(fake_interview_repo._sessions) == 1
@@ -124,7 +124,7 @@ def test_submit_does_not_finish_until_required_slots_are_filled(
 
     assert res.status_code == 200
     body = res.json()
-    assert body["ambiguityScore"] == 12
+    assert body["ambiguityScore"] == 13
     assert body["endReason"] is None
     assert body["currentQuestion"]["slotKey"] == "identity.season"
 
@@ -255,9 +255,9 @@ def test_critical_slot_reask_persists_attempts_across_db(
 
     # 3회차(상한): DB 를 넘어 누적된 시도 → best-effort 채택하고 다음 슬롯으로.
     # 목표가 1개(단일)라 goals.heaviest 가 자동 채워짐 → heaviest 질문을 건너뛰고
-    # 남은 필수 슬롯이 2개 감소, 다음은 goals.deadlines.
+    # 남은 필수 슬롯이 2개 감소, 다음은 goals.current_level (#B — heaviest 다음 슬롯).
     body = answer("goals.list", "그럼 프로젝트 하나 할래")
-    assert body["currentQuestion"]["slotKey"] == "goals.deadlines"
+    assert body["currentQuestion"]["slotKey"] == "goals.current_level"
     assert body["ambiguityScore"] == amb_at_goals - 2  # goals.list + goals.heaviest 충족
 
 

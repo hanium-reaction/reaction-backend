@@ -126,6 +126,7 @@ _CONTEXT_LABELS: dict[str, str] = {
     "identity.season": "학기",
     "goals.list": "목표",
     "goals.heaviest": "가장 무거운 목표",
+    "goals.current_level": "현재 수준",
     "goals.deadlines": "마감",
     "goals.success_image": "이번 주 목표 모습",
     "time.activity_window": "활동 시간대",
