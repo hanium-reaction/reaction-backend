@@ -298,7 +298,11 @@ async def generate_plan(
     async with user_agent_lock(session, user.id, _LOCK_AGENT):
         config = _config(session, user.tone_mode)
         state = first_plan.initial_state(
-            user_id=user.id, outcome=outcome, target_date=target_date, scope=body.scope
+            user_id=user.id,
+            outcome=outcome,
+            target_date=target_date,
+            scope=body.scope,
+            density=body.density,
         )
         # Validation Agent — LLM 분해 전에 Focus≤3 / Maintain≤5 게이트 (LLM 0회, 룰만).
         gate = await first_plan.validate_inputs(state, config)
