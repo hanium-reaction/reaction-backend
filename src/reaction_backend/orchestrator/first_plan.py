@@ -50,6 +50,7 @@ from reaction_backend.repositories.time_policy_repo import TimePolicyRepo
 from reaction_backend.schemas.common import KST, now_kst, to_kst
 from reaction_backend.schemas.interview import InterviewOutcome
 from reaction_backend.schemas.planning import (
+    ActionItemDraft,
     GoalDecomposition,
     GoalNodeDraft,
     PlanReview,
@@ -74,6 +75,8 @@ class FirstPlanState(TypedDict):
     target_date: str  # "YYYY-MM-DD" (KST 기준)
     # 배치 범위: "horizon"(기본, 마감까지 전 구간) | "week"(target_date 가 속한 달력 주만).
     scope: Literal["week", "horizon"]
+    # 계획 분량(밀도) — light/standard/intense. decompose 프롬프트의 '주당 세션 수' 하한으로 전개.
+    density: str
 
     # VALIDATING
     missing_fields: list[str]
@@ -102,12 +105,14 @@ def initial_state(
     outcome: InterviewOutcome,
     target_date: str,
     scope: Literal["week", "horizon"] = "horizon",
+    density: str = "standard",
 ) -> FirstPlanState:
     return FirstPlanState(
         user_id=user_id,
         outcome=outcome,
         target_date=target_date,
         scope=scope,
+        density=density,
         missing_fields=[],
         tier_violation=None,
         planning_context={},
@@ -137,21 +142,49 @@ def _tone_mode(config: RunnableConfig) -> str | None:
 
 
 def _rule_decomposition(state: FirstPlanState) -> GoalDecomposition:
-    """LLM 분해 실패 시 룰: heaviest 목표 1개를 root leaf 로 환원 (#32 에서 정교화)."""
-    return GoalDecomposition(
-        goal_nodes=[
+    """LLM 분해 실패 시 룰 폴백 — heaviest 목표를 density 만큼 균등 '회차' 세션으로 환원.
+
+    Gemini 미가용이라 내용 분해는 못 하지만, 사용자가 고른 분량(density → 주당 세션 수)만큼
+    회차 세션을 만들어 빈 계획으로 떨어지지 않게 한다. category 는 영속화(approve) 시
+    `_normalize_category` 가 enum 으로 정규화한다.
+    """
+    goals = state["outcome"].core_goals
+    heaviest = next((g for g in goals if g.is_heaviest), goals[0])
+    session_count = first_plan_adapter.sessions_per_week_for(state["density"])
+
+    root = GoalNodeDraft(
+        node_id="tmp-root",
+        parent_id=None,
+        title=heaviest.title,
+        node_type="root",
+        order_index=0,
+        is_leaf=False,
+    )
+    nodes = [root]
+    actions: list[ActionItemDraft] = []
+    for i in range(session_count):
+        leaf_id = f"tmp-leaf-{i}"
+        label = f"{heaviest.title} {i + 1}회차"
+        nodes.append(
             GoalNodeDraft(
-                node_id="tmp-root",
-                parent_id=None,
-                title=state["outcome"].core_goals[0].title,
-                node_type="root",
-                order_index=0,
+                node_id=leaf_id,
+                parent_id="tmp-root",
+                title=label,
+                node_type="leaf",
+                order_index=i,
                 is_leaf=True,
             )
-        ],
-        action_items=[],
-        policy_violations=[],
-    )
+        )
+        actions.append(
+            ActionItemDraft(
+                node_id=leaf_id,
+                title=label,
+                estimated_minutes=30,
+                category=heaviest.category,
+                first_step="가장 쉬운 부분부터 5분만 시작하기",
+            )
+        )
+    return GoalDecomposition(goal_nodes=nodes, action_items=actions, policy_violations=[])
 
 
 def _rule_review(state: FirstPlanState) -> PlanReview:
@@ -197,7 +230,9 @@ async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> Firs
         **state,
         "missing_fields": list(outcome.unresolved_slots),
         "tier_violation": violation,
-        "planning_context": first_plan_adapter.context_from_outcome(outcome),
+        "planning_context": first_plan_adapter.context_from_outcome(
+            outcome, density=state["density"]
+        ),
     }
 
 
@@ -378,7 +413,7 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         peak_windows=first_plan_adapter.peak_windows_from_outcome(outcome),
         focus_chunk_min=first_plan_adapter.focus_chunk_min_from_outcome(outcome),
         break_min=first_plan_adapter.break_min_from_outcome(outcome),
-        daily_focus_cap_min=first_plan_adapter.DEFAULT_DAILY_FOCUS_CAP_MIN,
+        daily_focus_cap_min=first_plan_adapter.daily_cap_for(state["density"]),
     )
 
     blocks = [
