@@ -152,6 +152,16 @@ class _FakeResult:
         return self._rows[0]
 
 
+class _FakeNestedTx:
+    """`_FakeSession.begin_nested()` 용 no-op savepoint (프로필 영속 best-effort 가드 #130)."""
+
+    async def __aenter__(self) -> _FakeNestedTx:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False  # 예외 억제 안 함 — 호출부 try/except 가 처리
+
+
 class _FakeSession:
     """라우터가 호출하는 session 인터페이스의 stub.
 
@@ -187,6 +197,10 @@ class _FakeSession:
 
     def add(self, obj: Any) -> None:  # noqa: ARG002
         return None
+
+    def begin_nested(self) -> _FakeNestedTx:
+        # profile persist 가 savepoint 로 감싸므로 fake 도 no-op CM 제공 (#130).
+        return _FakeNestedTx()
 
 
 # ───── 가짜 repository ─────

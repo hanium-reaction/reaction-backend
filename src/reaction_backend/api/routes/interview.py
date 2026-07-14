@@ -29,6 +29,7 @@ mock 스텁을 걷어내고 LangGraph 인터뷰 엔진(`orchestrator/interview*`
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import Annotated, Any, cast
 from uuid import UUID
@@ -42,6 +43,7 @@ from reaction_backend.api.mock.interview import SLOT_CATALOG, InterviewSlot
 from reaction_backend.config import get_settings
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionRow
 from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
+from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
 from reaction_backend.orchestrator import (
     first_plan_adapter,
@@ -64,8 +66,25 @@ from reaction_backend.schemas.interview import (
 
 router = APIRouter(prefix="/interview", tags=["interview"])
 
+logger = logging.getLogger(__name__)
+
 # ADR-0005 §7.6 — Interview 동시성 lock 의 agent 식별자.
 _LOCK_AGENT = "interview"
+
+
+async def _persist_profile_best_effort(session: AsyncSession, *, user: User, outcome: Any) -> None:
+    """지속형 프로필 메모리 영속을 **best-effort** 로 수행 (#130 리뷰).
+
+    프로필 영속은 부가 기능이라 실패해도 인터뷰 완료(finalize)를 막으면 안 된다. savepoint
+    (`begin_nested`)로 감싸 실패 시 프로필 변경만 롤백하고, 같은 트랜잭션의 목표/세션 종결은
+    보존한다(부분 flush 로 세션이 깨진 채 commit 되는 것 방지). 실패는 로깅만 하고 삼킨다.
+    """
+    try:
+        async with session.begin_nested():
+            await profile_memory.persist_profile_from_outcome(session, user=user, outcome=outcome)
+    except Exception:  # noqa: BLE001 — 프로필 영속 실패가 인터뷰 완료를 깨지 않게
+        logger.warning("profile memory persist failed; interview finalize continues", exc_info=True)
+
 
 _CATALOG_BY_KEY: dict[str, InterviewSlot] = {s.slot_key: s for s in SLOT_CATALOG}
 _REQUIRED_KEYS = interview_adapter.REQUIRED_SLOT_KEYS
@@ -371,9 +390,8 @@ async def submit_answer(
                 )
                 # 지속형 선호(에너지/톤/시간/회복)를 프로필 메모리에 영속 (#A-1) — 그동안 첫
                 # 계획에만 쓰이고 버려지던 Policy Snapshot 레이어를 채운다. 설정에서 편집(#A-2).
-                await profile_memory.persist_profile_from_outcome(
-                    session, user=user, outcome=result.outcome
-                )
+                # best-effort: 프로필 영속 실패가 인터뷰 완료를 깨지 않게 (#130 리뷰).
+                await _persist_profile_best_effort(session, user=user, outcome=result.outcome)
             await session.commit()
             return _response(
                 row.id,
@@ -435,11 +453,9 @@ async def finish_session(
             ambiguity_final=result.state["ambiguity_score"],
             used_fallback=result.state["used_fallback"],
         )
-        # 조기 종료([충분해요])도 지속형 선호를 프로필 메모리에 영속 (#A-1).
+        # 조기 종료([충분해요])도 지속형 선호를 프로필 메모리에 영속 (#A-1, best-effort #130).
         if result.outcome is not None:
-            await profile_memory.persist_profile_from_outcome(
-                session, user=user, outcome=result.outcome
-            )
+            await _persist_profile_best_effort(session, user=user, outcome=result.outcome)
         await session.commit()
         return _response(
             row.id, result.state, end_reason=reason, summary=result.summary, outcome=result.outcome
