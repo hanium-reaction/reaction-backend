@@ -40,6 +40,7 @@ SLOT_ANSWERS: dict[str, dict[str, Any] | None] = {
     "identity.major": {"type": "text", "raw": "컴퓨터공학"},
     "goals.list": {"type": "text", "raw": "캡스톤, 토익", "normalized": ["캡스톤", "토익"]},
     "goals.heaviest": {"type": "text", "raw": "캡스톤"},
+    "goals.current_level": {"type": "text", "raw": "기획서 초안까지 씀"},
     "goals.deadlines": {"type": "text", "raw": "2026-06-20"},
     "goals.success_image": {"type": "text", "raw": "데모 동작"},
     "time.activity_window": {"type": "range", "start": "09:00", "end": "23:00"},
@@ -73,6 +74,7 @@ def test_build_outcome_projects_required_slots() -> None:
     assert heaviest.title == "캡스톤"
     assert heaviest.tentative_tier == "focus"
     assert heaviest.deadline == "2026-06-20"
+    assert heaviest.current_level == "기획서 초안까지 씀"  # #B baseline
     assert {g.title for g in outcome.core_goals} == {"캡스톤", "토익"}
     assert outcome.availability.activity_window.start == "09:00"
     assert outcome.availability.peak_window == ["오전", "저녁"]
@@ -180,6 +182,10 @@ def test_context_from_outcome_builds_prompt_vars() -> None:
     assert ctx["horizon"] == "2026-06-20"
     # density 미지정 시 표준(5세션/주)이 프롬프트 변수로 실린다.
     assert ctx["prompt_vars"]["sessions_per_week"] == "5"
+    # 완료 기준(성공 이미지)·카테고리가 decompose 프롬프트에 실린다 (#B — 그동안 버려지던 맥락).
+    assert ctx["prompt_vars"]["success_image"] == "데모 동작"
+    assert ctx["prompt_vars"]["current_level"] == "기획서 초안까지 씀"  # #B baseline 주입
+    assert ctx["prompt_vars"]["category"]  # 비어있지 않음
 
 
 def test_density_maps_to_sessions_per_week() -> None:

@@ -90,6 +90,12 @@ def context_from_outcome(outcome: InterviewOutcome, *, density: str = "standard"
     prompt_vars: dict[str, str] = {
         "goal_title": heaviest.title,
         "why_now": heaviest.why_now or "",
+        # 완료 기준(DoD) — 인터뷰가 goals.success_image 로 이미 수집하나 그동안 decompose 에
+        # 안 실려 버려졌다. 분해가 '무엇을 달성하면 끝인지' 를 알아야 leaf 가 목표에 정렬된다(#B).
+        "success_image": heaviest.success_image or "(미입력)",
+        # 현재 수준(baseline) — 이미 한 단계를 다시 시키지 않도록 분해가 여기서부터 시작한다(#B).
+        "current_level": heaviest.current_level or "처음 시작",
+        "category": heaviest.category,
         "horizon": outcome.horizon or "",
         "behavioral_summary": _behavioral_summary(outcome),
         "time_policy_summary": _time_policy_summary(outcome),

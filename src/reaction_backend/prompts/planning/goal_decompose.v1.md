@@ -2,7 +2,10 @@
 
 입력 목표:
 - 제목: {{goal_title}}
+- 카테고리: {{category}}
 - why_now: {{why_now}}
+- 현재 수준(지금까지 진행): {{current_level}}
+- 완료 기준(성공 이미지): {{success_image}}
 - 마감 / 호라이즌: {{horizon}}
 - behavioral_profile 요약: {{behavioral_summary}}
 - time_policy 요약: {{time_policy_summary}}
@@ -13,6 +16,11 @@
 목표를 goal_node 트리 (root → branch → leaf) 와 leaf 별 action_item 목록으로 분해하라.
 
 규칙:
+- 시작점(중요): **현재 수준** 을 baseline 으로 삼아, 이미 끝낸 단계는 다시 넣지 마라
+  (예: '기본 코드는 안다' → '코드 익히기' 단계 생략). '처음 시작' 이면 입문 단계부터 담는다.
+- 완료 정렬(중요): leaf 들이 모여 **완료 기준(성공 이미지)** 에 도달하도록, 성공 이미지에서
+  역산해 꼭 필요한 단계만 담아라. 완료 기준과 무관한 곁가지는 넣지 말고, 성공 이미지가
+  '(미입력)' 이면 제목·카테고리로 합리적 완료 상태를 가정하라.
 - 분량(중요): 이 목표를 **주당 약 {{sessions_per_week}}개의 실행 세션(action_item)** 이 나오도록
   충분히 분해하라. 호라이즌이 여러 주에 걸치면 그 주 수에 비례해 더 많이 만든다
   (예: 주당 {{sessions_per_week}}개 × 남은 주 수). 각 세션은 서로 다른 구체 작업이어야 하고

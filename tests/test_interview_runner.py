@@ -371,7 +371,7 @@ async def test_single_goal_autofills_heaviest_and_skips(
         "type": "chip",
         "values": ["영어 공부 시작하기"],
     }
-    assert result.state["next_slot_key"] == "goals.deadlines"  # heaviest 는 건너뜀
+    assert result.state["next_slot_key"] == "goals.current_level"  # heaviest 건너뛰고 다음(#B)
 
 
 async def test_multiple_goals_still_asks_heaviest(
