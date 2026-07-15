@@ -8,10 +8,20 @@ from __future__ import annotations
 
 from typing import Literal
 
+from pydantic import Field
+
 from reaction_backend.schemas.common import CamelModel, KstDatetime
 
 # User.TONE_MODE_VALUES 와 동일 — gentle/strict/encouraging.
 ToneMode = Literal["gentle", "strict", "encouraging"]
+
+# ── 프로필 메모리 편집 enum (모델 enum 과 동일) ──
+EnergyCycle = Literal["morning", "afternoon", "evening", "night", "varies"]
+TimeChunk = Literal["10", "20", "30", "60", "90"]
+RecoveryTone = Literal["gentle", "normal", "encouraging"]
+ReminderFrequency = Literal["minimal", "standard", "active"]
+ExplanationDepth = Literal["brief", "normal", "detailed"]
+SuggestionStyle = Literal["soft", "neutral", "firm"]
 
 # user_consents.CONSENT_TYPE_VALUES 와 동일.
 ConsentType = Literal["required", "marketing", "research"]
@@ -49,6 +59,59 @@ class ToneModeUpdateRequest(CamelModel):
     """
 
     tone_mode: ToneMode
+
+
+# ── 프로필 메모리 (Policy Snapshot 레이어) — 조회/편집 (#A-1·A-2) ──
+
+
+class BehavioralProfileView(CamelModel):
+    """behavioral_profiles 의 사용자 편집 대상 필드."""
+
+    energy_cycle: EnergyCycle
+    attention_span: int
+    time_chunk_preference: TimeChunk
+    preferred_start_time: str | None = None  # "HH:MM"
+    preferred_end_time: str | None = None
+
+
+class InteractionStyleView(CamelModel):
+    """interaction_styles 의 사용자 편집 대상 필드."""
+
+    recovery_tone: RecoveryTone
+    suggestion_style: SuggestionStyle
+    explanation_depth: ExplanationDepth
+    reminder_frequency: ReminderFrequency
+
+
+class ProfileResponse(CamelModel):
+    """GET/PATCH /settings/profile — 지속형 프로필 메모리.
+
+    인터뷰가 아직 안 채웠으면 각 항목 null (행 없음).
+    `downscopeUnitMin`/`restOk` 는 회복 선호 — `users.focus_mode_preferences`(JSONB) 출처.
+    """
+
+    behavioral: BehavioralProfileView | None
+    interaction: InteractionStyleView | None
+    downscope_unit_min: int | None = None  # 회복 시 이 분(min) 단위까지 줄이면 해볼 만함
+    rest_ok: bool | None = None  # 회복 시 휴식 제안 수용 여부
+
+
+class ProfileUpdateRequest(CamelModel):
+    """PATCH /settings/profile — 지정 필드만 부분 갱신. 미지정(None)은 유지.
+
+    enum 외 값은 Pydantic Literal → 422 `COMMON_VALIDATION_ERROR`.
+    """
+
+    energy_cycle: EnergyCycle | None = None
+    attention_span: int | None = Field(default=None, ge=5, le=240)
+    time_chunk_preference: TimeChunk | None = None
+    recovery_tone: RecoveryTone | None = None
+    suggestion_style: SuggestionStyle | None = None
+    explanation_depth: ExplanationDepth | None = None
+    reminder_frequency: ReminderFrequency | None = None
+    # 회복 선호 (users.focus_mode_preferences JSONB) — 재인터뷰 없이 편집.
+    downscope_unit_min: int | None = Field(default=None, ge=1, le=120)
+    rest_ok: bool | None = None
 
 
 # ── S28 Privacy — Consent (#23-B) ──

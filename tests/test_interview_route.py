@@ -150,6 +150,34 @@ def test_finish_returns_summary_and_outcome(client: TestClient, monkeypatch: Any
     assert body["outcome"]["analysisSource"] == "llm"  # fallback 없음 → llm
 
 
+def test_profile_persist_failure_does_not_break_finish(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """프로필 영속이 예외를 던져도 인터뷰 완료(finish)는 200 으로 성공한다 (#130 best-effort).
+
+    프로필 메모리 영속은 부가 기능이라, 실패가 절대 안 깨져야 하는 finalize 경로를 막으면 안 된다.
+    """
+    monkeypatch.setattr(aiClient, "run", _stub())
+
+    async def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("profile write blew up")
+
+    monkeypatch.setattr(
+        "reaction_backend.orchestrator.profile_memory.persist_profile_from_outcome", _boom
+    )
+
+    sid = client.post("/interview/sessions").json()["sessionId"]
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.role", "value": ["3학년"], "clientTurn": 1},
+    )
+    res = client.post(f"/interview/sessions/{sid}/finish")
+    assert res.status_code == 200  # 프로필 실패에도 인터뷰 완료 성공
+    body = res.json()
+    assert body["endReason"] == "early_user"
+    assert body["outcome"]["sessionId"] == sid
+
+
 def test_used_fallback_persists_to_analysis_source(client: TestClient, monkeypatch: Any) -> None:
     """이전 턴에 LLM 룰 fallback 이 있었으면, 재조립을 넘어 outcome.analysisSource='rule'.
 
