@@ -429,6 +429,12 @@ async def finish_session(
             ambiguity_final=result.state["ambiguity_score"],
             used_fallback=result.state["used_fallback"],
         )
+        # 조기 종료([충분해요])도 추출한 목표를 영속(#96) — 완료 경로(submit_answer)와 대칭.
+        # 없으면 [충분해요] 로 끝낸 사용자는 목표 분류 화면이 빈 상태가 된다.
+        if result.outcome is not None:
+            await first_plan_adapter.materialize_goals(
+                session, user_id=user.id, core_goals=result.outcome.core_goals
+            )
         await session.commit()
         return _response(
             row.id, result.state, end_reason=reason, summary=result.summary, outcome=result.outcome
