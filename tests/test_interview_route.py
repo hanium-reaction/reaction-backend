@@ -178,6 +178,32 @@ def test_profile_persist_failure_does_not_break_finish(
     assert body["outcome"]["sessionId"] == sid
 
 
+def test_finish_materializes_extracted_goals(client: TestClient, monkeypatch: Any) -> None:
+    """[충분해요] 조기 종료도 추출한 목표를 materialize 한다 (완료 경로 submit_answer 와 대칭).
+
+    회귀: 예전엔 finish_session 에 materialize_goals 가 없어, [충분해요] 로 끝낸 사용자는
+    목표 분류 화면이 빈 상태가 됐다 (사용자 테스트로 발견).
+    """
+    monkeypatch.setattr(aiClient, "run", _stub())
+    seen: dict[str, Any] = {}
+
+    async def _spy(session: Any, *, user_id: Any, core_goals: Any) -> None:
+        seen["called"] = True
+        seen["n"] = len(core_goals)
+
+    monkeypatch.setattr("reaction_backend.orchestrator.first_plan_adapter.materialize_goals", _spy)
+
+    sid = client.post("/interview/sessions").json()["sessionId"]
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "goals.list", "value": "포트폴리오 사이트, 토익", "clientTurn": 1},
+    )
+    res = client.post(f"/interview/sessions/{sid}/finish")
+    assert res.status_code == 200
+    assert seen.get("called") is True  # 조기 종료도 목표 영속 시도
+    assert seen.get("n", 0) >= 1
+
+
 def test_used_fallback_persists_to_analysis_source(client: TestClient, monkeypatch: Any) -> None:
     """이전 턴에 LLM 룰 fallback 이 있었으면, 재조립을 넘어 outcome.analysisSource='rule'.
 
