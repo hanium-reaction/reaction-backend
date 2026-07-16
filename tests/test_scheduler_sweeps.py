@@ -127,4 +127,5 @@ def test_build_scheduler_registers_expected_jobs() -> None:
         "weekly_review",
         "interruption_resolver",
         "expire_drafts",
+        "expire_reflections",
     }

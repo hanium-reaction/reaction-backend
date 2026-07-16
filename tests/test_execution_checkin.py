@@ -563,3 +563,25 @@ def test_reflection_batch_rejects_duplicate_execution(
     )
     assert resp.status_code == 422
     assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"
+
+
+def test_reflection_batch_does_not_resurrect_cancelled_block(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """만료 cron(#20)이 취소한 블록을 stale 한 batch 요청이 finished 로 되살리지 않는다.
+
+    회고 화면을 켜 둔 채 04:00 을 넘기면 cron 이 카드를 보관하고 블록을 cancel 한다. 그 뒤
+    도착한 [모두 완료] 가 블록을 finished 로 덮으면, list_week(archived 를 안 보고 cancelled 만
+    제외)에 유령 블록이 되살아난다.
+    """
+    action = _seed_action(fake_action_item_repo, title="만료 예정 카드")
+    execution_id = _start(client, f"action_{action.id}").json()["executionId"]
+    block = next(iter(fake_execution_repo._blocks.values()))
+    block.block_status = "cancelled"  # cron 이 만료시킨 상태
+
+    resp = _batch(client, [{"executionId": execution_id, "completionStatus": "done"}])
+
+    assert resp.status_code == 200, resp.text
+    assert block.block_status == "cancelled"

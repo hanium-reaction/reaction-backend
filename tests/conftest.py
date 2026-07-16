@@ -984,14 +984,17 @@ class FakeExecutionRepo:
 
     `_executions`/`_failure_tags` 는 FakeRecoveryRepo 와 공유 (fixture에서 주입) —
     체크인→실패태깅→복구생성 E2E 루프 테스트를 위해.
+    `_actions` 는 FakeActionItemRepo 와 공유 (fixture에서 주입) — `expire_unreflected`
+    (#20 만료 cron)가 execution 으로 고른 카드를 action_items 쪽에서 변경하기 때문.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, actions: dict[UUID, ActionItem] | None = None) -> None:
         self._executions: dict[UUID, ExecutionEvent] = {}
         self._failure_tags: dict[UUID, list[str]] = {}
         self._blocks: dict[UUID, ScheduledBlock] = {}
         self._interruptions: dict[UUID, InterruptionEvent] = {}
         self._tag_master: list[FailureReasonTag] = default_failure_tags()
+        self._actions: dict[UUID, ActionItem] = actions if actions is not None else {}
 
     async def get_by_id(self, user_id: UUID, execution_id: UUID) -> ExecutionEvent | None:
         e = self._executions.get(execution_id)
@@ -1119,6 +1122,43 @@ class FakeExecutionRepo:
             and e.plan_start_at >= since
         ]
         return sorted(pending, key=lambda e: e.plan_start_at)
+
+    async def expire_unreflected(self, *, before: datetime, archived_at: datetime) -> int:
+        """실 repo 의 WHERE 를 파이썬 술어로 재현 — `_FakeSession` 은 SQL 을 평가하지 않는다.
+
+        실 구현(`ExecutionRepo.expire_unreflected`)과 조건이 어긋나면 테스트가 거짓 안심을
+        주므로, 조건을 바꿀 땐 양쪽을 함께 고칠 것.
+        """
+        stale_action_ids = {
+            e.action_item_id
+            for e in self._executions.values()
+            if e.completion_status == "in_progress"
+            and max(e.plan_start_at, e.actual_start_at or e.plan_start_at) < before
+        }
+        live_block_action_ids = {
+            b.action_item_id
+            for b in self._blocks.values()
+            if b.block_status in ("scheduled", "started") and b.start_at >= before
+        }
+        expired_ids = [
+            a.id
+            for a in self._actions.values()
+            if a.id in stale_action_ids
+            and a.id not in live_block_action_ids
+            and a.archived_at is None
+            and a.system_failure_reason is None
+        ]
+        for action_id in expired_ids:
+            action = self._actions[action_id]
+            action.system_failure_reason = "reflection_skipped"
+            action.archived_at = archived_at
+        for block in self._blocks.values():
+            if block.action_item_id in expired_ids and block.block_status in (
+                "scheduled",
+                "started",
+            ):
+                block.block_status = "cancelled"
+        return len(expired_ids)
 
 
 class FakeDailyBriefRepo:
@@ -1631,8 +1671,10 @@ def fake_interview_repo() -> FakeInterviewRepo:
 
 
 @pytest.fixture
-def fake_execution_repo() -> FakeExecutionRepo:
-    return FakeExecutionRepo()
+def fake_execution_repo(fake_action_item_repo: FakeActionItemRepo) -> FakeExecutionRepo:
+    # 카드 스토어를 ActionItemRepo 와 공유 — 만료 cron(#20)이 execution 으로 고른 카드를
+    # action_items 쪽에서 변경한다.
+    return FakeExecutionRepo(actions=fake_action_item_repo._items)
 
 
 @pytest.fixture

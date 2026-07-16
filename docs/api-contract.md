@@ -347,7 +347,7 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 | Method | Path | 설명 | 상태 |
 | --- | --- | --- | --- |
-| GET | `/reflection/pending` | 오늘+어제+그제 미체크 카드 (3일 누적) | ✅ #83 |
+| GET | `/reflection/pending` | 오늘+어제+그제 미체크 카드 (3일 누적). 창을 벗어난 카드는 매일 04:00 KST `expire_reflections` cron 이 `system_failure_reason='reflection_skipped'` + soft delete 로 만료하므로 목록에 나타나지 않는다 (#20) | ✅ #83 |
 | POST | `/reflection/batch` | 미체크 카드 일괄 종결 (Idempotency-Key 필수). 트랜잭션 | ✅ #20 |
 | GET | `/reflection/failure-tags` | 13종 마스터 (`is_active=true`) | ✅ #19-B |
 | POST | `/reflection/failure-tags/{executionId}` | 0~2개 태깅 + `memoEncrypted` | ✅ #19-B |
