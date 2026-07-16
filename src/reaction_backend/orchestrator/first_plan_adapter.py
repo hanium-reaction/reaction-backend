@@ -94,7 +94,10 @@ def context_from_outcome(outcome: InterviewOutcome, *, density: str = "standard"
         # 안 실려 버려졌다. 분해가 '무엇을 달성하면 끝인지' 를 알아야 leaf 가 목표에 정렬된다(#B).
         "success_image": heaviest.success_image or "(미입력)",
         # 현재 수준(baseline) — 이미 한 단계를 다시 시키지 않도록 분해가 여기서부터 시작한다(#B).
-        "current_level": heaviest.current_level or "처음 시작",
+        # 미응답은 success_image 와 같은 '(미입력)' 센티넬로 — 슬롯 신설(#B) 이전 세션과 [충분해요]
+        # 조기 종료는 이 슬롯이 비는데, "처음 시작" 으로 채우면 '모름' 이 '입문자' 라는 단정으로
+        # 바뀌어 이미 진도 나간 사용자에게 입문 단계를 다시 시킨다.
+        "current_level": heaviest.current_level or "(미입력)",
         "category": heaviest.category,
         "horizon": outcome.horizon or "",
         "behavioral_summary": _behavioral_summary(outcome),

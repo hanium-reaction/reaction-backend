@@ -188,6 +188,39 @@ def test_context_from_outcome_builds_prompt_vars() -> None:
     assert ctx["prompt_vars"]["category"]  # 비어있지 않음
 
 
+def test_missing_current_level_is_unknown_not_beginner() -> None:
+    """current_level 미응답은 '(미입력)' — '처음 시작' 으로 단정하지 않는다 (#B 리뷰).
+
+    회귀: 슬롯 신설(#B) 이전 세션과 [충분해요] 조기 종료는 goals.current_level 이 빈다.
+    이때 '처음 시작' 을 실으면 프롬프트 규칙("'처음이에요' 면 입문 단계부터")이 발동해,
+    이미 진도 나간 사용자에게 입문 단계를 다시 시키는 계획이 나온다 — 즉 '모름'이 '입문자'로
+    둔갑한다. 미응답은 success_image 와 동일한 '(미입력)' 센티넬로 실려야 한다.
+    """
+    slots = {k: v for k, v in SLOT_ANSWERS.items() if k != "goals.current_level"}
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_5",
+        slot_answers=slots,
+        ambiguity_final=0.4,
+        end_reason="early_user",
+        analysis_source="llm",
+    )
+    assert "goals.current_level" in outcome.unresolved_slots  # 데이터는 '모름' 이라고 말한다
+    ctx = first_plan_adapter.context_from_outcome(outcome)
+    assert ctx["prompt_vars"]["current_level"] == "(미입력)"  # 프롬프트도 '모름' 이라고 말해야
+
+
+def test_every_required_slot_has_a_rule_fallback_question() -> None:
+    """필수 슬롯은 모두 LLM 죽었을 때 쓸 기본 질문을 가져야 한다 (#B 리뷰).
+
+    회귀: #B 가 goals.current_level 을 REQUIRED_SLOT_KEYS 에만 추가하고
+    _DEFAULT_SLOT_QUESTIONS 에는 빠뜨려, LLM 실패 시 그 슬롯에서 "조금만 더 구체적으로
+    알려주실 수 있을까요?" 라는 맥락 없는 질문이 나왔다 (무엇을 묻는지 알 수 없음).
+    슬롯을 새로 추가할 때 이 짝을 강제한다.
+    """
+    missing = set(interview_adapter.REQUIRED_SLOT_KEYS) - set(interview._DEFAULT_SLOT_QUESTIONS)
+    assert not missing, f"필수 슬롯인데 LLM 폴백 질문이 없다: {sorted(missing)}"
+
+
 def test_density_maps_to_sessions_per_week() -> None:
     """계획 분량 프리셋(density) → decompose 프롬프트의 '주당 세션 수' 하한."""
     assert first_plan_adapter.sessions_per_week_for("light") == 3

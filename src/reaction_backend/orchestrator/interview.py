@@ -849,6 +849,7 @@ _DEFAULT_SLOT_QUESTIONS: dict[str, str] = {
     "identity.season": "지금 학기 중이에요, 방학이에요?",
     "goals.list": "지금 머릿속에 있는 일들을 편하게 알려주세요.",
     "goals.heaviest": "그중 가장 무겁게 느끼는 건 어떤 거예요?",
+    "goals.current_level": "그 목표, 지금 어느 정도까지 해봤어요? (처음이면 '처음이에요' 라고 알려주세요)",
     "goals.deadlines": "마감일이 정해진 게 있어요?",
     "goals.success_image": "이번 주 끝에 어떤 모습이면 좋을까요?",
     "time.activity_window": "보통 몇 시부터 몇 시까지 활동해요?",
