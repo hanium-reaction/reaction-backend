@@ -453,8 +453,13 @@ async def finish_session(
             ambiguity_final=result.state["ambiguity_score"],
             used_fallback=result.state["used_fallback"],
         )
-        # 조기 종료([충분해요])도 지속형 선호를 프로필 메모리에 영속 (#A-1, best-effort #130).
+        # 조기 종료([충분해요])도 완료 경로(submit_answer)와 대칭으로 영속한다 — 순서도 동일.
         if result.outcome is not None:
+            # 추출한 목표를 영속(#96). 없으면 [충분해요] 로 끝낸 사용자는 목표 분류 화면이 빈 상태.
+            await first_plan_adapter.materialize_goals(
+                session, user_id=user.id, core_goals=result.outcome.core_goals
+            )
+            # 지속형 선호를 프로필 메모리에 영속 (#A-1, best-effort #130).
             await _persist_profile_best_effort(session, user=user, outcome=result.outcome)
         await session.commit()
         return _response(
