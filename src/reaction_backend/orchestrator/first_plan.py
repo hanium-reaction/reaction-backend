@@ -150,7 +150,9 @@ def _rule_decomposition(state: FirstPlanState) -> GoalDecomposition:
     """
     goals = state["outcome"].core_goals
     heaviest = next((g for g in goals if g.is_heaviest), goals[0])
-    session_count = first_plan_adapter.sessions_per_week_for(state["density"])
+    # LLM 경로와 동일하게, 주당 가용 시간(weekly_hours)이 있으면 그 시간 기반으로 세션 수를 잡고
+    # 없으면 density 프리셋으로 폴백 — 룰 폴백도 사용자의 실제 시간에 맞춘 분량을 낸다.
+    session_count = first_plan_adapter.target_sessions_per_week(state["outcome"], state["density"])
 
     root = GoalNodeDraft(
         node_id="tmp-root",

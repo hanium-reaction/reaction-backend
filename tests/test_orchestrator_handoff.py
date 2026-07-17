@@ -41,6 +41,7 @@ SLOT_ANSWERS: dict[str, dict[str, Any] | None] = {
     "goals.list": {"type": "text", "raw": "캡스톤, 토익", "normalized": ["캡스톤", "토익"]},
     "goals.heaviest": {"type": "text", "raw": "캡스톤"},
     "goals.current_level": {"type": "text", "raw": "기획서 초안까지 씀"},
+    "goals.weekly_time": {"type": "chip", "values": ["6시간"]},
     "goals.deadlines": {"type": "text", "raw": "2026-06-20"},
     "goals.success_image": {"type": "text", "raw": "데모 동작"},
     "time.activity_window": {"type": "range", "start": "09:00", "end": "23:00"},
@@ -75,6 +76,7 @@ def test_build_outcome_projects_required_slots() -> None:
     assert heaviest.tentative_tier == "focus"
     assert heaviest.deadline == "2026-06-20"
     assert heaviest.current_level == "기획서 초안까지 씀"  # #B baseline
+    assert heaviest.weekly_hours == 6  # goals.weekly_time chip "6시간" → 6 (#weekly)
     assert {g.title for g in outcome.core_goals} == {"캡스톤", "토익"}
     assert outcome.availability.activity_window.start == "09:00"
     assert outcome.availability.peak_window == ["오전", "저녁"]
@@ -180,8 +182,9 @@ def test_context_from_outcome_builds_prompt_vars() -> None:
     assert ctx["prompt_vars"]["horizon"] == "2026-06-20"
     assert "활동: 09:00~23:00" in ctx["prompt_vars"]["time_policy_summary"]
     assert ctx["horizon"] == "2026-06-20"
-    # density 미지정 시 표준(5세션/주)이 프롬프트 변수로 실린다.
-    assert ctx["prompt_vars"]["sessions_per_week"] == "5"
+    # weekly_time '6시간' + focus 50분 → 실제 시간 기반 7세션/주 (density 미지정=standard×1.0).
+    assert ctx["prompt_vars"]["sessions_per_week"] == "7"
+    assert ctx["prompt_vars"]["weekly_hours"] == "6시간"
     # 완료 기준(성공 이미지)·카테고리가 decompose 프롬프트에 실린다 (#B — 그동안 버려지던 맥락).
     assert ctx["prompt_vars"]["success_image"] == "데모 동작"
     assert ctx["prompt_vars"]["current_level"] == "기획서 초안까지 씀"  # #B baseline 주입
@@ -222,15 +225,17 @@ def test_every_required_slot_has_a_rule_fallback_question() -> None:
 
 
 def test_density_maps_to_sessions_per_week() -> None:
-    """계획 분량 프리셋(density) → decompose 프롬프트의 '주당 세션 수' 하한."""
+    """주당 가용 시간 미입력 시 — density 프리셋이 '주당 세션 수' 폴백으로 쓰인다."""
     assert first_plan_adapter.sessions_per_week_for("light") == 3
     assert first_plan_adapter.sessions_per_week_for("standard") == 5
     assert first_plan_adapter.sessions_per_week_for("intense") == 8
     assert first_plan_adapter.sessions_per_week_for("bogus") == 5  # 폴백=표준
 
+    # weekly_time 이 없으면 density 프리셋(3/5/8)으로 폴백 (하위호환).
+    no_weekly = {k: v for k, v in SLOT_ANSWERS.items() if k != "goals.weekly_time"}
     outcome = interview_adapter.build_outcome(
         session_id="iv_density",
-        slot_answers=SLOT_ANSWERS,
+        slot_answers=no_weekly,
         ambiguity_final=0.1,
         end_reason="completed",
         analysis_source="llm",
@@ -238,6 +243,28 @@ def test_density_maps_to_sessions_per_week() -> None:
     for density, expected in (("light", "3"), ("standard", "5"), ("intense", "8")):
         ctx = first_plan_adapter.context_from_outcome(outcome, density=density)
         assert ctx["prompt_vars"]["sessions_per_week"] == expected
+
+
+def test_weekly_hours_drives_sessions_over_density() -> None:
+    """주당 가용 시간(#weekly)이 있으면 세션 수를 그 실제 시간으로 산정 + density 로 가감.
+
+    SLOT_ANSWERS: weekly_time '6시간' + focus_duration '50분' → capacity 6*60/50 = 7.2 세션.
+    density 배율: light 0.7 / standard 1.0 / intense 1.3.
+    """
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_weekly",
+        slot_answers=SLOT_ANSWERS,
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    # standard: round(7.2*1.0)=7 — density 프리셋(5)이 아니라 실제 시간 기반.
+    assert first_plan_adapter.target_sessions_per_week(outcome, "standard") == 7
+    assert first_plan_adapter.target_sessions_per_week(outcome, "light") == 5  # round(7.2*0.7)=5
+    assert first_plan_adapter.target_sessions_per_week(outcome, "intense") == 9  # round(7.2*1.3)=9
+    ctx = first_plan_adapter.context_from_outcome(outcome, density="standard")
+    assert ctx["prompt_vars"]["sessions_per_week"] == "7"
+    assert ctx["prompt_vars"]["weekly_hours"] == "6시간"
 
 
 def test_daily_cap_scales_with_density() -> None:
@@ -251,7 +278,11 @@ def test_daily_cap_scales_with_density() -> None:
 
 
 def test_rule_fallback_respects_density() -> None:
-    """Gemini 폴백(_rule_decomposition)도 density 만큼 '회차' 세션을 만든다 (빈 계획 방지)."""
+    """Gemini 폴백(_rule_decomposition)도 LLM 경로와 같은 분량 규칙을 따른다 (빈 계획 방지).
+
+    SLOT_ANSWERS: weekly_time '6시간' + focus '50분' → capacity 7.2 세션, density 로 가감
+    (light 0.7→5 / standard 1.0→7 / intense 1.3→9).
+    """
     outcome = interview_adapter.build_outcome(
         session_id="iv_fbden",
         slot_answers=SLOT_ANSWERS,
@@ -259,7 +290,7 @@ def test_rule_fallback_respects_density() -> None:
         end_reason="completed",
         analysis_source="llm",
     )
-    for density, n in (("light", 3), ("standard", 5), ("intense", 8)):
+    for density, n in (("light", 5), ("standard", 7), ("intense", 9)):
         state = first_plan.initial_state(
             user_id=uuid4(), outcome=outcome, target_date="2026-06-01", density=density
         )

@@ -201,6 +201,8 @@ class GoalCandidate(CamelModel):
     current_level: str | None = (
         None  # goals.current_level — 지금까지 진행한 수준(분해 baseline, #B)
     )
+    # goals.weekly_time — 이 목표에 주당 투입 가능한 시간(시간). 분해 세션 수 산정 기준.
+    weekly_hours: int | None = None
     tentative_tier: Literal["focus", "maintain", "parked"] = "maintain"
     confidence: float = Field(ge=0.0, le=1.0)  # 해당 슬롯 clarity_score
 

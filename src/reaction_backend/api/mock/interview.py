@@ -61,6 +61,15 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
         True,
         "goals",
     ),
+    # 목표별 주당 가용 시간 — 분해가 '얼마나 만들지'를 사용자의 실제 시간에 맞춰 산정한다.
+    InterviewSlot(
+        "goals.weekly_time",
+        "이 목표에 일주일에 몇 시간 정도 쓸 수 있어요?",
+        "chip",
+        True,
+        "goals",
+        options=("2시간", "4시간", "6시간", "8시간 이상"),
+    ),
     InterviewSlot("goals.deadlines", "마감일이 정해진 게 있어요?", "date_picker", True, "goals"),
     InterviewSlot(
         "goals.why_now", "그건 이번 학기에 꼭 끝내야 하는 이유가 있나요?", "text", False, "goals"
@@ -73,7 +82,9 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
         "time.activity_window", "보통 몇 시부터 몇 시까지 활동해요?", "time_range", True, "time"
     ),
     InterviewSlot(
-        "time.fixed_blocks", "매주 고정으로 비워야 하는 시간 있어요?", "text", True, "time"
+        # 필수 아님(#audit): 답이 fixed_block_hints 로만 남고 스케줄러가 소비하지 않아 계획에
+        # 영향이 없다. 실제 고정 일정은 별도 fixed_schedules(S05)로 받으므로 인터뷰 필수에서 제외.
+        "time.fixed_blocks", "매주 고정으로 비워야 하는 시간 있어요?", "text", False, "time"
     ),
     InterviewSlot(
         "time.peak_window",
