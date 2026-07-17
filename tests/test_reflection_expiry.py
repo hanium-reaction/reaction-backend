@@ -398,9 +398,30 @@ class _RecordingSession:
 
 
 def _sql(stmt: object) -> str:
+    """실 statement 를 PostgreSQL SQL 문자열로 — **값까지 인라인**(literal_binds).
+
+    기본 compile 은 값을 `%(completion_status_1)s` 로 감춰서, 단언이 컬럼명만 볼 수 있다.
+    그러면 `completion_status == "in_progress"` 를 `"done"` 으로 바꿔도 통과한다(동어반복).
+    가드는 컬럼이 아니라 **값**이 본질이므로 반드시 인라인해서 검사한다.
+    """
     from sqlalchemy.dialects import postgresql
 
-    return str(stmt.compile(dialect=postgresql.dialect()))  # type: ignore[attr-defined]
+    return str(
+        stmt.compile(  # type: ignore[attr-defined]
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+
+def _where_of(sql: str) -> str:
+    """UPDATE 문의 WHERE 절만 — SET 절에 같은 컬럼명이 있어 오탐하는 것을 막는다.
+
+    예: cancel 쿼리의 `SET block_status='cancelled'` 때문에 `"block_status" in sql` 은 WHERE 를
+    통째로 지워도 참이다. 실제로 그 단언이 뮤테이션을 놓쳤다.
+    """
+    _, _, where = sql.partition(" WHERE ")
+    return where
 
 
 async def test_real_expire_query_keeps_every_data_safety_guard() -> None:
@@ -419,26 +440,42 @@ async def test_real_expire_query_keeps_every_data_safety_guard() -> None:
     assert n == 1
     assert len(session.statements) == 2  # 카드 UPDATE + 블록 취소 UPDATE
     update_sql = _sql(session.statements[0])
+    update_where = _where_of(update_sql)
 
     # 대상은 action_items 이고, 만료 표식 2개를 쓴다.
     assert "UPDATE action_items" in update_sql
-    assert "system_failure_reason" in update_sql and "archived_at" in update_sql
+    assert "system_failure_reason='reflection_skipped'" in update_sql
+    assert f"archived_at='{NOW.isoformat(sep=' ')}'" in update_sql
     # 멱등성의 유일한 방어선 — 없으면 매일 archived_at 이 갱신된다.
-    assert "action_items.archived_at IS NULL" in update_sql
+    assert "action_items.archived_at IS NULL" in update_where
     # 최초 실패 사유 보존.
-    assert "action_items.system_failure_reason IS NULL" in update_sql
-    # 미체크 실행만 — 회고를 마친 카드는 대상이 아니다.
-    assert "execution_events.completion_status" in update_sql
-    # 뒤늦게 착수한 카드를 어제 착수분으로 만료시키지 않는 기준식.
-    assert "greatest(execution_events.plan_start_at, coalesce(" in update_sql
-    # 미래 세션 블록이 남은 분할 카드를 파괴하지 않는 가드 — 반드시 상관 서브쿼리여야 한다.
-    assert "NOT (EXISTS" in update_sql
-    assert "scheduled_blocks.action_item_id = action_items.id" in update_sql
+    assert "action_items.system_failure_reason IS NULL" in update_where
+    # **미체크 실행만** — 값까지 고정한다. 'done' 으로 뒤집히면 cron 이 회고를 마친 카드를
+    # 지우고 정작 미회고 카드는 안 지운다(표적 반전). 컬럼명만 보면 이 뮤테이션이 생존한다.
+    assert "execution_events.completion_status = 'in_progress'" in update_where
+    # 뒤늦게 착수한 카드를 어제 착수분으로 만료시키지 않는 기준식 — 창 경계와 함께 고정.
+    assert (
+        "greatest(execution_events.plan_start_at, "
+        "coalesce(execution_events.actual_start_at, execution_events.plan_start_at)) "
+        f"< '{SINCE.isoformat(sep=' ')}'"
+    ) in update_where
+    # 미래 세션 블록이 남은 분할 카드를 파괴하지 않는 가드 — 상관 서브쿼리 + **창 필터**.
+    # start_at 조건이 빠지면 가드가 '아무 미종결 블록이라도 있으면 보호' 로 넓어져, 체크인을
+    # 잊은 카드가 자기 started 블록 때문에 영영 안 지워진다 = cron 이 통째로 no-op 이 된다.
+    assert "NOT (EXISTS" in update_where
+    assert "scheduled_blocks.action_item_id = action_items.id" in update_where
+    assert "scheduled_blocks.block_status IN ('scheduled', 'started')" in update_where
+    assert f"scheduled_blocks.start_at >= '{SINCE.isoformat(sep=' ')}'" in update_where
 
-    # 블록 취소는 미종결 블록만 — finished 는 실제 수행 이력이라 건드리면 기록이 왜곡된다.
+    # 블록 취소는 **미종결 블록만** — finished 는 실제 수행 이력이라 취소하면 기록이 왜곡된다.
+    # WHERE 만 검사한다: SET 절에도 block_status 가 있어 통짜 검사는 WHERE 를 지워도 통과한다.
     cancel_sql = _sql(session.statements[1])
+    cancel_where = _where_of(cancel_sql)
     assert "UPDATE scheduled_blocks" in cancel_sql
-    assert "block_status" in cancel_sql
+    assert "block_status='cancelled'" in cancel_sql
+    assert "scheduled_blocks.block_status IN ('scheduled', 'started')" in cancel_where
+    # 만료된 카드의 블록만 — 남의 블록을 지우지 않는다.
+    assert "scheduled_blocks.action_item_id IN" in cancel_where
 
 
 async def test_real_pending_and_expiry_share_one_window_expression() -> None:

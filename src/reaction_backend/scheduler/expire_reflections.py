@@ -50,9 +50,13 @@ PENDING_WINDOW_DAYS = 3
 def pending_reflection_since(today: date) -> datetime:
     """회고 누적 창의 시작 경계 (KST 자정).
 
-    **단일 소스** — `GET /reflection/pending` 은 `plan_start_at >= ` 이 값을 노출하고,
-    만료 cron 은 `plan_start_at < ` 이 값을 만료시킨다(정확한 여집합). 두 쪽이 각자
+    **단일 소스** — `GET /reflection/pending` 은 회고 가능 시각이 `>= ` 이 값인 실행을
+    노출하고, 만료 cron 은 `< ` 인 실행의 카드를 만료시킨다(정확한 여집합). 두 쪽이 각자
     계산하면 한쪽만 바뀌었을 때 회고 가능한 카드를 지우거나(데이터 손실) 영영 안 지워진다.
+
+    ⚠️ 경계와 짝을 이루는 **기준식**은 `ExecutionRepo._reflectable_from()`
+    (= `greatest(plan_start_at, actual_start_at)`) 이다. 이 함수는 경계'값'만 정하고,
+    무엇을 그 값과 비교하는지는 저쪽이 정한다 — 양쪽 다 같은 식을 써야 여집합이 성립한다.
 
     라우터가 cron 모듈의 창 경계 함수를 재사용하는 것은 `week_start_of` 와 같은 패턴
     (`scheduler/weekly_review_precompute.py` ← `api/routes/review.py`).
