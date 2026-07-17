@@ -22,6 +22,11 @@ DB/서버 불필요 — `session=None` 으로 호출하므로 budget check·llm_
     # 같은 입력을 3번 — 출력 변동성(일관성) 점검. 프롬프트 튜닝의 핵심.
     uv run python scripts/prompt_lab.py recovery --repeat 3
 
+    # v1 vs v2 A/B 비교 (시나리오별 나란히). 프롬프트 개선 채택 판단용.
+    # recovery 프로덕션 라우트 조건 = thinking 0 + timeout 12s (한 쌍으로 재현할 것)
+    uv run python scripts/prompt_lab.py recovery --compare 1,2 --thinking-budget 0 --timeout 12
+    uv run python scripts/prompt_lab.py recovery --compare 1,2 --show-prompt   # 오프라인 문안 비교
+
     # 키 없이 프롬프트 문안만 보기 (오프라인)
     uv run python scripts/prompt_lab.py brief --show-prompt
 
@@ -73,7 +78,7 @@ class PromptSpec:
     prompt_id: str
     module: str
     schema_path: str  # "reaction_backend.schemas.recovery:RecoveryProposalLLM"
-    fallback_factory: Callable[[type], Any]
+    fallback_factory: Callable[[type, Mapping[str, str]], Any]
     headline_field: str  # 요약 테이블에 보여줄 핵심 필드
     scenarios: list[Scenario] = field(default_factory=list)
 
@@ -87,17 +92,21 @@ def _import_schema(path: str) -> type:
 
 
 # fallback 인스턴스 — 키 없을 때/오류 시 무엇이 사용자에게 가는지 보여준다.
-def _recovery_fallback(schema: type) -> Any:
+# 프로덕션 fallback 은 룰이 고른 top 전략의 **렌더된 카탈로그 템플릿**(routes/recovery.py)이므로,
+# 시나리오가 실은 base_template 를 그대로 쓴다 — 고정 문구를 쓰면 5/6 시나리오에서
+# 사용자가 실제 받는 fallback 과 다른 결과를 보여 튜닝 판단을 오도한다.
+def _recovery_fallback(schema: type, variables: Mapping[str, str]) -> Any:
     return schema(
-        strategy_code="downscope_default",
+        strategy_code=variables.get("strategy_group", "DOWNSCOPE").lower(),
         if_clause="",
-        then_clause="(fallback) 오늘은 절반만, 가능한 만큼만 해볼까요?",
+        then_clause="(fallback) "
+        + variables.get("base_template", "오늘은 절반만, 가능한 만큼만 해볼까요?"),
         rationale="",
         estimated_workload_change_minutes=0,
     )
 
 
-def _inbox_fallback(schema: type) -> Any:
+def _inbox_fallback(schema: type, variables: Mapping[str, str]) -> Any:  # noqa: ARG001
     return schema(
         ai_category_guess="other",
         confidence=0.0,
@@ -106,7 +115,7 @@ def _inbox_fallback(schema: type) -> Any:
     )
 
 
-def _brief_fallback(schema: type) -> Any:
+def _brief_fallback(schema: type, variables: Mapping[str, str]) -> Any:  # noqa: ARG001
     return schema(
         headline_ko="(fallback) 오늘도 한 걸음씩 가봐요. 가장 작은 것부터 시작해요.",
         first_step="가장 작은 카드 하나만 5분",
@@ -129,72 +138,96 @@ SPECS: dict[str, PromptSpec] = {
                 note="막막함 — 어디서 시작할지 모름 → 작게 쪼개는 제안이어야",
                 variables={
                     "failure_type": "AMBIGUITY",
-                    "confidence": "0.82",
+                    "confidence": "n/a",  # 라우트 하드코딩과 정렬 (진단 신뢰도는 미배선)
                     "interruption_summary": "없음",
                     "context_summary": "실행 카드: GROUP BY 실습 / 결과: 못 함, 어디서 시작할지 막막했음",
+                    # 룰 엔진 top: AMBIGUITY → NANO_STEP (프롬프트는 이 전략을 personalize 만 한다)
+                    "strategy_label": "5분 단위로 쪼개기",
+                    "strategy_group": "DOWNSCOPE",
+                    "base_template": "딱 5분만, 첫 단계만 해볼까요? GROUP BY 예제 1문제 열기",
                 },
                 expect_field="strategy_code",
-                expect_starts_with=("nano", "downscope", "context"),
+                expect_starts_with=("nano", "downscope", "5분"),
             ),
             Scenario(
                 name="fatigue",
                 note="피곤/저에너지 → 휴식 후 가볍게 또는 재배치",
                 variables={
                     "failure_type": "FATIGUE, LOW_ENERGY",
-                    "confidence": "0.74",
+                    "confidence": "n/a",  # 라우트 하드코딩과 정렬 (진단 신뢰도는 미배선)
                     "interruption_summary": "없음",
                     "context_summary": "실행 카드: 알고리즘 2문제 / 결과: 너무 피곤해서 시작 못 함",
+                    # 룰 엔진 top: LOW_ENERGY+FATIGUE 2태그 → ACTIVE_RECOVERY
+                    "strategy_label": "산책 후 가볍게",
+                    "strategy_group": "RESCHEDULE",
+                    "base_template": "잠깐 산책 20분 후, 가벼운 정리만 해볼까요?",
                 },
                 expect_field="strategy_code",
-                expect_starts_with=("active", "reschedule", "downscope"),
+                expect_starts_with=("active", "reschedule", "산책"),
             ),
             Scenario(
                 name="conflict",
                 note="일정 충돌 → 재배치",
                 variables={
                     "failure_type": "CONFLICT",
-                    "confidence": "0.69",
-                    "interruption_summary": "갑작스러운 가족 일정",
+                    "confidence": "n/a",  # 라우트 하드코딩과 정렬 (진단 신뢰도는 미배선)
+                    "interruption_summary": "없음",  # 라우트 하드코딩과 정렬
                     "context_summary": "실행 카드: 영어 단어 50개 / 결과: 갑자기 약속이 생겨 못 함",
+                    # 룰 엔진 top: CONFLICT → RESCHEDULE_DEFAULT
+                    "strategy_label": "내일로 옮기기",
+                    "strategy_group": "RESCHEDULE",
+                    "base_template": "내일 잘 되는 시간대로 옮겨드릴까요?",
                 },
                 expect_field="strategy_code",
-                expect_starts_with=("reschedule", "carryover"),
+                expect_starts_with=("reschedule", "내일"),
             ),
             Scenario(
                 name="plan_too_big",
                 note="과대 과제 → 범위 축소",
                 variables={
                     "failure_type": "PLAN_TOO_BIG",
-                    "confidence": "0.88",
+                    "confidence": "n/a",  # 라우트 하드코딩과 정렬 (진단 신뢰도는 미배선)
                     "interruption_summary": "없음",
                     "context_summary": "실행 카드: 캡스톤 보고서 전체 작성 / 결과: 너무 커서 손도 못 댐",
+                    # 룰 엔진 top: PLAN_TOO_BIG → DOWNSCOPE_DEFAULT
+                    "strategy_label": "범위 줄여서 진행",
+                    "strategy_group": "DOWNSCOPE",
+                    "base_template": "오늘은 절반만, 가능한 만큼만 해볼까요?",
                 },
                 expect_field="strategy_code",
-                expect_starts_with=("downscope", "nano"),
+                expect_starts_with=("downscope", "범위"),
             ),
             Scenario(
                 name="context_loss",
                 note="맥락 상실 → 워밍업으로 다시 잡기",
                 variables={
                     "failure_type": "CONTEXT_LOSS",
-                    "confidence": "0.71",
-                    "interruption_summary": "어제 중단 후 하루 경과",
+                    "confidence": "n/a",  # 라우트 하드코딩과 정렬 (진단 신뢰도는 미배선)
+                    "interruption_summary": "없음",  # 라우트 하드코딩과 정렬
                     "context_summary": "실행 카드: ERD 검토 (어제 중단) / 결과: 어디까지 했는지 기억 안 남",
+                    # 룰 엔진 top: CONTEXT_LOSS → CONTEXT_REWARMING
+                    "strategy_label": "맥락 워밍업 5분",
+                    "strategy_group": "DOWNSCOPE",
+                    "base_template": "ERD 검토 (어제 중단) 부터, 5분 워밍업으로 다시 잡아볼까요?",
                 },
                 expect_field="strategy_code",
-                expect_starts_with=("context", "nano"),
+                expect_starts_with=("context", "downscope", "맥락"),
             ),
             Scenario(
                 name="avoidance",
                 note="회피 — 톤이 비난조로 새지 않는지 특히 주의",
                 variables={
                     "failure_type": "AVOIDANCE",
-                    "confidence": "0.6",
+                    "confidence": "n/a",  # 라우트 하드코딩과 정렬 (진단 신뢰도는 미배선)
                     "interruption_summary": "없음",
                     "context_summary": "실행 카드: 발표 연습 / 결과: 계속 미루고 싶었음",
+                    # AVOIDANCE 는 어느 전략의 primary_tags 에도 없음 → 패딩 top = NANO_STEP
+                    "strategy_label": "5분 단위로 쪼개기",
+                    "strategy_group": "DOWNSCOPE",
+                    "base_template": "딱 5분만, 첫 단계만 해볼까요? 발표 대본 첫 문단 소리 내 읽기",
                 },
                 expect_field="strategy_code",
-                expect_starts_with=("nano", "downscope"),
+                expect_starts_with=("nano", "downscope", "5분"),
             ),
         ],
     ),
@@ -306,7 +339,9 @@ async def _call(
     schema: type,
     variables: Mapping[str, str],
     *,
+    prompt_id: str,
     timeout: float,
+    thinking_budget: int | None,
     price_in: float | None,
     price_out: float | None,
 ) -> CallOutcome:
@@ -320,9 +355,10 @@ async def _call(
     result = await aiClient.run(
         module=spec.module,
         schema=schema,
-        prompt_id=spec.prompt_id,
-        fallback=lambda: spec.fallback_factory(schema),
+        prompt_id=prompt_id,
+        fallback=lambda: spec.fallback_factory(schema, variables),
         timeout=timeout,
+        thinking_budget=thinking_budget,
         variables=dict(variables),
         session=None,  # DB/budget/llm_runs 우회 — 순수 프롬프트 실측
     )
@@ -347,12 +383,17 @@ async def _call(
     )
 
 
-def _render_prompt(spec: PromptSpec, variables: Mapping[str, str]) -> tuple[str, str]:
+def _render_prompt(prompt_id: str, variables: Mapping[str, str]) -> tuple[str, str]:
     from reaction_backend.prompts import registry as prompt_registry
 
     prompt_registry.reload()
-    text, tmpl = prompt_registry.render(spec.prompt_id, dict(variables))
+    text, tmpl = prompt_registry.render(prompt_id, dict(variables))
     return text, tmpl.full_id
+
+
+def _resolve_prompt_id(spec: PromptSpec, version: str | None) -> str:
+    """version 지정 시 `<id>@vN` 으로 핀, 없으면 latest."""
+    return spec.prompt_id if version is None else f"{spec.prompt_id}@v{version}"
 
 
 def _field(value: Any, name: str) -> str:
@@ -418,29 +459,55 @@ def _print_outcome(
     print("└" + "─" * 40)
 
 
+def _relabel(scn: Scenario, name: str) -> Scenario:
+    return Scenario(
+        name=name,
+        variables=scn.variables,
+        note=scn.note,
+        expect_field=scn.expect_field,
+        expect_starts_with=scn.expect_starts_with,
+    )
+
+
+def _versions(args: argparse.Namespace) -> list[str | None]:
+    """실행할 버전 목록. --compare 우선, 없으면 --version, 둘 다 없으면 [None]=latest."""
+    if args.compare:
+        return [v.strip() for v in args.compare.split(",") if v.strip()]
+    if args.version:
+        return [args.version]
+    return [None]
+
+
 async def _run_spec(
     spec: PromptSpec,
     args: argparse.Namespace,
 ) -> list[tuple[Scenario, CallOutcome]]:
-    try:
-        schema = _import_schema(spec.schema_path)
-    except (ImportError, AttributeError) as exc:
-        # 예: RecoveryProposalLLM 은 #20-A(PR #53) 머지 후에야 존재. 그 전엔 친절히 안내.
-        print(
-            _c(
-                f"[건너뜀] {spec.key}: schema '{spec.schema_path}' 없음 ({exc}).",
-                YELLOW,
-                on=args.color,
+    versions = _versions(args)
+    multi_ver = len(versions) > 1 or args.version is not None
+
+    # schema 는 실제 호출(LLM) 때만 필요 — --show-prompt 는 렌더만이라 import 안 함.
+    schema: type | None = None
+    if not args.show_prompt:
+        try:
+            schema = _import_schema(spec.schema_path)
+        except (ImportError, AttributeError) as exc:
+            # 예: RecoveryProposalLLM 은 #20-A(PR #53) 머지 후에야 존재. 그 전엔 친절히 안내.
+            print(
+                _c(
+                    f"[건너뜀] {spec.key}: schema '{spec.schema_path}' 없음 ({exc}).",
+                    YELLOW,
+                    on=args.color,
+                )
             )
-        )
-        print(
-            _c(
-                "         해당 PR 머지 후 사용 가능. inbox/brief 는 지금 바로 동작합니다.",
-                DIM,
-                on=args.color,
+            print(
+                _c(
+                    "         해당 PR 머지 후 LLM 호출 가능. --show-prompt 는 지금도 됩니다.",
+                    DIM,
+                    on=args.color,
+                )
             )
-        )
-        return []
+            return []
+
     scenarios = spec.scenarios
     if args.scenario:
         scenarios = [s for s in scenarios if s.name == args.scenario]
@@ -451,53 +518,53 @@ async def _run_spec(
 
     results: list[tuple[Scenario, CallOutcome]] = []
     for scn in scenarios:
-        rendered: str | None = None
-        if args.raw or args.show_prompt:
-            try:
-                rendered, _ = _render_prompt(spec, scn.variables)
-            except Exception as exc:  # noqa: BLE001
-                print(_c(f"[렌더 실패] {scn.name}: {exc}", RED, on=args.color))
+        for ver in versions:
+            prompt_id = _resolve_prompt_id(spec, ver)
+            vtag = f" @v{ver}" if (ver is not None or multi_ver) else ""
+
+            rendered: str | None = None
+            if args.raw or args.show_prompt:
+                try:
+                    rendered, _ = _render_prompt(prompt_id, scn.variables)
+                except Exception as exc:  # noqa: BLE001
+                    print(_c(f"[렌더 실패] {scn.name}{vtag}: {exc}", RED, on=args.color))
+                    continue
+
+            if args.show_prompt:
+                print()
+                print(_c(f"┌─ {scn.name}{vtag} (렌더만) ", BOLD, on=args.color))
+                for line in (rendered or "").splitlines():
+                    print(f"│  {line}")
+                print("└" + "─" * 40)
                 continue
 
-        if args.show_prompt:
-            print()
-            print(_c(f"┌─ {scn.name} (렌더만) ", BOLD, on=args.color))
-            for line in (rendered or "").splitlines():
-                print(f"│  {line}")
-            print("└" + "─" * 40)
-            continue
-
-        # --repeat: 변동성 점검 (fallback 은 결정적이라 1회로 강제)
-        n = max(1, args.repeat)
-        first_outcome: CallOutcome | None = None
-        for i in range(n):
-            outcome = await _call(
-                spec,
-                schema,
-                scn.variables,
-                timeout=args.timeout,
-                price_in=args.price_in,
-                price_out=args.price_out,
-            )
-            if first_outcome is None:
-                first_outcome = outcome
-            label = (
-                scn
-                if n == 1
-                else Scenario(
-                    name=f"{scn.name} #{i + 1}",
-                    variables=scn.variables,
-                    note=scn.note,
-                    expect_field=scn.expect_field,
-                    expect_starts_with=scn.expect_starts_with,
+            assert schema is not None
+            # --repeat: 변동성 점검 (fallback 은 결정적이라 1회로 강제)
+            n = max(1, args.repeat)
+            first_outcome: CallOutcome | None = None
+            for i in range(n):
+                outcome = await _call(
+                    spec,
+                    schema,
+                    scn.variables,
+                    prompt_id=prompt_id,
+                    timeout=args.timeout,
+                    thinking_budget=args.thinking_budget,
+                    price_in=args.price_in,
+                    price_out=args.price_out,
                 )
-            )
-            _print_outcome(spec, label, outcome, color=args.color, raw=args.raw, rendered=rendered)
-            if outcome.source == "FALLBACK" and n > 1:
-                print(_c("   (fallback 은 결정적 — repeat 생략)", DIM, on=args.color))
-                break
-        if first_outcome is not None:
-            results.append((scn, first_outcome))
+                if first_outcome is None:
+                    first_outcome = outcome
+                rep = "" if n == 1 else f" #{i + 1}"
+                label = _relabel(scn, f"{scn.name}{vtag}{rep}")
+                _print_outcome(
+                    spec, label, outcome, color=args.color, raw=args.raw, rendered=rendered
+                )
+                if outcome.source == "FALLBACK" and n > 1:
+                    print(_c("   (fallback 은 결정적 — repeat 생략)", DIM, on=args.color))
+                    break
+            if first_outcome is not None:
+                results.append((_relabel(scn, f"{scn.name}{vtag}"), first_outcome))
     return results
 
 
@@ -545,6 +612,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--list", action="store_true", help="프롬프트·시나리오 목록만 출력")
     parser.add_argument("--scenario", help="한 시나리오만 실행")
+    parser.add_argument("--version", help="프롬프트 버전 핀 (예: 2 → recovery/if_then_proposal@v2)")
+    parser.add_argument(
+        "--thinking-budget",
+        type=int,
+        default=None,
+        help="thinking 토큰 예산. recovery 라우트 조건 재현은 --thinking-budget 0 --timeout 12 (라우트는 thinking 0 + 12s 가 한 쌍)",
+    )
+    parser.add_argument("--compare", help="버전 A/B 비교 (예: 1,2 → 시나리오별 v1·v2 나란히)")
     parser.add_argument("--repeat", type=int, default=1, help="같은 입력 N회 (변동성 점검)")
     parser.add_argument("--raw", action="store_true", help="렌더된 프롬프트 + raw JSON 출력")
     parser.add_argument("--show-prompt", action="store_true", help="호출 없이 렌더된 프롬프트만")
