@@ -705,3 +705,245 @@ def test_approve_idempotent_when_already_approved(
     assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 1, 0)
     # 멱등 — 실제 블록은 새로 생기지 않는다.
     assert len(fake_scheduled_block_repo._blocks) == before
+
+
+# ── 리뷰 회귀 (#122 blocker) ─────────────────────────────────────────────────
+# 아래는 전부 "CI green 인데도 실제로 깨지던" 것들이다. 리뷰가 지적했듯 기존 테스트에는
+# user_edit 이 한 번도 등장하지 않아, repo 의 user_edit 필터를 양쪽 다 지워도 전부 통과했다.
+
+
+def test_approve_preserves_block_user_moved_after_generate(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_plan_draft_repo: FakePlanDraftRepo,
+) -> None:
+    """generate 이후 사용자가 옮긴 블록(user_edit)을 approve 가 지우면 안 된다 (TOCTOU).
+
+    회귀: generate 쪽 list_scheduled_between 의 user_edit 필터는 approve 보다 수 초~수 시간
+    앞서 돈다. 그 사이 사용자가 HITL 검토 중 블록을 드래그하면 edit_block 이 source 만
+    'user_edit' 으로 바꾸고 block_status 는 'scheduled' 로 남기는데, approve 가 status 만
+    보고 취소해 **사용자가 손으로 옮긴 계획을 파괴**했다. edit_block 은 lock 을 안 잡아
+    user_agent_lock 으로도 못 막는다 — 쓰기 시점에 source 를 다시 봐야 한다.
+    """
+    _freeze_now(monkeypatch)
+    action_a = _seed_action(fake_action_item_repo, title="A")
+    old = _seed_block(  # generate 시점엔 ai_plan 이라 후보로 잡혔다
+        fake_scheduled_block_repo,
+        action_id=action_a.id,
+        start=_kst(2026, 7, 15, 10, 0),
+        end=_kst(2026, 7, 15, 10, 30),
+    )
+    draft_id = _seed_replan_draft(
+        fake_plan_draft_repo,
+        blocks=[
+            _pblock(
+                action_id=action_a.id,
+                start=_kst(2026, 7, 14, 8, 0),
+                end=_kst(2026, 7, 14, 8, 30),
+                replaces=old.id,
+            )
+        ],
+    )
+    # HITL 검토 창에서 사용자가 직접 드래그 (edit_block 과 동일한 상태 전이).
+    old.source = "user_edit"
+    old.start_at = _kst(2026, 7, 16, 9, 0)
+    old.end_at = _kst(2026, 7, 16, 9, 30)
+
+    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 0, 1)
+    # 사용자가 옮긴 블록은 그대로 살아있고, 그 자리를 덮는 새 블록도 안 생긴다.
+    assert fake_scheduled_block_repo._blocks[old.id].block_status == "scheduled"
+    assert fake_scheduled_block_repo._blocks[old.id].start_at == _kst(2026, 7, 16, 9, 0)
+    assert not [
+        b
+        for b in fake_scheduled_block_repo._blocks.values()
+        if b.id != old.id and b.action_item_id == action_a.id and b.block_status == "scheduled"
+    ]
+
+
+def test_generate_skips_card_the_user_has_moved(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+) -> None:
+    """카드의 블록 중 user_edit 이 하나라도 있으면 그 카드는 통째로 보존한다 (#113 계약).
+
+    회귀: replan 은 user_edit 을 블록 단위로만 걸러(list_scheduled_between) 같은 카드의
+    다른 세션은 후보로 올렸다. first_plan_adapter.protected_card_ids 는 카드 단위로
+    보존하므로 두 승인 경로의 '사용자가 건드린 것' 정의가 어긋났다.
+    """
+    _freeze_now(monkeypatch)
+    action_a = _seed_action(fake_action_item_repo, title="분할카드", est=120)
+    _seed_block(  # 사용자가 옮긴 세션
+        fake_scheduled_block_repo,
+        action_id=action_a.id,
+        start=_kst(2026, 7, 14, 9, 0),
+        end=_kst(2026, 7, 14, 10, 0),
+        source="user_edit",
+    )
+    _seed_block(  # 같은 카드의 AI 세션 — 예전엔 이것만 보고 후보로 올렸다
+        fake_scheduled_block_repo,
+        action_id=action_a.id,
+        start=_kst(2026, 7, 15, 9, 0),
+        end=_kst(2026, 7, 15, 10, 0),
+    )
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert not [b for b in body["blocks"] if b["actionId"] == f"action_{action_a.id}"], (
+        "사용자가 옮긴 카드는 재계획 후보가 되면 안 된다"
+    )
+
+
+def test_generate_does_not_double_schedule_action_across_week_boundary(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+) -> None:
+    """주 경계를 걸친 분할 액션을 이중 배치하면 안 된다 (120분 액션에 180분).
+
+    회귀: 후보는 액션의 **전체** estimated_minutes 로 만들면서, 교체할 옛 블록은 스캔 창
+    [window_start, +365d] 안에서만 모았다. 이번 주 블록은 '보존'되어 취소되지 않으므로
+    살아남은 60분 + 새로 배치한 120분 = 180분이 된다. 세션 분할이 액션을 여러 날에 흩기
+    때문에 레이스도 사용자 편집도 없이 일상적으로 발생한다.
+    """
+    _freeze_now(monkeypatch)  # 2026-07-09(목) → window_start=07-13(월)
+    action_a = _seed_action(fake_action_item_repo, title="논문 읽기", est=120)
+    _seed_block(  # 이번 주(창 밖) 미래 세션 — 보존되며 60분을 이미 차지한다
+        fake_scheduled_block_repo,
+        action_id=action_a.id,
+        start=_kst(2026, 7, 10, 9, 0),
+        end=_kst(2026, 7, 10, 10, 0),
+    )
+    _seed_block(  # 다음 주(창 안) 세션 — 재배치 대상
+        fake_scheduled_block_repo,
+        action_id=action_a.id,
+        start=_kst(2026, 7, 15, 9, 0),
+        end=_kst(2026, 7, 15, 10, 0),
+    )
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    mine = [b for b in resp.json()["blocks"] if b["actionId"] == f"action_{action_a.id}"]
+    planned = sum(
+        (datetime.fromisoformat(b["end"]) - datetime.fromisoformat(b["start"])).total_seconds() / 60
+        for b in mine
+    )
+    # 살아남는 60분을 뺀 나머지 60분만 다시 배치해야 총량이 120분으로 유지된다.
+    assert planned == 60, f"창 밖 세션 60분을 빼지 않아 {planned}분을 재배치했다"
+
+
+def test_generate_preserves_action_with_started_sibling_session(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+) -> None:
+    """형제 세션을 이미 착수한 액션은 후보로 올리지 않는다 — 이미 한 일을 다시 시키지 않게.
+
+    회귀: list_scheduled_between 이 'scheduled' 만 반환하므로 started 형제는 oldBlocks 에
+    안 실렸고, approve 의 started/finished 가드도 발동하지 않았다. 결과적으로 착수한 60분
+    위에 새 120분이 얹혀 총 180분이 됐다. generate 가드를 approve 가드와 같은 규칙으로 맞춘다.
+    """
+    _freeze_now(monkeypatch)
+    action_a = _seed_action(fake_action_item_repo, title="캡스톤", est=120)
+    _seed_block(
+        fake_scheduled_block_repo,
+        action_id=action_a.id,
+        start=_kst(2026, 7, 14, 10, 0),
+        end=_kst(2026, 7, 14, 11, 0),
+        status="started",
+    )
+    _seed_block(
+        fake_scheduled_block_repo,
+        action_id=action_a.id,
+        start=_kst(2026, 7, 15, 9, 0),
+        end=_kst(2026, 7, 15, 10, 0),
+    )
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    assert not [b for b in resp.json()["blocks"] if b["actionId"] == f"action_{action_a.id}"], (
+        "착수한 액션은 재계획 후보가 되면 안 된다"
+    )
+
+
+def test_generate_draft_never_outlives_its_window_start(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_plan_draft_repo: FakePlanDraftRepo,
+) -> None:
+    """재계획 Draft 만료는 자기 window_start 를 넘지 못한다 — 과거 블록 생성 방지.
+
+    회귀: 기본 TTL 72h 만 쓰면, 일요일 생성(next_week_start 가 '내일')한 draft 를 그 주가
+    시작된 뒤 승인할 수 있었다. 그러면 살아있는 미래 블록을 취소하고 **과거 블록을 새로
+    만든다**(멀쩡한 미래를 죽은 과거와 맞바꿈). 늦은 승인은 문서화된 410 으로 떨어져야 한다.
+    """
+    sunday = datetime(2026, 7, 19, 10, 0, tzinfo=KST)  # 일 → window_start = 07-20(월)
+    _freeze_now(monkeypatch, sunday)
+    _seed_action(fake_action_item_repo, title="A", est=30, target=date(2026, 7, 24))
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+
+    draft = next(iter(fake_plan_draft_repo._items.values()))
+    window_start_dt = datetime(2026, 7, 20, 0, 0, tzinfo=KST)
+    assert draft.expires_at <= window_start_dt, (
+        f"만료 {draft.expires_at} 가 window_start {window_start_dt} 를 넘겨, "
+        "그 주가 시작된 뒤 승인 → 과거 블록 생성이 가능하다"
+    )
+
+
+def test_get_plan_does_not_500_on_replan_draft(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_plan_draft_repo: FakePlanDraftRepo,
+) -> None:
+    """GET /plans/{id} 에 재계획 draft id 를 주면 500 이 아니라 문서화된 404 여야 한다.
+
+    회귀: _draft_to_response 가 replan payload 에 없는 goal_nodes 를 읽어 uncaught KeyError
+    → 500. FE 가 approve 전에 앱을 백그라운드로 보냈다 돌아오면 재현된다. 승인 경로에는
+    같은 가드가 이미 있었고 get_plan 만 빠져 있었다.
+    """
+    _freeze_now(monkeypatch)
+    action_a = _seed_action(fake_action_item_repo, title="A")
+    draft_id = _seed_replan_draft(
+        fake_plan_draft_repo,
+        blocks=[
+            _pblock(
+                action_id=action_a.id,
+                start=_kst(2026, 7, 14, 8, 0),
+                end=_kst(2026, 7, 14, 8, 30),
+            )
+        ],
+    )
+
+    resp = client.get(f"/plans/{draft_id}")
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["code"] == "PLAN_DRAFT_NOT_FOUND"
+
+
+def test_weekly_replan_approve_schema_name_does_not_collide_with_recovery() -> None:
+    """OpenAPI 컴포넌트명이 회복 replan 과 충돌하면 안 된다 — FE 생성 클라이언트 보호.
+
+    회귀: planning 에 recovery 와 **동명**인 ReplanApproveResponse 를 추가하자, FastAPI 가
+    중복 모델명을 양쪽 다 full-qualify 로 바꿔(reaction_backend__schemas__recovery__...)
+    이 변경이 건드리지도 않은 회복 endpoint(POST /replan/{executionId}/approve)의 컴포넌트명이
+    바뀌었다. replan 테스트로는 잡히지 않아 FE 빌드에서야 터진다.
+    """
+    from reaction_backend.main import create_app
+
+    schemas = create_app().openapi()["components"]["schemas"]
+    qualified = [n for n in schemas if n.startswith("reaction_backend__schemas__")]
+    assert not qualified, f"모델명 충돌로 full-qualify 된 컴포넌트가 있다: {qualified}"
+    assert "ReplanApproveResponse" in schemas  # 회복 endpoint 의 이름이 그대로 유지된다

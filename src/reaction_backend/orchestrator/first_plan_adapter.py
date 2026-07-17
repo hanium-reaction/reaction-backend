@@ -90,6 +90,15 @@ def context_from_outcome(outcome: InterviewOutcome, *, density: str = "standard"
     prompt_vars: dict[str, str] = {
         "goal_title": heaviest.title,
         "why_now": heaviest.why_now or "",
+        # 완료 기준(DoD) — 인터뷰가 goals.success_image 로 이미 수집하나 그동안 decompose 에
+        # 안 실려 버려졌다. 분해가 '무엇을 달성하면 끝인지' 를 알아야 leaf 가 목표에 정렬된다(#B).
+        "success_image": heaviest.success_image or "(미입력)",
+        # 현재 수준(baseline) — 이미 한 단계를 다시 시키지 않도록 분해가 여기서부터 시작한다(#B).
+        # 미응답은 success_image 와 같은 '(미입력)' 센티넬로 — 슬롯 신설(#B) 이전 세션과 [충분해요]
+        # 조기 종료는 이 슬롯이 비는데, "처음 시작" 으로 채우면 '모름' 이 '입문자' 라는 단정으로
+        # 바뀌어 이미 진도 나간 사용자에게 입문 단계를 다시 시킨다.
+        "current_level": heaviest.current_level or "(미입력)",
+        "category": heaviest.category,
         "horizon": outcome.horizon or "",
         "behavioral_summary": _behavioral_summary(outcome),
         "time_policy_summary": _time_policy_summary(outcome),
@@ -325,11 +334,15 @@ def _replaceable_action(action: ActionItem, target_date: date) -> bool:
     )
 
 
-def _protected_card_ids(live_blocks: Sequence[ScheduledBlock]) -> set[uuid.UUID]:
+def protected_card_ids(live_blocks: Sequence[ScheduledBlock]) -> set[uuid.UUID]:
     """user_edit 블록(S15 직접 이동)을 가진 카드 id — 교체 대상에서 제외(보존).
 
-    supersede_previous_plan(취소)과 superseded_card_ids(재생성 busy 제외)가 공유하는
-    블록층 보호 규칙 — 한 곳에서만 정의해 두 경로가 어긋나지 않게 한다.
+    supersede_previous_plan(취소)·superseded_card_ids(재생성 busy 제외)·주간 forward
+    재계획 승인(`api/routes/planning.approve_replan`, #117)이 공유하는 블록층 보호 규칙 —
+    한 곳에서만 정의해 여러 경로가 어긋나지 않게 한다.
+
+    **카드(action) 단위**로 보존한다: 카드의 블록 중 user_edit 이 하나라도 있으면 그 카드는
+    통째로 보존 — 사용자가 시간을 옮긴 계획을 승인이 지우면 안 된다.
     """
     return {b.action_item_id for b in live_blocks if b.source == "user_edit"}
 
@@ -340,7 +353,7 @@ async def superseded_card_ids(
     """approve 시 supersede_previous_plan 이 '교체'할 카드 id 집합 (read-only).
 
     supersede 와 **완전히 같은 규칙**(카드층 `_replaceable_action` + 블록층
-    `_protected_card_ids`)을 쓰되 아무것도 변형하지 않고 FOR UPDATE 도 걸지 않는다.
+    `protected_card_ids`)을 쓰되 아무것도 변형하지 않고 FOR UPDATE 도 걸지 않는다.
     generate(재생성)가 '곧 자기 승인으로 비워질' 같은 날짜 이전 계획의 블록을 busy 에서
     제외하는 데 쓴다(#118) — 재생성 계획이 그 슬롯을 피해 나쁘게 배치되지 않도록.
     첫 계획(교체 대상 없음)이면 빈 집합이라 busy 제외가 no-op.
@@ -370,7 +383,7 @@ async def superseded_card_ids(
         for b in (await session.execute(block_stmt)).scalars().all()
         if b.action_item_id in candidate_ids and b.block_status != "cancelled"
     ]
-    return candidate_ids - _protected_card_ids(live_blocks)
+    return candidate_ids - protected_card_ids(live_blocks)
 
 
 async def supersede_previous_plan(
@@ -423,7 +436,7 @@ async def supersede_previous_plan(
         b for b in fetched if b.action_item_id in candidate_ids and b.block_status != "cancelled"
     ]
     # 사용자가 직접 옮긴(user_edit) 블록을 가진 카드는 교체 대상에서 제외 (superseded_card_ids 와 공유).
-    protected_ids = _protected_card_ids(live_blocks)
+    protected_ids = protected_card_ids(live_blocks)
     stale = [a for a in candidates if a.id not in protected_ids]
     if not stale:
         return 0

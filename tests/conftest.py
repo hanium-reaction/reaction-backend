@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from reaction_backend.api.deps import get_current_user
 from reaction_backend.auth.revoke import get_revoke_store
 from reaction_backend.db.models.action_item import ActionItem
+from reaction_backend.db.models.behavioral_profile import BehavioralProfile
 from reaction_backend.db.models.daily_brief import DailyBrief
 from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.failure_reason_tag import FailureReasonTag
@@ -30,6 +31,7 @@ from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.habit import Habit
 from reaction_backend.db.models.habit_instance import HabitInstance
 from reaction_backend.db.models.inbox_item import InboxItem
+from reaction_backend.db.models.interaction_style import InteractionStyle
 from reaction_backend.db.models.interruption_event import InterruptionEvent
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionModel
 from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
@@ -60,6 +62,7 @@ from reaction_backend.repositories.notification_repo import get_notification_rep
 from reaction_backend.repositories.plan_draft_repo import get_plan_draft_repo
 from reaction_backend.repositories.policy_snapshot_repo import get_policy_snapshot_repo
 from reaction_backend.repositories.privacy_repo import get_privacy_repo
+from reaction_backend.repositories.profile_repo import get_profile_repo
 from reaction_backend.repositories.recovery_repo import get_recovery_repo
 from reaction_backend.repositories.review_repo import get_review_repo
 from reaction_backend.repositories.scheduled_block_repo import get_scheduled_block_repo
@@ -149,6 +152,16 @@ class _FakeResult:
         return self._rows[0]
 
 
+class _FakeNestedTx:
+    """`_FakeSession.begin_nested()` 용 no-op savepoint (프로필 영속 best-effort 가드 #130)."""
+
+    async def __aenter__(self) -> _FakeNestedTx:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False  # 예외 억제 안 함 — 호출부 try/except 가 처리
+
+
 class _FakeSession:
     """라우터가 호출하는 session 인터페이스의 stub.
 
@@ -184,6 +197,10 @@ class _FakeSession:
 
     def add(self, obj: Any) -> None:  # noqa: ARG002
         return None
+
+    def begin_nested(self) -> _FakeNestedTx:
+        # profile persist 가 savepoint 로 감싸므로 fake 도 no-op CM 제공 (#130).
+        return _FakeNestedTx()
 
 
 # ───── 가짜 repository ─────
@@ -1702,6 +1719,61 @@ def fake_review_repo() -> FakeReviewRepo:
     return FakeReviewRepo()
 
 
+class FakeProfileRepo:
+    """in-memory ProfileRepo — behavioral_profiles / interaction_styles (#A-1·A-2)."""
+
+    def __init__(self) -> None:
+        self._behavioral: dict[UUID, BehavioralProfile] = {}
+        self._interaction: dict[UUID, InteractionStyle] = {}
+
+    async def get_behavioral(self, user_id: UUID) -> BehavioralProfile | None:
+        return self._behavioral.get(user_id)
+
+    async def get_interaction(self, user_id: UUID) -> InteractionStyle | None:
+        return self._interaction.get(user_id)
+
+    async def upsert_behavioral(
+        self, user_id: UUID, *, fields: dict[str, Any]
+    ) -> BehavioralProfile:
+        row = self._behavioral.get(user_id)
+        if row is None:
+            row = BehavioralProfile()
+            row.user_id = user_id
+            # server_default 미러 (테스트에선 flush 없이 읽으므로 명시)
+            row.energy_cycle = "varies"
+            row.attention_span = 30
+            row.time_chunk_preference = "30"
+            row.preferred_start_time = None
+            row.preferred_end_time = None
+            self._behavioral[user_id] = row
+        for key, value in fields.items():
+            if value is not None:
+                setattr(row, key, value)
+        return row
+
+    async def upsert_interaction(
+        self, user_id: UUID, *, fields: dict[str, Any]
+    ) -> InteractionStyle:
+        row = self._interaction.get(user_id)
+        if row is None:
+            row = InteractionStyle()
+            row.user_id = user_id
+            row.recovery_tone = "normal"
+            row.suggestion_style = "neutral"
+            row.explanation_depth = "normal"
+            row.reminder_frequency = "standard"
+            self._interaction[user_id] = row
+        for key, value in fields.items():
+            if value is not None:
+                setattr(row, key, value)
+        return row
+
+
+@pytest.fixture
+def fake_profile_repo() -> FakeProfileRepo:
+    return FakeProfileRepo()
+
+
 class FakePolicySnapshotRepo:
     """in-memory PolicySnapshotRepo — #83 §14 (조회만)."""
 
@@ -1753,6 +1825,7 @@ def client(
     fake_review_repo: FakeReviewRepo,
     fake_scheduled_block_repo: FakeScheduledBlockRepo,
     fake_policy_snapshot_repo: FakePolicySnapshotRepo,
+    fake_profile_repo: FakeProfileRepo,
 ) -> Iterator[TestClient]:
     """기본 client — 인증된 demo user + 도메인 fake repo + fake session."""
     _reset_process_singletons()
@@ -1786,6 +1859,7 @@ def client(
     app.dependency_overrides[get_review_repo] = lambda: fake_review_repo
     app.dependency_overrides[get_scheduled_block_repo] = lambda: fake_scheduled_block_repo
     app.dependency_overrides[get_policy_snapshot_repo] = lambda: fake_policy_snapshot_repo
+    app.dependency_overrides[get_profile_repo] = lambda: fake_profile_repo
     with TestClient(app) as test_client:
         yield test_client
 

@@ -31,6 +31,39 @@ def test_create_policy_rejects_bad_type(client: TestClient) -> None:
     assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"
 
 
+def test_create_sleep_missing_key_returns_422(client: TestClient) -> None:
+    """시각 키 누락 → 저장 전 422 (예전엔 통과 후 계획 생성이 500 으로 죽었다)."""
+    resp = client.post(
+        "/time-policies", json={"policyType": "sleep", "payload": {"startTime": "23:00"}}
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["code"] == "COMMON_VALIDATION_ERROR"
+    assert body["field"] == "payload"
+
+
+def test_create_bad_time_format_returns_422(client: TestClient) -> None:
+    resp = client.post(
+        "/time-policies",
+        json={"policyType": "sleep", "payload": {"startTime": "25:99", "endTime": "07:00"}},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["field"] == "payload"
+
+
+def test_payload_camelcase_normalized_to_snake_case(client: TestClient) -> None:
+    """camelCase 로 보내도 저장은 snake_case — 스케줄러 계약과 통일(계획 생성 500 방지)."""
+    resp = client.post(
+        "/time-policies",
+        json={"policyType": "sleep", "payload": {"startTime": "23:00", "endTime": "07:00"}},
+    )
+    assert resp.status_code == 201
+    payload = resp.json()["payload"]
+    assert payload.get("start_time") == "23:00"
+    assert payload.get("end_time") == "07:00"
+    assert "startTime" not in payload  # 정규화되어 camelCase 키는 사라짐
+
+
 def test_list_after_create(client: TestClient) -> None:
     client.post(
         "/time-policies",

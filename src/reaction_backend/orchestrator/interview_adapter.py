@@ -35,6 +35,7 @@ REQUIRED_SLOT_KEYS: tuple[str, ...] = (
     "identity.season",
     "goals.list",
     "goals.heaviest",
+    "goals.current_level",
     "goals.deadlines",
     "goals.success_image",
     "time.activity_window",
@@ -182,6 +183,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
     deadline = _text_raw(slot_answers.get("goals.deadlines"))  # date_picker → raw "YYYY-MM-DD"
     success_image = _text_raw(slot_answers.get("goals.success_image"))
     why_now = _text_raw(slot_answers.get("goals.why_now"))
+    current_level = _text_raw(slot_answers.get("goals.current_level"))
 
     if not titles:
         return [
@@ -204,6 +206,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
                 deadline=deadline if is_heaviest else None,
                 why_now=why_now if is_heaviest else None,
                 success_image=success_image if is_heaviest else None,
+                current_level=current_level if is_heaviest else None,
                 tentative_tier="focus" if is_heaviest else "maintain",
                 confidence=0.5,
             )

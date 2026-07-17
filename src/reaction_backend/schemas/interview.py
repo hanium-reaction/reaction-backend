@@ -198,6 +198,9 @@ class GoalCandidate(CamelModel):
     deadline: str | None = None  # goals.deadlines "YYYY-MM-DD"
     why_now: str | None = None  # goals.why_now (선택)
     success_image: str | None = None  # goals.success_image
+    current_level: str | None = (
+        None  # goals.current_level — 지금까지 진행한 수준(분해 baseline, #B)
+    )
     tentative_tier: Literal["focus", "maintain", "parked"] = "maintain"
     confidence: float = Field(ge=0.0, le=1.0)  # 해당 슬롯 clarity_score
 
