@@ -3,12 +3,18 @@
 DevBaseline §1.4 잠금 결정(AGENTS.md §1): "누적 정책: 미회고 카드 최대 3일, 그 이후
 `system_failure_reason='reflection_skipped'` 자동 만료."
 
-만료 대상 = `GET /reflection/pending` 창의 **정확한 여집합**. pending 은
-`plan_start_at >= pending_reflection_since(오늘)` 을 보여주고, 이 cron 은 그 반대편
-(`< `)을 만료시킨다 — 즉 **사용자가 아직 회고할 수 있는 카드는 절대 건드리지 않는다**.
-카드는 만료 전에 저녁 회고 기회를 정확히 3회 갖는다 (X일 카드 → X·X+1·X+2 의 21:00 노출
-→ X+3 04:00 만료). 이슈 원문의 "4일 이상 된"(1-indexed 일차)과 잠금 결정의 "최대 3일"
-(회고 기회 횟수)은 같은 경계의 다른 셈법이다.
+만료 대상 = `GET /reflection/pending` 창의 **정확한 여집합**. 양쪽 다 `execution_repo` 의
+`_reflectable_from()`(= 계획 시각과 실제 착수 시각 중 **나중**)을 기준으로, pending 은
+`>= pending_reflection_since(오늘)` 을 보여주고 이 cron 은 그 반대편(`<`)을 만료시킨다 —
+즉 **사용자가 아직 회고할 수 있는 카드는 절대 건드리지 않는다**. 카드는 만료 전에 저녁 회고
+기회를 정확히 3회 갖는다 (X일 카드 → X·X+1·X+2 의 21:00 노출 → X+3 04:00 만료). 이슈 원문의
+"4일 이상 된"(1-indexed 일차)과 잠금 결정의 "최대 3일"(회고 기회 횟수)은 같은 경계의 다른
+셈법이다.
+
+두 쪽이 **같은 기준식**을 써야 하는 이유(리뷰 지적): 각자 다른 컬럼을 보면 여집합이 깨져
+어느 집합에도 안 드는 카드가 생긴다. 지난 블록을 뒤늦게 [▶시작] 하면 `plan_start_at` 은
+이미 창 밖이라 회고 화면엔 **한 번도 안 뜨는데** 만료는 착수 시각 기준으로 일어나, 회고
+기회를 0회 받고 카드가 조용히 사라졌다.
 
 ⚠️ `execution_events.completion_status` 는 **건드리지 않는다**(in_progress 유지).
 `review_repo.collect_execution_stats` 에 archived 필터가 없어, 만료 카드의 실행을 주간 KPI
