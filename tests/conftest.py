@@ -1114,12 +1114,14 @@ class FakeExecutionRepo:
     async def list_pending_reflection(
         self, user_id: UUID, *, since: datetime
     ) -> list[ExecutionEvent]:
+        # 실 repo 의 `_reflectable_from()` = greatest(plan_start_at, coalesce(actual, plan)).
+        # 만료(expire_unreflected)와 **같은 식**이어야 정확한 여집합 (#20) — 아래 fake 도 동일.
         pending = [
             e
             for e in self._executions.values()
             if e.user_id == user_id
             and e.completion_status == "in_progress"
-            and e.plan_start_at >= since
+            and max(e.plan_start_at, e.actual_start_at or e.plan_start_at) >= since
         ]
         return sorted(pending, key=lambda e: e.plan_start_at)
 
