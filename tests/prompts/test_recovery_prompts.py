@@ -96,3 +96,40 @@ def test_resolved_prompt_keeps_strategy_personalization_contract() -> None:
 def test_missing_variable_raises() -> None:
     with pytest.raises(PromptRenderError):
         registry.render("recovery/if_then_proposal", {})
+
+
+@pytest.mark.parametrize("prompt_id", list(CODE_VARS))
+def test_few_shot_examples_are_banned_word_free(prompt_id: str) -> None:
+    """모든 버전의 few-shot **예시 출력값**에 금지어가 없다.
+
+    LLM 은 예시를 모방한다 — 예시에 "실패" 같은 금지어가 들어가면 출력 히트 빈도가 올라가고,
+    런타임 필터는 차단이 아니라 **치환**이라("실패"→"한 번 멈춤") 어색한 비문이 회복 카드에
+    노출된다. 지시문의 금지어 *인용*("~표현 금지")은 의도된 것이므로, JSON 으로 파싱되는
+    예시 블록의 문자열 값만 검사한다.
+    """
+    import json
+
+    from reaction_backend.safety.banned_words import scan
+
+    for tmpl in _all_versions(prompt_id):
+        # 본문에서 { ... } 블록을 추출해 JSON 으로 파싱되는 것만 = few-shot 예시.
+        # (출력 형식 블록은 <placeholder> 가 unquoted 라 파싱에 실패해 자연히 제외된다.)
+        examples: list[dict[str, object]] = []
+        for match in re.finditer(r"\{[^{}]*\}", tmpl.body, re.DOTALL):
+            try:
+                examples.append(json.loads(match.group(0)))
+            except (json.JSONDecodeError, ValueError):
+                continue
+        if "예시" in tmpl.body:
+            assert examples, (
+                f"{tmpl.full_id}: 예시 섹션이 있는데 파싱된 예시 0개 — 검사가 공허해진다"
+            )
+        for example in examples:
+            for key, value in example.items():
+                if not isinstance(value, str):
+                    continue
+                hits = scan(value)
+                assert not hits, (
+                    f"{tmpl.full_id} 예시의 {key} 에 금지어 {hits} — LLM 이 모방해 출력하면 "
+                    "치환 비문이 사용자 카드에 노출된다."
+                )

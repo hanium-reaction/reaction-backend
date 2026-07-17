@@ -21,7 +21,9 @@ RecoveryDecision = Literal["accepted", "skipped"]
 class RecoveryProposalLLM(CamelModel):
     """LLM Structured Output — `aiClient.run("recovery/if_then_proposal")` 응답 schema.
 
-    프롬프트(`prompts/recovery/if_then_proposal.v1.md`)의 JSON 형식과 1:1.
+    프롬프트(`prompts/recovery/if_then_proposal.v*.md` — registry 가 latest 자동 선택)의
+    JSON 형식과 1:1. 새 버전을 올릴 땐 이 schema 와 출력 형식을 맞출 것
+    (`tests/prompts/test_recovery_prompts.py` 가 변수 계약을 강제한다).
     fallback 룰도 같은 schema 로 반환 (Tool Executor 가 강제 검증).
     """
 
