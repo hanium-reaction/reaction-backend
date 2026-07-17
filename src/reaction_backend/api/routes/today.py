@@ -300,7 +300,11 @@ async def quick_check_in(
         execution.user_feedback_encrypted = encrypt_memo(body.user_feedback)
 
     block = await execution_repo.get_block(execution.scheduled_block_id)
-    if block is not None:
+    if block is not None and block.block_status != "cancelled":
+        # 취소된 블록은 되살리지 않는다 — 회고 창을 넘겨 만료 cron(#20)이 카드와 함께 정리한
+        # 블록에 stale 한 executionId 로 체크인이 들어오면, finished 로 덮어써서 주간 그리드에
+        # 유령 블록이 되살아난다(list_week 는 archived 를 안 보고 block_status 만 본다).
+        # `/reflection/batch` 의 같은 가드와 대칭 — 두 경로가 같은 쓰기를 한다.
         block.block_status = "finished"
 
     # 카드 상태 전이 — 4칩 값은 ACTION_STATUS_VALUES 와 1:1 (done/partial_done/failed/over_done)

@@ -17,7 +17,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import func, select, update
+from sqlalchemy import ColumnElement, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import ActionItem
@@ -27,6 +27,24 @@ from reaction_backend.db.models.failure_reason_tag import FailureReasonTag
 from reaction_backend.db.models.interruption_event import InterruptionEvent
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.session import get_db
+
+
+def _reflectable_from() -> ColumnElement[datetime]:
+    """실행을 **회고할 수 있게 된 시각** = 계획 시각과 실제 착수 시각 중 나중 (#20).
+
+    회고 창의 단일 기준식 — `list_pending_reflection`(창 안: `>= since`)과
+    `expire_unreflected`(창 밖: `< since`)가 **둘 다 이 식을 쓴다**. 그래야 두 집합이
+    정확한 여집합이 되어, 어느 쪽에도 안 드는 카드(회고 화면엔 안 뜨는데 만료는 되는 카드)가
+    생기지 않는다.
+
+    `plan_start_at` 만 보면 안 되는 이유: `find_open_block` 에 날짜 필터가 없어 지난 블록을
+    뒤늦게 [▶시작] 할 수 있고, 그러면 계획 시각은 과거인데 실제 착수는 방금이다. 계획 시각만
+    보면 어제 착수한 카드가 오늘 만료되고, 회고 화면엔 애초에 뜨지도 않는다.
+    """
+    return func.greatest(
+        ExecutionEvent.plan_start_at,
+        func.coalesce(ExecutionEvent.actual_start_at, ExecutionEvent.plan_start_at),
+    )
 
 
 class ExecutionRepo:
@@ -149,16 +167,22 @@ class ExecutionRepo:
     async def list_pending_reflection(
         self, user_id: UUID, *, since: datetime
     ) -> list[ExecutionEvent]:
-        """미체크(in_progress) 실행 — plan_start_at >= since, 오래된 순 (#83 S17 회고).
+        """미체크(in_progress) 실행 — 회고 가능 시각 >= since, 오래된 순 (#83 S17 회고).
 
         시작만 하고 체크인하지 않은 실행 = 저녁 회고에서 소급 처리할 대상.
+
+        경계 식은 `_reflectable_from()` — 만료 cron(`expire_unreflected`)이 쓰는 것과 **반드시
+        같아야** 이 창과 만료가 정확한 여집합이 된다(#20). 두 쪽이 서로 다른 컬럼을 보면 어느
+        집합에도 안 드는 카드가 생긴다: 지난 블록을 뒤늦게 [▶시작] 하면 `plan_start_at` 은
+        이미 창 밖이라 회고 화면에 **한 번도 안 뜨는데**, 만료는 `actual_start_at` 기준이라
+        3일 뒤 조용히 보관된다 — 회고 기회 0회로 카드가 사라진다.
         """
         stmt = (
             select(ExecutionEvent)
             .where(
                 ExecutionEvent.user_id == user_id,
                 ExecutionEvent.completion_status == "in_progress",
-                ExecutionEvent.plan_start_at >= since,
+                _reflectable_from() >= since,
             )
             .order_by(ExecutionEvent.plan_start_at)
         )
@@ -168,8 +192,8 @@ class ExecutionRepo:
     async def expire_unreflected(self, *, before: datetime, archived_at: datetime) -> int:
         """회고 창 밖의 미체크 실행의 카드를 만료. 반환: 만료 카드 수.
 
-        `list_pending_reflection` 의 여집합 — 저 쪽이 `>= since` 를 보여주고 이 쪽이 `< since`
-        를 만료시킨다. 전역(모든 사용자) 일괄 처리 — cron 전용(Issue #20).
+        `list_pending_reflection` 의 **정확한 여집합** — 두 쪽 다 `_reflectable_from()` 을 기준으로
+        저 쪽이 `>= since` 를 보여주고 이 쪽이 `< since` 를 만료시킨다. 전역(모든 사용자) 일괄 처리 — cron 전용(Issue #20).
 
         만료 = `system_failure_reason='reflection_skipped'` + `archived_at`(soft delete)
         + 남은 미종결 블록 cancel. 3가지를 **건드리지 않는다**:
@@ -202,14 +226,9 @@ class ExecutionRepo:
         인덱스가 없다. 하루 1회 04:00 단발 + MVP 규모라 수용. 필요 시 partial index 는 별도
         마이그레이션 이슈(AGENTS.md §8).
         """
-        # 회고가 가능해진 시각 = 계획 시각과 실제 착수 시각 중 **나중** (둘 다 창 밖일 때만 만료).
-        reflectable_from = func.greatest(
-            ExecutionEvent.plan_start_at,
-            func.coalesce(ExecutionEvent.actual_start_at, ExecutionEvent.plan_start_at),
-        )
         unreflected = select(ExecutionEvent.action_item_id).where(
             ExecutionEvent.completion_status == "in_progress",
-            reflectable_from < before,
+            _reflectable_from() < before,
         )
         # 창 안/이후에 아직 미종결 블록이 남았다면 그 카드는 '진행 중인 계획' — 만료 대상 아님.
         has_live_block = (

@@ -360,3 +360,109 @@ async def test_keeps_card_started_late_against_past_block(
 
     assert count == 0
     assert card.archived_at is None
+
+
+# ── 실 SQL 가드 (리뷰 회귀) ─────────────────────────────────────────────────
+# 위 테스트들은 전부 FakeExecutionRepo 를 주입한다 — 실 `ExecutionRepo.expire_unreflected`
+# 의 본문(SQLAlchemy 쿼리)은 **어떤 테스트도 실행하지 않는다**(커버리지로 확인: 해당 라인
+# 전부 miss). 그래서 실 쿼리의 WHERE 를 통째로 지워 "모든 사용자의 모든 카드를 보관" 하게
+# 만들어도 504개 테스트가 전부 통과한다. fake 는 같은 조건을 파이썬으로 **재현**할 뿐이라,
+# 두 구현이 어긋나는 순간 테스트는 거짓 안심을 준다.
+#
+# 아래 테스트는 실 repo 를 실제로 호출해 그 쿼리가 세션에 넘기는 SQL 을 잡아 검증한다.
+# DB 없이 CI 에서 돌면서도, 가드 절이 조용히 사라지는 것을 막는다.
+
+
+class _RecordingResult:
+    def __init__(self, ids: list[UUID]) -> None:
+        self._ids = ids
+
+    def scalars(self) -> _RecordingResult:
+        return self
+
+    def all(self) -> list[UUID]:
+        return self._ids
+
+
+class _RecordingSession:
+    """실행된 statement 를 붙잡아 두는 세션 — 실 repo 의 SQL 을 검사하기 위한 것."""
+
+    def __init__(self, returned_ids: list[UUID]) -> None:
+        self.statements: list[object] = []
+        self._returned_ids = returned_ids
+
+    async def execute(self, stmt: object) -> _RecordingResult:
+        self.statements.append(stmt)
+        # 첫 실행(UPDATE ... RETURNING)만 id 를 돌려준다 → 이후 블록 취소 쿼리도 잡힌다.
+        return _RecordingResult(self._returned_ids if len(self.statements) == 1 else [])
+
+
+def _sql(stmt: object) -> str:
+    from sqlalchemy.dialects import postgresql
+
+    return str(stmt.compile(dialect=postgresql.dialect()))  # type: ignore[attr-defined]
+
+
+async def test_real_expire_query_keeps_every_data_safety_guard() -> None:
+    """실 `ExecutionRepo.expire_unreflected` 가 내보내는 SQL 이 보호 절을 전부 갖는다.
+
+    회귀: 이 메서드는 어떤 테스트도 실행하지 않아(전부 fake 주입), WHERE 를 지워 전 사용자의
+    카드를 보관하게 만들어도 전 테스트가 통과했다. 사용자 카드를 무인 상태로 보관하는
+    쿼리이므로, 가드가 조용히 사라지지 않도록 실제로 호출해 SQL 을 검사한다.
+    """
+    from reaction_backend.repositories.execution_repo import ExecutionRepo
+
+    session = _RecordingSession([uuid4()])
+    repo = ExecutionRepo(session)  # type: ignore[arg-type]
+    n = await repo.expire_unreflected(before=SINCE, archived_at=NOW)
+
+    assert n == 1
+    assert len(session.statements) == 2  # 카드 UPDATE + 블록 취소 UPDATE
+    update_sql = _sql(session.statements[0])
+
+    # 대상은 action_items 이고, 만료 표식 2개를 쓴다.
+    assert "UPDATE action_items" in update_sql
+    assert "system_failure_reason" in update_sql and "archived_at" in update_sql
+    # 멱등성의 유일한 방어선 — 없으면 매일 archived_at 이 갱신된다.
+    assert "action_items.archived_at IS NULL" in update_sql
+    # 최초 실패 사유 보존.
+    assert "action_items.system_failure_reason IS NULL" in update_sql
+    # 미체크 실행만 — 회고를 마친 카드는 대상이 아니다.
+    assert "execution_events.completion_status" in update_sql
+    # 뒤늦게 착수한 카드를 어제 착수분으로 만료시키지 않는 기준식.
+    assert "greatest(execution_events.plan_start_at, coalesce(" in update_sql
+    # 미래 세션 블록이 남은 분할 카드를 파괴하지 않는 가드 — 반드시 상관 서브쿼리여야 한다.
+    assert "NOT (EXISTS" in update_sql
+    assert "scheduled_blocks.action_item_id = action_items.id" in update_sql
+
+    # 블록 취소는 미종결 블록만 — finished 는 실제 수행 이력이라 건드리면 기록이 왜곡된다.
+    cancel_sql = _sql(session.statements[1])
+    assert "UPDATE scheduled_blocks" in cancel_sql
+    assert "block_status" in cancel_sql
+
+
+async def test_real_pending_and_expiry_share_one_window_expression() -> None:
+    """회고 창(pending)과 만료(cron)가 **같은 기준식**을 쓴다 — 정확한 여집합의 전제.
+
+    회귀: pending 은 `plan_start_at` 만 보고 만료는 `greatest(plan, actual)` 을 봐서 두 집합이
+    여집합이 아니었다. 지난 블록을 뒤늦게 [▶시작] 한 카드는 pending 에 **한 번도 안 뜨는데**
+    3일 뒤 만료돼, 회고 기회를 0회 받고 사라졌다.
+    """
+    from reaction_backend.repositories.execution_repo import ExecutionRepo
+
+    session = _RecordingSession([])
+    repo = ExecutionRepo(session)  # type: ignore[arg-type]
+    await repo.list_pending_reflection(DEMO_USER_UUID, since=SINCE)
+    pending_sql = _sql(session.statements[0])
+
+    session2 = _RecordingSession([])
+    repo2 = ExecutionRepo(session2)  # type: ignore[arg-type]
+    await repo2.expire_unreflected(before=SINCE, archived_at=NOW)
+    expire_sql = _sql(session2.statements[0])
+
+    window = "greatest(execution_events.plan_start_at, coalesce(execution_events.actual_start_at, execution_events.plan_start_at))"
+    assert window in pending_sql, "pending 이 공유 기준식을 쓰지 않는다"
+    assert window in expire_sql, "만료가 공유 기준식을 쓰지 않는다"
+    # 한쪽은 >= (창 안), 다른 쪽은 < (창 밖) — 방향이 반대여야 여집합이다.
+    assert f"{window} >= " in pending_sql
+    assert f"{window} < " in expire_sql
