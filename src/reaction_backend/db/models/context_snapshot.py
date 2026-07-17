@@ -12,6 +12,18 @@ DB 설계서 v0.7.1 §5.18:
 규칙:
 - overwhelm_level >= 4 → S19 에서 PARK 회복 옵션 후보
 - location_type='home' + focus_level 낮음 → Environment Shift 회복 옵션 후보
+
+현황 (2026-07) — 위는 DB 설계서 §5.18 의 **의도**이고, 아직 구현이 따라오지 않았다:
+- **INSERT/SELECT 코드가 0곳**이다. 캡처는 #19-B-2 유예 중(`docs/api-contract.md` §10
+  `/today/check-ins` 행 · "pause/resume + context_snapshot 캡처는 #19-B-2 후속").
+- 그래서 지금 S21 peak/drain 은 이 테이블이 아니라 `execution_events.plan_start_at`
+  (요일×시간대 프록시)로 계산한다 — `orchestrator/weekly_review.py`. 위 3행의 "S21 인사이트의
+  원본"은 아직 사실이 아니다. 이관 시 `time_of_day` enum 5종 ↔ weekly_review 의 시간대 어휘
+  정합이 필요하다.
+- `estimated_energy_level` 은 **실행 1건의 그 순간 상태**다(아래 "state 1~5 척도" 4형제).
+  저녁 회고의 '하루 에너지'를 여기 넣지 말 것 — `execution_id` 가 NOT NULL 이라 미체크 실행이
+  0건인 날엔 저장 자체가 불가하고, N건 종결 시 같은 값을 복제하면 실행 수가 가중치로 붙어
+  통계가 왜곡된다. 일별 에너지는 현재 설계에 없다(#141, `docs/api-contract.md` §11).
 """
 
 from __future__ import annotations

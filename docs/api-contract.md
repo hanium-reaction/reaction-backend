@@ -383,6 +383,21 @@ failureTags?(0~2), memo? }] }` (빈 배열 no-op, 상한 50건). 각 항목을 `
 · 재태깅 409 `REFLECT_ALREADY_TAGGED`)면 **전체 롤백(부분 적용 없음)**. 응답
 `{ processedCount, taggedCount, needsFailureTags[] }`(사유 미기록 실패 항목의 executionId). `memo` 는 서버 at-rest 암호화.
 
+**일별 '하루 에너지'는 이 계약에 없다 — 설계에 없기 때문이다** (#141). S17 회고는 **실행 단위
+종결**만 다룬다. 이 문단이 없어서 "저장할 자리가 있는데 BE 가 안 만들었다"는 오해가 반복됐다:
+
+- `context_snapshots.estimated_energy_level` 은 **하루 총평이 아니라 실행 1건의 그 순간 추정치**다
+  (`focus_level`/`overwhelm_level`/`noise_level` 과 같은 "state 1~5 척도" 4형제, DB 설계서 §5.18).
+  쓰는 주체·시점도 다르다 — architecture.md §5 표: `Execution Logger | check-in 입력 |
+  execution_event + context_snapshot`. **캡처 자체가 #19-B-2 유예 중**(위 §10 `/today/check-ins` 행).
+  `execution_id` 가 NOT NULL 이라 **미체크 실행이 0건인 날엔 저장할 행 자체가 없다**.
+- 지속형 에너지 **선호**의 단일 진실 소스는 `/settings/profile`(`behavioral_profiles.energy_cycle`,
+  §17). 인터뷰가 채우며 일별 기록과는 다른 개념이다.
+
+즉 일별 에너지를 도입하려면 **새 저장소 + 마이그레이션**(AGENTS.md §8 사람 합의 대상)이고, 그 전에
+**읽을 사람(소비처)부터 정해야 한다** — `context_snapshots` 가 설계·마이그레이션·모델을 다 갖추고도
+INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽는다"가 거짓이라는 레포 내부 물증이다.
+
 #19-B 태깅 메모: failed/partial_done 실행만 허용 (422 `REFLECT_NOT_FAILED`), 무효 코드 422
 `REFLECT_INVALID_TAG`, 재태깅 409 `REFLECT_ALREADY_TAGGED` (hard delete 회피), memo 는
 `encrypt_memo` at-rest 암호화. 이 태그가 §12 Recovery 룰 엔진의 입력이 된다.
