@@ -86,13 +86,13 @@ from reaction_backend.schemas.planning import (
     FirstPlanResponse,
     GoalNodeDraft,
     PolicyViolation,
-    ReplanApproveResponse,
     ReplanBlockPreview,
     ReplanResponse,
     ScheduledBlockPreview,
     WeeklyBlock,
     WeeklyPlanDay,
     WeeklyPlanResponse,
+    WeeklyReplanApproveResponse,
 )
 
 router = APIRouter(prefix="/plans", tags=["planning"])
@@ -531,8 +531,19 @@ async def edit_block(
 
 @router.get("/{plan_id}")
 async def get_plan(plan_id: str, user: CurrentUser, draft_repo: DraftRepoDep) -> FirstPlanResponse:
-    """저장된 First Plan Draft 미리보기 — LLM 재호출 없이 스냅샷 재구성."""
+    """저장된 First Plan Draft 미리보기 — LLM 재호출 없이 스냅샷 재구성.
+
+    재계획(`kind='replan'`) Draft 는 payload 모양이 달라(goal_nodes 가 없다) 여기서 다루지
+    않는다 — 가드가 없으면 `_draft_to_response` 가 `KeyError: 'goal_nodes'` 로 500 을 낸다.
+    승인 endpoint 의 반대편 가드(approve_replan 의 `kind != "replan"` 검사)와 대칭.
+    """
     draft = await _load_draft(draft_repo, user.id, plan_id)
+    if draft.payload.get("kind") == "replan":
+        raise ApiError(
+            ErrorCode.PLAN_DRAFT_NOT_FOUND,
+            "계획 초안을 찾을 수 없어요.",
+            http_status=HTTPStatus.NOT_FOUND,
+        )
     return _draft_to_response(draft)
 
 
@@ -716,6 +727,11 @@ def _active_or_default_policies(rows: list[Any]) -> list[Any]:
     return [_RulePolicy("sleep", {"start_time": "23:00", "end_time": "08:00"})]
 
 
+def _block_minutes(block: ScheduledBlock) -> int:
+    """블록 길이(분) — 재계획이 '이미 배정된 몫'을 남은 분량에서 뺄 때 쓴다."""
+    return max(0, int((block.end_at - block.start_at).total_seconds() // 60))
+
+
 def _replan_response(draft: PlanDraft) -> ReplanResponse:
     """저장된 재계획 Draft → 응답(재조회·생성 공용)."""
     payload = draft.payload
@@ -781,14 +797,44 @@ async def generate_replan(
         # 수 있다. 1개만 잡으면 승인 때 나머지가 유령으로 남거나 새 세션이 드롭된다(리뷰 지적).
         cand: dict[UUID, replan.ReplanCandidate] = {}
         old_blocks_by_action: dict[UUID, list[UUID]] = {}
+        actions_by_id: dict[UUID, Any] = {}
         for block, action in scheduled_pairs:
-            cand[action.id] = replan.ReplanCandidate(
-                action_id=action.id,
+            actions_by_id[action.id] = action
+            old_blocks_by_action.setdefault(action.id, []).append(block.id)
+
+        # 후보 분량은 액션의 **전체 live 블록**을 보고 정한다. scheduled_pairs 는 스캔 창
+        # [window_start, +365d] 안의 'scheduled' 블록만 주는데, 세션 분할(#115 _split_minutes)이
+        # 한 액션을 여러 날에 흩기 때문에 액션은 일상적으로 주 경계를 걸친다. 창 밖(이번 주)
+        # 블록은 '보존'되어 취소되지 않으므로, 전체 estimated_minutes 를 다시 배치하면 그만큼
+        # 이중 배치된다(120분 액션에 180분). 창 밖 블록은 여기서 안 보이므로 액션 단위로 다시 조회한다.
+        now = now_kst()
+        for action_id, action in actions_by_id.items():
+            old_ids = set(old_blocks_by_action[action_id])
+            live = await block_repo.list_by_action_item(user.id, action_id)  # cancelled 제외
+            # 아래 두 가드는 approve 의 가드와 **같은 규칙**이어야 한다. generate 가 후보로
+            # 올렸는데 approve 가 skip 하면, 사용자는 '재계획됐다'는 미리보기를 보고 승인해도
+            # 아무 일도 안 일어난다.
+            if any(b.block_status in ("started", "finished") for b in live):
+                old_blocks_by_action.pop(action_id, None)  # 착수한 액션은 통째 보존
+                continue
+            if first_plan_adapter.protected_card_ids(live):
+                old_blocks_by_action.pop(action_id, None)  # 사용자가 옮긴 카드는 통째 보존(#113)
+                continue
+            # 교체되지 않고 살아남는 **미래** 블록의 시간은 이미 배정된 몫 → 남은 분량에서 뺀다.
+            # (과거의 미착수 블록은 '밀린 일' 이라 배정으로 치지 않는다.)
+            covered = sum(
+                _block_minutes(b) for b in live if b.id not in old_ids and to_kst(b.start_at) >= now
+            )
+            remaining = (action.estimated_minutes or 30) - covered
+            if remaining <= 0:  # 살아남는 블록만으로 이미 충분 → 손대지 않는다
+                old_blocks_by_action.pop(action_id, None)
+                continue
+            cand[action_id] = replan.ReplanCandidate(
+                action_id=action_id,
                 title=action.title,
                 category=action.category,
-                estimated_minutes=action.estimated_minutes or 30,
+                estimated_minutes=remaining,
             )
-            old_blocks_by_action.setdefault(action.id, []).append(block.id)
         for action in backlog:
             cand.setdefault(
                 action.id,
@@ -862,13 +908,20 @@ async def generate_replan(
             },
             "warnings": warnings,
         }
+        # 만료는 **자기 window_start 를 넘지 못한다**. 이 draft 의 블록은 전부 window_start
+        # 이후인데, window_start 가 미래인 건 *생성 시점* 에만 보장된다 — 기본 TTL(72h)만
+        # 쓰면 금·토·일에 만든 draft(next_week_start 가 일요일엔 '내일')를 그 주가 시작된 뒤
+        # 승인할 수 있고, 그러면 살아있는 미래 블록을 취소하고 **과거 블록을 새로 만든다**.
+        # window_start 00:00 KST 로 상한을 두면 승인 시점에 모든 블록이 미래임이 보장되고,
+        # 늦은 승인은 조용한 손실 대신 문서화된 410 PLAN_DRAFT_EXPIRED 로 떨어진다.
+        window_start_dt, _ = replan.day_bounds_kst(window_start, window_start)
         draft = await draft_repo.create(
             user.id,
             target_date=window_start,
             horizon=deadline.isoformat(),
             ai_source="rule",
             payload=payload,
-            expires_at=now_kst() + _DRAFT_TTL,
+            expires_at=min(now_kst() + _DRAFT_TTL, window_start_dt),
         )
         await session.commit()
 
@@ -883,7 +936,7 @@ async def approve_replan(
     action_repo: ActionRepoDep,
     draft_repo: DraftRepoDep,
     session: SessionDep,
-) -> ReplanApproveResponse:
+) -> WeeklyReplanApproveResponse:
     """재계획 Draft 승인 → **action 단위 재조정**으로 미래 블록 교체(#117 재작업).
 
     #115 스케줄러가 긴 액션을 **여러 세션 블록**으로 쪼개므로, 재조정은 개별 블록이 아니라
@@ -914,7 +967,7 @@ async def approve_replan(
                 http_status=HTTPStatus.GONE,
             )
         if draft.status == "approved":  # 멱등 — lock 안 확인이라 동시 승인이 직렬화됨
-            return ReplanApproveResponse(
+            return WeeklyReplanApproveResponse(
                 plan_id=plan_id,
                 cancelled_blocks=0,
                 created_blocks=len(payload.get("blocks", [])),
@@ -949,6 +1002,16 @@ async def approve_replan(
                 if any(o.block_status in ("started", "finished") for o in present):
                     skipped += n
                     continue
+                # user_edit 은 **쓰기 시점에 다시** 확인한다(TOCTOU). generate 쪽
+                # list_scheduled_between 의 user_edit 필터는 이 승인보다 수 초~수 시간 앞서
+                # 돌기 때문에, 그 사이 사용자가 HITL 검토 중 블록을 드래그하면 — edit_block 이
+                # source='user_edit' 로 바꾸되 block_status 는 'scheduled' 로 남긴다 — 아래
+                # 취소가 **사용자가 손으로 옮긴 계획을 지운다**. user_agent_lock 도 방어가 안
+                # 된다: edit_block 은 lock 을 잡지 않아 replan↔edit 은 직렬화되지 않는다.
+                # 보존 단위는 #113 이 확립한 카드(action) 단위 계약을 그대로 재사용한다.
+                if first_plan_adapter.protected_card_ids(present):
+                    skipped += n
+                    continue
                 active = [o for o in present if o.block_status == "scheduled"]
                 # 활성 옛 블록이 하나도 없으면(그새 전부 취소·삭제) 중복 방지로 skip.
                 if not active:
@@ -975,7 +1038,7 @@ async def approve_replan(
         await draft_repo.mark_approved(draft, approved_at=now_kst())
         await session.commit()
 
-        return ReplanApproveResponse(
+        return WeeklyReplanApproveResponse(
             plan_id=plan_id,
             cancelled_blocks=cancelled,
             created_blocks=created,

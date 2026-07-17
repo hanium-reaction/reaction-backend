@@ -180,11 +180,17 @@ class ReplanResponse(DraftMixin):
     generated_at: KstDatetime
 
 
-class ReplanApproveResponse(CamelModel):
-    """재계획 승인 결과 — 재조정 카운트. `is_draft=False`.
+class WeeklyReplanApproveResponse(CamelModel):
+    """주간 forward 재계획 승인 결과 — 재조정 카운트. `is_draft=False`.
 
     started/finished 로 바뀐 옛 블록·다른 계획 승인분은 건드리지 않으므로(재조정),
     `skipped` 는 그렇게 보존된 항목 수다.
+
+    ⚠️ 이름 주의: `schemas/recovery.py` 의 `ReplanApproveResponse`(S20 실행단위 replan,
+    `POST /replan/{executionId}/approve`)와 **다른 것**이다. 같은 이름을 쓰면 FastAPI 가
+    중복 모델명을 양쪽 다 full-qualify 로 바꿔(`reaction_backend__schemas__recovery__...`)
+    이 PR 이 건드리지도 않은 회복 endpoint 의 OpenAPI 컴포넌트명이 변하고 FE 생성
+    클라이언트가 깨진다. 'Weekly' 접두사는 그 충돌을 피하기 위한 것 — 지우지 말 것.
     """
 
     plan_id: str
