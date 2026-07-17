@@ -79,7 +79,7 @@ def test_start_returns_first_question(client: TestClient, monkeypatch: Any) -> N
     assert body["currentQuestion"]["slotKey"] == "identity.role"
     assert body["currentQuestion"]["answerType"] == "chip"
     assert "1학년" in body["currentQuestion"]["options"]  # 카탈로그 보기 매핑
-    assert body["ambiguityScore"] == 13  # 미해결 필수 슬롯 수
+    assert body["ambiguityScore"] == 14  # 미해결 필수 슬롯 수 (goals.current_level 추가 #B)
     assert body["endReason"] is None
 
 
@@ -99,7 +99,7 @@ def test_submit_advances_and_persists(
     assert res.status_code == 200
     body = res.json()
     assert body["currentQuestion"]["slotKey"] == "identity.season"  # 다음 필수 슬롯
-    assert body["ambiguityScore"] == 12  # 하나 채워져 감소
+    assert body["ambiguityScore"] == 13  # 하나 채워져 감소 (필수 14개, #B)
 
     # 영속화 검증 — fake repo 에 세션 1개 + identity.role 답 저장
     assert len(fake_interview_repo._sessions) == 1
@@ -124,7 +124,7 @@ def test_submit_does_not_finish_until_required_slots_are_filled(
 
     assert res.status_code == 200
     body = res.json()
-    assert body["ambiguityScore"] == 12
+    assert body["ambiguityScore"] == 13
     assert body["endReason"] is None
     assert body["currentQuestion"]["slotKey"] == "identity.season"
 
@@ -148,6 +148,60 @@ def test_finish_returns_summary_and_outcome(client: TestClient, monkeypatch: Any
     assert body["outcome"]["sessionId"] == sid  # First Plan 시드
     assert "identity.role" not in body["outcome"]["unresolvedSlots"]  # 채운 슬롯
     assert body["outcome"]["analysisSource"] == "llm"  # fallback 없음 → llm
+
+
+def test_profile_persist_failure_does_not_break_finish(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """프로필 영속이 예외를 던져도 인터뷰 완료(finish)는 200 으로 성공한다 (#130 best-effort).
+
+    프로필 메모리 영속은 부가 기능이라, 실패가 절대 안 깨져야 하는 finalize 경로를 막으면 안 된다.
+    """
+    monkeypatch.setattr(aiClient, "run", _stub())
+
+    async def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("profile write blew up")
+
+    monkeypatch.setattr(
+        "reaction_backend.orchestrator.profile_memory.persist_profile_from_outcome", _boom
+    )
+
+    sid = client.post("/interview/sessions").json()["sessionId"]
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.role", "value": ["3학년"], "clientTurn": 1},
+    )
+    res = client.post(f"/interview/sessions/{sid}/finish")
+    assert res.status_code == 200  # 프로필 실패에도 인터뷰 완료 성공
+    body = res.json()
+    assert body["endReason"] == "early_user"
+    assert body["outcome"]["sessionId"] == sid
+
+
+def test_finish_materializes_extracted_goals(client: TestClient, monkeypatch: Any) -> None:
+    """[충분해요] 조기 종료도 추출한 목표를 materialize 한다 (완료 경로 submit_answer 와 대칭).
+
+    회귀: 예전엔 finish_session 에 materialize_goals 가 없어, [충분해요] 로 끝낸 사용자는
+    목표 분류 화면이 빈 상태가 됐다 (사용자 테스트로 발견).
+    """
+    monkeypatch.setattr(aiClient, "run", _stub())
+    seen: dict[str, Any] = {}
+
+    async def _spy(session: Any, *, user_id: Any, core_goals: Any) -> None:
+        seen["called"] = True
+        seen["n"] = len(core_goals)
+
+    monkeypatch.setattr("reaction_backend.orchestrator.first_plan_adapter.materialize_goals", _spy)
+
+    sid = client.post("/interview/sessions").json()["sessionId"]
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "goals.list", "value": "포트폴리오 사이트, 토익", "clientTurn": 1},
+    )
+    res = client.post(f"/interview/sessions/{sid}/finish")
+    assert res.status_code == 200
+    assert seen.get("called") is True  # 조기 종료도 목표 영속 시도
+    assert seen.get("n", 0) >= 1
 
 
 def test_used_fallback_persists_to_analysis_source(client: TestClient, monkeypatch: Any) -> None:
@@ -227,9 +281,9 @@ def test_critical_slot_reask_persists_attempts_across_db(
 
     # 3회차(상한): DB 를 넘어 누적된 시도 → best-effort 채택하고 다음 슬롯으로.
     # 목표가 1개(단일)라 goals.heaviest 가 자동 채워짐 → heaviest 질문을 건너뛰고
-    # 남은 필수 슬롯이 2개 감소, 다음은 goals.deadlines.
+    # 남은 필수 슬롯이 2개 감소, 다음은 goals.current_level (#B — heaviest 다음 슬롯).
     body = answer("goals.list", "그럼 프로젝트 하나 할래")
-    assert body["currentQuestion"]["slotKey"] == "goals.deadlines"
+    assert body["currentQuestion"]["slotKey"] == "goals.current_level"
     assert body["ambiguityScore"] == amb_at_goals - 2  # goals.list + goals.heaviest 충족
 
 
