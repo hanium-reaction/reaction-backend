@@ -164,6 +164,7 @@ P2: **Semantic Memory (Vector DB)** — insight embedding 으로 Recovery Coach 
 | 일요일 03:00 | `weekly_review_precompute` | week data → `period_summaries` (LLM) |
 | 월요일 00:00 | `habit_instances_generator` | habits → 이번 주 instances |
 | 6시간마다 | `interruption_resolver` | NULL resumed_after_interrupt → false |
+| 04:00 KST | `expire_unreflected_cards` | 회고 창(3일) 밖 미체크 실행 → 카드 `reflection_skipped` + soft delete |
 | 04:00 KST | `anonymize_inactive_users` | 90일 비활성 → 익명화 |
 | 1시간마다 | `oauth_token_refresher` | 만료 임박 토큰 → refresh |
 

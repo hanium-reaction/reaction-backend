@@ -22,7 +22,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
 from http import HTTPStatus
 from typing import Annotated
 from uuid import UUID
@@ -36,7 +35,8 @@ from reaction_backend.db.session import get_db
 from reaction_backend.repositories.action_item_repo import ActionItemRepo, get_action_item_repo
 from reaction_backend.repositories.execution_repo import ExecutionRepo, get_execution_repo
 from reaction_backend.safety.encryption import encrypt_memo
-from reaction_backend.schemas.common import KST, now_kst, to_kst
+from reaction_backend.scheduler.expire_reflections import pending_reflection_since
+from reaction_backend.schemas.common import now_kst, to_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.reflection import (
     FailureTagMaster,
@@ -53,8 +53,9 @@ router = APIRouter(prefix="/reflection", tags=["reflection"])
 _EXEC_PREFIX = "exec_"
 _ACTION_PREFIX = "action_"
 
-# 회고 누적 창 — 오늘+어제+그제 (DevBaseline §1.4). 초과분은 cron 이 reflection_skipped 로 만료.
-_PENDING_WINDOW_DAYS = 3
+# 회고 누적 창 — 오늘+어제+그제 (DevBaseline §1.4). 초과분은 expire_reflections cron
+# (매일 04:00 KST)이 reflection_skipped 로 만료한다. 창 경계 단일 소스 =
+# `scheduler/expire_reflections.pending_reflection_since` — 이 쪽이 `>=`, cron 이 `<`(여집합).
 
 # 태깅 대상 — 실패/부분완료만 (S18 은 미완료 카드에서만 진입)
 _TAGGABLE_STATUSES = ("failed", "partial_done")
@@ -92,8 +93,7 @@ async def list_pending_reflections(
     시작만 하고 체크인하지 않은 실행을 소급 회고(POST /reflection/batch)하도록 모은다.
     아직 결과 미정이라 completionStatus 는 null.
     """
-    today = now_kst().date()
-    since = datetime.combine(today - timedelta(days=_PENDING_WINDOW_DAYS - 1), time.min, tzinfo=KST)
+    since = pending_reflection_since(now_kst().date())
     executions = await repo.list_pending_reflection(user.id, since=since)
 
     items: list[ReflectionPendingItem] = []
@@ -264,7 +264,10 @@ async def batch_reflect(
             execution.actual_duration_minutes = max(int(delta.total_seconds() // 60), 0)
 
         block = await repo.get_block(execution.scheduled_block_id)
-        if block is not None:
+        if block is not None and block.block_status != "cancelled":
+            # 취소된 블록은 되살리지 않는다 — 회고 창을 넘겨 만료 cron(#20)이 카드와 함께
+            # 정리한 블록에 stale 한 executionId 로 batch 가 들어오면, finished 로 덮어써서
+            # 주간 그리드에 유령 블록이 되살아난다(list_week 는 archived 를 안 본다).
             block.block_status = "finished"
 
         action = await action_repo.get_by_id(user.id, execution.action_item_id)
