@@ -3,20 +3,24 @@
 `recovery/if_then_proposal` 이 personalize 하려면 route 가 넘기는 변수(선두 전략 정보 포함)가
 템플릿 `{{var}}` 와 정확히 일치해야 한다. 누락되면 PromptRenderError → 조용히 룰 fallback
 (카탈로그 템플릿)으로 빠지므로 — 그 은폐를 여기서 잡는다.
+
+⚠️ 검사 대상을 **파일명으로 고정하지 않는다**. registry 는 버전을 생략한 `prompt_id` 를
+`latest()`(SemVer-ish 최댓값)로 해석하므로, 새 버전 파일을 디렉터리에 **떨어뜨리기만 해도
+프로덕션이 그 버전으로 갈아탄다**. 예전엔 이 파일이 `if_then_proposal.v1.md` 를 하드코딩해서,
+계약이 다른 v2 를 넣어도 테스트는 v1 만 보고 통과했다(#57 의 orphan v2 가 정확히 그 경우 —
+`strategy_label`/`strategy_group`/`base_template` 없이 LLM 이 직접 전략을 고르게 하는 옛 설계라,
+룰이 고른 전략과 다른 문구가 그 전략 라벨에 찍히는 모순이 조용히 프로덕션에 나간다).
+그래서 **registry 가 실제로 해석하는 것**과 **존재하는 모든 버전**을 함께 검사한다.
 """
 
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import pytest
 
-import reaction_backend
 from reaction_backend.prompts import registry
-from reaction_backend.prompts.registry import PromptRenderError
-
-_DIR = Path(reaction_backend.__file__).parent / "prompts" / "recovery"
+from reaction_backend.prompts.registry import PromptRenderError, PromptTemplate
 
 # route(api/routes/recovery.py) 의 generate 가 넘기는 변수 집합과 동기화.
 CODE_VARS: dict[str, set[str]] = {
@@ -30,17 +34,41 @@ CODE_VARS: dict[str, set[str]] = {
         "context_summary",
     },
 }
-_FILES = {"recovery/if_then_proposal": "if_then_proposal.v1.md"}
 _PH = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 
 
-def _placeholders(pid: str) -> set[str]:
-    return set(_PH.findall((_DIR / _FILES[pid]).read_text(encoding="utf-8")))
+def _placeholders(body: str) -> set[str]:
+    return set(_PH.findall(body))
+
+
+def _all_versions(prompt_id: str) -> list[PromptTemplate]:
+    domain, name = prompt_id.split("/", 1)
+    return [t for t in registry.list_all() if t.domain == domain and t.name == name]
 
 
 @pytest.mark.parametrize("prompt_id", list(CODE_VARS))
-def test_placeholders_match_code_variables(prompt_id: str) -> None:
-    assert _placeholders(prompt_id) == CODE_VARS[prompt_id]
+def test_resolved_prompt_placeholders_match_code_variables(prompt_id: str) -> None:
+    """**registry 가 해석한 것**(= 프로덕션이 쓰는 것)이 코드의 변수 계약과 일치한다."""
+    resolved = registry.get(prompt_id)
+    assert _placeholders(resolved.body) == CODE_VARS[prompt_id], (
+        f"{resolved.full_id} 의 placeholder 가 route 가 넘기는 변수와 다르다. "
+        "버전을 새로 올렸다면 코드 계약(strategy_label/strategy_group/base_template 포함)을 지킬 것."
+    )
+
+
+@pytest.mark.parametrize("prompt_id", list(CODE_VARS))
+def test_every_version_matches_code_variables(prompt_id: str) -> None:
+    """존재하는 **모든** 버전이 계약을 지킨다 — 파일을 넣는 순간 latest 가 될 수 있으므로.
+
+    계약이 다른 초안을 디렉터리에 두는 것 자체가 프로덕션 전환 트리거다(별도 승격 절차 없음).
+    """
+    versions = _all_versions(prompt_id)
+    assert versions, f"{prompt_id} 템플릿이 하나도 없다"
+    for tmpl in versions:
+        assert _placeholders(tmpl.body) == CODE_VARS[prompt_id], (
+            f"{tmpl.full_id} 가 계약을 어긴다 — 이 파일이 존재하는 것만으로 latest 가 되어 "
+            "프로덕션에 나갈 수 있다."
+        )
 
 
 @pytest.mark.parametrize("prompt_id", list(CODE_VARS))
@@ -48,6 +76,21 @@ def test_renders_without_missing_variables(prompt_id: str) -> None:
     text, _ = registry.render(prompt_id, dict.fromkeys(CODE_VARS[prompt_id], "x"))
     assert text.strip()
     assert "{{" not in text
+
+
+def test_resolved_prompt_keeps_strategy_personalization_contract() -> None:
+    """해석된 프롬프트가 '룰이 고른 전략을 personalize' 계약을 유지한다.
+
+    route 는 LLM 이 돌려준 `strategy_code` 를 **검사하지 않고** 문구를 룰이 고른 전략
+    (`top.strategy_type`)에 그대로 붙인다. 그래서 프롬프트가 LLM 에게 전략을 직접 고르라고
+    시키면, 고른 전략의 문구가 **다른 전략 라벨에 찍히는** 모순이 조용히 나간다.
+    선두 전략을 알려주는 변수 3종이 프롬프트에 살아 있어야 그 사고가 구조적으로 막힌다.
+    """
+    body = registry.get("recovery/if_then_proposal").body
+    for var in ("strategy_label", "strategy_group", "base_template"):
+        assert f"{{{{{var}}}}}" in body, (
+            f"{var} 가 프롬프트에서 사라졌다 — LLM 이 룰의 선택을 모른 채 제 전략을 고르게 된다."
+        )
 
 
 def test_missing_variable_raises() -> None:
