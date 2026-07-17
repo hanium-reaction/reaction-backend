@@ -15,7 +15,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import ActionItem
@@ -133,6 +133,52 @@ class ScheduledBlockRepo:
         stmt = select(ScheduledBlock).where(
             ScheduledBlock.user_id == user_id,
             ScheduledBlock.block_status != "cancelled",
+            ScheduledBlock.start_at < end_dt,
+            ScheduledBlock.end_at > start_dt,
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def list_scheduled_between(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[tuple[ScheduledBlock, ActionItem]]:
+        """[start_dt, end_dt) 의 **미착수('scheduled')** 블록 + 그 ActionItem — 재계획 재배치 대상.
+
+        시작/완료된 블록은 제외(불변). **사용자가 직접 옮긴 블록(`source='user_edit'`)도 제외**
+        — 수동 배치를 재계획이 지우지 않는다(#113 원칙). 각 블록의 `id` 는 approve 시 '교체할
+        옛 블록' 으로 payload 에 실려, blanket-cancel 없이 그 블록만 재조정 취소된다(#117).
+        """
+        stmt = (
+            select(ScheduledBlock, ActionItem)
+            .join(ActionItem, ScheduledBlock.action_item_id == ActionItem.id)
+            .where(
+                ScheduledBlock.user_id == user_id,
+                ScheduledBlock.block_status == "scheduled",
+                ScheduledBlock.source != "user_edit",
+                ScheduledBlock.start_at >= start_dt,
+                ScheduledBlock.start_at < end_dt,
+                ActionItem.archived_at.is_(None),
+            )
+            .order_by(ScheduledBlock.start_at)
+        )
+        result = await self._session.execute(stmt)
+        return [(block, action) for block, action in result.all()]
+
+    async def list_committed_between(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[ScheduledBlock]:
+        """[start_dt, end_dt) 의 **확정 일정** — 재계획이 회피할(fit-around) 블록.
+
+        확정 = 이미 **시작/완료된** 블록 + **사용자가 직접 옮긴 블록(`source='user_edit'`)**.
+        재배치 대상에서 빠지므로 여기 busy 로 포함해야 새 블록이 그 위에 겹치지 않는다.
+        """
+        stmt = select(ScheduledBlock).where(
+            ScheduledBlock.user_id == user_id,
+            ScheduledBlock.block_status != "cancelled",
+            or_(
+                ScheduledBlock.block_status.in_(("started", "finished")),
+                ScheduledBlock.source == "user_edit",
+            ),
             ScheduledBlock.start_at < end_dt,
             ScheduledBlock.end_at > start_dt,
         )

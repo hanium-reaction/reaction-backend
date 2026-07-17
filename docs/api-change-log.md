@@ -7,6 +7,26 @@
 
 ---
 
+## v1.21 — 2026-07-16 (주간 재계획 리뷰 수정 — 사용자 블록 보존·과거 배치·이중 배치, #117)
+
+v1.20 의 `POST /plans/replan` 계열을 머지 전 리뷰에서 확인된 결함 기준으로 조정. 전부 재현으로 확인된 것이며 새 endpoint 는 없다.
+
+- ⚠️ **`POST /plans/replan/{planId}/approve` 가 `user_edit` 옛 블록을 보존**한다(액션 통째 skip). 이전 구현은 `block_status` 만 보고 취소해, **생성 후 HITL 검토 창에서 사용자가 드래그한 블록을 파괴**했다 — `PATCH /plans/{planId}/blocks/{blockId}` 는 `source` 만 `user_edit` 으로 바꾸고 `block_status` 는 `scheduled` 로 남기기 때문. 생성 시점 필터는 승인보다 수 초~수 시간 앞서 돌아 방어가 안 되고, `edit_block` 은 lock 을 잡지 않아 `user_agent_lock` 으로도 못 막는다 → **쓰기 시점 재확인**. 보존 단위는 #113 의 카드(action) 단위 계약(`first_plan_adapter.protected_card_ids`) 재사용
+- ⚠️ **`POST /plans/replan` 의 `expiresAt` 이 자기 `windowStart` 00:00 KST 를 넘지 않는다**(기본 72h 와의 min). 이전엔 금·토·일에 만든 Draft(일요일은 `windowStart` 가 '내일')를 그 주가 시작된 뒤 승인할 수 있어, **살아있는 미래 블록을 취소하고 과거 블록을 생성**했다. 늦은 승인은 조용한 손실 대신 410 `PLAN_DRAFT_EXPIRED`
+- ⚠️ **후보 분량을 액션의 전체 live 블록 기준으로 산정**. 이전엔 후보를 액션의 **전체** `estimatedMinutes` 로 만들면서 옛 블록은 스캔 창 안에서만 모아, 주 경계를 걸친 분할 세션(#115)이 보존된 채 **이중 배치**됐다(120분 액션에 180분). 이제 (a) 형제 세션이 `started`/`finished` 이거나 (b) 카드에 `user_edit` 블록이 있으면 액션 통째 보존(승인 가드와 **동일 규칙** — 생성이 후보로 올렸는데 승인이 skip 하는 불일치 해소), (c) 살아남는 미래 블록의 분(分)은 차감
+- ⚠️ **`GET /plans/{planId}` 에 재계획 Draft id 를 주면 404 `PLAN_DRAFT_NOT_FOUND`** (이전: `KeyError: 'goal_nodes'` → 500). 승인 경로엔 이미 있던 가드가 조회 경로에만 빠져 있었다
+- **내부 스키마 개명** `ReplanApproveResponse`(planning) → `WeeklyReplanApproveResponse`. **응답 본문(wire)은 불변**. 같은 이름이 `schemas/recovery.py` 에 이미 있어 FastAPI 가 중복 모델명을 양쪽 다 full-qualify 로 바꿨고(`reaction_backend__schemas__recovery__ReplanApproveResponse`), 그 결과 **이 변경과 무관한 회복 endpoint `POST /replan/{executionId}/approve` 의 OpenAPI 컴포넌트명이 바뀌어 FE 생성 클라이언트가 깨졌다**. 개명으로 회복 쪽 이름이 원래대로 복구 — v1.20 기준으로 클라이언트를 재생성했다면 **다시 생성 필요**
+
+## v1.20 — 2026-07-09 (주간 forward 재계획 `POST /plans/replan` + block-id 재조정 승인, #117)
+
+- **신규** `POST /plans/replan` — 주간 리포트를 먼저 작성하고(직전 완료 주), **다음 주 월요일부터 마감까지** 남은 작업 + 수락한 회복을 다시 배치. 대상 = 다음 주 이후 **미착수(`scheduled`) 블록**의 액션(actionId dedup) + **활성 블록 없는 `planned` 백로그**. 과거·시작/완료·`user_edit` 블록은 불변. busy = 확정(시작/완료·`user_edit`) 블록 + DB `time_policies` + **고정 일정(`fixed_schedules`, #112 정합)**. 응답 `ReplanResponse`(Draft): `{planId, windowStart, horizon, blocks[]{actionId,title,category,start,end,replacesBlockId}, warnings, generatedAt, isDraft:true}`. 각 블록의 `replacesBlockId` 는 교체할 옛 미래 블록(없으면 백로그라 `null`)
+- **신규** `POST /plans/replan/{planId}/approve` — **block-id 재조정** 승인(blanket-cancel 없음): `replacesBlockId` 를 현재 DB 상태로 재조정 — 여전히 `scheduled` → 그 블록만 취소+생성 / 그새 `started`·`finished`·`cancelled`·삭제 → 취소·생성 **모두 skip**(손실·중복 방지) / 백로그인데 그새 활성 블록 생김 → 생성 skip. payload 에 없는 블록(드롭 후보)은 손대지 않아 **보존**. Draft 로드~쓰기를 `user_agent_lock` 단일 commit 으로 원자화(#113 패턴). 응답 `{planId, isDraft:false, cancelledBlocks, createdBlocks, skippedBlocks, activatedAt}`
+- 배경(#117 재작업): 이전 설계의 blanket-cancel(창 안 미래 블록 일괄 취소 후 재생성)은 생성~승인 사이 사용자가 시작/이동한 블록을 지우거나 중복 생성할 수 있었다. 승인 시점 재조정으로 그 창을 봉합
+- 기존 goal/node/action **재사용**(새 목표 트리 생성 없음) — additive endpoint 라 기존 계약 불변. 신규 에러코드 없음(409 `AGENT_CONCURRENT_ACCESS` / 410 `PLAN_DRAFT_EXPIRED` / 404 `PLAN_DRAFT_NOT_FOUND` 재사용)
+- 지평 붕괴 방지: 미래 블록이 없고 backlog `target_date` 가 전부 과거/None 이면 지평이 `windowStart` 하루로 축소돼 next Monday 에 몰리던 문제 → **최소 한 주(다음 주 월~일)** 로 분산. 먼 미래 backlog 는 스캔 창(1년)으로 상한
+- ⚠️ 방어: **재계획 Draft 를 First Plan 승인(`POST /plans/{planId}/approve`)에 넣으면** 이전엔 `payload["outcome"]` KeyError→500 이었으나, 이제 404 `PLAN_DRAFT_NOT_FOUND` 로 안내(전용 `POST /plans/replan/{planId}/approve` 사용). approve 시 action 이 그새 아카이브(#113 supersede)됐으면 좀비 블록 방지로 skip
+- **다중 세션 재조정**(리뷰 대응): #115 스케줄러가 긴 액션을 여러 세션 블록으로 쪼개므로, 재조정을 개별 블록이 아니라 **액션당 옛 블록 '집합'(payload `oldBlocks`)** 단위로 처리. 옛 블록 1개만 잡으면 나머지가 유령으로 남거나(중복) 새 세션이 드롭(손실)되던 것을 봉합 — 액션당 활성 옛 블록 전부 취소 + 새 세션 블록 전부 생성(하나라도 started/finished 면 액션 전체 보존). `replacesBlockId` 는 미리보기용 대표 1개로 남음
+
 ## v1.19 — 2026-07-08 (Inbox 보관함 조회·복원 + 승격 대상 구분)
 
 - **버그 픽스**: `GET /inbox` 가 모든 쿼리에 `archived_at IS NULL` 을 하드코딩해 **보관(archived) 항목이 어떤 필터로도 조회 불가**하던 문제 수정. `?status=archived` 로 보관함 조회 가능(기본 목록은 여전히 archived 제외).

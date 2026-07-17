@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import ActionItem
+from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.session import get_db
 
 
@@ -49,6 +50,30 @@ class ActionItemRepo:
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def list_planned_without_block(self, user_id: UUID) -> list[ActionItem]:
+        """활성 블록(비-cancelled)이 하나도 없는 **planned** 카드 — 미배치 백로그(읽기 전용).
+
+        주간 forward 재계획이 '아직 캘린더에 안 올라간 남은 일'을 함께 배치할 때의 소스.
+        수락했지만 아직 개별 재배치하지 않은 회복 카드(source=recovery_*, status=planned)가
+        여기 포함된다. **원본 status 는 읽기만 — 변경 금지**(AGENTS §2).
+        """
+        has_active_block = select(ScheduledBlock.action_item_id).where(
+            ScheduledBlock.user_id == user_id,
+            ScheduledBlock.block_status != "cancelled",
+        )
+        stmt = (
+            select(ActionItem)
+            .where(
+                ActionItem.user_id == user_id,
+                ActionItem.archived_at.is_(None),
+                ActionItem.status == "planned",
+                ActionItem.id.not_in(has_active_block),
+            )
+            .order_by(ActionItem.priority.asc(), ActionItem.created_at.asc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
 
     async def create_from_inbox(
         self,
