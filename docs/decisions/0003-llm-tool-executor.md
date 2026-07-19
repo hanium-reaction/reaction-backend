@@ -68,3 +68,15 @@ DevBaseline §부록 D Q8 잠금: 톤 모드(gentle/strict/encouraging)를 **시
 - 톤은 동결 게이트 한 곳에서만 합성 → 호출처는 `tone_mode=` 한 줄(또는 config 채널)만 전달.
 - LangGraph 도 config 채널로 일관 처리 → state 스키마/직렬화 불변, 회귀 없음.
 - 모든 LLM 호출(5도메인 8지점)에 톤 적용 완료.
+
+## Addendum — 라우트별 timeout override (2026-07, #128)
+
+동결된 것은 **`timeout=8.0` 기본값**이지 호출별 값이 아니다. 호출처는 작업 특성에 따라
+override 할 수 있고, 현재 유일한 override 는 recovery personalize 다:
+
+- `api/routes/recovery.py` — `thinking_budget=0` + `timeout=12.0` **한 쌍**.
+- 사유(#128): flash 계열이 SDK 기본 thinking 으로 8s 를 상습 초과해 **매번 폴백**됐다
+  (회복 카드가 항상 카탈로그 템플릿 = LLM personalize 무용). thinking 을 끄면 품질 손실
+  없이 2~4s 로 내려오고, 12s 는 그 위의 여유다.
+- 다른 도메인(inbox/brief 등)은 기본 8s 유지. 새 override 를 추가하면 이 절에 사유와 함께
+  기록할 것 — 문서에 없는 override 는 리뷰에서 "8s 위반"으로 오독된다(실제로 그랬다).
