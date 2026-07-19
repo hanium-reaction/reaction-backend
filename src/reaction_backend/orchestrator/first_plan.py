@@ -375,6 +375,16 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
 
     start_day = date.fromisoformat(state["target_date"])
     schedule_end = _schedule_end(start_day, outcome.horizon, state["scope"])
+    # 먼 마감 희석 방지(#weekly-rate): weekly_hours 는 '주당' rate 다. 이번 분해량(action 수)을
+    # 주당 rate 로 담는 데 필요한 주 수만큼으로 배치 창을 좁힌다. 그러지 않으면 scope="horizon"
+    # 기본값에서 ~1주치 세션이 먼 마감(예: 이번 학기) 전체에 균등 분산돼 이번 주가 텅 빈다.
+    # 마감이 그보다 가까우면 _schedule_end 캡이 그대로 이겨(마감까지 몰기) 유지된다. 이후 주는
+    # 주간 재계획이 채운다(비지속 초안이라 안전).
+    if action_items:
+        rate = first_plan_adapter.target_sessions_per_week(outcome, state["density"])
+        weeks_needed = max(1, -(-len(action_items) // max(rate, 1)))
+        density_end = start_day + timedelta(days=weeks_needed * 7 - 1)
+        schedule_end = max(min(schedule_end, density_end), start_day)
     # 정책 = outcome 스냅샷 + DB 정책(온보딩 후 수정 포함). union → compute_free_blocks 가 병합.
     policies = [
         *first_plan_adapter.time_policies_from_outcome(outcome),
