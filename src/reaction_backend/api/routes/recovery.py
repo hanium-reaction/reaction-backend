@@ -151,7 +151,7 @@ async def generate_recovery_proposals(
     action_repo: ActionRepoDep,
     session: SessionDep,
 ) -> RecoveryProposalsResponse:
-    """실패 컨텍스트 기반 회복 옵션 2~4개 생성 (LLM ≤ 8s + heuristic fallback).
+    """실패 컨텍스트 기반 회복 옵션 2~4개 생성 (LLM thinking 0 + ≤ 12s, 룰 fallback — ADR-0003 addendum).
 
     이미 pending 카드가 있으면 재생성하지 않고 그대로 반환한다 (중복 INSERT 방지).
     """
