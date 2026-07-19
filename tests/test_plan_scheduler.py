@@ -84,6 +84,52 @@ def test_spreads_across_days_instead_of_cramming_one_day() -> None:
         assert total <= 180
 
 
+def test_fills_available_time_when_over_comfort_cap() -> None:
+    """마감이 임박해(단일일) 일이 편안한 상한(180분)보다 많으면, 편안한 상한에서 멈추지 않고
+    비피크 가용 시간까지 채워 세션을 드롭하지 않는다(#fill-available).
+
+    이전: cap 180 에 닿으면 그 날을 건너뛰어 400분 중 ~180분만 배치, 나머지는 경고로 버려짐.
+    지금: 1차(상한 내 분산) 후 남은 세션을 2차로 남은 free 에 상한 무시하고 채운다.
+    """
+    actions = [_action(f"작업{i}", 50) for i in range(8)]  # 400분 > cap 180
+    blocks, warnings = schedule_actions_multiday(
+        start_day=START,
+        horizon_day=START,  # 단 하루 — 마감 임박
+        actions=actions,
+        busy_for_day=_busy_09_2330,  # 09:00~23:30 free (충분)
+        peak_windows=[PlanWindow(time(18, 0), time(20, 0))],  # 피크 저녁 2h 뿐
+        focus_chunk_min=60,
+        break_min=10,
+        daily_focus_cap_min=180,
+    )
+    assert not warnings  # 전부 배치 — 상한에 막혀 버려지지 않음
+    assert len(blocks) == 8
+    total = sum(b.interval.duration_minutes for b in blocks)
+    assert total == 400  # 하루에 400분(>180)까지 담김 = 비피크 시간까지 활용
+    # 피크 우선은 유지 — 적어도 첫 세션은 피크(18:00~) 안에서 시작.
+    assert any(time(18, 0) <= b.interval.start.time() < time(20, 0) for b in blocks)
+
+
+def test_relaxed_deadline_still_respects_comfort_cap() -> None:
+    """여유 있는 마감(여러 날)이면 1차 분산만으로 다 담겨 편안한 상한(180분/일)을 지킨다."""
+    actions = [_action(f"작업{i}", 50) for i in range(6)]  # 300분, 14일에 여유
+    blocks, warnings = schedule_actions_multiday(
+        start_day=START,
+        horizon_day=date(2026, 7, 22),
+        actions=actions,
+        busy_for_day=_busy_09_2330,
+        peak_windows=[],
+        focus_chunk_min=60,
+        break_min=10,
+        daily_focus_cap_min=180,
+    )
+    assert not warnings
+    days_used = {b.interval.start.date() for b in blocks}
+    for day in days_used:
+        total = sum(b.interval.duration_minutes for b in blocks if b.interval.start.date() == day)
+        assert total <= 180  # 여유로우면 하루 상한 유지(고르게 분산)
+
+
 def test_spreads_toward_deadline_not_front_loaded() -> None:
     """마감까지 **균등 분산** — 첫 며칠에 몰리지 않고 마지막 세션이 호라이즌 후반부에 놓인다.
 
