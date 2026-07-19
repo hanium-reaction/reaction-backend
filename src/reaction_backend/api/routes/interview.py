@@ -270,6 +270,27 @@ async def _persist_turn(
     )
 
 
+async def _carry_over_answers(repo: InterviewRepo, user_id: UUID) -> dict[str, dict[str, Any]]:
+    """지난 완료 인터뷰의 '지속형(너에 대한)' 슬롯 답을 새 세션 시드로 회수(#reduce-reask).
+
+    첫 인터뷰(완료 이력 없음)면 빈 dict → 기존처럼 전부 묻는다. 목표·이번주 한정 슬롯은
+    CARRY_OVER_SLOT_KEYS 에서 빠져 있어 자동으로 다시 묻게 된다.
+    """
+    prev = await repo.get_latest_finished(user_id)
+    if prev is None:
+        return {}
+    seed: dict[str, dict[str, Any]] = {}
+    for r in await repo.list_slot_answers(prev.id):
+        value = r.value
+        if (
+            value is not None
+            and r.slot_key in interview_adapter.CARRY_OVER_SLOT_KEYS
+            and interview_adapter.is_filled_answer(value)
+        ):
+            seed[r.slot_key] = value
+    return seed
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # endpoints
 # ─────────────────────────────────────────────────────────────────────────────
@@ -293,13 +314,15 @@ async def start_session(user: CurrentUser, repo: RepoDep, session: SessionDep) -
                 total_turns=stale.total_turns,
                 ambiguity_final=float(stale.ambiguity_final or 0.0),
             )
+        seed = await _carry_over_answers(repo, user.id)
         row = await repo.create_session(user.id, get_settings().llm_model)
         result = await interview_runner.start_interview(
             session_id=row.id,
             user_id=user.id,
             session=session,
             tone_mode=user.tone_mode,
-            slot_meta=_slot_meta({}),
+            slot_meta=_slot_meta(seed),
+            seed_answers=seed,
         )
         await _persist_turn(repo, row, result.state)
         await session.commit()

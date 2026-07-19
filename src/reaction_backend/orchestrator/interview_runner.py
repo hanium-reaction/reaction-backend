@@ -96,10 +96,17 @@ async def start_interview(
     session: AsyncSession | None = None,
     tone_mode: str | None = None,
     slot_meta: dict[str, dict[str, Any]] | None = None,
+    seed_answers: dict[str, dict[str, Any]] | None = None,
 ) -> TurnResult:
-    """세션 시작 → FSM 이 고른 첫 필수 슬롯 질문 1개를 만들어 반환."""
+    """세션 시작 → FSM 이 고른 첫 필수 슬롯 질문 1개를 만들어 반환.
+
+    seed_answers 가 있으면(재인터뷰 시 지난 인터뷰의 지속형 슬롯) 그 슬롯들은 이미 채워진
+    것으로 두어 FSM 이 건너뛰고 첫 '미충족' 슬롯(보통 목표)부터 묻는다(#reduce-reask).
+    """
     config = _config(session, tone_mode, slot_meta=slot_meta)
     state = interview.initial_state(session_id=session_id, user_id=user_id)
+    if seed_answers:
+        state["slot_answers"] = dict(seed_answers)
     state = await interview.ask_question(state, config)
     return TurnResult(state=state, done=False, question=state["next_question"])
 

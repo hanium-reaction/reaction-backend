@@ -47,6 +47,27 @@ REQUIRED_SLOT_KEYS: tuple[str, ...] = (
     "recovery.downscope_unit",
 )
 
+# 재인터뷰 시 지난 완료 인터뷰에서 그대로 이어받는 '지속형(너에 대한)' 슬롯 — 매번 다시 묻지
+# 않는다(#reduce-reask). 목표 관련(goals.*)과 이번 주 한정(energy.weekly_drain '이번 주 컨디션',
+# constraints.* '이번 달 일정')은 계획 주기마다 바뀌므로 제외하고 새로 묻는다. 프로필은 설정에서
+# 수정 가능하므로, 여기서 이어받아도 사용자가 언제든 바꿀 수 있다.
+CARRY_OVER_SLOT_KEYS: frozenset[str] = frozenset(
+    {
+        "identity.role",
+        "identity.season",
+        "identity.major",
+        "time.activity_window",
+        "time.peak_window",
+        "time.no_touch",
+        "time.fixed_blocks",
+        "energy.focus_duration",
+        "energy.break_pattern",
+        "recovery.tone",
+        "recovery.rest_ok",
+        "recovery.downscope_unit",
+    }
+)
+
 _DEFAULT_ACTIVITY = TimeRange(start="09:00", end="23:00")
 _DEFAULT_TONE = "담백"
 _DEFAULT_DOWNSCOPE_MIN = 10
