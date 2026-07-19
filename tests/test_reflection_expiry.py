@@ -424,6 +424,19 @@ def _where_of(sql: str) -> str:
     return where
 
 
+def _set_columns_of(sql: str) -> set[str]:
+    """UPDATE 문이 **쓰는 컬럼 집합** — `SET a=..., b=...` 의 좌변만.
+
+    WHERE 가드만 검사하면 "무엇을 쓰는가"는 무방비다. 실제로 `expire_unreflected` 의
+    `.values()` 에 `status` 를 끼워 넣어도 전 스위트가 통과했다 — AGENTS.md §2 의 절대 규칙
+    (원본 `action_item.status` 변경 금지)을 어겨도 CI 가 green 이었다는 뜻이다.
+    """
+    _, _, rest = sql.partition(" SET ")
+    set_clause = rest.partition(" WHERE ")[0]
+    # `col='v', col2=now()` → {col, col2}. 값 안의 콤마는 이 쿼리들에 없다(단순 리터럴뿐).
+    return {frag.split("=", 1)[0].strip() for frag in set_clause.split(", ") if "=" in frag}
+
+
 async def test_real_expire_query_keeps_every_data_safety_guard() -> None:
     """실 `ExecutionRepo.expire_unreflected` 가 내보내는 SQL 이 보호 절을 전부 갖는다.
 
@@ -467,6 +480,11 @@ async def test_real_expire_query_keeps_every_data_safety_guard() -> None:
     assert "scheduled_blocks.block_status IN ('scheduled', 'started')" in update_where
     assert f"scheduled_blocks.start_at >= '{SINCE.isoformat(sep=' ')}'" in update_where
 
+    # **쓰는 컬럼을 못 박는다** — WHERE 만 보면 "무엇을 쓰는가"가 무방비다.
+    # 특히 `status` 가 끼어들면 AGENTS.md §2 절대 규칙(원본 action_item.status 변경 금지 —
+    # Resilience 지표 전제)을 cron 이 조용히 어긴다. updated_at 은 TimestampMixin 의 onupdate.
+    assert _set_columns_of(update_sql) == {"system_failure_reason", "archived_at", "updated_at"}
+
     # 블록 취소는 **미종결 블록만** — finished 는 실제 수행 이력이라 취소하면 기록이 왜곡된다.
     # WHERE 만 검사한다: SET 절에도 block_status 가 있어 통짜 검사는 WHERE 를 지워도 통과한다.
     cancel_sql = _sql(session.statements[1])
@@ -474,6 +492,8 @@ async def test_real_expire_query_keeps_every_data_safety_guard() -> None:
     assert "UPDATE scheduled_blocks" in cancel_sql
     assert "block_status='cancelled'" in cancel_sql
     assert "scheduled_blocks.block_status IN ('scheduled', 'started')" in cancel_where
+    # 블록 쿼리도 마찬가지 — 만료가 블록의 다른 속성을 건드리지 않는다.
+    assert _set_columns_of(cancel_sql) == {"block_status", "updated_at"}
     # 만료된 카드의 블록만 — 남의 블록을 지우지 않는다.
     assert "scheduled_blocks.action_item_id IN" in cancel_where
 

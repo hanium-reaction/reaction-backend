@@ -129,3 +129,22 @@ def test_build_scheduler_registers_expected_jobs() -> None:
         "expire_drafts",
         "expire_reflections",
     }
+
+
+def test_expire_reflections_job_is_wired_to_the_right_function_and_time() -> None:
+    """만료 cron 이 **매일 04:00 KST 에 만료 job 을** 부른다.
+
+    회귀: 위 테스트는 job **id 집합**만 본다. 그래서 `id="expire_reflections"` 를 유지한 채
+    (a) 다른 함수를 꽂거나 (b) 시각을 바꿔도 전 스위트가 통과했다 — 4일째 카드가 영영 안
+    지워져도 CI 는 green 이었다는 뜻이다. 잠금 결정(AGENTS.md §1 "3일 그 이후 자동 만료")의
+    '언제·무엇을' 은 여기서만 고정된다.
+    """
+    from reaction_backend.scheduler import runtime
+
+    job = next(j for j in runtime.build_scheduler().get_jobs() if j.id == "expire_reflections")
+
+    assert job.func is runtime._expire_reflections_job
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"] == "4", f"만료 cron 시각이 04시가 아니다: {fields}"
+    assert fields["minute"] == "0", f"만료 cron 분이 00분이 아니다: {fields}"
+    assert str(job.trigger.timezone) == "Asia/Seoul"
