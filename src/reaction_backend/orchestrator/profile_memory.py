@@ -10,10 +10,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import time
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from reaction_backend.db.models.behavioral_profile import BehavioralProfile
+from reaction_backend.db.models.interaction_style import InteractionStyle
 from reaction_backend.db.models.user import User
 from reaction_backend.repositories.profile_repo import ProfileRepo
 from reaction_backend.schemas.interview import InterviewOutcome
@@ -37,6 +41,46 @@ _TONE_TO_INTERACTION: dict[str, str] = {
 
 # behavioral_profiles.time_chunk_preference 는 "10/20/30/60/90" 버킷(VARCHAR).
 _CHUNK_BUCKETS: tuple[int, ...] = (10, 20, 30, 60, 90)
+
+# 역매핑 — 저장된 프로필(설정에서 수정 가능)을 재인터뷰 시드용 슬롯값으로 되돌린다(#reduce-reask).
+# forward 가 다대일(유머·코치→encouraging)인 경우 대표 칩 1개로 되돌린다(약간 손실, 허용).
+_CYCLE_TO_PEAK: dict[str, str] = {v: k for k, v in _PEAK_TO_CYCLE.items()}
+_INTERACTION_TO_TONE: dict[str, str] = {"gentle": "따뜻", "normal": "담백", "encouraging": "유머"}
+
+
+def seed_slots_from_profile(
+    *,
+    behavioral: BehavioralProfile | None,
+    interaction: InteractionStyle | None,
+    focus_mode_prefs: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """저장된 프로필 → 재인터뷰 시드 슬롯값(설정 수정이 반영된 '최신 진실').
+
+    **설정에서 수정 가능한 필드만** 슬롯으로 되돌린다: 피크시간대·집중길이·회복톤·최소단위·
+    휴식수용. 활동창(preferred_*)은 설정 편집 대상이 아니고 '24:00' 등이 프로필로 왕복되지
+    않으므로 여기서 만들지 않는다(호출자가 지난 인터뷰 원답을 그대로 쓴다).
+    """
+    seed: dict[str, dict[str, Any]] = {}
+    if behavioral is not None:
+        peak = _CYCLE_TO_PEAK.get(behavioral.energy_cycle)
+        if peak:
+            seed["time.peak_window"] = {"type": "chip", "values": [peak]}
+        if behavioral.attention_span:
+            seed["energy.focus_duration"] = {
+                "type": "chip",
+                "values": [f"{behavioral.attention_span}분"],
+            }
+    if interaction is not None:
+        tone = _INTERACTION_TO_TONE.get(interaction.recovery_tone)
+        if tone:
+            seed["recovery.tone"] = {"type": "chip", "values": [tone]}
+    downscope = focus_mode_prefs.get("downscope_unit_min")
+    if downscope is not None:
+        seed["recovery.downscope_unit"] = {"type": "chip", "values": [f"{downscope}분"]}
+    rest_ok = focus_mode_prefs.get("rest_ok")
+    if rest_ok is not None:
+        seed["recovery.rest_ok"] = {"type": "chip", "values": ["네" if rest_ok else "아니오"]}
+    return seed
 
 
 def energy_cycle_from_peak(peak_window: list[str]) -> str:
