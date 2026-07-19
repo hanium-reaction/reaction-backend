@@ -1,0 +1,43 @@
+name: Preview expire-reflections (EC2, read-only)
+
+# SCHEDULER_ENABLED 를 켜기 전 사전 실측(#20 DoD 2 · #24) — 만료 cron 이 첫 04:00 에
+# 몇 건을 지울지 라이브 RDS 에서 **읽기 전용**으로 센다.
+# deploy.yml 과 같은 self-hosted EC2 runner 에서 돌아 prod .env(RDS DATABASE_URL)를 쓴다.
+#
+# 안전:
+# - workflow_dispatch 전용 (push/PR 로는 절대 트리거되지 않음)
+# - 스크립트는 SELECT 뿐 — 쓰기 옵션 자체가 없다(--apply 없음)
+# - 판정 WHERE 는 실제 만료 쿼리와 동일함이 테스트로 고정됨
+#   (tests/test_preview_expire_reflections.py)
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  # deploy 와 같은 앱 디렉터리를 쓰므로 배포와 겹치지 않게 직렬화.
+  group: deploy-ec2
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    name: "preview (read-only)"
+    runs-on: [self-hosted, ec2, reaction-backend]
+    timeout-minutes: 10
+
+    env:
+      APP_DIR: /home/ubuntu/reaction-backend
+
+    steps:
+      - name: Run preview
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          ~/.local/bin/uv run --no-dev python -m scripts.preview_expire_reflections | tee /tmp/preview.out
+
+      - name: Summary
+        if: always()
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          echo "### Preview expire-reflections (read-only)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 60 /tmp/preview.out >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
