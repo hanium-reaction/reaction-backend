@@ -5,9 +5,36 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any, cast
+
 from fastapi.testclient import TestClient
 
 from reaction_backend.orchestrator import profile_memory as pm
+
+
+def test_seed_slots_from_profile_reverses_editable_fields() -> None:
+    """설정에서 수정 가능한 프로필 필드 → 재인터뷰 시드 슬롯값으로 역매핑(#reduce-reask)."""
+    beh = cast(Any, SimpleNamespace(energy_cycle="evening", attention_span=45))
+    inter = cast(Any, SimpleNamespace(recovery_tone="gentle"))
+    seed = pm.seed_slots_from_profile(
+        behavioral=beh,
+        interaction=inter,
+        focus_mode_prefs={"downscope_unit_min": 15, "rest_ok": False},
+    )
+    assert seed["time.peak_window"] == {"type": "chip", "values": ["저녁"]}
+    assert seed["energy.focus_duration"] == {"type": "chip", "values": ["45분"]}
+    assert seed["recovery.tone"] == {"type": "chip", "values": ["따뜻"]}
+    assert seed["recovery.downscope_unit"] == {"type": "chip", "values": ["15분"]}
+    assert seed["recovery.rest_ok"] == {"type": "chip", "values": ["아니오"]}
+    # 활동창(preferred_*)은 설정 편집 대상이 아니라 프로필로 만들지 않는다 → 호출자가 원답 사용.
+    assert "time.activity_window" not in seed
+
+
+def test_seed_slots_from_profile_empty_when_absent() -> None:
+    """프로필·focus_mode 가 없으면 빈 시드 → 오버레이가 지난 인터뷰 원답을 덮지 않는다."""
+    assert pm.seed_slots_from_profile(behavioral=None, interaction=None, focus_mode_prefs={}) == {}
+
 
 # ───────────────────────── 매핑 순수 함수 ─────────────────────────
 

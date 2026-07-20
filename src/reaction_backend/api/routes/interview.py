@@ -55,6 +55,7 @@ from reaction_backend.orchestrator import (
 from reaction_backend.orchestrator._common import user_agent_lock
 from reaction_backend.orchestrator.interview import InterviewState
 from reaction_backend.repositories.interview_repo import InterviewRepo, get_interview_repo
+from reaction_backend.repositories.profile_repo import ProfileRepo, get_profile_repo
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.interview import (
     InterviewEndReason,
@@ -90,6 +91,7 @@ _CATALOG_BY_KEY: dict[str, InterviewSlot] = {s.slot_key: s for s in SLOT_CATALOG
 _REQUIRED_KEYS = interview_adapter.REQUIRED_SLOT_KEYS
 
 RepoDep = Annotated[InterviewRepo, Depends(get_interview_repo)]
+ProfileRepoDep = Annotated[ProfileRepo, Depends(get_profile_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 
 
@@ -270,13 +272,49 @@ async def _persist_turn(
     )
 
 
+async def _carry_over_answers(
+    repo: InterviewRepo, profile_repo: ProfileRepo, user: User
+) -> dict[str, dict[str, Any]]:
+    """재인터뷰 시드 — 지난 인터뷰의 지속형 슬롯 원답 위에, **설정에서 수정 가능한 프로필**을
+    덮어써 최신 진실을 반영한다(#reduce-reask).
+
+    - base: 지난 완료 인터뷰의 CARRY_OVER 슬롯 원답(identity·no_touch·활동창 등 — 프로필이
+      담지 않거나 설정에서 못 고치는 슬롯까지 faithful 하게 회수).
+    - overlay: behavioral/interaction/focus_mode 프로필을 슬롯값으로 역매핑(피크·집중길이·톤·
+      최소단위·휴식수용). 사용자가 설정에서 고쳤으면 그 값이 base 를 덮는다.
+
+    첫 인터뷰(이력·프로필 없음)면 빈 dict → 기존처럼 전부 묻는다.
+    """
+    base: dict[str, dict[str, Any]] = {}
+    prev = await repo.get_latest_finished(user.id)
+    if prev is not None:
+        for r in await repo.list_slot_answers(prev.id):
+            value = r.value
+            if (
+                value is not None
+                and r.slot_key in interview_adapter.CARRY_OVER_SLOT_KEYS
+                and interview_adapter.is_filled_answer(value)
+            ):
+                base[r.slot_key] = value
+
+    overlay = profile_memory.seed_slots_from_profile(
+        behavioral=await profile_repo.get_behavioral(user.id),
+        interaction=await profile_repo.get_interaction(user.id),
+        focus_mode_prefs=user.focus_mode_preferences or {},
+    )
+    base.update(overlay)  # 설정 수정이 반영된 프로필이 지난 인터뷰 원답을 덮는다(최신 우선).
+    return base
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # endpoints
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @router.post("/sessions", status_code=status.HTTP_201_CREATED)
-async def start_session(user: CurrentUser, repo: RepoDep, session: SessionDep) -> InterviewSession:
+async def start_session(
+    user: CurrentUser, repo: RepoDep, profile_repo: ProfileRepoDep, session: SessionDep
+) -> InterviewSession:
     """딥 인터뷰 세션 시작 — FSM 이 고른 첫 필수 슬롯 질문 1개 생성.
 
     재시작 승리(restart-wins): 진행 중(end_reason IS NULL) 세션이 있으면 `abandoned` 로
@@ -293,13 +331,15 @@ async def start_session(user: CurrentUser, repo: RepoDep, session: SessionDep) -
                 total_turns=stale.total_turns,
                 ambiguity_final=float(stale.ambiguity_final or 0.0),
             )
+        seed = await _carry_over_answers(repo, profile_repo, user)
         row = await repo.create_session(user.id, get_settings().llm_model)
         result = await interview_runner.start_interview(
             session_id=row.id,
             user_id=user.id,
             session=session,
             tone_mode=user.tone_mode,
-            slot_meta=_slot_meta({}),
+            slot_meta=_slot_meta(seed),
+            seed_answers=seed,
         )
         await _persist_turn(repo, row, result.state)
         await session.commit()

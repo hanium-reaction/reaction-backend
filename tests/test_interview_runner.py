@@ -130,6 +130,39 @@ async def test_fsm_collects_required_slots_then_confirms(monkeypatch: pytest.Mon
     assert result.outcome.preferences.recovery_tone == "네"
 
 
+async def test_seed_answers_skip_durable_slots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """재인터뷰: 지난 인터뷰의 지속형 슬롯을 seed 로 넘기면 FSM 이 건너뛰고 첫 목표 슬롯부터 묻는다.
+
+    #reduce-reask — 학년·시간·회복 등 '너에 대한' 정보를 다시 묻지 않는다. seed 에 없는
+    목표 관련(goals.*)만 남으므로 첫 질문은 goals.list.
+    """
+    monkeypatch.setattr(aiClient, "run", _stub(clarity=0.9))
+    seed = {
+        "identity.role": {"type": "chip", "values": ["대3"]},
+        "identity.season": {"type": "chip", "values": ["학기중"]},
+        "time.activity_window": {"type": "range", "start": "09:00", "end": "23:00"},
+        "time.peak_window": {"type": "chip", "values": ["오전"]},
+        "time.no_touch": {"type": "chip", "values": ["일요일"]},
+        "recovery.tone": {"type": "chip", "values": ["담백"]},
+        "recovery.rest_ok": {"type": "chip", "values": ["네"]},
+        "recovery.downscope_unit": {"type": "chip", "values": ["10분"]},
+    }
+    result = await interview_runner.start_interview(
+        session_id=uuid4(), user_id=uuid4(), seed_answers=seed
+    )
+    # 학년(identity.role) 을 다시 묻지 않고 첫 미충족 필수(goals.list)부터.
+    assert result.state["next_slot_key"] == "goals.list"
+    # 남은 필수 슬롯이 8개(지속형) 만큼 줄었다 — 14 - 8 = 6.
+    remaining = sum(
+        1
+        for k in interview.REQUIRED_SLOT_SEQUENCE
+        if not interview._is_filled(result.state["slot_answers"].get(k))
+    )
+    assert remaining == 6
+    # 이어받은 값은 그대로 상태에 있다(끝까지 가면 outcome 에 실린다).
+    assert result.state["slot_answers"]["identity.role"] == {"type": "chip", "values": ["대3"]}
+
+
 async def test_low_clarity_reasks_same_slot(monkeypatch: pytest.MonkeyPatch) -> None:
     """자유 서술(text) 답의 clarity 가 임계 미만이면 저장하지 않고 같은 슬롯을 다시 묻는다."""
     monkeypatch.setattr(aiClient, "run", _stub(clarity=0.1))
