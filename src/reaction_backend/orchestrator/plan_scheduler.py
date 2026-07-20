@@ -223,20 +223,25 @@ def schedule_actions_multiday(
     placements: list[tuple[TimeInterval, PlanAction, int]] = []
     warnings: list[str] = []
 
-    for idx, (action, minutes, si, n) in enumerate(flat):
+    def _target_day_index(idx: int) -> int:
         # 마감까지 **균등 분산**(stride): idx 0 → 첫날, 마지막 idx → 마지막 날. front-fill(오늘부터
         # 몰기) 대신 세션을 [start, horizon] 전 구간에 고르게 흩뿌린다(#exam-plan-clustering).
         if total_days <= 1 or n_sessions <= 1:
-            target = 0
-        else:
-            target = round(idx * (total_days - 1) / (n_sessions - 1))
+            return 0
+        return round(idx * (total_days - 1) / (n_sessions - 1))
+
+    def _try_place(
+        action: PlanAction, minutes: int, n: int, target: int, *, respect_cap: bool
+    ) -> bool:
+        """target 일 근처(뒤 우선, 없으면 앞)에 한 세션을 배치. 성공하면 상태를 갱신하고 True.
+
+        respect_cap=True 면 편안한 하루 상한을 넘긴 날은 건너뛴다(빈 날 단일 세션은 예외 허용).
+        respect_cap=False 면 상한을 무시하고 남은 가용 시간에 채운다(피크 우선은 그대로).
+        """
         need = timedelta(minutes=minutes)
-        placed_flag = False
-        # 목표일부터 가까운 날 순으로(뒤 우선, 없으면 앞) — cap/가용시간에 막히면 이웃 날로.
         for di in _search_order(target, total_days):
             day = days[di]
-            # 하루 집중 상한(가드) — 빈 날이면 단일 세션이 상한을 넘어도 1개는 허용(드롭 방지).
-            if used_by_day[day] > 0 and used_by_day[day] + minutes > cap:
+            if respect_cap and used_by_day[day] > 0 and used_by_day[day] + minutes > cap:
                 continue
             free = free_of(day)
             slot = _earliest_fit(free, need, _peak_intervals(day, peak_windows))
@@ -247,9 +252,21 @@ def schedule_actions_multiday(
             placements.append((interval, action, n))
             free_by_day[day] = _subtract(free, index, interval, gap)
             used_by_day[day] += minutes
-            placed_flag = True
-            break
-        if not placed_flag:
+            return True
+        return False
+
+    # 1차: 편안한 하루 상한 안에서 마감까지 균등 분산. 마감이 넉넉하면 여기서 전부 배치돼 고르게 퍼진다.
+    leftovers: list[tuple[int, PlanAction, int, int, int]] = []
+    for idx, (action, minutes, si, n) in enumerate(flat):
+        if not _try_place(action, minutes, n, _target_day_index(idx), respect_cap=True):
+            leftovers.append((idx, action, minutes, si, n))
+
+    # 2차: 1차에서 편안한 상한에 막혀 남은 세션을, 마감까지 남은 **가용 시간에 상한 무시하고 채운다**
+    # (피크 우선은 유지). 일의 양이 많거나 마감이 임박해 편안한 상한으로 다 못 담을 때, 놀고 있는
+    # 비피크 시간까지 활용해 '배치할 수 있으면 배치'한다(#fill-available). 물리적으로 free 가 아예
+    # 없을 때만 경고로 남긴다(예: 활동창이 너무 좁음).
+    for idx, action, minutes, si, n in leftovers:
+        if not _try_place(action, minutes, n, _target_day_index(idx), respect_cap=False):
             label = f"{action.title} ({si + 1}/{n})" if n > 1 else action.title
             warnings.append(
                 f"'{label}' 을(를) 배치할 가용 시간을 찾지 못했어요. 다른 시간으로 옮겨볼까요?"
