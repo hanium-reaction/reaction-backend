@@ -78,20 +78,30 @@ def sessions_per_week_for(density: str) -> int:
     return _DENSITY_SESSIONS_PER_WEEK.get(density, _DEFAULT_SESSIONS_PER_WEEK)
 
 
+def session_min_for(outcome: InterviewOutcome, *, default: int = _DEFAULT_SESSION_MIN) -> int:
+    """이 계획(heaviest 목표)의 한 세션 길이(분).
+
+    우선순위: **목표별** goals.session_length(session_length_min) → 전역 energy.focus_duration
+    → default. 목표마다 다른 집중 호흡을 반영하려고 목표별 값을 최우선으로 둔다(#per-goal).
+    """
+    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    value = heaviest.session_length_min or outcome.preferences.focus_duration_min
+    return value if value and value > 0 else default
+
+
 def target_sessions_per_week(outcome: InterviewOutcome, density: str) -> int:
     """분해에 넘길 주당 목표 세션 수.
 
     heaviest 목표에 주당 가용 시간(weekly_hours)이 있으면 **그 시간을 세션 길이로 나눠**
     현실적인 세션 수를 뽑고, density 배율(light 0.7 / standard 1.0 / intense 1.3)로 가감한다.
-    시간 미입력이면 기존 density 프리셋(3/5/8)으로 폴백해 하위호환.
+    세션 길이는 목표별(session_length) 우선. 시간 미입력이면 density 프리셋(3/5/8)으로 폴백.
     """
     goals = outcome.core_goals
     heaviest = next((g for g in goals if g.is_heaviest), goals[0])
     hours = heaviest.weekly_hours
     if not hours or hours <= 0:
         return sessions_per_week_for(density)
-    session_min = outcome.preferences.focus_duration_min or _DEFAULT_SESSION_MIN
-    capacity = hours * 60 / session_min
+    capacity = hours * 60 / session_min_for(outcome)
     scaled = round(capacity * _DENSITY_MULTIPLIER.get(density, 1.0))
     return max(_MIN_SESSIONS_PER_WEEK, min(scaled, _MAX_SESSIONS_PER_WEEK))
 
@@ -129,6 +139,8 @@ def context_from_outcome(outcome: InterviewOutcome, *, density: str = "standard"
         "horizon": outcome.horizon or "",
         # 이 목표에 주당 투입 가능한 시간 — 분해가 분량을 사용자의 실제 시간에 맞추게 한다(#weekly).
         "weekly_hours": f"{heaviest.weekly_hours}시간" if heaviest.weekly_hours else "(미입력)",
+        # 한 번에 집중 가능한 시간 — 각 세션(leaf) 길이를 이에 맞춘다(#per-goal session length).
+        "session_length": f"{session_min_for(outcome)}분",
         "behavioral_summary": _behavioral_summary(outcome),
         "time_policy_summary": _time_policy_summary(outcome),
         "sessions_per_week": str(target_sessions_per_week(outcome, density)),
@@ -312,9 +324,8 @@ def peak_windows_from_outcome(outcome: InterviewOutcome) -> list[PlanWindow]:
 
 
 def focus_chunk_min_from_outcome(outcome: InterviewOutcome) -> int:
-    """한 세션 최대 길이(분) — energy.focus_duration, 없으면 기본값."""
-    fd = outcome.preferences.focus_duration_min
-    return fd if fd and fd > 0 else _DEFAULT_FOCUS_CHUNK_MIN
+    """한 세션 최대 길이(분) — 목표별 goals.session_length 우선, 없으면 전역 focus_duration/기본값."""
+    return session_min_for(outcome, default=_DEFAULT_FOCUS_CHUNK_MIN)
 
 
 def break_min_from_outcome(outcome: InterviewOutcome) -> int:

@@ -152,13 +152,13 @@ async def test_seed_answers_skip_durable_slots(monkeypatch: pytest.MonkeyPatch) 
     )
     # 학년(identity.role) 을 다시 묻지 않고 첫 미충족 필수(goals.list)부터.
     assert result.state["next_slot_key"] == "goals.list"
-    # 남은 필수 슬롯이 8개(지속형) 만큼 줄었다 — 14 - 8 = 6.
+    # 남은 필수 슬롯이 8개(지속형) 만큼 줄었다 — 15 - 8 = 7 (목표 관련만 남음).
     remaining = sum(
         1
         for k in interview.REQUIRED_SLOT_SEQUENCE
         if not interview._is_filled(result.state["slot_answers"].get(k))
     )
-    assert remaining == 6
+    assert remaining == 7
     # 이어받은 값은 그대로 상태에 있다(끝까지 가면 outcome 에 실린다).
     assert result.state["slot_answers"]["identity.role"] == {"type": "chip", "values": ["대3"]}
 
