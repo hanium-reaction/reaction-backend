@@ -153,6 +153,8 @@ def _rule_decomposition(state: FirstPlanState) -> GoalDecomposition:
     # LLM 경로와 동일하게, 주당 가용 시간(weekly_hours)이 있으면 그 시간 기반으로 세션 수를 잡고
     # 없으면 density 프리셋으로 폴백 — 룰 폴백도 사용자의 실제 시간에 맞춘 분량을 낸다.
     session_count = first_plan_adapter.target_sessions_per_week(state["outcome"], state["density"])
+    # 룰 폴백 세션 길이도 목표별 세션 길이(없으면 전역/기본)를 따른다 — 하드코딩 30분 대신.
+    session_len = first_plan_adapter.session_min_for(state["outcome"])
 
     root = GoalNodeDraft(
         node_id="tmp-root",
@@ -181,7 +183,7 @@ def _rule_decomposition(state: FirstPlanState) -> GoalDecomposition:
             ActionItemDraft(
                 node_id=leaf_id,
                 title=label,
-                estimated_minutes=30,
+                estimated_minutes=session_len,
                 category=heaviest.category,
                 first_step="가장 쉬운 부분부터 5분만 시작하기",
             )
@@ -259,9 +261,17 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
         tone_mode=_tone_mode(config),
         thinking_budget=settings.llm_planning_thinking_budget,
     )
+    # 세션 길이·개수 결정적 보정 — LLM 이 목표별 세션 길이를 무시하고 너무 짧게(9분) 내거나 세션을
+    # 과다 생성해도, 밴드로 가두고 주당 시간만큼으로 잘라 이번 주 분량이 weekly_hours 에 맞게
+    # 한다(#per-goal). 목표별 입력이 없으면 no-op.
+    goal_plan = result.value
+    if goal_plan is not None and goal_plan.action_items:
+        goal_plan = first_plan_adapter.shape_action_plan(
+            state["outcome"], state["density"], goal_plan
+        )
     return {
         **state,
-        "goal_plan": result.value,
+        "goal_plan": goal_plan,
         "used_fallback": state["used_fallback"] or result.fell_back,
     }
 

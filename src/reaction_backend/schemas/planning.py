@@ -45,7 +45,9 @@ class ActionItemDraft(CamelModel):
 
     node_id: str  # 소속 leaf 의 temp_uuid
     title: str
-    estimated_minutes: int = Field(ge=1, le=60)  # leaf 는 60분 이내 (goal_decompose 규칙)
+    # 세션 길이는 목표별 goals.session_length(최대 2시간)까지 허용 — 60 상한이면 90/120분
+    # 세션이 구조적으로 불가능해 그 값들이 무시됐다(#per-goal). 240 은 여유 상한.
+    estimated_minutes: int = Field(ge=1, le=240)
     category: str
     first_step: str  # 5분 내 시작 가능한 tiny first step
 

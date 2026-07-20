@@ -46,6 +46,7 @@ from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome
 from reaction_backend.schemas.planning import (
     ActionItemDraft,
+    GoalDecomposition,
     GoalNodeDraft,
     ScheduledBlockPreview,
 )
@@ -87,6 +88,54 @@ def session_min_for(outcome: InterviewOutcome, *, default: int = _DEFAULT_SESSIO
     heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
     value = heaviest.session_length_min or outcome.preferences.focus_duration_min
     return value if value and value > 0 else default
+
+
+def normalize_action_minutes(
+    outcome: InterviewOutcome, action_items: list[ActionItemDraft]
+) -> list[ActionItemDraft]:
+    """목표별 세션 길이(goals.session_length)가 있으면 각 leaf 의 estimated_minutes 를
+    **그 세션 길이로 통일**한다(#per-goal 준수 보장).
+
+    session_length 는 '한 번에 집중 가능한 시간' = 한 세션 블록의 크기다. LLM 이 이를 무시하고
+    9분처럼 극단적으로 내면 주당 시간이 과소 반영되므로, 프롬프트에만 의존하지 않고 규칙으로
+    각 세션을 그 길이로 맞춘다. 세션 수를 target 로 자르는 것(shape_action_plan)과 합쳐지면
+    'target 세션 × 세션 길이 = 주당 시간' 이 성립한다. 목표별 세션 길이가 없으면(전역 fallback)
+    원본을 그대로 둬 기존 동작을 보존한다.
+    """
+    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    session_len = heaviest.session_length_min
+    if not session_len or session_len <= 0:
+        return action_items
+    return [
+        item
+        if item.estimated_minutes == session_len
+        else item.model_copy(update={"estimated_minutes": session_len})
+        for item in action_items
+    ]
+
+
+def shape_action_plan(
+    outcome: InterviewOutcome, density: str, goal_plan: GoalDecomposition
+) -> GoalDecomposition:
+    """분해 결과를 목표별 세션 길이·주당 시간에 맞춰 결정적으로 다듬는다(#per-goal 준수 보장).
+
+    1) 세션 길이 정규화 — 각 leaf estimated_minutes 를 세션 길이 밴드로(9분 등 방지).
+    2) 세션 수 상한 — weekly_hours 가 있으면 target_sessions_per_week 로 잘라, 이번 주 분량이
+       주당 시간을 넘지 않게 한다(LLM 이 과다 생성하면 앞쪽 = 진행 순서대로 유지, 나머지는 이후
+       주간 재계획이 이어감). 잘려서 고아가 된 leaf 노드도 함께 제거해 트리를 깨끗이 둔다.
+
+    목표별 입력(session_length / weekly_hours)이 없으면 각 단계는 no-op → 기존 동작 보존.
+    """
+    items = normalize_action_minutes(outcome, list(goal_plan.action_items))
+    nodes = list(goal_plan.goal_nodes)
+    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    if heaviest.weekly_hours and heaviest.weekly_hours > 0:
+        target = target_sessions_per_week(outcome, density)
+        if len(items) > target:
+            items = items[:target]
+            kept = {a.node_id for a in items}
+            nodes = [n for n in nodes if (not n.is_leaf) or n.node_id in kept]
+    return goal_plan.model_copy(update={"action_items": items, "goal_nodes": nodes})
 
 
 def target_sessions_per_week(outcome: InterviewOutcome, density: str) -> int:

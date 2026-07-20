@@ -28,7 +28,12 @@ from reaction_backend.schemas.interview import (
     NextQuestionSchema,
     SlotHarvest,
 )
-from reaction_backend.schemas.planning import GoalDecomposition, PlanReview
+from reaction_backend.schemas.planning import (
+    ActionItemDraft,
+    GoalDecomposition,
+    GoalNodeDraft,
+    PlanReview,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 대표 slot_answers (db/models/interview_slot_answer.py value 형식)
@@ -270,6 +275,94 @@ def test_weekly_hours_drives_sessions_over_density() -> None:
     assert ctx["prompt_vars"]["weekly_hours"] == "6시간"
     # 목표별 session_length(60) 가 전역 focus_duration(50) 을 이긴다.
     assert first_plan_adapter.session_min_for(outcome) == 60
+
+
+def test_normalize_action_minutes_unifies_to_session_length() -> None:
+    """목표별 세션 길이가 있으면 각 세션을 그 길이로 통일 — 9분 같은 garbage 제거 + 총합 예측.
+
+    세션 길이 미지정이면 원본 유지.
+    """
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_norm",
+        slot_answers=SLOT_ANSWERS,  # session_length "1시간" 은 아래에서 90 으로 덮어씀
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    heaviest = next(g for g in outcome.core_goals if g.is_heaviest)
+    heaviest.session_length_min = 90
+
+    def _item(minutes: int) -> ActionItemDraft:
+        return ActionItemDraft(
+            node_id="n", title="t", estimated_minutes=minutes, category="study", first_step="s"
+        )
+
+    items = [_item(9), _item(45), _item(80), _item(200)]
+    out = first_plan_adapter.normalize_action_minutes(outcome, items)
+    assert [i.estimated_minutes for i in out] == [90, 90, 90, 90]  # 전부 세션 길이로 통일
+
+    # 세션 길이 미지정(전역 fallback) → 원본 그대로.
+    heaviest.session_length_min = None
+    passthrough = first_plan_adapter.normalize_action_minutes(outcome, items)
+    assert [i.estimated_minutes for i in passthrough] == [9, 45, 80, 200]
+
+
+def test_shape_action_plan_caps_sessions_to_weekly_target() -> None:
+    """세션 길이가 크면 LLM 이 세션을 과다 생성해도, 주당 시간 target 로 잘라 overshoot 방지.
+
+    weekly 6시간 + session_length 90분 → target 6*60/90 = 4 세션. LLM 이 8개(각 20분) 내면
+    → 정규화(밴드 [68,90]) + 4개로 절단 + 고아 leaf 제거.
+    """
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_shape",
+        slot_answers=SLOT_ANSWERS,
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    heaviest = next(g for g in outcome.core_goals if g.is_heaviest)
+    heaviest.session_length_min = 90  # target = 4
+
+    nodes = [
+        GoalNodeDraft(
+            node_id="root",
+            parent_id=None,
+            title="목표",
+            node_type="root",
+            order_index=0,
+            is_leaf=False,
+        )
+    ]
+    actions = []
+    for i in range(8):
+        nodes.append(
+            GoalNodeDraft(
+                node_id=f"leaf{i}",
+                parent_id="root",
+                title=f"l{i}",
+                node_type="leaf",
+                order_index=i,
+                is_leaf=True,
+            )
+        )
+        actions.append(
+            ActionItemDraft(
+                node_id=f"leaf{i}",
+                title=f"t{i}",
+                estimated_minutes=20,
+                category="study",
+                first_step="s",
+            )
+        )
+    gp = GoalDecomposition(goal_nodes=nodes, action_items=actions, policy_violations=[])
+
+    shaped = first_plan_adapter.shape_action_plan(outcome, "standard", gp)
+    assert len(shaped.action_items) == 4  # target 로 절단 (8 → 4)
+    assert all(a.estimated_minutes == 90 for a in shaped.action_items)  # 세션 길이로 통일
+    assert sum(a.estimated_minutes for a in shaped.action_items) == 360  # 4 × 90 = 6시간(weekly)
+    leaf_ids = {n.node_id for n in shaped.goal_nodes if n.is_leaf}
+    assert len(leaf_ids) == 4  # 고아 leaf 제거
+    assert all(a.node_id in leaf_ids for a in shaped.action_items)
 
 
 def test_daily_cap_scales_with_density() -> None:
