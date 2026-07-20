@@ -205,6 +205,9 @@ class GoalCandidate(CamelModel):
     weekly_hours: int | None = None
     # goals.session_length — 이 목표를 한 번에 집중/수행 가능한 시간(분). 세션 길이·개수 산정.
     session_length_min: int | None = None
+    # goals.approach — 이 목표를 어떻게 해나가고 싶은지·참고 자료(사용자 자유서술). 분해가
+    # 일반적 방식이 아니라 사용자가 밝힌 방향/자료 구조를 따르도록 하는 grounding.
+    approach_note: str | None = None
     tentative_tier: Literal["focus", "maintain", "parked"] = "maintain"
     confidence: float = Field(ge=0.0, le=1.0)  # 해당 슬롯 clarity_score
 

@@ -190,6 +190,9 @@ def context_from_outcome(outcome: InterviewOutcome, *, density: str = "standard"
         "weekly_hours": f"{heaviest.weekly_hours}시간" if heaviest.weekly_hours else "(미입력)",
         # 한 번에 집중 가능한 시간 — 각 세션(leaf) 길이를 이에 맞춘다(#per-goal session length).
         "session_length": f"{session_min_for(outcome)}분",
+        # 사용자가 밝힌 접근 방식·참고 자료 — 분해가 일반적 방식이 아니라 이 방향/내용을 따르게
+        # 하는 grounding(#approach). 미입력이면 '(없음)'.
+        "approach_note": heaviest.approach_note or "(없음)",
         "behavioral_summary": _behavioral_summary(outcome),
         "time_policy_summary": _time_policy_summary(outcome),
         "sessions_per_week": str(target_sessions_per_week(outcome, density)),

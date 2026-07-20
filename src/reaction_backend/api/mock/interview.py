@@ -86,6 +86,14 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
     InterviewSlot(
         "goals.success_image", "이번 주 끝에 어떤 모습이면 좋을까요?", "text", True, "goals"
     ),
+    # 목표 접근/자료 — 사용자가 밝힌 방식·참고 자료로 분해를 grounding (없으면 넘겨도 됨).
+    InterviewSlot(
+        "goals.approach",
+        "이 목표, 어떻게 해나가고 싶어요? 참고할 자료나 방식이 있으면 알려주세요 (없으면 넘겨도 돼요)",
+        "text",
+        True,
+        "goals",
+    ),
     # [C] 시간
     InterviewSlot(
         "time.activity_window", "보통 몇 시부터 몇 시까지 활동해요?", "time_range", True, "time"
