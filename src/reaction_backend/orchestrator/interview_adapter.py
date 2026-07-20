@@ -36,10 +36,10 @@ REQUIRED_SLOT_KEYS: tuple[str, ...] = (
     "goals.list",
     "goals.heaviest",
     "goals.current_level",
+    "goals.weekly_time",
     "goals.deadlines",
     "goals.success_image",
     "time.activity_window",
-    "time.fixed_blocks",
     "time.peak_window",
     "time.no_touch",
     "recovery.tone",
@@ -184,6 +184,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
     success_image = _text_raw(slot_answers.get("goals.success_image"))
     why_now = _text_raw(slot_answers.get("goals.why_now"))
     current_level = _text_raw(slot_answers.get("goals.current_level"))
+    weekly_hours = _chip_hours(slot_answers.get("goals.weekly_time"))
 
     if not titles:
         return [
@@ -207,6 +208,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
                 why_now=why_now if is_heaviest else None,
                 success_image=success_image if is_heaviest else None,
                 current_level=current_level if is_heaviest else None,
+                weekly_hours=weekly_hours if is_heaviest else None,
                 tentative_tier="focus" if is_heaviest else "maintain",
                 confidence=0.5,
             )
@@ -251,6 +253,15 @@ def _build_preferences(
 
 def _chip_minutes(value: Mapping[str, Any] | None) -> int | None:
     """'25분'·'5분' 같은 chip 답에서 분(min) 정수를 추출. 숫자 없으면 None."""
+    chips = _chip_values(value)
+    if not chips:
+        return None
+    digits = "".join(c for c in chips[0] if c.isdigit())
+    return int(digits) if digits else None
+
+
+def _chip_hours(value: Mapping[str, Any] | None) -> int | None:
+    """'6시간'·'8시간 이상' 같은 chip 답에서 시간(hour) 정수를 추출. 숫자 없으면 None."""
     chips = _chip_values(value)
     if not chips:
         return None

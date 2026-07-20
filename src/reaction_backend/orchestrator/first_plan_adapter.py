@@ -63,10 +63,37 @@ _DEFAULT_SESSIONS_PER_WEEK = 5
 # standard=180 은 기존 기본값(DEFAULT_DAILY_FOCUS_CAP_MIN)과 동일 — 하위호환.
 _DENSITY_DAILY_CAP_MIN: dict[str, int] = {"light": 120, "standard": 180, "intense": 240}
 
+# 목표별 주당 가용 시간(goals.weekly_time)이 있으면 세션 수를 그 '실제 시간'으로 산정하고,
+# density 는 그 위에서 밀어붙임/여유를 조절하는 가감 배율로 남긴다(둘 다 의미 유지).
+_DENSITY_MULTIPLIER: dict[str, float] = {"light": 0.7, "standard": 1.0, "intense": 1.3}
+# weekly_hours 를 세션 수로 나눌 때의 기본 세션 길이(분) — focus_duration 미입력 시.
+_DEFAULT_SESSION_MIN = 50
+# 산정 세션 수 범위 — 주 2회 미만은 계획 유지가 어렵고, 14(하루 2회)면 충분한 상한.
+_MIN_SESSIONS_PER_WEEK = 2
+_MAX_SESSIONS_PER_WEEK = 14
+
 
 def sessions_per_week_for(density: str) -> int:
     """density 프리셋 → 주당 목표 세션 수. 미지원 값은 표준(5)으로 폴백."""
     return _DENSITY_SESSIONS_PER_WEEK.get(density, _DEFAULT_SESSIONS_PER_WEEK)
+
+
+def target_sessions_per_week(outcome: InterviewOutcome, density: str) -> int:
+    """분해에 넘길 주당 목표 세션 수.
+
+    heaviest 목표에 주당 가용 시간(weekly_hours)이 있으면 **그 시간을 세션 길이로 나눠**
+    현실적인 세션 수를 뽑고, density 배율(light 0.7 / standard 1.0 / intense 1.3)로 가감한다.
+    시간 미입력이면 기존 density 프리셋(3/5/8)으로 폴백해 하위호환.
+    """
+    goals = outcome.core_goals
+    heaviest = next((g for g in goals if g.is_heaviest), goals[0])
+    hours = heaviest.weekly_hours
+    if not hours or hours <= 0:
+        return sessions_per_week_for(density)
+    session_min = outcome.preferences.focus_duration_min or _DEFAULT_SESSION_MIN
+    capacity = hours * 60 / session_min
+    scaled = round(capacity * _DENSITY_MULTIPLIER.get(density, 1.0))
+    return max(_MIN_SESSIONS_PER_WEEK, min(scaled, _MAX_SESSIONS_PER_WEEK))
 
 
 def daily_cap_for(density: str) -> int:
@@ -100,9 +127,11 @@ def context_from_outcome(outcome: InterviewOutcome, *, density: str = "standard"
         "current_level": heaviest.current_level or "(미입력)",
         "category": heaviest.category,
         "horizon": outcome.horizon or "",
+        # 이 목표에 주당 투입 가능한 시간 — 분해가 분량을 사용자의 실제 시간에 맞추게 한다(#weekly).
+        "weekly_hours": f"{heaviest.weekly_hours}시간" if heaviest.weekly_hours else "(미입력)",
         "behavioral_summary": _behavioral_summary(outcome),
         "time_policy_summary": _time_policy_summary(outcome),
-        "sessions_per_week": str(sessions_per_week_for(density)),
+        "sessions_per_week": str(target_sessions_per_week(outcome, density)),
     }
 
     return {
