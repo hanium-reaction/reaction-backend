@@ -37,6 +37,7 @@ REQUIRED_SLOT_KEYS: tuple[str, ...] = (
     "goals.heaviest",
     "goals.current_level",
     "goals.weekly_time",
+    "goals.session_length",
     "goals.deadlines",
     "goals.success_image",
     "time.activity_window",
@@ -206,6 +207,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
     why_now = _text_raw(slot_answers.get("goals.why_now"))
     current_level = _text_raw(slot_answers.get("goals.current_level"))
     weekly_hours = _chip_hours(slot_answers.get("goals.weekly_time"))
+    session_length = _chip_duration_min(slot_answers.get("goals.session_length"))
 
     if not titles:
         return [
@@ -230,6 +232,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
                 success_image=success_image if is_heaviest else None,
                 current_level=current_level if is_heaviest else None,
                 weekly_hours=weekly_hours if is_heaviest else None,
+                session_length_min=session_length if is_heaviest else None,
                 tentative_tier="focus" if is_heaviest else "maintain",
                 confidence=0.5,
             )
@@ -288,6 +291,27 @@ def _chip_hours(value: Mapping[str, Any] | None) -> int | None:
         return None
     digits = "".join(c for c in chips[0] if c.isdigit())
     return int(digits) if digits else None
+
+
+def _chip_duration_min(value: Mapping[str, Any] | None) -> int | None:
+    """'1시간 30분'·'2시간'·'30분' 같은 chip 답에서 총 분(min)을 추출. 없으면 None.
+
+    숫자 뒤 '시'(간)면 ×60, '분'이면 그대로 누적. 예: '1시간 30분' → 90, '2시간' → 120.
+    """
+    chips = _chip_values(value)
+    if not chips:
+        return None
+    total, num = 0, ""
+    for ch in chips[0]:
+        if ch.isdigit():
+            num += ch
+        elif ch == "시" and num:  # '시간'
+            total += int(num) * 60
+            num = ""
+        elif ch == "분" and num:
+            total += int(num)
+            num = ""
+    return total or None
 
 
 def _max_deadline(goals: Sequence[GoalCandidate]) -> str | None:

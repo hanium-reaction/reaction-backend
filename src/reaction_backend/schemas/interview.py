@@ -203,6 +203,8 @@ class GoalCandidate(CamelModel):
     )
     # goals.weekly_time — 이 목표에 주당 투입 가능한 시간(시간). 분해 세션 수 산정 기준.
     weekly_hours: int | None = None
+    # goals.session_length — 이 목표를 한 번에 집중/수행 가능한 시간(분). 세션 길이·개수 산정.
+    session_length_min: int | None = None
     tentative_tier: Literal["focus", "maintain", "parked"] = "maintain"
     confidence: float = Field(ge=0.0, le=1.0)  # 해당 슬롯 clarity_score
 

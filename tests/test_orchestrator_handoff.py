@@ -28,7 +28,12 @@ from reaction_backend.schemas.interview import (
     NextQuestionSchema,
     SlotHarvest,
 )
-from reaction_backend.schemas.planning import GoalDecomposition, PlanReview
+from reaction_backend.schemas.planning import (
+    ActionItemDraft,
+    GoalDecomposition,
+    GoalNodeDraft,
+    PlanReview,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 대표 slot_answers (db/models/interview_slot_answer.py value 형식)
@@ -42,6 +47,7 @@ SLOT_ANSWERS: dict[str, dict[str, Any] | None] = {
     "goals.heaviest": {"type": "text", "raw": "캡스톤"},
     "goals.current_level": {"type": "text", "raw": "기획서 초안까지 씀"},
     "goals.weekly_time": {"type": "chip", "values": ["6시간"]},
+    "goals.session_length": {"type": "chip", "values": ["1시간"]},
     "goals.deadlines": {"type": "text", "raw": "2026-06-20"},
     "goals.success_image": {"type": "text", "raw": "데모 동작"},
     "time.activity_window": {"type": "range", "start": "09:00", "end": "23:00"},
@@ -77,6 +83,7 @@ def test_build_outcome_projects_required_slots() -> None:
     assert heaviest.deadline == "2026-06-20"
     assert heaviest.current_level == "기획서 초안까지 씀"  # #B baseline
     assert heaviest.weekly_hours == 6  # goals.weekly_time chip "6시간" → 6 (#weekly)
+    assert heaviest.session_length_min == 60  # goals.session_length chip "1시간" → 60 (#per-goal)
     assert {g.title for g in outcome.core_goals} == {"캡스톤", "토익"}
     assert outcome.availability.activity_window.start == "09:00"
     assert outcome.availability.peak_window == ["오전", "저녁"]
@@ -182,9 +189,10 @@ def test_context_from_outcome_builds_prompt_vars() -> None:
     assert ctx["prompt_vars"]["horizon"] == "2026-06-20"
     assert "활동: 09:00~23:00" in ctx["prompt_vars"]["time_policy_summary"]
     assert ctx["horizon"] == "2026-06-20"
-    # weekly_time '6시간' + focus 50분 → 실제 시간 기반 7세션/주 (density 미지정=standard×1.0).
-    assert ctx["prompt_vars"]["sessions_per_week"] == "7"
+    # weekly_time '6시간' ÷ 목표별 session_length '1시간'(60분) → 6세션/주 (density=standard×1.0).
+    assert ctx["prompt_vars"]["sessions_per_week"] == "6"
     assert ctx["prompt_vars"]["weekly_hours"] == "6시간"
+    assert ctx["prompt_vars"]["session_length"] == "60분"  # 목표별 집중 길이 (#per-goal)
     # 완료 기준(성공 이미지)·카테고리가 decompose 프롬프트에 실린다 (#B — 그동안 버려지던 맥락).
     assert ctx["prompt_vars"]["success_image"] == "데모 동작"
     assert ctx["prompt_vars"]["current_level"] == "기획서 초안까지 씀"  # #B baseline 주입
@@ -246,10 +254,10 @@ def test_density_maps_to_sessions_per_week() -> None:
 
 
 def test_weekly_hours_drives_sessions_over_density() -> None:
-    """주당 가용 시간(#weekly)이 있으면 세션 수를 그 실제 시간으로 산정 + density 로 가감.
+    """주당 가용 시간(#weekly) ÷ 목표별 세션 길이(#per-goal)로 세션 수 산정 + density 가감.
 
-    SLOT_ANSWERS: weekly_time '6시간' + focus_duration '50분' → capacity 6*60/50 = 7.2 세션.
-    density 배율: light 0.7 / standard 1.0 / intense 1.3.
+    SLOT_ANSWERS: weekly_time '6시간' + session_length '1시간'(60분) → capacity 6*60/60 = 6 세션.
+    (전역 focus_duration '50분'보다 목표별 session_length 가 우선.) density 배율: 0.7/1.0/1.3.
     """
     outcome = interview_adapter.build_outcome(
         session_id="iv_weekly",
@@ -258,13 +266,103 @@ def test_weekly_hours_drives_sessions_over_density() -> None:
         end_reason="completed",
         analysis_source="llm",
     )
-    # standard: round(7.2*1.0)=7 — density 프리셋(5)이 아니라 실제 시간 기반.
-    assert first_plan_adapter.target_sessions_per_week(outcome, "standard") == 7
-    assert first_plan_adapter.target_sessions_per_week(outcome, "light") == 5  # round(7.2*0.7)=5
-    assert first_plan_adapter.target_sessions_per_week(outcome, "intense") == 9  # round(7.2*1.3)=9
+    # standard: round(6*1.0)=6 — density 프리셋(5)이 아니라 실제 시간 기반.
+    assert first_plan_adapter.target_sessions_per_week(outcome, "standard") == 6
+    assert first_plan_adapter.target_sessions_per_week(outcome, "light") == 4  # round(6*0.7)=4
+    assert first_plan_adapter.target_sessions_per_week(outcome, "intense") == 8  # round(6*1.3)=8
     ctx = first_plan_adapter.context_from_outcome(outcome, density="standard")
-    assert ctx["prompt_vars"]["sessions_per_week"] == "7"
+    assert ctx["prompt_vars"]["sessions_per_week"] == "6"
     assert ctx["prompt_vars"]["weekly_hours"] == "6시간"
+    # 목표별 session_length(60) 가 전역 focus_duration(50) 을 이긴다.
+    assert first_plan_adapter.session_min_for(outcome) == 60
+
+
+def test_normalize_action_minutes_unifies_to_session_length() -> None:
+    """목표별 세션 길이가 있으면 각 세션을 그 길이로 통일 — 9분 같은 garbage 제거 + 총합 예측.
+
+    세션 길이 미지정이면 원본 유지.
+    """
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_norm",
+        slot_answers=SLOT_ANSWERS,  # session_length "1시간" 은 아래에서 90 으로 덮어씀
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    heaviest = next(g for g in outcome.core_goals if g.is_heaviest)
+    heaviest.session_length_min = 90
+
+    def _item(minutes: int) -> ActionItemDraft:
+        return ActionItemDraft(
+            node_id="n", title="t", estimated_minutes=minutes, category="study", first_step="s"
+        )
+
+    items = [_item(9), _item(45), _item(80), _item(200)]
+    out = first_plan_adapter.normalize_action_minutes(outcome, items)
+    assert [i.estimated_minutes for i in out] == [90, 90, 90, 90]  # 전부 세션 길이로 통일
+
+    # 세션 길이 미지정(전역 fallback) → 원본 그대로.
+    heaviest.session_length_min = None
+    passthrough = first_plan_adapter.normalize_action_minutes(outcome, items)
+    assert [i.estimated_minutes for i in passthrough] == [9, 45, 80, 200]
+
+
+def test_shape_action_plan_caps_sessions_to_weekly_target() -> None:
+    """세션 길이가 크면 LLM 이 세션을 과다 생성해도, 주당 시간 target 로 잘라 overshoot 방지.
+
+    weekly 6시간 + session_length 90분 → target 6*60/90 = 4 세션. LLM 이 8개(각 20분) 내면
+    → 정규화(밴드 [68,90]) + 4개로 절단 + 고아 leaf 제거.
+    """
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_shape",
+        slot_answers=SLOT_ANSWERS,
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    heaviest = next(g for g in outcome.core_goals if g.is_heaviest)
+    heaviest.session_length_min = 90  # target = 4
+
+    nodes = [
+        GoalNodeDraft(
+            node_id="root",
+            parent_id=None,
+            title="목표",
+            node_type="root",
+            order_index=0,
+            is_leaf=False,
+        )
+    ]
+    actions = []
+    for i in range(8):
+        nodes.append(
+            GoalNodeDraft(
+                node_id=f"leaf{i}",
+                parent_id="root",
+                title=f"l{i}",
+                node_type="leaf",
+                order_index=i,
+                is_leaf=True,
+            )
+        )
+        actions.append(
+            ActionItemDraft(
+                node_id=f"leaf{i}",
+                title=f"t{i}",
+                estimated_minutes=20,
+                category="study",
+                first_step="s",
+            )
+        )
+    gp = GoalDecomposition(goal_nodes=nodes, action_items=actions, policy_violations=[])
+
+    shaped = first_plan_adapter.shape_action_plan(outcome, "standard", gp)
+    assert len(shaped.action_items) == 4  # target 로 절단 (8 → 4)
+    assert all(a.estimated_minutes == 90 for a in shaped.action_items)  # 세션 길이로 통일
+    assert sum(a.estimated_minutes for a in shaped.action_items) == 360  # 4 × 90 = 6시간(weekly)
+    leaf_ids = {n.node_id for n in shaped.goal_nodes if n.is_leaf}
+    assert len(leaf_ids) == 4  # 고아 leaf 제거
+    assert all(a.node_id in leaf_ids for a in shaped.action_items)
 
 
 def test_daily_cap_scales_with_density() -> None:
@@ -280,8 +378,8 @@ def test_daily_cap_scales_with_density() -> None:
 def test_rule_fallback_respects_density() -> None:
     """Gemini 폴백(_rule_decomposition)도 LLM 경로와 같은 분량 규칙을 따른다 (빈 계획 방지).
 
-    SLOT_ANSWERS: weekly_time '6시간' + focus '50분' → capacity 7.2 세션, density 로 가감
-    (light 0.7→5 / standard 1.0→7 / intense 1.3→9).
+    SLOT_ANSWERS: weekly_time '6시간' ÷ session_length '1시간'(60분) → capacity 6 세션, density 가감
+    (light 0.7→4 / standard 1.0→6 / intense 1.3→8).
     """
     outcome = interview_adapter.build_outcome(
         session_id="iv_fbden",
@@ -290,7 +388,7 @@ def test_rule_fallback_respects_density() -> None:
         end_reason="completed",
         analysis_source="llm",
     )
-    for density, n in (("light", 5), ("standard", 7), ("intense", 9)):
+    for density, n in (("light", 4), ("standard", 6), ("intense", 8)):
         state = first_plan.initial_state(
             user_id=uuid4(), outcome=outcome, target_date="2026-06-01", density=density
         )

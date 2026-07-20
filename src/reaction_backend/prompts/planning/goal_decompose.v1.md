@@ -7,6 +7,7 @@
 - 현재 수준(지금까지 진행): {{current_level}}
 - 완료 기준(성공 이미지): {{success_image}}
 - 주당 투입 가능 시간: {{weekly_hours}}
+- 한 번에 집중 가능한 시간: {{session_length}}
 - 마감 / 호라이즌: {{horizon}}
 - behavioral_profile 요약: {{behavioral_summary}}
 - time_policy 요약: {{time_policy_summary}}
@@ -33,7 +34,11 @@
   (같은 내용 반복 나열 금지), 쉬움→어려움·준비→적용의 자연스러운 진행 순서를 따른다.
   다만 목표 자체가 그만큼의 분량이 안 되면 억지로 채우지 말고 policy_violations 에 사유를 남겨라.
 - Focus 카드 최대 3, Maintain 최대 5 — 초과 금지.
-- 각 leaf 는 60분 이내. 60분 초과면 더 잘게 나눠라.
+- 세션 길이(매우 중요): 각 leaf(action_item)의 estimated_minutes 를 **한 번에 집중 가능한
+  시간({{session_length}})과 같거나 비슷하게** 잡아라. 이 값의 **절반보다 짧게 만들지 마라**
+  (예: {{session_length}} 인데 10~20분짜리 세션 금지). 한 세션에 담기 애매하면 그 길이를
+  꽉 채우도록 작업을 묶고, 더 오래 걸리는 건 그 길이 단위로 여러 세션에 나눠라. 목표마다
+  집중 호흡이 다르니 이 값을 최우선으로 지켜라.
 - action_item 은 SMART (Specific, Measurable, Actionable). "공부하기" 금지.
 - category 는 반드시 다음 중 하나: study | project | health | routine | schedule | career |
   relationship | self_dev | other. 목표 주제로 분류가 명확하면(예: 코딩테스트·토익 → study)
