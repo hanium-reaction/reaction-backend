@@ -544,10 +544,17 @@ PARK       → PARK_DEFAULT
 - 재구독은 덮어쓰기 (1 device 1 subscription — Issue #16)
 - 응답은 `GET /notifications/settings` 와 같은 형태. `pushSubscribed` 는 저장된 구독 유무에서 파생
 
-가드:
+가드 (서버 측 enforce — 발송 게이트 `safety/push_gate.py` 단일 지점, ADR-0006):
 - `morningTime` 06~10시, `eveningTime` 19~23시 외 → 422 `NOTIF_TIME_RANGE`
-- 23~07시 자동 푸시 금지 (서버 측 enforce)
-- 주 ≤ 3건 enforce
+- 23~07시 자동 푸시 금지 — 구간은 `[23:00, 07:00)`. `eveningTime` 이 22:55 를 넘으면
+  **22:55 로 클램프해 발송**한다 (quiet hours 전 마지막 5분 폴 — 미발송 사각지대 방지,
+  ADR-0006 §7). FE 는 22:55 상한 노출 권장
+- 주 ≤ 3건 — **사용자별 · 3 클래스(morning_brief/pre_card/evening_reflection) 합산 ·
+  rolling 7일 · 실발송만 카운트**. cron 은 매일 시도하지만 실제 수신은 주 3건이 상한이다
+  (알림 피로 최소화 — 베이스라인 §1.4 잠금의 문면 그대로, 해석 근거 ADR-0006 §2)
+- 같은 클래스 하루(KST) 1건 — "24h 중복 금지"의 달력일 구현 (래칫 방지, ADR-0006 §3)
+- 저녁 회고 알림은 **회고할 카드가 있을 때만** (경계는 `GET /reflection/pending` 과 동일)
+- pre_card 는 opt-in(`preCardEnabled`) + 시작 2~7분 전 (2분 리드 + 5분 폴)
 
 ---
 

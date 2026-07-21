@@ -22,6 +22,7 @@ dependencies = [
     "requests>=2.34.2",
     "langgraph>=0.2,<1.0",  # ADR-0005 — Agentic Orchestration (LangGraph 채택)
     "apscheduler>=3.11.2",
+    "pywebpush>=2.3.0",
 ]
 
 [dependency-groups]
@@ -80,6 +81,11 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "google.oauth2.*"
+ignore_missing_imports = true
+
+# pywebpush 는 py.typed 미배포. Issue #16/#20 Web Push 발송 도입.
+[[tool.mypy.overrides]]
+module = "pywebpush.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

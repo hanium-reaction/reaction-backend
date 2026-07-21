@@ -53,6 +53,7 @@ from reaction_backend.db.models.interruption_event import InterruptionEvent
 from reaction_backend.db.models.interview_session import InterviewSession
 from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.models.llm_run import LlmRun
+from reaction_backend.db.models.notification_send import NotificationSend
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.period_summary import PeriodSummary
 from reaction_backend.db.models.plan_draft import PlanDraft
@@ -86,6 +87,7 @@ __all__ = [
     "InterviewSession",
     "InterviewSlotAnswer",
     "LlmRun",
+    "NotificationSend",
     "NotificationSetting",
     "PeriodSummary",
     "PlanDraft",

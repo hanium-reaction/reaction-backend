@@ -36,14 +36,28 @@ PR 2-F drift fix 적용 후 명세서와 1:1 일치.
 ### 집계/시스템 (5)
 `period_summaries` · `daily_briefs` · `policy_snapshots` · `llm_runs` · `idempotency_keys`
 
+### 설계서 외 추가 (3) — '보존한 개선' 선례
+
+`plan_drafts` (#62, First Plan HITL Draft 영속화) · `user_consents` (#23-B, 동의 기록)
+· `notification_sends` (#20, Web Push 발송 이력 — 주 ≤3건·클래스 dedup enforce 근거,
+[ADR-0006 §5](decisions/0006-notification-dispatch.md))
+
 ## 3. 마이그레이션 체인
 
-PR 2-F 에서 **5개 → 2개로 통합** (ADR Option B):
+PR 2-F 에서 **5개 → 2개로 통합** (ADR Option B), 이후 기능별 추가:
 
 ```
 59acd6c5f086 (create all tables aligned with DB v0.7.1, 1487줄)
    ▼
-d09c105520b5 (seed master data v0.7.1 — 13 + 9)  ← HEAD
+d09c105520b5 (seed master data v0.7.1 — 13 + 9)
+   ▼
+b1f2a3c4d5e6 (create plan_drafts, #62)
+   ▼
+c2d3e4f5a6b7 (create user_consents, #23-B)
+   ▼
+d3e4f5a6b7c8 (interview_sessions.used_fallback)
+   ▼
+e4f5a6b7c8d9 (create notification_sends, #20)  ← HEAD
 ```
 
 이전 5개 마이그레이션 (`9f7c7958ccc8`, `ced84c31fc05`, `235ce4f5c94c`, `6a8ae9bf3be0`, `a96678e9ffe5`) 는 PR 2-F 에서 통합 삭제됨.

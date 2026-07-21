@@ -19,6 +19,7 @@ from uuid import UUID
 from fastapi import Depends
 from sqlalchemy import ColumnElement, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.execution_event import ExecutionEvent
@@ -26,6 +27,7 @@ from reaction_backend.db.models.execution_failure_tag import ExecutionFailureTag
 from reaction_backend.db.models.failure_reason_tag import FailureReasonTag
 from reaction_backend.db.models.interruption_event import InterruptionEvent
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
+from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
 
 
@@ -163,6 +165,39 @@ class ExecutionRepo:
         await self._session.flush()
         await self._session.refresh(row)
         return row
+
+    async def list_blocks_starting_between(
+        self, *, start: datetime, end: datetime
+    ) -> list[ScheduledBlock]:
+        """pre_card 알림 후보 — `[start, end)` 에 시작하는 미착수(`scheduled`) 블록 (#20).
+
+        전 사용자 대상 5분 폴 쿼리라 여기서 바로 거른다:
+        - `started` 제외 — 이미 착수한 카드에 "곧 시작" 알림은 소음
+        - 카드 archived 제외 — 만료 cron(`expire_unreflected`)이 보관한 카드의 블록은
+          cancel 되지만, 블록 상태만 믿지 않고 카드 생사도 본다 (이중 방어)
+        - 비활성 사용자 제외 — `UserRepo.list_active()` 와 같은 3조건 (soft-archived·
+          익명화 사용자의 잔존 블록에 발송하지 않는다)
+
+        `action_item` 은 payload(카드 제목)용으로 즉시 로드.
+        """
+        stmt = (
+            select(ScheduledBlock)
+            .join(ActionItem, ScheduledBlock.action_item_id == ActionItem.id)
+            .join(User, ScheduledBlock.user_id == User.id)
+            .where(
+                ScheduledBlock.block_status == "scheduled",
+                ScheduledBlock.start_at >= start,
+                ScheduledBlock.start_at < end,
+                ActionItem.archived_at.is_(None),
+                User.archived_at.is_(None),
+                User.is_anonymized.is_(False),
+                User.onboarding_state == "ACTIVE",
+            )
+            .options(joinedload(ScheduledBlock.action_item))
+            .order_by(ScheduledBlock.start_at)
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
 
     async def list_pending_reflection(
         self, user_id: UUID, *, since: datetime
