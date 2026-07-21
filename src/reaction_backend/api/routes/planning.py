@@ -49,6 +49,7 @@ from reaction_backend.db.session import get_db
 from reaction_backend.orchestrator import (
     first_plan,
     first_plan_adapter,
+    first_plan_milestones,
     interview_adapter,
     replan,
 )
@@ -85,6 +86,7 @@ from reaction_backend.schemas.planning import (
     FirstPlanGenerateRequest,
     FirstPlanResponse,
     GoalNodeDraft,
+    MilestoneListResponse,
     PolicyViolation,
     ReplanBlockPreview,
     ReplanResponse,
@@ -276,6 +278,28 @@ async def _load_draft(repo: PlanDraftRepo, user_id: UUID, plan_id: str) -> PlanD
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@router.post("/milestones")
+async def generate_milestones(
+    body: FirstPlanGenerateRequest,
+    user: CurrentUser,
+    repo: RepoDep,
+    session: SessionDep,
+) -> MilestoneListResponse:
+    """Stage A(#milestones) — 목표를 중간 목표 3~5개로. 사용자가 확인·편집 후 generate 로 넘긴다.
+
+    입력은 generate 와 동일(interviewSessionId/outcome + density). LLM 1콜 + 룰 폴백이라 가볍다.
+    """
+    outcome = await _resolve_outcome(body, user.id, repo)
+    milestones, fell_back = await first_plan_milestones.generate_milestones(
+        outcome=outcome,
+        density=body.density,
+        session=session,
+        tone_mode=user.tone_mode,
+        user_id=user.id,
+    )
+    return MilestoneListResponse(milestones=milestones, ai_source="rule" if fell_back else "llm")
+
+
 @router.post("/generate")
 async def generate_plan(
     body: FirstPlanGenerateRequest,
@@ -303,6 +327,7 @@ async def generate_plan(
             target_date=target_date,
             scope=body.scope,
             density=body.density,
+            milestones=body.milestones,
         )
         # Validation Agent — LLM 분해 전에 Focus≤3 / Maintain≤5 게이트 (LLM 0회, 룰만).
         gate = await first_plan.validate_inputs(state, config)

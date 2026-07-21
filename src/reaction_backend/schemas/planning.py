@@ -77,6 +77,30 @@ class PlanReview(CamelModel):
     feedback: list[str] = Field(default_factory=list)  # 미승인 시 재계획 이슈 목록
 
 
+class MilestoneDraft(CamelModel):
+    """중간 목표(마일스톤) 한 개 — 사용자가 확인·편집하는 계획 뼈대 단위(#milestones Phase 2).
+
+    사용자가 이 목록을 보고 수정/재배열/추가/삭제해 방향을 확정하면, 분해(Stage B)가 각
+    마일스톤을 branch 로 고정하고 그 안에서만 세션(leaf)을 만든다.
+    """
+
+    title: str
+    summary: str = ""  # 이 마일스톤에서 무엇을 이루는지 한 줄
+
+
+class MilestonePlan(CamelModel):
+    """plan_milestones LLM 출력 — 목표를 향한 3~5개 중간 목표."""
+
+    milestones: list[MilestoneDraft] = Field(min_length=1, max_length=6)
+
+
+class MilestoneListResponse(CamelModel):
+    """POST /plans/milestones 응답 — 사용자 확인용 마일스톤 초안(Stage A)."""
+
+    milestones: list[MilestoneDraft]
+    ai_source: Literal["llm", "rule"] = "llm"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 경계 입력 — First Plan 트리거 요청.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -92,6 +116,9 @@ class FirstPlanGenerateRequest(CamelModel):
 
     interview_session_id: str | None = None
     outcome: InterviewOutcome | None = None
+    # 사용자가 확인·편집해 확정한 중간 목표(#milestones Stage B). 있으면 분해가 이걸 branch 로
+    # 고정하고 각 안에서만 세션을 만든다. 없으면 현행(자동 전체 분해) — 하위호환.
+    milestones: list[MilestoneDraft] | None = None
     target_date: str | None = None  # "YYYY-MM-DD" — 미지정 시 오늘(KST) 기준
     # 배치 범위: "horizon"(기본, 마감까지 전 구간 — 실행이 마감 전 여러 날에 분배되고, 주간
     # 재계획이 이후를 다시 씀) | "week"(target_date 가 속한 달력 주만 — 가벼운 단기 계획).
