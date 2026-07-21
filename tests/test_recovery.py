@@ -10,6 +10,7 @@ from datetime import date
 from typing import Any
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from reaction_backend.orchestrator.recovery import render_template, select_strategies
@@ -507,3 +508,204 @@ def test_render_template_missing_var_is_safe() -> None:
         render_template("{suspended_step} 부터 다시", {"suspended_step": "ERD 검토"})
         == "ERD 검토 부터 다시"
     )
+
+
+# ───────────────────────── decisions: edited (#20 DoD 7) ─────────────────
+
+
+def test_decision_edited_uses_user_text_and_preserves_ai_original(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """'수정' 수락 — 새 카드 제목은 사용자 문구, **AI 원문은 보존**.
+
+    보존이 핵심 계약이다: `suggested_action_text` 를 덮어쓰면 "AI 제안을 사용자가 얼마나
+    고쳐 썼나"(= Draft Layer 잠금 결정의 효과)를 영영 못 잰다.
+    """
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AMBIGUITY", "CONFLICT"]
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    target = next(c for c in cards if c["optionGroup"] == "DOWNSCOPE")
+    ai_original = next(
+        a.suggested_action_text
+        for a in fake_recovery_repo._attempts.values()
+        if f"rec_{a.id}" == target["attemptId"]
+    )
+
+    resp = _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "edited",
+            "acceptedAttemptId": target["attemptId"],
+            "editedActionText": "GROUP BY 예제 1문제만 풀어볼까요",
+        },
+    )
+
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()
+    assert body["acceptedAttemptId"] == target["attemptId"]
+    assert len(body["rejectedAttemptIds"]) == len(cards) - 1  # 형제는 accepted 와 동일하게 rejected
+    assert body["resultingActionItemId"] is not None
+
+    new_action = next(
+        a for a in fake_action_item_repo._items.values() if a.source == "recovery_downscope"
+    )
+    assert new_action.title == "GROUP BY 예제 1문제만 풀어볼까요"
+
+    attempt = next(
+        a for a in fake_recovery_repo._attempts.values() if f"rec_{a.id}" == target["attemptId"]
+    )
+    assert attempt.user_decision == "edited"
+    assert attempt.suggested_action_text == ai_original, "AI 원문이 덮어써졌다"
+    assert attempt.suggested_action_text != new_action.title
+
+    # 원본 카드 status 불변 (AGENTS.md §2)
+    original = next(a for a in fake_action_item_repo._items.values() if a.source == "manual")
+    assert original.status == "failed"
+
+
+def test_decision_edited_enables_replan(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """편집 수락도 S20 replan 이 열린다 — 다른 endpoint 의 관측 결과로 검증.
+
+    회귀: `_accepted_replan_attempt` 가 'accepted' 만 찾으면 '수정'을 고른 사용자만 재배치가
+    422 로 막히는 비대칭 버그가 된다. 내가 고친 함수가 아니라 GET /replan 응답으로 확인한다.
+    """
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AMBIGUITY", "CONFLICT"]
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    target = next(c for c in cards if c["optionGroup"] == "DOWNSCOPE")
+    _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "edited",
+            "acceptedAttemptId": target["attemptId"],
+            "editedActionText": "딱 5분만 열어볼까요",
+        },
+    )
+
+    resp = client.get(f"/replan/{exec_id}")
+
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["after"]["title"] == "딱 5분만 열어볼까요"
+
+
+def test_decision_edited_keeps_user_text_verbatim(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """사용자 편집문은 금지어 필터를 **거치지 않는다** — 톤 잠금은 AI 출력 대상이다.
+
+    사전에 있는 '실패'가 포함돼도 글자 그대로 저장된다. 서버가 사용자 말을 몰래 고치면
+    "Be on your side" 가 사용자를 검열하는 도구로 뒤집힌다. 누가 나중에 사용자 입력에
+    enforce 를 붙이면 이 테스트가 즉시 실패한다.
+    """
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AMBIGUITY"]
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    target = next(c for c in cards if c["optionGroup"] == "DOWNSCOPE")
+
+    _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "edited",
+            "acceptedAttemptId": target["attemptId"],
+            "editedActionText": "실패해도 5분만 해보기",
+        },
+    )
+
+    new_action = next(
+        a for a in fake_action_item_repo._items.values() if a.source == "recovery_downscope"
+    )
+    assert new_action.title == "실패해도 5분만 해보기"
+
+
+def test_decision_edited_rejects_group_without_new_card(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """RESCHEDULE/PARK 은 새 카드를 안 만들어 문구를 담을 곳이 없다 → 422."""
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["CONFLICT"]
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    target = next(c for c in cards if c["optionGroup"] == "RESCHEDULE")
+
+    resp = _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "edited",
+            "acceptedAttemptId": target["attemptId"],
+            "editedActionText": "다른 문구",
+        },
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "RECOVERY_EDIT_NOT_SUPPORTED"
+
+
+@pytest.mark.parametrize("text", ["", "   "])
+def test_decision_edited_requires_non_empty_text(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    text: str,
+) -> None:
+    """decision='edited' 인데 문구가 비면 422 — 요청 자체가 모순이다."""
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AMBIGUITY"]
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    target = next(c for c in cards if c["optionGroup"] == "DOWNSCOPE")
+
+    resp = _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "edited",
+            "acceptedAttemptId": target["attemptId"],
+            "editedActionText": text,
+        },
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"
+
+
+def test_edited_text_with_non_edited_decision_is_rejected(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """decision='accepted' 인데 편집문을 보내면 422 — 조용히 무시하면 유실을 숨긴다."""
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AMBIGUITY"]
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    target = next(c for c in cards if c["optionGroup"] == "DOWNSCOPE")
+
+    resp = _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "accepted",
+            "acceptedAttemptId": target["attemptId"],
+            "editedActionText": "무시되면 안 되는 문구",
+        },
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"

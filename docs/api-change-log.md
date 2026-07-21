@@ -7,6 +7,19 @@
 
 ---
 
+## v1.22 — 2026-07-19 (회복 카드 '수정' 수락, #20 DoD 7)
+
+- `POST /recovery/decisions` 의 `decision` 에 **`edited` 추가** + 요청 필드
+  `editedActionText`(optional, ≤300자). 잠금 결정 [수락/**수정**/거절] 3버튼 중 '수정'.
+- 부수효과는 `accepted` 와 동일(형제 rejected · 새 ActionItem 생성 · replan 대상)이고
+  **새 카드 title 만 사용자 문구**. AI 원문 `suggestedActionText` 는 보존.
+- RESCHEDULE/PARK + `edited` → 422 `RECOVERY_EDIT_NOT_SUPPORTED`(신규 에러코드).
+- 회복 지표(resilience_rate·average_recovery_minutes)가 `edited` 도 회복으로 센다.
+- **호환**: 요청은 optional 필드 추가 + 입력 enum 확대라 기존 FE 페이로드 그대로 유효.
+  **응답 스키마 불변.** 단 OpenAPI 가 바뀌므로 생성 클라이언트는 재생성 필요.
+  ⚠️ FE 주의: 문구를 고쳐 재전송할 때 **Idempotency-Key 를 새로 발급**할 것 — 같은 키에
+  다른 body 는 409 `IDEMPOTENCY_KEY_MISMATCH` 다.
+
 ## v1.21 — 2026-07-16 (주간 재계획 리뷰 수정 — 사용자 블록 보존·과거 배치·이중 배치, #117)
 
 v1.20 의 `POST /plans/replan` 계열을 머지 전 리뷰에서 확인된 결함 기준으로 조정. 전부 재현으로 확인된 것이며 새 endpoint 는 없다.

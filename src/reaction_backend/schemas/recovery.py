@@ -15,7 +15,7 @@ from reaction_backend.schemas.common import CamelModel, DraftMixin, KstDatetime
 
 RecoveryOptionGroup = Literal["DOWNSCOPE", "RESCHEDULE", "CARRY_OVER", "PARK"]
 
-RecoveryDecision = Literal["accepted", "skipped"]
+RecoveryDecision = Literal["accepted", "edited", "skipped"]
 
 
 class RecoveryProposalLLM(CamelModel):
@@ -64,12 +64,17 @@ class RecoveryDecisionRequest(CamelModel):
     """POST /recovery/decisions 요청 (Idempotency-Key 필수, §1.7).
 
     - `decision="accepted"` → `accepted_attempt_id` 필수, 나머지 pending 카드는 rejected.
+    - `decision="edited"` → `accepted_attempt_id` + `edited_action_text` 필수. 부수효과는
+      accepted 와 같고(형제 rejected, 새 카드 생성) **새 카드 title 만 사용자 문구**가 된다.
+      AI 원문(`suggested_action_text`)은 보존한다 — "얼마나 고쳐 썼나"가 AI 품질 지표다.
+      새 카드를 만들지 않는 그룹(RESCHEDULE/PARK)은 문구를 담을 곳이 없어 422.
     - `decision="skipped"` → 모든 pending 카드 skipped ("오늘은 쉬기").
     """
 
     execution_id: str
     decision: RecoveryDecision
     accepted_attempt_id: str | None = None
+    edited_action_text: str | None = Field(default=None, max_length=300)
     decision_reason: str | None = Field(default=None, max_length=200)
 
 
