@@ -546,8 +546,9 @@ PARK       → PARK_DEFAULT
 
 가드 (서버 측 enforce — 발송 게이트 `safety/push_gate.py` 단일 지점, ADR-0006):
 - `morningTime` 06~10시, `eveningTime` 19~23시 외 → 422 `NOTIF_TIME_RANGE`
-- 23~07시 자동 푸시 금지 — 구간은 `[23:00, 07:00)`. ⚠️ `eveningTime=23:00` 은 이 구간과
-  맞닿아 **회고 알림이 발송되지 않는다** (FE 는 22:55 상한 권장)
+- 23~07시 자동 푸시 금지 — 구간은 `[23:00, 07:00)`. `eveningTime` 이 22:55 를 넘으면
+  **22:55 로 클램프해 발송**한다 (quiet hours 전 마지막 5분 폴 — 미발송 사각지대 방지,
+  ADR-0006 §7). FE 는 22:55 상한 노출 권장
 - 주 ≤ 3건 — **사용자별 · 3 클래스(morning_brief/pre_card/evening_reflection) 합산 ·
   rolling 7일 · 실발송만 카운트**. cron 은 매일 시도하지만 실제 수신은 주 3건이 상한이다
   (알림 피로 최소화 — 베이스라인 §1.4 잠금의 문면 그대로, 해석 근거 ADR-0006 §2)

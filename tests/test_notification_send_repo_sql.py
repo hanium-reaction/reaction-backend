@@ -61,6 +61,23 @@ def _sql(stmt: object) -> str:
 # ── NotificationSendRepo ──
 
 
+async def test_lock_user_is_transaction_scoped_advisory_lock() -> None:
+    """`lock_user` 가 진짜 `pg_advisory_xact_lock` 인가 — fake 는 no-op 이라 여기서만 고정.
+
+    try 계열(`pg_try_advisory_lock`)이나 세션 스코프(`pg_advisory_lock`)로 바뀌면 각각
+    '락 실패를 조용히 통과' / '커밋 후에도 락 잔류'가 되므로 함수명까지 문자열로 박는다.
+    """
+    from reaction_backend.repositories.notification_send_repo import NotificationSendRepo
+
+    session = _RecordingSession()
+    repo = NotificationSendRepo(session)  # type: ignore[arg-type]
+    await repo.lock_user(uuid4())
+
+    sql = _sql(session.statements[0])
+    assert "pg_advisory_xact_lock" in sql, f"트랜잭션 스코프 advisory lock 이 아니다: {sql}"
+    assert "hashtext" in sql, f"user_id 를 락 키로 해시하지 않는다: {sql}"
+
+
 async def test_weekly_count_has_no_class_filter() -> None:
     """예산 카운트는 **전 클래스 합산** — notification_class 필터가 끼면 잠금 완화다."""
     from reaction_backend.repositories.notification_send_repo import NotificationSendRepo

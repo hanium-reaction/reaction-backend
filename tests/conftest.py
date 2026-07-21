@@ -175,12 +175,16 @@ class _FakeSession:
 
     def __init__(self, *, lock_acquired: bool = True) -> None:
         self.lock_acquired = lock_acquired
+        # commit/rollback 이 계약인 코드(알림 sweep 의 건당 commit 등)를 검증할 카운터 —
+        # no-op fake 는 "commit 을 지워도 전 스위트 초록" 뮤테이션을 못 잡는다 (#20 리뷰).
+        self.commit_count = 0
+        self.rollback_count = 0
 
     async def commit(self) -> None:
-        return None
+        self.commit_count += 1
 
     async def rollback(self) -> None:
-        return None
+        self.rollback_count += 1
 
     async def execute(self, stmt: Any, params: Any = None) -> _FakeResult:  # noqa: ARG002
         # prefill 의 inline select / advisory unlock 만 도달 — 빈 결과 반환.
@@ -362,19 +366,26 @@ class FakeNotificationRepo:
 class FakeNotificationSendRepo:
     """in-memory NotificationSendRepo — 발송 게이트(push_gate) 테스트용 (#20).
 
-    실 repo 의 WHERE 는 fake 로는 절대 실행되지 않는다 —
+    실 repo 의 WHERE/락 SQL 은 fake 로는 절대 실행되지 않는다 —
     `tests/test_notification_send_repo_sql.py` 가 실 SQL 문자열로 별도 고정.
+    `ops` 는 게이트가 락을 **이력 조회보다 먼저** 잡는지(TOCTOU 방지 순서) 검증용.
     """
 
     def __init__(self) -> None:
         self._sends: list[NotificationSend] = []
+        self.ops: list[str] = []
+
+    async def lock_user(self, user_id: UUID) -> None:  # noqa: ARG002 — 실 repo 시그니처 유지
+        self.ops.append("lock")
 
     async def count_sent_since(self, user_id: UUID, *, since: datetime) -> int:
+        self.ops.append("count")
         return sum(1 for s in self._sends if s.user_id == user_id and s.sent_at >= since)
 
     async def class_sent_since(
         self, user_id: UUID, *, notification_class: str, since: datetime
     ) -> bool:
+        self.ops.append("dedup")
         return any(
             s.user_id == user_id
             and s.notification_class == notification_class
@@ -385,6 +396,7 @@ class FakeNotificationSendRepo:
     async def record(
         self, *, user_id: UUID, notification_class: str, sent_at: datetime
     ) -> NotificationSend:
+        self.ops.append("record")
         row = NotificationSend()
         row.id = uuid4()
         row.user_id = user_id

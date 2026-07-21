@@ -12,6 +12,11 @@ name: Provision VAPID keys (EC2)
 #   재발급(rotate)은 mode=rotate 명시 필요. ⚠️ rotate 하면 기존 구독이 전부 무효가 된다
 #   (구독은 서버 public key 에 묶인다) — FE 재구독 필요.
 # - private key 는 어떤 step 에서도 echo 하지 않는다.
+# - .env 는 임시 파일 + os.replace 로 **원자 교체** — .env 는 DATABASE_URL·
+#   COLUMN_ENCRYPTION_KEY 의 유일본이라(백업 없음, deploy 는 rsync 제외) truncate 중
+#   실패(ENOSPC 등)로 파손되면 복구가 없다.
+# - concurrency 그룹(deploy-ec2)을 deploy 와 공유해 배포와 직렬화된다. queue: max 로
+#   대기 중인 deploy 를 취소하지 않고 순서대로 큐잉한다 (deploy.yml 의 concurrency 주석 참조).
 
 on:
   workflow_dispatch:
@@ -25,8 +30,11 @@ on:
         default: generate
 
 concurrency:
+  # deploy 와 같은 .env 를 건드리므로 배포와 직렬화.
+  # queue: max — 기본(single)은 pending 취소로 대기 중 deploy 가 유실된다 (deploy.yml 참조).
   group: deploy-ec2
   cancel-in-progress: false
+  queue: max
 
 jobs:
   provision:
@@ -52,6 +60,8 @@ jobs:
           # stdout 은 public key 만 — private 은 파이썬 안에서 파일로만 나간다.
           PUBLIC_KEY=$(~/.local/bin/uv run --no-dev python - <<'PY'
           import base64
+          import os
+          import shutil
           from pathlib import Path
 
           from cryptography.hazmat.primitives import serialization
@@ -75,7 +85,13 @@ jobs:
               if not line.startswith(("VAPID_PRIVATE_KEY=", "VAPID_PUBLIC_KEY="))
           ]
           lines += [f"VAPID_PRIVATE_KEY={private_b64}", f"VAPID_PUBLIC_KEY={public_b64}"]
-          env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          # 원자 교체 — write_text 는 truncate-then-write 라 도중 실패(ENOSPC·취소)에
+          # 유일본 .env 가 빈 파일로 남는다. 같은 디렉터리의 tmp 에 쓰고 rename.
+          tmp = Path(".env.provision-tmp")
+          tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          shutil.copymode(env_path, tmp)  # .env 가 600 이면 그대로 유지
+          os.replace(tmp, env_path)
 
           print(public_b64)
           PY

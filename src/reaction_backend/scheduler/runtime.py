@@ -4,8 +4,10 @@
 테스트/로컬은 안 돈다(데모는 시드로 커버).
 
 ⚠️ **in-process**(앱과 동일 프로세스). 다중 인스턴스 배포 시 같은 job 이 인스턴스 수만큼
-실행된다 — 모든 job 이 idempotent(같은 날/주/대상 재실행 skip)라 결과는 안전하나,
-LLM 비용·부하 측면에서 **단일 인스턴스 배포 권장**(PM #24 배포 설정).
+실행된다 — 기존 job 은 idempotent(같은 날/주/대상 재실행 skip + DB unique 백스톱)라
+안전하고, 알림 job 2종은 게이트의 **사용자 advisory lock + 건당 commit**(ADR-0006 §8)이
+인스턴스 간 dedup·예산을 직렬화한다. LLM 비용·부하 측면에서 **단일 인스턴스 배포
+권장**(PM #24 배포 설정)은 유지.
 
 시각 기준 = KST. cron 시간표는 `scheduler/README.md`. 등록 대상은 **job 함수가 존재하는 것만**:
 morning_brief / weekly_review / interruption_resolver / expire_drafts / expire_reflections
@@ -164,17 +166,22 @@ def build_scheduler() -> AsyncIOScheduler:
     # 19~23시 5분 폴 — 사용자별 evening_reflection_time(19~23시 설정 가능)을 분 단위로
     # 존중하려면 고정 시각 1회로는 안 된다. 23시대 폴은 게이트(quiet hours)가 전부
     # 막지만, "왜 안 갔는지"가 로그에 남도록 폴 자체는 돌린다.
+    # misfire_grace_time: APScheduler 기본 1초라 발화 시점 루프가 1초만 밀려도 폴이
+    # 통째로 skip 된다 — 폴 간격(5분) 미만인 60초로 완화.
     scheduler.add_job(
         _evening_reflection_notify_job,
         CronTrigger(hour="19-23", minute="*/5", timezone=KST),
         id="evening_reflection_notify",
         replace_existing=True,
+        misfire_grace_time=60,
     )
     # 종일 5분 폴 — [now+2분, now+7분) 시작 블록. 23~07시 발송은 게이트가 막는다.
+    # pre_card 는 창이 이동해 skip 폴을 다음 폴이 회수하지 못하므로 grace 가 특히 중요.
     scheduler.add_job(
         _pre_card_notify_job,
         CronTrigger(minute="*/5", timezone=KST),
         id="pre_card_notify",
         replace_existing=True,
+        misfire_grace_time=60,
     )
     return scheduler

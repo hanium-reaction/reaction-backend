@@ -170,6 +170,8 @@ def test_evening_notify_job_is_wired_to_the_right_function_and_time() -> None:
     assert fields["hour"] == "19-23", f"회고 알림 폴 시간대가 19~23시가 아니다: {fields}"
     assert fields["minute"] == "*/5", f"회고 알림이 5분 폴이 아니다: {fields}"
     assert str(job.trigger.timezone) == "Asia/Seoul"
+    # APScheduler 기본 grace 1초 — 발화 시점 루프가 1초만 밀려도 폴이 통째로 skip 된다.
+    assert job.misfire_grace_time == 60
 
 
 def test_pre_card_notify_job_is_wired_to_the_right_function_and_time() -> None:
@@ -187,3 +189,5 @@ def test_pre_card_notify_job_is_wired_to_the_right_function_and_time() -> None:
     assert fields["hour"] == "*", f"pre_card 폴이 종일이 아니다: {fields}"
     assert fields["minute"] == "*/5", f"pre_card 가 5분 폴이 아니다: {fields}"
     assert str(job.trigger.timezone) == "Asia/Seoul"
+    # pre_card 는 창이 이동해 skip 폴을 다음 폴이 회수하지 못한다 — grace 가 필수.
+    assert job.misfire_grace_time == 60

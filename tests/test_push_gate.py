@@ -83,6 +83,26 @@ async def test_unknown_class_is_rejected() -> None:
         await _send(_setting(), klass="marketing_blast")
 
 
+async def test_user_lock_is_taken_before_any_history_read() -> None:
+    """advisory lock 이 dedup·예산 **조회보다 먼저** 잡힌다 — TOCTOU 방지 (ADR-0006 §8).
+
+    evening·pre_card cron 은 같은 5분 틱에 병행한다. 락 없이(또는 조회 뒤에 잡으면)
+    두 게이트가 동시에 커밋 전 count 를 읽고 둘 다 발송해 주 3건을 초과한다.
+    락 호출 삭제·순서 이동 뮤턴트를 여기서 죽인다.
+    """
+    _, send_repo, _ = await _send(_setting())
+
+    assert send_repo.ops[0] == "lock", f"이력 조회 전에 락이 없다: {send_repo.ops}"
+    assert send_repo.ops == ["lock", "dedup", "count", "record"]
+
+    # 차단 경로(dedup)도 조회 전 락 — 차단 판정 자체가 이력 read 다.
+    blocked_repo = FakeNotificationSendRepo()
+    setting = _setting()
+    await _send(setting, send_repo=blocked_repo)
+    await _send(setting, now=NOW + timedelta(hours=1), send_repo=blocked_repo)
+    assert blocked_repo.ops[4:] == ["lock", "dedup"], f"차단 경로 순서: {blocked_repo.ops}"
+
+
 # ── 규칙 1: 구독 없음 ──
 
 
@@ -130,6 +150,10 @@ async def test_same_class_same_day_is_deduped() -> None:
     assert first.sent is True
     assert second == PushResult(sent=False, reason="class_dedup")
     assert sender2.calls == []
+    # 차단 경로가 이력을 남기면 안 된다 — 뮤테이션 실증: dedup 분기에 record() 를 넣은
+    # 뮤턴트가 이 단언 없이는 전 스위트(622건)를 통과했다. 그 회귀가 실리면 5분 폴의
+    # 차단 기록만으로 10분 만에 주 예산 3건이 차고 rolling 창이 계속 밀린다 (#20 리뷰).
+    assert len(send_repo._sends) == 1
 
 
 async def test_same_class_next_day_is_allowed_no_ratchet() -> None:
@@ -196,19 +220,46 @@ async def test_weekly_budget_counts_all_classes_combined() -> None:
     assert blocked == PushResult(sent=False, reason="weekly_budget")
 
 
-async def test_weekly_budget_window_rolls_off() -> None:
-    """8일 전 발송은 카운트에서 빠진다 — rolling 7일."""
+async def test_weekly_budget_window_is_exactly_seven_days() -> None:
+    """창 크기 양쪽 경계 고정 — 6일 14시간 전은 **카운트**, 7일 1시간 전은 **제외**.
+
+    뮤테이션 실증: 기존 시드(차단측 1~3일 전 · 롤오프측 8~10일 전)로는
+    `PUSH_BUDGET_WINDOW` 를 3일로 줄여도 전 스위트가 통과했다 — 3일 창이면 주 ~7건까지
+    발송돼 '주 ≤3건' 잠금(AGENTS.md §1)이 무증상으로 깨진다. 이 테스트와 아래 롤오프가
+    각각 창 축소·창 확대 뮤턴트를 죽인다 (#20 리뷰).
+
+    6일 14시간인 이유: NOW(21:00)에서 그보다 더 과거로 붙이면 착지 시각이 quiet
+    hours([23,07))에 들어가 발송 시드 자체가 게이트에 막힌다 — 07:00 착지가 한계.
+    """
     setting = _setting()
     send_repo = FakeNotificationSendRepo()
 
-    for d in (10, 9, 8):  # 시간순 — 거꾸로 보내면 미래 기록에 dedup 이 걸린다
+    # 6일 14시간 전(=착지 07:00, quiet 밖)에 3건 — 같은 날이라 클래스가 달라야 dedup 회피.
+    for klass in ("morning_brief", "pre_card", "evening_reflection"):
         r, _, _ = await _send(
-            setting, now=NOW - timedelta(days=d), klass="pre_card", send_repo=send_repo
+            setting, now=NOW - timedelta(days=6, hours=14), klass=klass, send_repo=send_repo
+        )
+        assert r.sent is True
+
+    blocked, _, _ = await _send(setting, send_repo=send_repo)
+    assert blocked == PushResult(sent=False, reason="weekly_budget"), (
+        "6일 14시간 전 발송이 카운트에서 빠졌다 — 예산 창이 7일보다 좁다"
+    )
+
+
+async def test_weekly_budget_window_rolls_off_after_seven_days() -> None:
+    """7일 1시간 전 발송은 카운트에서 빠진다 — rolling 7일의 반대쪽 경계."""
+    setting = _setting()
+    send_repo = FakeNotificationSendRepo()
+
+    for klass in ("morning_brief", "pre_card", "evening_reflection"):
+        r, _, _ = await _send(
+            setting, now=NOW - timedelta(days=7, hours=1), klass=klass, send_repo=send_repo
         )
         assert r.sent is True
 
     result, _, _ = await _send(setting, send_repo=send_repo)
-    assert result.sent is True
+    assert result.sent is True, "7일 지난 발송이 아직 카운트된다 — 예산 창이 7일보다 넓다"
 
 
 async def test_budget_is_per_user() -> None:

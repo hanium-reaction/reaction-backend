@@ -79,6 +79,7 @@ class _EveningHarness:
         self.execution_repo = FakeExecutionRepo()
         self.send_repo = FakeNotificationSendRepo()
         self.sender = FakeWebPushSender()
+        self.session = _FakeSession()
 
     def seed_user(
         self,
@@ -106,7 +107,8 @@ class _EveningHarness:
             execution_repo=self.execution_repo,  # type: ignore[arg-type]
             send_repo=self.send_repo,  # type: ignore[arg-type]
             sender=self.sender,  # type: ignore[arg-type]
-            session=_FakeSession(),
+            session=self.session,  # type: ignore[arg-type]
+            clock=lambda: now,  # 결정론 — 기본값(now_kst)은 벽시계라 테스트가 흔들린다
         )
 
 
@@ -123,6 +125,9 @@ async def test_evening_sends_after_user_time_with_pending() -> None:
     payload = h.sender.calls[0][1]
     assert payload["class"] == "evening_reflection"
     assert "2장" in payload["body"]  # pending 수가 문구에 반영
+    # 발송 직후 사용자 단위 commit — 뮤테이션 실증: commit 을 지운 뮤턴트가 이 단언 없이
+    # 전 스위트를 통과했고, 운영에선 이력이 매 폴 롤백돼 5분마다 재발송(스팸)이 된다.
+    assert h.session.commit_count >= 1
 
 
 async def test_evening_not_before_user_time() -> None:
@@ -182,6 +187,24 @@ async def test_evening_second_poll_does_not_duplicate() -> None:
     assert first.sent == 1
     assert second.sent == 0
     assert len(h.sender.calls) == 1
+    assert len(h.send_repo._sends) == 1  # 차단 폴이 이력·예산을 소모하지 않는다
+
+
+async def test_evening_setting_after_2255_is_clamped_to_last_poll() -> None:
+    """22:56~23:00 설정은 22:55(quiet 전 마지막 폴)로 클램프 — 영구 미발송 방지.
+
+    회귀: 클램프 없이는 22:57 설정의 첫 통과 폴이 23:00 인데 quiet hours 가 막아
+    **매일 조용히 미발송**된다 (계약상 19~23시는 유효 설정인데도). ADR-0006 §7.
+    """
+    h = _EveningHarness()
+    h.seed_user(evening=time(22, 57))
+    h.seed_user(evening=time(23, 0))
+
+    before = await h.run(now=datetime(2026, 7, 21, 22, 50, tzinfo=KST))
+    assert before.sent == 0  # 클램프 시각(22:55) 전에는 안 보낸다
+
+    result = await h.run(now=datetime(2026, 7, 21, 22, 55, tzinfo=KST))
+    assert result.sent == 2, "22:55 폴에서 클램프 발송돼야 한다 — 그날의 마지막 기회"
 
 
 async def test_evening_isolates_one_user_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,6 +225,9 @@ async def test_evening_isolates_one_user_failure(monkeypatch: pytest.MonkeyPatch
 
     assert result.failed == 1
     assert result.sent == 1  # 나머지는 진행
+    # 실패 시 세션 rollback — 없으면 실 DB 에선 aborted 세션이 남아 이후 사용자 전원이
+    # PendingRollbackError 로 죽는다 (실패 격리가 허상이 된다).
+    assert h.session.rollback_count == 1
 
 
 # ── pre_card 알림 ──
@@ -213,6 +239,7 @@ class _PreCardHarness:
         self.execution_repo = FakeExecutionRepo()
         self.send_repo = FakeNotificationSendRepo()
         self.sender = FakeWebPushSender()
+        self.session = _FakeSession()
 
     def seed_block(
         self,
@@ -249,7 +276,8 @@ class _PreCardHarness:
             notif_repo=self.notif_repo,  # type: ignore[arg-type]
             send_repo=self.send_repo,  # type: ignore[arg-type]
             sender=self.sender,  # type: ignore[arg-type]
-            session=_FakeSession(),
+            session=self.session,  # type: ignore[arg-type]
+            clock=lambda: now,
         )
 
 
@@ -264,6 +292,7 @@ async def test_pre_card_sends_for_block_in_window() -> None:
     assert payload["class"] == "pre_card"
     assert "리포트 초안 쓰기" in payload["body"]
     assert "21:06" in payload["body"]  # 시작 시각 HH:MM
+    assert h.session.commit_count >= 1  # 건당 commit (evening 쪽 테스트와 같은 근거)
 
 
 async def test_pre_card_window_is_2_to_7_minutes() -> None:
@@ -324,3 +353,4 @@ async def test_pre_card_second_card_same_day_is_deduped() -> None:
     assert result.total == 2
     assert result.sent == 1  # 첫 카드만
     assert result.skipped == 1
+    assert len(h.send_repo._sends) == 1  # 차단된 두 번째가 이력을 남기지 않는다

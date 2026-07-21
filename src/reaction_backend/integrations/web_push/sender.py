@@ -27,6 +27,14 @@ SendOutcome = Literal["ok", "gone", "error", "unconfigured"]
 
 _GONE_STATUSES = (404, 410)
 
+# 푸시 서비스 응답 대기 상한(초, requests 로 전달). endpoint 는 사용자 제공 URL 이라
+# 응답을 물고 있는 블랙홀이 올 수 있다 — pywebpush 의 webpush() 는 timeout=None 이
+# 기본이라(2.3.0, requests.post 무한 대기) 명시하지 않으면 스레드가 무한 점유되고,
+# max_instances=1 인 cron 의 후속 폴이 전부 skip 되는 정지가 온다.
+_SEND_TIMEOUT_SECONDS = 10.0
+# to_thread 자체가 복귀하지 않는 최악까지 대비한 코루틴 상한 (이중 안전장치).
+_SEND_HARD_TIMEOUT_SECONDS = 15.0
+
 
 class WebPushSender:
     """VAPID 키 한 쌍으로 Web Push 를 보낸다. 정책 검사는 하지 않는다(게이트 책임)."""
@@ -45,13 +53,20 @@ class WebPushSender:
             return "unconfigured"
         try:
             # pywebpush 는 동기(requests) — 이벤트 루프를 막지 않게 스레드로 내린다.
-            await asyncio.to_thread(
-                webpush,
-                subscription_info=subscription,
-                data=json.dumps(payload, ensure_ascii=False),
-                vapid_private_key=self._private_key,
-                vapid_claims={"sub": self._subject},
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    webpush,
+                    subscription_info=subscription,
+                    data=json.dumps(payload, ensure_ascii=False),
+                    vapid_private_key=self._private_key,
+                    vapid_claims={"sub": self._subject},
+                    timeout=_SEND_TIMEOUT_SECONDS,
+                ),
+                timeout=_SEND_HARD_TIMEOUT_SECONDS,
             )
+        except TimeoutError:
+            _log.warning("web push send timed out (>%ss)", _SEND_HARD_TIMEOUT_SECONDS)
+            return "error"
         except WebPushException as e:
             status = e.response.status_code if e.response is not None else None
             if status in _GONE_STATUSES:
