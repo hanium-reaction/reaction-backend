@@ -139,3 +139,21 @@ def test_patch_profile_invalid_enum(client: TestClient) -> None:
 
 def test_profile_requires_auth(unauthed_client: TestClient) -> None:
     assert unauthed_client.get("/settings/profile").status_code == 401
+
+
+def test_patch_activity_window_round_trip(client: TestClient) -> None:
+    """활동 시간대(계획 배치 창) 편집 → focus_mode_preferences 저장/조회 (#editable-activity-window)."""
+    resp = client.patch(
+        "/settings/profile", json={"activityStart": "06:00", "activityEnd": "24:00"}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["activityStart"] == "06:00"
+    assert body["activityEnd"] == "24:00"
+    got = client.get("/settings/profile").json()
+    assert got["activityStart"] == "06:00"
+    assert got["activityEnd"] == "24:00"
+
+
+def test_patch_activity_window_invalid(client: TestClient) -> None:
+    assert client.patch("/settings/profile", json={"activityStart": "25:00"}).status_code == 422

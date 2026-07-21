@@ -862,7 +862,7 @@ _DEFAULT_SLOT_QUESTIONS: dict[str, str] = {
     "goals.success_image": "이번 주 끝에 어떤 모습이면 좋을까요?",
     "goals.approach": "이 목표, 어떻게 해나가고 싶어요? 선호하는 방식·순서가 있으면 알려주세요.",
     "goals.materials": "참고할 자료가 있으면 그 내용을 그대로 붙여넣어 주세요.",
-    "time.activity_window": "보통 몇 시부터 몇 시까지 활동해요?",
+    "time.activity_window": "하루 중 계획을 잡아도 되는 시간대는 몇 시부터 몇 시까지예요? (이 시간 밖엔 일정을 안 잡아요)",
     "time.fixed_blocks": "매주 고정으로 비워야 하는 시간 있어요?",
     "time.peak_window": "가장 잘 집중되는 시간대는요?",
     "time.no_touch": "절대 일정 잡으면 안 되는 시간은요?",

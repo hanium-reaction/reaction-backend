@@ -128,6 +128,23 @@ def _hhmm(value: time | None) -> str | None:
     return value.strftime("%H:%M") if value is not None else None
 
 
+def _validate_hhmm(value: str, field: str) -> None:
+    """활동 시간대 'HH:MM' 검증(자정=24:00 허용). 위반이면 422."""
+    try:
+        hh_s, mm_s = value.split(":")
+        hh, mm = int(hh_s), int(mm_s)
+    except (ValueError, AttributeError):
+        hh = mm = -1
+    ok = (hh == 24 and mm == 0) or (0 <= hh <= 23 and 0 <= mm <= 59)
+    if not ok:
+        raise ApiError(
+            ErrorCode.COMMON_VALIDATION_ERROR,
+            f"{field} 는 HH:MM 형식이어야 해요 (받은 값: {value!r}).",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field=field,
+        )
+
+
 def _behavioral_view(row: BehavioralProfile | None) -> BehavioralProfileView | None:
     if row is None:
         return None
@@ -153,11 +170,16 @@ def _interaction_view(row: InteractionStyle | None) -> InteractionStyleView | No
 
 async def _profile_response(user: User, repo: ProfileRepo) -> ProfileResponse:
     fmp = user.focus_mode_preferences or {}
+    beh = await repo.get_behavioral(user.id)
     return ProfileResponse(
-        behavioral=_behavioral_view(await repo.get_behavioral(user.id)),
+        behavioral=_behavioral_view(beh),
         interaction=_interaction_view(await repo.get_interaction(user.id)),
         downscope_unit_min=fmp.get("downscope_unit_min"),
         rest_ok=fmp.get("rest_ok"),
+        # 편집값(fmp) 우선, 없으면 인터뷰가 넣은 preferred_start/end 로 폴백.
+        activity_start=fmp.get("activity_start")
+        or (_hhmm(beh.preferred_start_time) if beh else None),
+        activity_end=fmp.get("activity_end") or (_hhmm(beh.preferred_end_time) if beh else None),
     )
 
 
@@ -197,12 +219,22 @@ async def update_profile(
         await repo.upsert_behavioral(user.id, fields=behavioral_fields)
     if any(v is not None for v in interaction_fields.values()):
         await repo.upsert_interaction(user.id, fields=interaction_fields)
-    if body.downscope_unit_min is not None or body.rest_ok is not None:
+    fmp_changed = any(
+        v is not None
+        for v in (body.downscope_unit_min, body.rest_ok, body.activity_start, body.activity_end)
+    )
+    if fmp_changed:
         fmp = dict(user.focus_mode_preferences or {})
         if body.downscope_unit_min is not None:
             fmp["downscope_unit_min"] = body.downscope_unit_min
         if body.rest_ok is not None:
             fmp["rest_ok"] = body.rest_ok
+        if body.activity_start is not None:
+            _validate_hhmm(body.activity_start, "activityStart")
+            fmp["activity_start"] = body.activity_start
+        if body.activity_end is not None:
+            _validate_hhmm(body.activity_end, "activityEnd")
+            fmp["activity_end"] = body.activity_end
         user.focus_mode_preferences = fmp  # 새 dict 재대입 → JSONB 변경 감지
     await session.commit()
 
