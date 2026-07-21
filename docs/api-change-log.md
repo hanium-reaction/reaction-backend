@@ -7,6 +7,18 @@
 
 ---
 
+## v1.23 — 2026-07-21 (Web Push 구독 실구현, #16 BE)
+
+- `POST /notifications/subscribe` — mock 제거, `push_subscription` JSONB 실 저장.
+  요청 body 를 계약에 명문화: `{endpoint, keys: {p256dh, auth}}` (브라우저
+  `PushSubscription.toJSON()`). **p256dh/auth 누락 → 422 `COMMON_VALIDATION_ERROR`** —
+  기존 mock 은 아무 keys 나 201 이었으므로 잘못된 객체를 보내던 클라이언트는 이제 거부된다
+  (정상 브라우저 구독 객체는 항상 둘 다 포함 → 실 FE 영향 없음).
+- `DELETE /notifications/subscribe` — 실 해제(NULL). 멱등 유지(구독 없어도 204).
+- 응답이 **실 설정 행 기준**으로 바뀜 — mock 은 DEMO 고정값(08:00/21:00)을 돌려줬다.
+  `pushSubscribed` 는 저장된 구독 유무에서 파생.
+- 엔드포인트·메서드·상태코드 불변. 발송(cron·게이트)은 다음 항목(#20 알림 cron)에서.
+
 ## v1.22 — 2026-07-19 (회복 카드 '수정' 수락, #20 DoD 7)
 
 - `POST /recovery/decisions` 의 `decision` 에 **`edited` 추가** + 요청 필드

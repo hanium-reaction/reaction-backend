@@ -528,8 +528,21 @@ PARK       → PARK_DEFAULT
 | --- | --- | --- |
 | GET | `/notifications/settings` | 내 알림 설정 |
 | PATCH | `/notifications/settings` | morningTime / eveningTime / preCardEnabled |
-| POST | `/notifications/subscribe` | Web Push subscription 등록 |
-| DELETE | `/notifications/subscribe` | 구독 해제 |
+| POST | `/notifications/subscribe` | Web Push subscription 등록 (201, 갱신된 설정 반환) |
+| DELETE | `/notifications/subscribe` | 구독 해제 (204, 멱등 — 구독 없어도 204) |
+
+`POST /notifications/subscribe` 요청 = 브라우저 `PushSubscription.toJSON()`:
+
+```json
+{
+  "endpoint": "https://fcm.googleapis.com/…",
+  "keys": { "p256dh": "…", "auth": "…" }
+}
+```
+
+- `keys.p256dh` / `keys.auth` 누락·빈 값 → 422 `COMMON_VALIDATION_ERROR` (발송 암호화에 필수)
+- 재구독은 덮어쓰기 (1 device 1 subscription — Issue #16)
+- 응답은 `GET /notifications/settings` 와 같은 형태. `pushSubscribed` 는 저장된 구독 유무에서 파생
 
 가드:
 - `morningTime` 06~10시, `eveningTime` 19~23시 외 → 422 `NOTIF_TIME_RANGE`

@@ -1,10 +1,11 @@
 """Notifications — 알림 설정 + Web Push 구독 (S08, api-contract §15).
 
-Issue #17 실구현:
+Issue #17 + #16(BE 측) 실구현:
 - `/notifications/settings` GET/PATCH — 실 DB (`notification_settings` 테이블, user 당 1행)
 - 첫 PATCH 시 onboarding_state 전이: NOTIFICATIONS → ACTIVE
 - 시간 가드: morning 06~10시, evening 19~23시 (422 `NOTIF_TIME_RANGE`)
-- `/notifications/subscribe` — Web Push 는 Issue #25(PWA)에서 본격 구현. 현재 mock 유지.
+- `/notifications/subscribe` POST/DELETE — 구독 객체를 `push_subscription` JSONB 에 저장/해제.
+  발송 자체(cron·게이트)는 scheduler 쪽 — 여기는 구독 저장만 책임진다.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
-from reaction_backend.api.mock.notifications import DEMO_NOTIFICATION_SETTINGS
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.session import get_db
 from reaction_backend.repositories.notification_repo import (
@@ -136,26 +136,39 @@ async def update_settings(
     return _to_schema(updated)
 
 
-# ───── Web Push subscription — Issue #25 (PWA) 범위. 현재 mock 유지. ─────
-
-
-def _demo_settings(*, push_subscribed: bool | None = None) -> NotificationSettings:
-    demo = DEMO_NOTIFICATION_SETTINGS
-    return NotificationSettings(
-        morning_brief_time=demo.morning_brief_time,
-        evening_reflection_time=demo.evening_reflection_time,
-        pre_card_enabled=demo.pre_card_enabled,
-        push_subscribed=demo.push_subscribed if push_subscribed is None else push_subscribed,
-    )
+# ───── Web Push subscription (Issue #16 BE 측) ─────
 
 
 @router.post("/subscribe", status_code=status.HTTP_201_CREATED)
-async def subscribe(body: PushSubscribeRequest) -> NotificationSettings:
-    """[mock] Web Push 구독 등록 — Issue #25 (PWA) 에서 실 구현."""
-    return _demo_settings(push_subscribed=True)
+async def subscribe(
+    body: PushSubscribeRequest,
+    user: CurrentUser,
+    repo: RepoDep,
+    session: SessionDep,
+) -> NotificationSettings:
+    """Web Push 구독 등록 — `push_subscription` JSONB 저장 (재구독은 덮어쓰기).
+
+    저장 형태는 pywebpush 가 그대로 받는 `{endpoint, keys: {p256dh, auth}}`.
+    응답은 실 설정 행 기준 — pushSubscribed 는 저장 결과에서 파생된다.
+    """
+    setting = await repo.get_or_create(user.id)
+    updated = await repo.set_push_subscription(
+        setting, {"endpoint": body.endpoint, "keys": body.keys}
+    )
+    await session.commit()
+    await session.refresh(updated)
+    return _to_schema(updated)
 
 
 @router.delete("/subscribe", status_code=status.HTTP_204_NO_CONTENT)
-async def unsubscribe() -> None:
-    """[mock] Web Push 구독 해제 — Issue #25 (PWA) 에서 실 구현."""
+async def unsubscribe(
+    user: CurrentUser,
+    repo: RepoDep,
+    session: SessionDep,
+) -> None:
+    """Web Push 구독 해제 — 멱등 (구독이 없어도 204)."""
+    setting = await repo.get_by_user(user.id)
+    if setting is not None and setting.push_subscription is not None:
+        await repo.clear_push_subscription(setting)
+        await session.commit()
     return None

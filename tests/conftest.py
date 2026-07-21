@@ -347,6 +347,16 @@ class FakeNotificationRepo:
             setting.pre_card_enabled = pre_card_enabled
         return setting
 
+    async def set_push_subscription(
+        self, setting: NotificationSetting, subscription: dict[str, Any]
+    ) -> NotificationSetting:
+        setting.push_subscription = subscription
+        return setting
+
+    async def clear_push_subscription(self, setting: NotificationSetting) -> NotificationSetting:
+        setting.push_subscription = None
+        return setting
+
 
 class FakeGoalRepo:
     """in-memory GoalRepo — Issue #22."""
