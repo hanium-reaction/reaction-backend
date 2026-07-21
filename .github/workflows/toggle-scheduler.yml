@@ -1,0 +1,99 @@
+name: Toggle SCHEDULER_ENABLED (EC2)
+
+# 라이브 EC2 의 `.env` 에서 SCHEDULER_ENABLED 를 켜고/끄고 앱을 재기동한다 (#24, #20 DoD 2).
+#
+# 왜 워크플로인가: deploy.yml 이 `--exclude='.env'` 로 rsync 하므로 이 값은 레포에서 못 켠다.
+# 수동 SSH 대신 러너를 쓰면 (a) 버전 관리 (b) 실행 로그 감사 (c) disable 로 즉시 롤백이 된다.
+# 러너는 deploy.yml 과 같은 EC2 self-hosted 이고 `sudo systemctl restart` 권한이 이미 있다.
+#
+# ⚠️ 켜면 5개 job 이 전부 돈다(만료 04:00 · 모닝브리프 06:00 · 주간리뷰 일 03:00 ·
+#    interruption/draft만료 6h). 전부 idempotent 라 다회 실행은 안전하지만,
+#    **만료 cron 은 회고 창 밖 카드를 soft delete 하므로 켜기 전 프리뷰로 실측할 것**
+#    (preview-expire-reflections.yml — 읽기 전용).
+#
+# 안전:
+# - workflow_dispatch 전용 (push/PR 로는 절대 트리거되지 않음)
+# - `.env` 전체를 로그에 출력하지 않는다 — SCHEDULER_ENABLED 한 줄만 (DATABASE_URL·
+#   JWT_SECRET·GEMINI_API_KEY 유출 방지)
+# - 재기동 후 health check 실패 시 job 실패 → 이상을 즉시 알 수 있다
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "enable(cron 기동) 또는 disable(롤백)"
+        type: choice
+        options:
+          - enable
+          - disable
+        default: enable
+
+concurrency:
+  # deploy 와 같은 앱 디렉터리·서비스를 건드리므로 배포와 직렬화.
+  group: deploy-ec2
+  cancel-in-progress: false
+
+jobs:
+  toggle:
+    name: "toggle (${{ inputs.mode }})"
+    runs-on: [self-hosted, ec2, reaction-backend]
+    timeout-minutes: 10
+
+    env:
+      APP_DIR: /home/ubuntu/reaction-backend
+
+    steps:
+      - name: Set SCHEDULER_ENABLED
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          VALUE=$([ "${{ inputs.mode }}" = "enable" ] && echo true || echo false)
+
+          # 이 파일만 grep 한다 — .env 전체를 절대 출력하지 않는다(비밀값 유출).
+          echo "before: $(grep '^SCHEDULER_ENABLED=' .env || echo '(설정 없음 → 기본 false)')"
+
+          if grep -q '^SCHEDULER_ENABLED=' .env; then
+            sed -i "s/^SCHEDULER_ENABLED=.*/SCHEDULER_ENABLED=${VALUE}/" .env
+          else
+            printf '\nSCHEDULER_ENABLED=%s\n' "${VALUE}" >> .env
+          fi
+
+          echo "after : $(grep '^SCHEDULER_ENABLED=' .env)"
+
+      - name: Restart app
+        run: sudo systemctl restart reaction-backend
+
+      - name: Health check
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://127.0.0.1:8000/health -o /tmp/health.json; then
+              if grep -q '"status":"ok"' /tmp/health.json; then
+                echo "healthy:"; cat /tmp/health.json; exit 0
+              fi
+            fi
+            sleep 2
+          done
+          echo "::error::health check failed after restart"
+          exit 1
+
+      - name: Verify scheduler state in logs
+        if: always()
+        run: |
+          # lifespan 이 SCHEDULER_ENABLED=true 일 때만 "APScheduler started (N jobs)" 를 찍는다.
+          # 로그 권한이 없을 수 있어 실패해도 job 을 죽이지 않는다(health check 가 본 판정).
+          LOG=$( (sudo journalctl -u reaction-backend -n 80 --no-pager 2>/dev/null \
+                  || journalctl -u reaction-backend -n 80 --no-pager 2>/dev/null \
+                  || echo "(로그 조회 권한 없음)") )
+          echo "$LOG" | grep -i "apscheduler" || echo "APScheduler 로그 라인 없음 (disable 이면 정상)"
+
+      - name: Summary
+        if: always()
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          {
+            echo "### Toggle SCHEDULER_ENABLED — ${{ inputs.mode }}"
+            echo '```'
+            grep '^SCHEDULER_ENABLED=' .env || echo '(설정 없음)'
+            echo '```'
+            echo "롤백: 같은 워크플로를 mode=disable 로 재실행."
+          } >> "$GITHUB_STEP_SUMMARY"
