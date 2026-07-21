@@ -336,6 +336,16 @@ class LLMToolExecutor:
     ) -> RunResult[T]:
         value = await _resolve_fallback(fallback, schema=schema)
 
+        # 룰 fallback 도 **사용자에게 나가는 문자열**이므로 금지어 필터를 통과시킨다.
+        # 대부분의 fallback 은 신뢰된 카탈로그 템플릿이지만, 사용자 입력을 되돌려주는 것도
+        # 있다(예: inbox 의 suggested_title=raw_text[:10]) — 그 경로가 필터를 우회하면
+        # 잠금 결정(AGENTS.md §1 금지어 필터 강제)에 구멍이 난다.
+        # 여기서는 치환만 하고 blocked 는 무시한다: fallback 의 fallback 은 없고,
+        # 치환된 문구가 원문보다 항상 낫기 때문(무한 재귀 방지).
+        sanitized_fallback, _, fallback_hits = enforce_structured(value.model_dump())
+        if fallback_hits:
+            value = schema.model_validate(sanitized_fallback)
+
         _log.warning(
             "llm_fallback",
             extra={
