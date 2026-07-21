@@ -74,6 +74,19 @@ _MIN_SESSIONS_PER_WEEK = 2
 _MAX_SESSIONS_PER_WEEK = 14
 
 
+# 참고 자료 원문을 프롬프트에 실을 때 최대 길이(자) — 붙여넣기가 길면 토큰 budget 을 먹으므로
+# 앞부분만 싣는다. 대부분의 강의계획서·요구사항 요지는 앞쪽에 있다.
+_MATERIALS_MAX_CHARS = 2000
+
+
+def _clip(text: str) -> str:
+    """자료 원문을 프롬프트용으로 앞부분만 자른다(길면 절단 표시)."""
+    text = text.strip()
+    if len(text) <= _MATERIALS_MAX_CHARS:
+        return text
+    return text[:_MATERIALS_MAX_CHARS] + " …(이하 생략)"
+
+
 def sessions_per_week_for(density: str) -> int:
     """density 프리셋 → 주당 목표 세션 수. 미지원 값은 표준(5)으로 폴백."""
     return _DENSITY_SESSIONS_PER_WEEK.get(density, _DEFAULT_SESSIONS_PER_WEEK)
@@ -190,9 +203,12 @@ def context_from_outcome(outcome: InterviewOutcome, *, density: str = "standard"
         "weekly_hours": f"{heaviest.weekly_hours}시간" if heaviest.weekly_hours else "(미입력)",
         # 한 번에 집중 가능한 시간 — 각 세션(leaf) 길이를 이에 맞춘다(#per-goal session length).
         "session_length": f"{session_min_for(outcome)}분",
-        # 사용자가 밝힌 접근 방식·참고 자료 — 분해가 일반적 방식이 아니라 이 방향/내용을 따르게
-        # 하는 grounding(#approach). 미입력이면 '(없음)'.
+        # 사용자가 밝힌 접근 방식 — 분해가 일반적 방식이 아니라 이 방향을 따르게 하는 grounding
+        # (#approach). 미입력이면 '(없음)'.
         "approach_note": heaviest.approach_note or "(없음)",
+        # 참고 자료 **원문** — 분해가 그 실제 내용(기능·목차·요구사항)을 뼈대로 삼게 한다(#materials).
+        # 길면 앞부분만(토큰 budget). pointer 뿐이고 원문이 없으면 프롬프트가 flag 하도록 유도.
+        "materials": _clip(heaviest.materials_note) if heaviest.materials_note else "(없음)",
         "behavioral_summary": _behavioral_summary(outcome),
         "time_policy_summary": _time_policy_summary(outcome),
         "sessions_per_week": str(target_sessions_per_week(outcome, density)),

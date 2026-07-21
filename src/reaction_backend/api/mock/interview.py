@@ -86,10 +86,18 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
     InterviewSlot(
         "goals.success_image", "이번 주 끝에 어떤 모습이면 좋을까요?", "text", True, "goals"
     ),
-    # 목표 접근/자료 — 사용자가 밝힌 방식·참고 자료로 분해를 grounding (없으면 넘겨도 됨).
+    # 목표 접근 — 사용자가 선호하는 방식·순서로 분해를 grounding (없으면 넘겨도 됨).
     InterviewSlot(
         "goals.approach",
-        "이 목표, 어떻게 해나가고 싶어요? 참고할 자료나 방식이 있으면 알려주세요 (없으면 넘겨도 돼요)",
+        "이 목표, 어떻게 해나가고 싶어요? 선호하는 방식·순서가 있으면 알려주세요 (없으면 넘겨도 돼요)",
+        "text",
+        True,
+        "goals",
+    ),
+    # 목표 참고 자료 원문 — pointer 가 아니라 실제 내용을 붙여넣어야 분해가 그대로 뼈대로 쓴다.
+    InterviewSlot(
+        "goals.materials",
+        "참고할 자료가 있으면 그 내용을 그대로 붙여넣어 주세요 — 프로젝트 설명·README·강의계획서·요구사항 등 (없으면 넘겨도 돼요)",
         "text",
         True,
         "goals",

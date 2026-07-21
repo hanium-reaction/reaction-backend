@@ -41,6 +41,7 @@ REQUIRED_SLOT_KEYS: tuple[str, ...] = (
     "goals.deadlines",
     "goals.success_image",
     "goals.approach",
+    "goals.materials",
     "time.activity_window",
     "time.peak_window",
     "time.no_touch",
@@ -210,6 +211,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
     weekly_hours = _chip_hours(slot_answers.get("goals.weekly_time"))
     session_length = _chip_duration_min(slot_answers.get("goals.session_length"))
     approach_note = _text_raw(slot_answers.get("goals.approach"))
+    materials_note = _text_raw(slot_answers.get("goals.materials"))
 
     if not titles:
         return [
@@ -236,6 +238,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
                 weekly_hours=weekly_hours if is_heaviest else None,
                 session_length_min=session_length if is_heaviest else None,
                 approach_note=approach_note if is_heaviest else None,
+                materials_note=materials_note if is_heaviest else None,
                 tentative_tier="focus" if is_heaviest else "maintain",
                 confidence=0.5,
             )
