@@ -167,7 +167,10 @@ async def record(
     _log.info(
         "llm_run_recorded",
         extra={
-            "module": rec.module,
+            # 'module' 은 LogRecord 예약 속성이라 그대로 쓰면 KeyError 로 **호출부가 죽는다**
+            # (tool_executor 의 llm_fallback 이 같은 이유로 llm_module 로 rename 돼 있다).
+            # INFO 가 꺼져 있으면 레코드 생성 전에 반환돼 안 터질 뿐, 로깅을 켜는 순간 터진다.
+            "llm_module": rec.module,
             "model": rec.model,
             "prompt_id": rec.prompt_id,
             "prompt_version": rec.prompt_version,

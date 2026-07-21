@@ -66,7 +66,26 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             scheduler.shutdown(wait=False)
 
 
+def _configure_logging() -> None:
+    """앱 로그를 stdout 으로 — 없으면 운영 INFO 로그가 통째로 사라진다.
+
+    Python 기본 root 로거는 핸들러가 없어 `logging.lastResort`(WARNING)로 떨어진다.
+    uvicorn 은 `uvicorn.*` 네임스페이스만 설정하므로 `reaction_backend.*` 의 INFO 는
+    **아무 데도 안 남는다** — 실제로 그래서 "APScheduler started (N jobs)"(#24 기동 확인)와
+    "expire_unreflected: N cards expired"(#20 만료 건수, 사고 시 원복 범위 산정용)가
+    라이브에서 보이지 않았다. 둘 다 사후에 "무엇이 일어났나"를 아는 유일한 수단이다.
+
+    `basicConfig` 는 root 에 핸들러가 이미 있으면 no-op 이라 다른 설정을 덮어쓰지 않는다.
+    systemd 는 stdout 을 journald 로 수집하므로 `journalctl -u reaction-backend` 로 보인다.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+
 def create_app() -> FastAPI:
+    _configure_logging()
     cfg = get_settings()
 
     app = FastAPI(
