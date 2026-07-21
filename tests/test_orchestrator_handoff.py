@@ -50,6 +50,8 @@ SLOT_ANSWERS: dict[str, dict[str, Any] | None] = {
     "goals.session_length": {"type": "chip", "values": ["1시간"]},
     "goals.deadlines": {"type": "text", "raw": "2026-06-20"},
     "goals.success_image": {"type": "text", "raw": "데모 동작"},
+    "goals.approach": {"type": "text", "raw": "PintOS 과제 순서대로, 강의 자료 위주로"},
+    "goals.materials": {"type": "text", "raw": "1주차 스레드, 2주차 유저프로그램, 3주차 VM"},
     "time.activity_window": {"type": "range", "start": "09:00", "end": "23:00"},
     "time.peak_window": {"type": "chip", "values": ["오전", "저녁"]},
     "time.no_touch": {"type": "chip", "values": ["일요일"]},
@@ -84,6 +86,8 @@ def test_build_outcome_projects_required_slots() -> None:
     assert heaviest.current_level == "기획서 초안까지 씀"  # #B baseline
     assert heaviest.weekly_hours == 6  # goals.weekly_time chip "6시간" → 6 (#weekly)
     assert heaviest.session_length_min == 60  # goals.session_length chip "1시간" → 60 (#per-goal)
+    assert heaviest.approach_note == "PintOS 과제 순서대로, 강의 자료 위주로"  # goals.approach (#approach)
+    assert heaviest.materials_note == "1주차 스레드, 2주차 유저프로그램, 3주차 VM"  # goals.materials (#materials)
     assert {g.title for g in outcome.core_goals} == {"캡스톤", "토익"}
     assert outcome.availability.activity_window.start == "09:00"
     assert outcome.availability.peak_window == ["오전", "저녁"]
@@ -193,6 +197,9 @@ def test_context_from_outcome_builds_prompt_vars() -> None:
     assert ctx["prompt_vars"]["sessions_per_week"] == "6"
     assert ctx["prompt_vars"]["weekly_hours"] == "6시간"
     assert ctx["prompt_vars"]["session_length"] == "60분"  # 목표별 집중 길이 (#per-goal)
+    # 사용자 접근/자료가 분해 프롬프트에 실린다 (#approach grounding).
+    assert ctx["prompt_vars"]["approach_note"] == "PintOS 과제 순서대로, 강의 자료 위주로"
+    assert ctx["prompt_vars"]["materials"] == "1주차 스레드, 2주차 유저프로그램, 3주차 VM"  # 자료 원문 (#materials)
     # 완료 기준(성공 이미지)·카테고리가 decompose 프롬프트에 실린다 (#B — 그동안 버려지던 맥락).
     assert ctx["prompt_vars"]["success_image"] == "데모 동작"
     assert ctx["prompt_vars"]["current_level"] == "기획서 초안까지 씀"  # #B baseline 주입
