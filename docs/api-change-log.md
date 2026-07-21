@@ -7,6 +7,18 @@
 
 ---
 
+## v1.24 — 2026-07-21 (알림 cron 2종 + 발송 게이트 — §15 가드 의미 확정, #20)
+
+- endpoint 변경 없음 — §15 가드 3줄의 **미정의였던 적용 의미를 명문화** (ADR-0006):
+  - 주 ≤ 3건 = 사용자별 · 3 클래스 합산 · rolling 7일 · 실발송만 카운트
+  - 23~07 금지 = `[23:00, 07:00)` 반개구간. ⚠️ `eveningTime=23:00` 설정은 회고 알림이
+    발송되지 않는다 — FE 는 22:55 상한 권장
+  - "같은 클래스 24h 중복 금지" = KST 달력일 1건 (매일 5분씩 밀리는 래칫 방지)
+- 발송 시작: `evening_reflection_notify`(사용자별 설정 시각, 회고할 카드 있을 때만) ·
+  `pre_card_notify`(opt-in, 시작 2~7분 전). payload 는 `{class, title, body, url}` JSON —
+  FE service worker(#25)가 소비.
+- 신규 테이블 `notification_sends` (발송 이력, 게이트 enforce 근거 — ADR-0006 §5).
+
 ## v1.23 — 2026-07-21 (Web Push 구독 실구현, #16 BE)
 
 - `POST /notifications/subscribe` — mock 제거, `push_subscription` JSONB 실 저장.

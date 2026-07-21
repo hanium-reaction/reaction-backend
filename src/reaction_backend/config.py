@@ -97,6 +97,15 @@ class Settings(BaseSettings):
     # 다중 인스턴스 배포 시 중복 실행(모든 job idempotent → 안전하나 단일 인스턴스 권장).
     scheduler_enabled: bool = False
 
+    # ── Web Push VAPID (#16/#20) ──
+    # 비어있으면 발송이 unconfigured 로 조용히 skip (GEMINI_API_KEY 부재와 같은 degrade).
+    # 라이브 키는 provision-vapid.yml 워크플로가 EC2 .env 에 생성 — private key 는 레포·
+    # 로그 어디에도 남기지 않는다. public key 는 FE pushManager.subscribe 에 필요(공개값).
+    vapid_private_key: str = ""
+    vapid_public_key: str = ""
+    # VAPID 스펙상 연락처 URI (mailto: 또는 https:). 푸시 서비스가 문제 시 연락하는 주소.
+    vapid_subject: str = "mailto:j07801@hanyang.ac.kr"
+
     def model_for_module(self, module: str) -> str:
         """llm_runs.module → 사용할 Gemini 모델.
 

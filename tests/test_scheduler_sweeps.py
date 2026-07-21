@@ -128,6 +128,8 @@ def test_build_scheduler_registers_expected_jobs() -> None:
         "interruption_resolver",
         "expire_drafts",
         "expire_reflections",
+        "evening_reflection_notify",
+        "pre_card_notify",
     }
 
 
@@ -147,4 +149,41 @@ def test_expire_reflections_job_is_wired_to_the_right_function_and_time() -> Non
     fields = {f.name: str(f) for f in job.trigger.fields}
     assert fields["hour"] == "4", f"만료 cron 시각이 04시가 아니다: {fields}"
     assert fields["minute"] == "0", f"만료 cron 분이 00분이 아니다: {fields}"
+    assert str(job.trigger.timezone) == "Asia/Seoul"
+
+
+def test_evening_notify_job_is_wired_to_the_right_function_and_time() -> None:
+    """회고 알림이 **19~23시 5분 폴 KST** 로 알림 sweep 을 부른다 (#20).
+
+    5분 폴인 이유: 사용자별 `evening_reflection_time`(19~23시, 분 단위)을 존중하려면
+    고정 시각 1회로는 안 된다. 시각·함수를 여기 고정하지 않으면 id 만 남기고
+    바꿔치기해도 전 스위트가 통과한다 (expire_reflections 에서 실증된 회귀 패턴).
+    """
+    from reaction_backend.scheduler import runtime
+
+    job = next(
+        j for j in runtime.build_scheduler().get_jobs() if j.id == "evening_reflection_notify"
+    )
+
+    assert job.func is runtime._evening_reflection_notify_job
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"] == "19-23", f"회고 알림 폴 시간대가 19~23시가 아니다: {fields}"
+    assert fields["minute"] == "*/5", f"회고 알림이 5분 폴이 아니다: {fields}"
+    assert str(job.trigger.timezone) == "Asia/Seoul"
+
+
+def test_pre_card_notify_job_is_wired_to_the_right_function_and_time() -> None:
+    """pre_card 알림이 **종일 5분 폴 KST** 로 알림 sweep 을 부른다 (#20).
+
+    리드타임 2~7분(= 2분 리드 + 5분 폴)은 폴 간격이 5분일 때만 성립 — 간격이 늘어나면
+    "카드 2분 전"(architecture.md §6) 약속이 조용히 깨진다.
+    """
+    from reaction_backend.scheduler import runtime
+
+    job = next(j for j in runtime.build_scheduler().get_jobs() if j.id == "pre_card_notify")
+
+    assert job.func is runtime._pre_card_notify_job
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"] == "*", f"pre_card 폴이 종일이 아니다: {fields}"
+    assert fields["minute"] == "*/5", f"pre_card 가 5분 폴이 아니다: {fields}"
     assert str(job.trigger.timezone) == "Asia/Seoul"

@@ -1,0 +1,108 @@
+name: Provision VAPID keys (EC2)
+
+# Web Push VAPID 키 쌍을 **EC2 러너 위에서 생성해 .env 에 직접 기록**한다 (#16/#20).
+#
+# 왜 이 방식인가: private key 가 레포·GitHub Secrets·Actions 로그·로컬 어디에도 존재하지
+# 않는다 — 생성 즉시 EC2 .env 로만 들어간다 (ADR-0006 §6). deploy.yml 은 .env 를 rsync
+# 에서 제외하므로 이후 배포에도 보존된다. public key 만 summary 에 출력한다 — FE 의
+# `pushManager.subscribe(applicationServerKey)` 에 필요한 **공개값**이다.
+#
+# 안전:
+# - workflow_dispatch 전용. 이미 키가 있으면 기본적으로 건드리지 않는다(멱등) —
+#   재발급(rotate)은 mode=rotate 명시 필요. ⚠️ rotate 하면 기존 구독이 전부 무효가 된다
+#   (구독은 서버 public key 에 묶인다) — FE 재구독 필요.
+# - private key 는 어떤 step 에서도 echo 하지 않는다.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "generate(없을 때만 생성) 또는 rotate(⚠️ 기존 구독 전부 무효)"
+        type: choice
+        options:
+          - generate
+          - rotate
+        default: generate
+
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    name: "provision (${{ inputs.mode }})"
+    runs-on: [self-hosted, ec2, reaction-backend]
+    timeout-minutes: 10
+
+    env:
+      APP_DIR: /home/ubuntu/reaction-backend
+
+    steps:
+      - name: Generate keys into .env (private key never printed)
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+
+          if grep -q '^VAPID_PRIVATE_KEY=..*' .env && [ "${{ inputs.mode }}" != "rotate" ]; then
+            echo "VAPID 키가 이미 있다 — 재발급하려면 mode=rotate (기존 구독 전부 무효 주의)."
+            exit 0
+          fi
+
+          # cryptography(기존 의존성)로 P-256 쌍 생성 → .env 에 직접 기록.
+          # stdout 은 public key 만 — private 은 파이썬 안에서 파일로만 나간다.
+          PUBLIC_KEY=$(~/.local/bin/uv run --no-dev python - <<'PY'
+          import base64
+          from pathlib import Path
+
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric import ec
+
+          def b64url(raw: bytes) -> str:
+              return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+          key = ec.generate_private_key(ec.SECP256R1())
+          private_b64 = b64url(key.private_numbers().private_value.to_bytes(32, "big"))
+          public_b64 = b64url(
+              key.public_key().public_bytes(
+                  serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
+              )
+          )
+
+          env_path = Path(".env")
+          lines = [
+              line
+              for line in env_path.read_text(encoding="utf-8").splitlines()
+              if not line.startswith(("VAPID_PRIVATE_KEY=", "VAPID_PUBLIC_KEY="))
+          ]
+          lines += [f"VAPID_PRIVATE_KEY={private_b64}", f"VAPID_PUBLIC_KEY={public_b64}"]
+          env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          print(public_b64)
+          PY
+          )
+
+          echo "public_key=${PUBLIC_KEY}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### VAPID public key (FE applicationServerKey 용 — 공개값)"
+            echo '```'
+            echo "${PUBLIC_KEY}"
+            echo '```'
+            echo "private key 는 EC2 .env 에만 기록됨 (로그·레포 미노출)."
+          } >> "$GITHUB_STEP_SUMMARY"
+        id: gen
+
+      - name: Restart app
+        run: sudo systemctl restart reaction-backend
+
+      - name: Health check
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://127.0.0.1:8000/health -o /tmp/health.json; then
+              if grep -q '"status":"ok"' /tmp/health.json; then
+                echo "healthy:"; cat /tmp/health.json; exit 0
+              fi
+            fi
+            sleep 2
+          done
+          echo "::error::health check failed after restart"
+          exit 1

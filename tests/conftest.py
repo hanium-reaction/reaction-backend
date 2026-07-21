@@ -35,6 +35,7 @@ from reaction_backend.db.models.interaction_style import InteractionStyle
 from reaction_backend.db.models.interruption_event import InterruptionEvent
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionModel
 from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
+from reaction_backend.db.models.notification_send import NotificationSend
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.period_summary import PeriodSummary
 from reaction_backend.db.models.plan_draft import PlanDraft
@@ -356,6 +357,57 @@ class FakeNotificationRepo:
     async def clear_push_subscription(self, setting: NotificationSetting) -> NotificationSetting:
         setting.push_subscription = None
         return setting
+
+
+class FakeNotificationSendRepo:
+    """in-memory NotificationSendRepo — 발송 게이트(push_gate) 테스트용 (#20).
+
+    실 repo 의 WHERE 는 fake 로는 절대 실행되지 않는다 —
+    `tests/test_notification_send_repo_sql.py` 가 실 SQL 문자열로 별도 고정.
+    """
+
+    def __init__(self) -> None:
+        self._sends: list[NotificationSend] = []
+
+    async def count_sent_since(self, user_id: UUID, *, since: datetime) -> int:
+        return sum(1 for s in self._sends if s.user_id == user_id and s.sent_at >= since)
+
+    async def class_sent_since(
+        self, user_id: UUID, *, notification_class: str, since: datetime
+    ) -> bool:
+        return any(
+            s.user_id == user_id
+            and s.notification_class == notification_class
+            and s.sent_at >= since
+            for s in self._sends
+        )
+
+    async def record(
+        self, *, user_id: UUID, notification_class: str, sent_at: datetime
+    ) -> NotificationSend:
+        row = NotificationSend()
+        row.id = uuid4()
+        row.user_id = user_id
+        row.notification_class = notification_class
+        row.sent_at = sent_at
+        self._sends.append(row)
+        return row
+
+
+class FakeWebPushSender:
+    """전송 기록 sender — outcome 을 지정해 gone/error/unconfigured 분기를 테스트."""
+
+    def __init__(self, outcome: str = "ok") -> None:
+        self.outcome = outcome
+        self.calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    @property
+    def is_configured(self) -> bool:
+        return self.outcome != "unconfigured"
+
+    async def send(self, subscription: dict[str, Any], payload: dict[str, Any]) -> str:
+        self.calls.append((subscription, payload))
+        return self.outcome
 
 
 class FakeGoalRepo:
@@ -1101,6 +1153,22 @@ class FakeExecutionRepo:
 
     async def get_block(self, block_id: UUID) -> ScheduledBlock | None:
         return self._blocks.get(block_id)
+
+    async def list_blocks_starting_between(
+        self, *, start: datetime, end: datetime
+    ) -> list[ScheduledBlock]:
+        # 실 repo 와 동일 의미: scheduled 만 · [start, end) · 카드 archived 제외.
+        # (활성 사용자 필터는 SQL 전용 — test_pre_card_candidates_sql 이 실 SQL 로 고정.)
+        found = []
+        for b in self._blocks.values():
+            if b.block_status != "scheduled" or not (start <= b.start_at < end):
+                continue
+            action = self._actions.get(b.action_item_id)
+            if action is None or action.archived_at is not None:
+                continue
+            b.action_item = action  # 실 repo 는 joinedload — payload(제목)용
+            found.append(b)
+        return sorted(found, key=lambda b: b.start_at)
 
     async def list_active_failure_tags(self) -> list[FailureReasonTag]:
         return sorted((t for t in self._tag_master if t.is_active), key=lambda t: t.sort_order)
@@ -1990,6 +2058,8 @@ __all__ = [
     "FakeHabitRepo",
     "FakeInboxRepo",
     "FakeNotificationRepo",
+    "FakeNotificationSendRepo",
+    "FakeWebPushSender",
     "FakePlanDraftRepo",
     "FakePrivacyRepo",
     "FakeRecoveryRepo",
