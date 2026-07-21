@@ -81,10 +81,16 @@ jobs:
         run: |
           # lifespan 이 SCHEDULER_ENABLED=true 일 때만 "APScheduler started (N jobs)" 를 찍는다.
           # 로그 권한이 없을 수 있어 실패해도 job 을 죽이지 않는다(health check 가 본 판정).
-          LOG=$( (sudo journalctl -u reaction-backend -n 80 --no-pager 2>/dev/null \
-                  || journalctl -u reaction-backend -n 80 --no-pager 2>/dev/null \
-                  || echo "(로그 조회 권한 없음)") )
-          echo "$LOG" | grep -i "apscheduler" || echo "APScheduler 로그 라인 없음 (disable 이면 정상)"
+          if LOG=$(sudo journalctl -u reaction-backend -n 60 --no-pager 2>&1); then
+            echo "--- 최근 로그 (tail) ---"
+            echo "$LOG" | tail -n 25
+            echo "--- APScheduler 라인 ---"
+            echo "$LOG" | grep -i "apscheduler"               || echo "!! APScheduler 라인 없음 — enable 인데 안 보이면 기동 실패를 의심할 것"
+          else
+            # 로그를 못 읽은 것과 '라인이 없는 것'은 다른 사건이다. 구분해서 남긴다.
+            echo "!! journalctl 조회 실패 — 스케줄러 기동 여부를 이 스텝으로는 확인 불가"
+            echo "$LOG" | tail -n 5
+          fi
 
       - name: Summary
         if: always()
