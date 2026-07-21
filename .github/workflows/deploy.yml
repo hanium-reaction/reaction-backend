@@ -25,8 +25,13 @@ on:
 
 concurrency:
   # 동시 배포 방지 — 같은 EC2 앱 디렉터리를 여러 잡이 동시에 건드리지 않도록.
+  # queue: max — 기본(single)은 그룹당 pending 1개만 유지해, deploy 가 대기 중일 때
+  # 같은 그룹의 다른 workflow_dispatch 가 그 pending deploy 를 조용히 취소한다
+  # (#20 리뷰에서 확인. cancel-in-progress:false 는 실행 중만 보호). max 는 최대
+  # 100개까지 큐잉해 대기 순서대로 실행한다. 이 그룹을 쓰는 모든 워크플로에 동일 적용.
   group: deploy-ec2
   cancel-in-progress: false
+  queue: max
 
 jobs:
   deploy:

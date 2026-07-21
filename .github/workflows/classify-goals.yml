@@ -22,8 +22,11 @@ on:
         default: ""
 
 concurrency:
+  # deploy 와 같은 앱 디렉터리를 쓰므로 배포와 겹치지 않게 직렬화.
+  # queue: max — 기본(single)은 pending 취소로 대기 중 deploy 가 유실된다 (deploy.yml 참조).
   group: deploy-ec2
   cancel-in-progress: false
+  queue: max
 
 jobs:
   classify:
