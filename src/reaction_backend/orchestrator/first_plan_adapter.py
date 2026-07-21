@@ -43,7 +43,7 @@ from reaction_backend.orchestrator.goal_structuring import (
 from reaction_backend.orchestrator.interview_adapter import is_placeholder_goal
 from reaction_backend.orchestrator.plan_scheduler import PlanAction, PlanWindow
 from reaction_backend.schemas.common import now_kst
-from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome
+from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome, TimeRange
 from reaction_backend.schemas.planning import (
     ActionItemDraft,
     GoalDecomposition,
@@ -282,22 +282,72 @@ class _ActionPlacement:
     node_id: str = field(default="", compare=False)
 
 
+def _hhmm_to_min(value: str, *, as_end: bool = False) -> int:
+    """'HH:MM' → 자정 기준 분. 윈도우 끝의 '00:00'/'24:00' 은 하루 끝(1440)."""
+    hh, mm = value.split(":")
+    total = int(hh) * 60 + int(mm)
+    return 1440 if as_end and total == 0 else total
+
+
+def _min_to_hhmm(minutes: int) -> str:
+    return "24:00" if minutes >= 1440 else f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _activity_awake_min(activity: TimeRange) -> list[tuple[int, int]]:
+    """활동창을 자정 기준 분 구간으로. 자정 넘김(예: 22:00~06:00)은 두 구간으로 쪼갠다."""
+    start = _hhmm_to_min(activity.start)
+    end = _hhmm_to_min(activity.end, as_end=True)
+    if end > start:
+        return [(start, end)]
+    out = [(start, 1440)]
+    if end > 0:
+        out.append((0, end))
+    return out
+
+
+def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for s, e in sorted(intervals):
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _complement_min(awake: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """[0,1440] 에서 awake 의 여집합(수면 구간)."""
+    gaps: list[tuple[int, int]] = []
+    cursor = 0
+    for s, e in awake:
+        if s > cursor:
+            gaps.append((cursor, s))
+        cursor = max(cursor, e)
+    if cursor < 1440:
+        gaps.append((cursor, 1440))
+    return gaps
+
+
 def time_policies_from_outcome(outcome: InterviewOutcome) -> list[TimePolicyLike]:
     """outcome 가용 시간 → 룰 스케줄러 busy 계산용 시간 정책 목록.
 
-    - 활동 윈도우 **바깥** 을 수면(sleep)으로 환원한다(자정을 넘는 구간). 활동 시간만
-      가용으로 남으므로 free/busy 계산의 기준이 된다.
+    - 활동창(+ **목표별 선호 시간대**)을 '깨어있음' 으로 보고, 그 여집합을 수면(sleep, busy)으로
+      환원한다. 목표에 선호 시간(preferred_time)이 있으면 활동창 밖이어도 그 시간대를 가용에
+      포함한다 — '아침에 운동' 처럼 특정 목표만 다른 시간대를 원할 때(#per-goal-time-availability).
     - no_touch 윈도우는 그대로 no_touch 정책으로 전개(요일 제한 포함).
     """
     a = outcome.availability
+    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    awake = _activity_awake_min(a.activity_window)
+    pref = _PEAK_CHIP_WINDOWS.get((heaviest.preferred_time or "").strip())
+    if pref is not None:
+        awake.append((pref[0].hour * 60 + pref[0].minute, pref[1].hour * 60 + pref[1].minute))
     policies: list[TimePolicyLike] = [
         _RuleTimePolicy(
             policy_type="sleep",
-            payload={
-                "start_time": a.activity_window.end,
-                "end_time": a.activity_window.start,
-            },
+            payload={"start_time": _min_to_hhmm(s), "end_time": _min_to_hhmm(e)},
         )
+        for s, e in _complement_min(_merge_intervals(awake))
     ]
     for nt in a.no_touch_windows:
         policies.append(
@@ -389,6 +439,20 @@ def peak_windows_from_outcome(outcome: InterviewOutcome) -> list[PlanWindow]:
         if bounds is not None:
             windows.append(PlanWindow(start=bounds[0], end=bounds[1]))
     return windows
+
+
+def peak_windows_for_plan(outcome: InterviewOutcome) -> list[PlanWindow]:
+    """이 계획(heaviest 목표)을 배치할 선호 시간창.
+
+    목표별 선호 시간(goals.preferred_time)이 있으면 그 시간대를 **전역 peak 대신** 우선한다
+    (예: '아침 운동'은 전역 저녁 peak 이 아니라 오전에)(#per-goal-time). '상관없음'/미입력이면
+    전역 peak_window 로 폴백.
+    """
+    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    bounds = _PEAK_CHIP_WINDOWS.get((heaviest.preferred_time or "").strip())
+    if bounds is not None:
+        return [PlanWindow(start=bounds[0], end=bounds[1])]
+    return peak_windows_from_outcome(outcome)
 
 
 def focus_chunk_min_from_outcome(outcome: InterviewOutcome) -> int:

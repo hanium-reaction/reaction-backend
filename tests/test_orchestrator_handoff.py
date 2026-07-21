@@ -48,6 +48,7 @@ SLOT_ANSWERS: dict[str, dict[str, Any] | None] = {
     "goals.current_level": {"type": "text", "raw": "기획서 초안까지 씀"},
     "goals.weekly_time": {"type": "chip", "values": ["6시간"]},
     "goals.session_length": {"type": "chip", "values": ["1시간"]},
+    "goals.preferred_time": {"type": "chip", "values": ["오전"]},
     "goals.deadlines": {"type": "text", "raw": "2026-06-20"},
     "goals.success_image": {"type": "text", "raw": "데모 동작"},
     "goals.approach": {"type": "text", "raw": "PintOS 과제 순서대로, 강의 자료 위주로"},
@@ -86,8 +87,13 @@ def test_build_outcome_projects_required_slots() -> None:
     assert heaviest.current_level == "기획서 초안까지 씀"  # #B baseline
     assert heaviest.weekly_hours == 6  # goals.weekly_time chip "6시간" → 6 (#weekly)
     assert heaviest.session_length_min == 60  # goals.session_length chip "1시간" → 60 (#per-goal)
-    assert heaviest.approach_note == "PintOS 과제 순서대로, 강의 자료 위주로"  # goals.approach (#approach)
-    assert heaviest.materials_note == "1주차 스레드, 2주차 유저프로그램, 3주차 VM"  # goals.materials (#materials)
+    assert (
+        heaviest.approach_note == "PintOS 과제 순서대로, 강의 자료 위주로"
+    )  # goals.approach (#approach)
+    assert (
+        heaviest.materials_note == "1주차 스레드, 2주차 유저프로그램, 3주차 VM"
+    )  # goals.materials (#materials)
+    assert heaviest.preferred_time == "오전"  # goals.preferred_time (#per-goal-time)
     assert {g.title for g in outcome.core_goals} == {"캡스톤", "토익"}
     assert outcome.availability.activity_window.start == "09:00"
     assert outcome.availability.peak_window == ["오전", "저녁"]
@@ -199,7 +205,9 @@ def test_context_from_outcome_builds_prompt_vars() -> None:
     assert ctx["prompt_vars"]["session_length"] == "60분"  # 목표별 집중 길이 (#per-goal)
     # 사용자 접근/자료가 분해 프롬프트에 실린다 (#approach grounding).
     assert ctx["prompt_vars"]["approach_note"] == "PintOS 과제 순서대로, 강의 자료 위주로"
-    assert ctx["prompt_vars"]["materials"] == "1주차 스레드, 2주차 유저프로그램, 3주차 VM"  # 자료 원문 (#materials)
+    assert (
+        ctx["prompt_vars"]["materials"] == "1주차 스레드, 2주차 유저프로그램, 3주차 VM"
+    )  # 자료 원문 (#materials)
     # 완료 기준(성공 이미지)·카테고리가 decompose 프롬프트에 실린다 (#B — 그동안 버려지던 맥락).
     assert ctx["prompt_vars"]["success_image"] == "데모 동작"
     assert ctx["prompt_vars"]["current_level"] == "기획서 초안까지 씀"  # #B baseline 주입
@@ -370,6 +378,58 @@ def test_shape_action_plan_caps_sessions_to_weekly_target() -> None:
     leaf_ids = {n.node_id for n in shaped.goal_nodes if n.is_leaf}
     assert len(leaf_ids) == 4  # 고아 leaf 제거
     assert all(a.node_id in leaf_ids for a in shaped.action_items)
+
+
+def test_peak_windows_for_plan_prefers_goal_time() -> None:
+    """목표별 preferred_time 이 전역 peak 를 덮는다 — '오전' 목표는 오전 창으로(#per-goal-time)."""
+    from datetime import time
+
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_pt",
+        slot_answers=SLOT_ANSWERS,  # 전역 peak=["오전","저녁"], 목표 preferred_time="오전"
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    wins = first_plan_adapter.peak_windows_for_plan(outcome)
+    assert len(wins) == 1  # 목표별 preferred_time 하나로 좁혀짐(전역 2창이 아니라)
+    assert wins[0].start == time(6, 0) and wins[0].end == time(12, 0)  # 오전 창
+
+    # preferred_time 없으면 전역 peak(오전+저녁 2창)로 폴백.
+    heaviest = next(g for g in outcome.core_goals if g.is_heaviest)
+    heaviest.preferred_time = None
+    assert len(first_plan_adapter.peak_windows_for_plan(outcome)) == 2
+
+
+def test_preferred_time_outside_activity_becomes_available() -> None:
+    """활동창이 저녁뿐이어도 목표 선호 시간(오전)이 있으면 오전이 가용해진다.
+
+    회귀: 예전엔 활동창(20:00~24:00) 밖이라 아침이 수면(busy)으로 잡혀, 아침 운동이 저녁으로
+    폴백했다(사용자 발견). 이제 선호 시간대를 가용에 포함한다(#per-goal-time-availability).
+    """
+    from datetime import date
+
+    from reaction_backend.orchestrator.goal_structuring import (
+        compute_free_blocks,
+        time_policies_to_busy,
+    )
+
+    sa = {
+        **SLOT_ANSWERS,
+        "time.activity_window": {"type": "range", "start": "20:00", "end": "24:00"},
+        "goals.preferred_time": {"type": "chip", "values": ["오전"]},
+    }
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_av", slot_answers=sa, ambiguity_final=0.1,
+        end_reason="completed", analysis_source="llm",
+    )
+    pols = first_plan_adapter.time_policies_from_outcome(outcome)
+    day = date(2026, 7, 23)
+    free = compute_free_blocks(day, time_policies_to_busy(day, pols))
+    # 오전(06~12)에 가용 구간이 생겨야 한다.
+    assert any(f.start.hour < 12 for f in free), [
+        (str(f.start.time()), str(f.end.time())) for f in free
+    ]
 
 
 def test_daily_cap_scales_with_density() -> None:
