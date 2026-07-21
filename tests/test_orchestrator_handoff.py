@@ -401,6 +401,37 @@ def test_peak_windows_for_plan_prefers_goal_time() -> None:
     assert len(first_plan_adapter.peak_windows_for_plan(outcome)) == 2
 
 
+def test_preferred_time_outside_activity_becomes_available() -> None:
+    """활동창이 저녁뿐이어도 목표 선호 시간(오전)이 있으면 오전이 가용해진다.
+
+    회귀: 예전엔 활동창(20:00~24:00) 밖이라 아침이 수면(busy)으로 잡혀, 아침 운동이 저녁으로
+    폴백했다(사용자 발견). 이제 선호 시간대를 가용에 포함한다(#per-goal-time-availability).
+    """
+    from datetime import date
+
+    from reaction_backend.orchestrator.goal_structuring import (
+        compute_free_blocks,
+        time_policies_to_busy,
+    )
+
+    sa = {
+        **SLOT_ANSWERS,
+        "time.activity_window": {"type": "range", "start": "20:00", "end": "24:00"},
+        "goals.preferred_time": {"type": "chip", "values": ["오전"]},
+    }
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_av", slot_answers=sa, ambiguity_final=0.1,
+        end_reason="completed", analysis_source="llm",
+    )
+    pols = first_plan_adapter.time_policies_from_outcome(outcome)
+    day = date(2026, 7, 23)
+    free = compute_free_blocks(day, time_policies_to_busy(day, pols))
+    # 오전(06~12)에 가용 구간이 생겨야 한다.
+    assert any(f.start.hour < 12 for f in free), [
+        (str(f.start.time()), str(f.end.time())) for f in free
+    ]
+
+
 def test_daily_cap_scales_with_density() -> None:
     """하루 집중 총량 상한(분)도 density 에 연동 — standard 는 기존 기본값."""
     assert first_plan_adapter.daily_cap_for("light") == 120
