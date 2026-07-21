@@ -38,6 +38,7 @@ REQUIRED_SLOT_KEYS: tuple[str, ...] = (
     "goals.current_level",
     "goals.weekly_time",
     "goals.session_length",
+    "goals.preferred_time",
     "goals.deadlines",
     "goals.success_image",
     "goals.approach",
@@ -210,6 +211,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
     current_level = _text_raw(slot_answers.get("goals.current_level"))
     weekly_hours = _chip_hours(slot_answers.get("goals.weekly_time"))
     session_length = _chip_duration_min(slot_answers.get("goals.session_length"))
+    preferred_time = _first(_chip_values(slot_answers.get("goals.preferred_time")))
     approach_note = _text_raw(slot_answers.get("goals.approach"))
     materials_note = _text_raw(slot_answers.get("goals.materials"))
 
@@ -237,6 +239,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
                 current_level=current_level if is_heaviest else None,
                 weekly_hours=weekly_hours if is_heaviest else None,
                 session_length_min=session_length if is_heaviest else None,
+                preferred_time=preferred_time if is_heaviest else None,
                 approach_note=approach_note if is_heaviest else None,
                 materials_note=materials_note if is_heaviest else None,
                 tentative_tier="focus" if is_heaviest else "maintain",

@@ -455,7 +455,7 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         horizon_day=schedule_end,
         actions=actions,
         busy_for_day=busy_for_day,
-        peak_windows=first_plan_adapter.peak_windows_from_outcome(outcome),
+        peak_windows=first_plan_adapter.peak_windows_for_plan(outcome),
         focus_chunk_min=first_plan_adapter.focus_chunk_min_from_outcome(outcome),
         break_min=first_plan_adapter.break_min_from_outcome(outcome),
         daily_focus_cap_min=first_plan_adapter.daily_cap_for(state["density"]),

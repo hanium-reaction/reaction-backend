@@ -79,6 +79,15 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
         "goals",
         options=("30분", "1시간", "1시간 30분", "2시간"),
     ),
+    # 목표별 선호 시간대 — 스케줄러가 이 목표를 배치할 때 전역 peak 대신 이 시간대를 우선한다.
+    InterviewSlot(
+        "goals.preferred_time",
+        "이 목표는 주로 언제 하고 싶어요?",
+        "chip",
+        True,
+        "goals",
+        options=("오전", "오후", "저녁", "심야", "상관없음"),
+    ),
     InterviewSlot("goals.deadlines", "마감일이 정해진 게 있어요?", "date_picker", True, "goals"),
     InterviewSlot(
         "goals.why_now", "그건 이번 학기에 꼭 끝내야 하는 이유가 있나요?", "text", False, "goals"

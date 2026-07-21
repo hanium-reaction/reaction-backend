@@ -391,6 +391,20 @@ def peak_windows_from_outcome(outcome: InterviewOutcome) -> list[PlanWindow]:
     return windows
 
 
+def peak_windows_for_plan(outcome: InterviewOutcome) -> list[PlanWindow]:
+    """이 계획(heaviest 목표)을 배치할 선호 시간창.
+
+    목표별 선호 시간(goals.preferred_time)이 있으면 그 시간대를 **전역 peak 대신** 우선한다
+    (예: '아침 운동'은 전역 저녁 peak 이 아니라 오전에)(#per-goal-time). '상관없음'/미입력이면
+    전역 peak_window 로 폴백.
+    """
+    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    bounds = _PEAK_CHIP_WINDOWS.get((heaviest.preferred_time or "").strip())
+    if bounds is not None:
+        return [PlanWindow(start=bounds[0], end=bounds[1])]
+    return peak_windows_from_outcome(outcome)
+
+
 def focus_chunk_min_from_outcome(outcome: InterviewOutcome) -> int:
     """한 세션 최대 길이(분) — 목표별 goals.session_length 우선, 없으면 전역 focus_duration/기본값."""
     return session_min_for(outcome, default=_DEFAULT_FOCUS_CHUNK_MIN)

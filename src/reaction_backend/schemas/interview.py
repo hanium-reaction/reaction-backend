@@ -205,6 +205,9 @@ class GoalCandidate(CamelModel):
     weekly_hours: int | None = None
     # goals.session_length — 이 목표를 한 번에 집중/수행 가능한 시간(분). 세션 길이·개수 산정.
     session_length_min: int | None = None
+    # goals.preferred_time — 이 목표를 언제 하고 싶은지(오전/오후/저녁/심야). 스케줄러가 이 목표를
+    # 배치할 때 전역 peak 대신 이 시간대를 우선한다('상관없음'/미입력이면 전역 peak 폴백).
+    preferred_time: str | None = None
     # goals.approach — 이 목표를 어떻게 해나가고 싶은지(방식·순서 서술). 분해가 일반적 방식이
     # 아니라 사용자가 밝힌 방향을 따르도록 하는 grounding.
     approach_note: str | None = None
