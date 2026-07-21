@@ -38,6 +38,11 @@ if TYPE_CHECKING:
 
 USER_DECISION_VALUES = ("pending", "accepted", "rejected", "edited", "skipped")
 
+# 회복을 **채택한** 결정 — resilience 분자 · replan 대상 · 새 카드 생성.
+# 'edited' 는 AI 문구를 사용자가 고쳐서 수락한 것이라 accepted 와 부수효과가 같다.
+# 이 상수를 안 쓰고 "accepted" 를 직접 비교하면 편집 수락이 지표·replan 에서 조용히 빠진다.
+ADOPTED_DECISION_VALUES = ("accepted", "edited")
+
 RECOVERY_RESULT_VALUES = ("completed", "abandoned", "pending")
 
 

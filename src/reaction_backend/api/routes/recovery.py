@@ -36,7 +36,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from reaction_backend.api.deps import CurrentUser
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.execution_event import ExecutionEvent
-from reaction_backend.db.models.recovery_attempt import RecoveryAttempt
+from reaction_backend.db.models.recovery_attempt import (
+    ADOPTED_DECISION_VALUES,
+    RecoveryAttempt,
+)
 from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
 from reaction_backend.db.session import get_db
 from reaction_backend.llm import aiClient
@@ -289,7 +292,17 @@ async def decide_recovery(
     skipped_ids: list[str] = []
     resulting_action_id: str | None = None
 
-    if body.decision == "accepted":
+    edited_text = (body.edited_action_text or "").strip()
+    if body.decision != "edited" and edited_text:
+        # 조용히 무시하면 "고쳤는데 반영이 안 됨"을 숨긴다.
+        raise ApiError(
+            ErrorCode.COMMON_VALIDATION_ERROR,
+            "문구를 고쳐서 수락하려면 decision 을 'edited' 로 보내주세요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="editedActionText",
+        )
+
+    if body.decision in ADOPTED_DECISION_VALUES:
         if body.accepted_attempt_id is None:
             raise ApiError(
                 ErrorCode.COMMON_VALIDATION_ERROR,
@@ -302,7 +315,25 @@ async def decide_recovery(
         if target is None:
             raise _attempt_not_found()
 
-        target.user_decision = "accepted"
+        if body.decision == "edited":
+            if not edited_text:
+                raise ApiError(
+                    ErrorCode.COMMON_VALIDATION_ERROR,
+                    "고친 문구(editedActionText)를 알려주세요.",
+                    http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                    field="editedActionText",
+                )
+            if target.recovery_option_group not in _GROUP_TO_SOURCE:
+                # 이 그룹은 새 카드를 만들지 않아 문구를 담을 곳이 없다. 계약상 이들의 조정은
+                # 문구가 아니라 시간이고, 그 경로는 S15 주간 편집기(PATCH blocks)다.
+                raise ApiError(
+                    ErrorCode.RECOVERY_EDIT_NOT_SUPPORTED,
+                    "이 회복은 문구 대신 시간을 조정해요. 주간 편집기에서 옮겨 주세요.",
+                    http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                    field="editedActionText",
+                )
+
+        target.user_decision = body.decision
         target.recovery_decided_at = decided_at
         target.recovery_started_at = decided_at
         target.decision_reason = body.decision_reason
@@ -332,7 +363,9 @@ async def decide_recovery(
             new_action = await action_repo.create_from_recovery(
                 user_id=user.id,
                 parent_action_item_id=execution.action_item_id,
-                title=(target.suggested_action_text or "회복 액션")[:300],
+                # 편집 수락이면 사용자 문구가 카드 제목이 된다. `target.suggested_action_text`
+                # (AI 원문)는 그대로 둔다 — 덮어쓰면 "얼마나 고쳐 썼나"를 영영 못 잰다.
+                title=edited_text or (target.suggested_action_text or "회복 액션")[:300],
                 category=original.category if original is not None else "other",
                 source=source,
                 target_date=target_date,
@@ -374,7 +407,10 @@ def _accepted_replan_attempt(attempts: list[RecoveryAttempt]) -> RecoveryAttempt
     수락이 없거나(skipped) 새 카드를 만들지 않는 그룹(RESCHEDULE/PARK)이면 422.
     """
     for attempt in attempts:
-        if attempt.user_decision == "accepted" and attempt.resulting_action_item_id is not None:
+        if (
+            attempt.user_decision in ADOPTED_DECISION_VALUES
+            and attempt.resulting_action_item_id is not None
+        ):
             return attempt
     raise _no_replan()
 

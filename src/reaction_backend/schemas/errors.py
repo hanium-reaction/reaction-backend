@@ -119,6 +119,7 @@ class ErrorCode(StrEnum):
     RECOVERY_ALREADY_DECIDED = "RECOVERY_ALREADY_DECIDED"
     # #20-B — replan: 수락된 회복(새 ActionItem)이 없어 일정 재배치할 대상이 없음
     RECOVERY_NO_REPLAN = "RECOVERY_NO_REPLAN"
+    RECOVERY_EDIT_NOT_SUPPORTED = "RECOVERY_EDIT_NOT_SUPPORTED"
 
     # ── Reviews (REVIEW_) — #21-A ──
     REVIEW_INVALID_WEEK = "REVIEW_INVALID_WEEK"

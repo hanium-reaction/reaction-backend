@@ -20,7 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.period_summary import PeriodSummary
-from reaction_backend.db.models.recovery_attempt import RecoveryAttempt
+from reaction_backend.db.models.recovery_attempt import (
+    ADOPTED_DECISION_VALUES,
+    RecoveryAttempt,
+)
 from reaction_backend.db.session import get_db
 from reaction_backend.orchestrator.weekly_review import (
     ExecutionStat,
@@ -120,7 +123,7 @@ class ReviewRepo:
         stmt = select(RecoveryAttempt.execution_id).where(
             RecoveryAttempt.user_id == user_id,
             RecoveryAttempt.execution_id.in_(execution_ids),
-            RecoveryAttempt.user_decision == "accepted",
+            RecoveryAttempt.user_decision.in_(ADOPTED_DECISION_VALUES),
         )
         result = await self._session.execute(stmt)
         return set(result.scalars().all())
@@ -131,7 +134,7 @@ class ReviewRepo:
         """[start_dt, end_dt) 안에 결정된 수락 회복의 소요분 (average_recovery_minutes)."""
         stmt = select(RecoveryAttempt.recovery_duration_minutes).where(
             RecoveryAttempt.user_id == user_id,
-            RecoveryAttempt.user_decision == "accepted",
+            RecoveryAttempt.user_decision.in_(ADOPTED_DECISION_VALUES),
             RecoveryAttempt.recovery_decided_at >= start_dt,
             RecoveryAttempt.recovery_decided_at < end_dt,
         )
