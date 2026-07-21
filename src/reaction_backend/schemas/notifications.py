@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from reaction_backend.schemas.common import CamelModel
 
@@ -31,7 +31,21 @@ class NotificationSettingsUpdateRequest(CamelModel):
 
 
 class PushSubscribeRequest(CamelModel):
-    """POST /notifications/subscribe 요청 — Web Push subscription 객체."""
+    """POST /notifications/subscribe 요청 — Web Push subscription 객체.
+
+    브라우저 `PushSubscription.toJSON()` 의 `{endpoint, keys: {p256dh, auth}}`.
+    p256dh/auth 는 pywebpush 발송(payload 암호화)에 필수라 스키마에서 강제한다 —
+    빠진 채 저장되면 **발송 시점**에야 터져서, 구독은 됐다고 믿는 사용자가 조용히
+    알림을 못 받는다.
+    """
 
     endpoint: str = Field(min_length=1)
     keys: dict[str, str]
+
+    @field_validator("keys")
+    @classmethod
+    def _require_webpush_keys(cls, v: dict[str, str]) -> dict[str, str]:
+        missing = [k for k in ("p256dh", "auth") if not v.get(k)]
+        if missing:
+            raise ValueError(f"keys 에 {', '.join(missing)} 가 필요해요 (Web Push 표준 구독 객체)")
+        return v
