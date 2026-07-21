@@ -327,6 +327,7 @@ async def generate_plan(
             target_date=target_date,
             scope=body.scope,
             density=body.density,
+            milestones=body.milestones,
         )
         # Validation Agent — LLM 분해 전에 Focus≤3 / Maintain≤5 게이트 (LLM 0회, 룰만).
         gate = await first_plan.validate_inputs(state, config)

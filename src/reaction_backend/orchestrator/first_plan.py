@@ -53,6 +53,7 @@ from reaction_backend.schemas.planning import (
     ActionItemDraft,
     GoalDecomposition,
     GoalNodeDraft,
+    MilestoneDraft,
     PlanReview,
     ScheduledBlockPreview,
 )
@@ -77,6 +78,8 @@ class FirstPlanState(TypedDict):
     scope: Literal["week", "horizon"]
     # 계획 분량(밀도) — light/standard/intense. decompose 프롬프트의 '주당 세션 수' 하한으로 전개.
     density: str
+    # 사용자가 확정한 중간 목표(#milestones Stage B). 있으면 분해가 이걸 branch 로 고정.
+    milestones: list[MilestoneDraft] | None
 
     # VALIDATING
     missing_fields: list[str]
@@ -106,6 +109,7 @@ def initial_state(
     target_date: str,
     scope: Literal["week", "horizon"] = "horizon",
     density: str = "standard",
+    milestones: list[MilestoneDraft] | None = None,
 ) -> FirstPlanState:
     return FirstPlanState(
         user_id=user_id,
@@ -113,6 +117,7 @@ def initial_state(
         target_date=target_date,
         scope=scope,
         density=density,
+        milestones=milestones,
         missing_fields=[],
         tier_violation=None,
         planning_context={},
@@ -209,6 +214,20 @@ def _replan_feedback(state: FirstPlanState) -> str:
     return "\n".join(f"- {item}" for item in review.feedback)
 
 
+def _format_milestones(milestones: list[MilestoneDraft] | None) -> str:
+    """확정 마일스톤 → decompose 프롬프트 변수(`{{milestones}}`). 없으면 '(없음)'.
+
+    있으면 분해가 이 목록을 branch 로 고정하고 각 안에서만 leaf 를 만든다(#milestones Stage B).
+    """
+    if not milestones:
+        return "(없음)"
+    lines = []
+    for i, m in enumerate(milestones, 1):
+        summary = f" — {m.summary}" if m.summary else ""
+        lines.append(f"{i}. {m.title}{summary}")
+    return "\n".join(lines)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Nodes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -255,7 +274,11 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
         prompt_id="planning/goal_decompose",
         fallback=lambda: _rule_decomposition(state),
         timeout=settings.llm_planning_timeout_seconds,
-        variables={**prompt_vars, "review_feedback": _replan_feedback(state)},
+        variables={
+            **prompt_vars,
+            "review_feedback": _replan_feedback(state),
+            "milestones": _format_milestones(state.get("milestones")),
+        },
         user_id=state["user_id"],
         session=_session(config),
         tone_mode=_tone_mode(config),

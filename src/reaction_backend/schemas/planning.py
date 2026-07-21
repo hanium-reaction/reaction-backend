@@ -116,6 +116,9 @@ class FirstPlanGenerateRequest(CamelModel):
 
     interview_session_id: str | None = None
     outcome: InterviewOutcome | None = None
+    # 사용자가 확인·편집해 확정한 중간 목표(#milestones Stage B). 있으면 분해가 이걸 branch 로
+    # 고정하고 각 안에서만 세션을 만든다. 없으면 현행(자동 전체 분해) — 하위호환.
+    milestones: list[MilestoneDraft] | None = None
     target_date: str | None = None  # "YYYY-MM-DD" — 미지정 시 오늘(KST) 기준
     # 배치 범위: "horizon"(기본, 마감까지 전 구간 — 실행이 마감 전 여러 날에 분배되고, 주간
     # 재계획이 이후를 다시 씀) | "week"(target_date 가 속한 달력 주만 — 가벼운 단기 계획).

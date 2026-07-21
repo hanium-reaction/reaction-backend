@@ -706,3 +706,52 @@ def test_milestones_rule_fallback(client: TestClient, monkeypatch: Any) -> None:
     body = res.json()
     assert len(body["milestones"]) == 3
     assert body["aiSource"] == "rule"
+
+
+def test_generate_passes_confirmed_milestones_to_decompose(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """확정 마일스톤(Stage B)이 decompose 프롬프트 변수 {{milestones}} 로 전달된다."""
+    captured: dict[str, Any] = {}
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        schema = kwargs["schema"]
+        value: Any
+        if schema is GoalDecomposition:
+            captured["milestones"] = kwargs["variables"].get("milestones")
+            value = GoalDecomposition(
+                goal_nodes=[
+                    GoalNodeDraft(
+                        node_id="n1",
+                        parent_id=None,
+                        title="목표0",
+                        node_type="root",
+                        order_index=0,
+                        is_leaf=True,
+                    )
+                ],
+                action_items=[],
+                policy_violations=[],
+            )
+        elif schema is PlanReview:
+            value = PlanReview(approved=True, feedback=[])
+        else:  # pragma: no cover
+            raise AssertionError(f"unexpected schema {schema}")
+        return RunResult(
+            value=value,
+            fell_back=False,
+            reason=None,
+            prompt_id=kwargs["prompt_id"],
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+    body = _body(_outcome())
+    body["milestones"] = [
+        {"title": "기초 문법", "summary": "변수·함수"},
+        {"title": "DOM 조작", "summary": ""},
+    ]
+    res = client.post("/plans/generate", json=body)
+    assert res.status_code == 200
+    assert "기초 문법" in captured["milestones"]  # 확정 마일스톤이 프롬프트에 실림
+    assert "DOM 조작" in captured["milestones"]
