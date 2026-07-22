@@ -30,7 +30,6 @@ _CHIP_SLOTS = {
     "identity.role",
     "identity.season",
     "time.peak_window",
-    "time.no_touch",
     "recovery.tone",
     "recovery.rest_ok",
     "recovery.downscope_unit",
@@ -142,7 +141,6 @@ async def test_seed_answers_skip_durable_slots(monkeypatch: pytest.MonkeyPatch) 
         "identity.season": {"type": "chip", "values": ["학기중"]},
         "time.activity_window": {"type": "range", "start": "09:00", "end": "23:00"},
         "time.peak_window": {"type": "chip", "values": ["오전"]},
-        "time.no_touch": {"type": "chip", "values": ["일요일"]},
         "recovery.tone": {"type": "chip", "values": ["담백"]},
         "recovery.rest_ok": {"type": "chip", "values": ["네"]},
         "recovery.downscope_unit": {"type": "chip", "values": ["10분"]},
@@ -152,13 +150,13 @@ async def test_seed_answers_skip_durable_slots(monkeypatch: pytest.MonkeyPatch) 
     )
     # 학년(identity.role) 을 다시 묻지 않고 첫 미충족 필수(goals.list)부터.
     assert result.state["next_slot_key"] == "goals.list"
-    # 남은 필수 슬롯이 8개(지속형) 만큼 줄었다 — 18 - 8 = 10 (목표 관련만 남음).
+    # 남은 필수 슬롯이 7개(지속형) 만큼 줄었다 — 18 - 7 = 11 (목표 관련만 남음).
     remaining = sum(
         1
         for k in interview.REQUIRED_SLOT_SEQUENCE
         if not interview._is_filled(result.state["slot_answers"].get(k))
     )
-    assert remaining == 10
+    assert remaining == 11
     # 이어받은 값은 그대로 상태에 있다(끝까지 가면 outcome 에 실린다).
     assert result.state["slot_answers"]["identity.role"] == {"type": "chip", "values": ["대3"]}
 

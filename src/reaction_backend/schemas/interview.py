@@ -208,6 +208,10 @@ class GoalCandidate(CamelModel):
     # goals.preferred_time — 이 목표를 언제 하고 싶은지(오전/오후/저녁/심야). 스케줄러가 이 목표를
     # 배치할 때 전역 peak 대신 이 시간대를 우선한다('상관없음'/미입력이면 전역 peak 폴백).
     preferred_time: str | None = None
+    # goals.frequency — 이 목표를 주당 며칠 하고 싶은지(매일=7 / 주 N회=N). 볼륨(weekly_hours)과
+    # 별개인 '케이던스' 의도. 있으면 주당 세션 수를 이 값으로 잡아 스케줄러가 그만큼 서로 다른
+    # 날에 분산한다('상관없음/몰아서'·미입력이면 None → 볼륨 기반 산정으로 폴백).
+    frequency_per_week: int | None = None
     # goals.approach — 이 목표를 어떻게 해나가고 싶은지(방식·순서 서술). 분해가 일반적 방식이
     # 아니라 사용자가 밝힌 방향을 따르도록 하는 grounding.
     approach_note: str | None = None

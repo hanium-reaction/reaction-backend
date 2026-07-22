@@ -152,17 +152,22 @@ def shape_action_plan(
     """분해 결과를 목표별 세션 길이·주당 시간에 맞춰 결정적으로 다듬는다(#per-goal 준수 보장).
 
     1) 세션 길이 정규화 — 각 leaf estimated_minutes 를 세션 길이 밴드로(9분 등 방지).
-    2) 세션 수 상한 — weekly_hours 가 있으면 **마감까지 주당 rate 로 담을 수 있는 만큼**
-       (target/주 × 마감까지 주 수)으로 자른다. 주당 분량은 유지하되 **마감까지 전 구간을
-       커버**한다(예: 20강 강의는 여러 주에 걸쳐 다 계획). 주당 rate 자체는 스케줄러가 weeks_needed
-       로 여러 날에 분산. target_date 미지정이면 1주치(하위호환). 고아 leaf 노드도 함께 제거.
+    2) 세션 수 상한 — 주당 rate(weekly_hours 기반 **또는** frequency 기반)가 있으면 **마감까지
+       주당 rate 로 담을 수 있는 만큼**(target/주 × 마감까지 주 수)으로 자른다. 주당 분량은
+       유지하되 **마감까지 전 구간을 커버**한다(예: 20강 강의는 여러 주에 걸쳐 다 계획). '매일'처럼
+       빈도만 준 경우도 LLM 과잉 생성분을 rate 로 잘라 케이던스를 지킨다. 주당 rate 자체는
+       스케줄러가 weeks_needed 로 여러 날에 분산. target_date 미지정이면 1주치(하위호환).
+       고아 leaf 노드도 함께 제거.
 
-    목표별 입력(session_length / weekly_hours)이 없으면 각 단계는 no-op → 기존 동작 보존.
+    목표별 입력(session_length / weekly_hours / frequency)이 없으면 각 단계는 no-op → 기존 동작 보존.
     """
     items = normalize_action_minutes(outcome, list(goal_plan.action_items))
     nodes = list(goal_plan.goal_nodes)
     heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
-    if heaviest.weekly_hours and heaviest.weekly_hours > 0:
+    has_rate = (heaviest.weekly_hours and heaviest.weekly_hours > 0) or (
+        heaviest.frequency_per_week and heaviest.frequency_per_week > 0
+    )
+    if has_rate:
         per_week = target_sessions_per_week(outcome, density)
         max_sessions = per_week * _horizon_weeks(target_date, outcome.horizon)
         if len(items) > max_sessions:
@@ -175,12 +180,19 @@ def shape_action_plan(
 def target_sessions_per_week(outcome: InterviewOutcome, density: str) -> int:
     """분해에 넘길 주당 목표 세션 수.
 
-    heaviest 목표에 주당 가용 시간(weekly_hours)이 있으면 **그 시간을 세션 길이로 나눠**
-    현실적인 세션 수를 뽑고, density 배율(light 0.7 / standard 1.0 / intense 1.3)로 가감한다.
-    세션 길이는 목표별(session_length) 우선. 시간 미입력이면 density 프리셋(3/5/8)으로 폴백.
+    우선순위:
+    1) **빈도(frequency_per_week)** 가 있으면 그 값을 그대로 주당 세션 수로 쓴다 — 사용자가
+       케이던스를 명시한 것이므로('매일'=7, '주 3회'=3) density 로 가감하지 않고 존중한다.
+       '주 1회' 같은 명시 저빈도도 그대로 살리려 하한(2)을 적용하지 않는다(상한 14만).
+    2) 빈도가 없고 주당 가용 시간(weekly_hours)이 있으면 **그 시간을 세션 길이로 나눠** 현실적인
+       세션 수를 뽑고 density 배율(light 0.7 / standard 1.0 / intense 1.3)로 가감한다.
+    3) 둘 다 없으면 density 프리셋(3/5/8)으로 폴백. 세션 길이는 목표별(session_length) 우선.
     """
     goals = outcome.core_goals
     heaviest = next((g for g in goals if g.is_heaviest), goals[0])
+    freq = heaviest.frequency_per_week
+    if freq and freq > 0:
+        return max(1, min(freq, _MAX_SESSIONS_PER_WEEK))
     hours = heaviest.weekly_hours
     if not hours or hours <= 0:
         return sessions_per_week_for(density)

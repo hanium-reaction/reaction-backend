@@ -420,7 +420,16 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         rate = first_plan_adapter.target_sessions_per_week(outcome, state["density"])
         weeks_needed = max(1, -(-len(action_items) // max(rate, 1)))
         density_end = start_day + timedelta(days=weeks_needed * 7 - 1)
-        schedule_end = max(min(schedule_end, density_end), start_day)
+        if state["scope"] == "horizon" and not outcome.horizon:
+            # 마감 없는 습관형 목표(예: '매일 운동')는 _schedule_end 가 배치 창을 **하루로
+            # 붕괴**시킨다(horizon=None → end=start_day). 그러면 주당 rate 만큼의 세션이 전부
+            # 첫날에 몰려 '매일'이 '하루 몰빵'이 된다. rate 를 담을 weeks_needed 주로 창을 펴
+            # 세션이 서로 다른 날에 분산되게 한다(#per-goal-frequency, 마감없음 케이스).
+            # shape_action_plan 이 마감 없을 때 leaf 를 per_week 로 캡하므로 weeks_needed=1 →
+            # 정확히 1주로 바운드된다(무한 미래 배치 없음). 이후 주는 주간 재계획이 잇는다.
+            schedule_end = density_end
+        else:
+            schedule_end = max(min(schedule_end, density_end), start_day)
     # 정책 = outcome 스냅샷 + DB 정책(온보딩 후 수정 포함). union → compute_free_blocks 가 병합.
     policies = [
         *first_plan_adapter.time_policies_from_outcome(outcome),

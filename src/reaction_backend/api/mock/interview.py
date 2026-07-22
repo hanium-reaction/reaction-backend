@@ -88,6 +88,17 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
         "goals",
         options=("오전", "오후", "저녁", "심야", "상관없음"),
     ),
+    # 목표별 빈도(케이던스) — 주당 며칠 할지. 볼륨(weekly_time)과 별개로 '매일/주3회' 의도를 받아
+    # 서로 다른 날에 분산 배치한다('몰아서'는 빈도 무관 → 볼륨 기반). '매일 운동'이 주 1일로만
+    # 반영되던 문제를 해결(#per-goal-frequency).
+    InterviewSlot(
+        "goals.frequency",
+        "이 목표는 얼마나 자주 하고 싶어요?",
+        "chip",
+        True,
+        "goals",
+        options=("매일", "주 5회", "주 4회", "주 3회", "주 2회", "주 1회", "몰아서 · 상관없음"),
+    ),
     InterviewSlot("goals.deadlines", "마감일이 정해진 게 있어요?", "date_picker", True, "goals"),
     InterviewSlot(
         "goals.why_now", "그건 이번 학기에 꼭 끝내야 하는 이유가 있나요?", "text", False, "goals"
@@ -136,14 +147,9 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
         "time",
         options=("오전", "오후", "저녁", "심야", "변동"),
     ),
-    InterviewSlot(
-        "time.no_touch",
-        "절대 일정 잡으면 안 되는 시간은요?",
-        "chip",
-        True,
-        "time",
-        options=("수면", "식사", "통학·이동", "아르바이트", "가족 시간", "없음"),
-    ),
+    # time.no_touch(#audit 제거): chip 카테고리만 받아 스케줄러가 소비할 실제 시각이 없었고,
+    # 어댑터가 days_of_week=[]·window=활동창 전체로 전개해 매 요일 skip → 계획에 무효였다(잠복
+    # 지뢰). 실제 시각 차단은 활동창(수면 여집합) + 고정일정(S05, 요일·시각 보유)이 담당한다.
     # [D] 패턴 & 에너지
     InterviewSlot(
         "energy.focus_duration",
@@ -194,18 +200,8 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
         "recovery",
         options=("5분", "10분", "15분", "30분"),
     ),
-    # [F] 외부 제약
-    InterviewSlot(
-        "constraints.special_events", "이번 달에 특별한 일정 있어요?", "text", False, "constraints"
-    ),
-    InterviewSlot(
-        "constraints.current_burden",
-        "지금 외부에서 받는 부담이 있나요?",
-        "chip",
-        False,
-        "constraints",
-        options=("없음", "학업", "대인관계", "건강", "경제", "기타"),
-    ),
+    # [F] 외부 제약(#audit 제거): constraints.special_events·current_burden 은 slot_answers 로만
+    # 남고 build_outcome 이 어떤 필드로도 투영하지 않아 계획·프롬프트에 전혀 쓰이지 않았다(死코드).
 )
 
 # 필수 슬롯 수 — 스텁의 ambiguityScore 초기값으로 사용 (모호함 = 미해결 필수 슬롯 수).

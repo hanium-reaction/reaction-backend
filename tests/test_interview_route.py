@@ -81,7 +81,7 @@ def test_start_returns_first_question(client: TestClient, monkeypatch: Any) -> N
     assert "1학년" in body["currentQuestion"]["options"]  # 카탈로그 보기 매핑
     assert (
         body["ambiguityScore"] == 18
-    )  # 미해결 필수 슬롯 수 (goals.preferred_time 추가 #per-goal-time)
+    )  # 미해결 필수 슬롯 수 (goals.frequency 추가 #per-goal-frequency)
     assert body["endReason"] is None
 
 
@@ -101,7 +101,7 @@ def test_submit_advances_and_persists(
     assert res.status_code == 200
     body = res.json()
     assert body["currentQuestion"]["slotKey"] == "identity.season"  # 다음 필수 슬롯
-    assert body["ambiguityScore"] == 17  # 하나 채워져 감소 (필수 18개, #per-goal-time)
+    assert body["ambiguityScore"] == 17  # 하나 채워져 감소 (필수 18개, #per-goal-frequency)
 
     # 영속화 검증 — fake repo 에 세션 1개 + identity.role 답 저장
     assert len(fake_interview_repo._sessions) == 1

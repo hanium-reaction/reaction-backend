@@ -49,13 +49,14 @@ SLOT_ANSWERS: dict[str, dict[str, Any] | None] = {
     "goals.weekly_time": {"type": "chip", "values": ["6시간"]},
     "goals.session_length": {"type": "chip", "values": ["1시간"]},
     "goals.preferred_time": {"type": "chip", "values": ["오전"]},
+    # '몰아서 · 상관없음' → frequency_per_week=None (볼륨 기반). weekly_hours 산정 경로가 유지된다.
+    "goals.frequency": {"type": "chip", "values": ["몰아서 · 상관없음"]},
     "goals.deadlines": {"type": "text", "raw": "2026-06-20"},
     "goals.success_image": {"type": "text", "raw": "데모 동작"},
     "goals.approach": {"type": "text", "raw": "PintOS 과제 순서대로, 강의 자료 위주로"},
     "goals.materials": {"type": "text", "raw": "1주차 스레드, 2주차 유저프로그램, 3주차 VM"},
     "time.activity_window": {"type": "range", "start": "09:00", "end": "23:00"},
     "time.peak_window": {"type": "chip", "values": ["오전", "저녁"]},
-    "time.no_touch": {"type": "chip", "values": ["일요일"]},
     "time.fixed_blocks": {"type": "text", "raw": "화목 수업", "normalized": ["화목 수업"]},
     "recovery.tone": {"type": "chip", "values": ["담백"]},
     "recovery.rest_ok": {"type": "chip", "values": ["네"]},
@@ -94,6 +95,7 @@ def test_build_outcome_projects_required_slots() -> None:
         heaviest.materials_note == "1주차 스레드, 2주차 유저프로그램, 3주차 VM"
     )  # goals.materials (#materials)
     assert heaviest.preferred_time == "오전"  # goals.preferred_time (#per-goal-time)
+    assert heaviest.frequency_per_week is None  # '몰아서·상관없음' → None (#per-goal-frequency)
     assert {g.title for g in outcome.core_goals} == {"캡스톤", "토익"}
     assert outcome.availability.activity_window.start == "09:00"
     assert outcome.availability.peak_window == ["오전", "저녁"]
@@ -290,6 +292,36 @@ def test_weekly_hours_drives_sessions_over_density() -> None:
     assert ctx["prompt_vars"]["weekly_hours"] == "6시간"
     # 목표별 session_length(60) 가 전역 focus_duration(50) 을 이긴다.
     assert first_plan_adapter.session_min_for(outcome) == 60
+
+
+def test_frequency_drives_sessions_over_volume_and_density() -> None:
+    """빈도(#per-goal-frequency)가 있으면 주당 세션 수 = 빈도값 — 볼륨·density 를 이긴다.
+
+    '매일' → 7, '주 3회' → 3. weekly_hours(6)·density 가감과 무관하게 케이던스를 존중한다.
+    이게 '매일 하고 싶다고 했는데 주 1일만 반영'되던 문제를 봉합한다(세션 수→요일 분산).
+    """
+    daily = interview_adapter.build_outcome(
+        session_id="iv_freq_daily",
+        slot_answers={**SLOT_ANSWERS, "goals.frequency": {"type": "chip", "values": ["매일"]}},
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    assert next(g for g in daily.core_goals if g.is_heaviest).frequency_per_week == 7
+    # 매일 → 7. density 로 가감하지 않고(케이던스 존중), 볼륨(weekly_hours=6)도 이긴다.
+    assert first_plan_adapter.target_sessions_per_week(daily, "standard") == 7
+    assert first_plan_adapter.target_sessions_per_week(daily, "intense") == 7
+    assert first_plan_adapter.context_from_outcome(daily)["prompt_vars"]["sessions_per_week"] == "7"
+
+    thrice = interview_adapter.build_outcome(
+        session_id="iv_freq_3",
+        slot_answers={**SLOT_ANSWERS, "goals.frequency": {"type": "chip", "values": ["주 3회"]}},
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    assert next(g for g in thrice.core_goals if g.is_heaviest).frequency_per_week == 3
+    assert first_plan_adapter.target_sessions_per_week(thrice, "standard") == 3
 
 
 def test_normalize_action_minutes_unifies_to_session_length() -> None:
@@ -913,14 +945,13 @@ async def test_planning_calls_enable_thinking_with_longer_timeout(
 
 
 def test_summary_variables_include_deadline_and_prefs() -> None:
-    """요약 변수가 마감·성공 이미지·노터치·휴식 수용·다운스코프 단위까지 실어낸다 (P1-4)."""
+    """요약 변수가 마감·성공 이미지·휴식 수용·다운스코프 단위까지 실어낸다 (P1-4)."""
     state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
     state["slot_answers"] = dict(SLOT_ANSWERS)
 
     v = interview._summary_variables(state)
     assert v["deadlines"] == "2026-06-20"
     assert v["success_image"] == "데모 동작"
-    assert v["no_touch"] == "일요일"
     assert v["rest_ok"] == "네"
     assert v["downscope_unit"] == "10분"
 
