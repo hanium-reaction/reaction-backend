@@ -290,7 +290,10 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
     goal_plan = result.value
     if goal_plan is not None and goal_plan.action_items:
         goal_plan = first_plan_adapter.shape_action_plan(
-            state["outcome"], state["density"], goal_plan
+            state["outcome"],
+            state["density"],
+            goal_plan,
+            target_date=date.fromisoformat(state["target_date"]),
         )
     return {
         **state,
