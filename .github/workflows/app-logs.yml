@@ -1,0 +1,82 @@
+name: App logs (EC2, read-only)
+
+# 라이브 앱 로그(journalctl)를 **재기동 없이** 조회한다 (#24 운영).
+#
+# 왜 필요한가: 지금까지 로그를 보려면 toggle-scheduler 를 돌려야 했고(곁다리 verify 스텝),
+# 그건 앱을 재기동시킬 뿐 아니라 재기동 직후 60줄만 보여줘 **과거 cron 실행 로그를 못 본다**.
+# cron 사후 검증(`expire_unreflected: N cards` · `evening_reflection notify: …`)은 로그가
+# 유일한 창구다(#157 에서 앱 로깅을 배선한 이유).
+#
+# 안전:
+# - workflow_dispatch 전용 · 읽기만 한다(앱·DB·.env 를 건드리는 스텝 없음)
+# - **비밀값 마스킹**: 예외 트레이스백에 DSN·키가 섞여 나올 수 있어 출력 전 sed 로 가린다
+#   (asyncpg 연결 실패 시 DATABASE_URL 이 메시지에 실리는 경로가 실재)
+# - 조회 실패와 '해당 로그 없음'을 **구분해서** 출력한다 (#157 에서 고친 실수 반복 방지)
+
+on:
+  workflow_dispatch:
+    inputs:
+      grep:
+        description: "필터 정규식 (비우면 전체 tail). 예: expire_unreflected|notify:"
+        type: string
+        default: ""
+      lines:
+        description: "조회할 최근 로그 줄 수 (필터 적용 전)"
+        type: string
+        default: "2000"
+      since:
+        description: "조회 시작 시점 (journalctl --since). 예: '6 hours ago', 'today'"
+        type: string
+        default: "24 hours ago"
+
+concurrency:
+  # 읽기 전용이지만 같은 러너를 쓰므로 배포와 직렬화 (queue: max — deploy.yml 주석 참조).
+  group: deploy-ec2
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  logs:
+    name: journalctl (read-only)
+    runs-on: [self-hosted, ec2, reaction-backend]
+    timeout-minutes: 5
+
+    steps:
+      - name: Fetch logs
+        env:
+          GREP: ${{ inputs.grep }}
+          LINES: ${{ inputs.lines }}
+          SINCE: ${{ inputs.since }}
+        run: |
+          set -uo pipefail
+
+          if ! RAW=$(sudo journalctl -u reaction-backend -n "${LINES}" --since "${SINCE}" --no-pager 2>&1); then
+            echo "::error::journalctl 조회 실패 — 로그 부재가 아니라 **조회 자체가 실패**했다"
+            echo "$RAW" | tail -n 5
+            exit 1
+          fi
+
+          # 비밀값 마스킹 — 트레이스백에 섞여 나올 수 있는 값들.
+          MASKED=$(printf '%s\n' "$RAW" \
+            | sed -E 's#(postgres(ql)?(\+asyncpg)?://)[^[:space:]"'"'"']*#\1***MASKED***#g' \
+            | sed -E 's#(AIza|sk-|eyJ)[A-Za-z0-9._-]{10,}#***MASKED***#g' \
+            | sed -E 's#(SECRET|TOKEN|PASSWORD|API_KEY|PRIVATE_KEY)([=:[:space:]]+)[^[:space:]]+#\1\2***MASKED***#gi')
+
+          if [ -n "${GREP}" ]; then
+            OUT=$(printf '%s\n' "$MASKED" | grep -E "${GREP}" || true)
+            if [ -z "$OUT" ]; then
+              echo "조회는 성공했으나 패턴에 맞는 줄이 **없다**: /${GREP}/ (최근 ${LINES}줄, since=${SINCE})"
+              echo "→ 로그가 안 남은 것인지 그 일이 안 일어난 것인지는 필터를 넓혀 재확인할 것."
+              exit 0
+            fi
+          else
+            OUT=$(printf '%s\n' "$MASKED" | tail -n 200)
+          fi
+
+          echo "$OUT"
+          {
+            echo "### App logs — since \`${SINCE}\`${GREP:+ · filter \`}${GREP}${GREP:+\`}"
+            echo '```'
+            printf '%s\n' "$OUT" | tail -n 100
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
