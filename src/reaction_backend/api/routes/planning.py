@@ -741,13 +741,39 @@ def _approved_response(plan_id: str, payload: dict[str, Any]) -> FirstPlanApprov
 ReviewRepoDep = Annotated[ReviewRepo, Depends(get_review_repo)]
 FixedRepoDep = Annotated[FixedScheduleRepo, Depends(get_fixed_schedule_repo)]
 
-# 재계획 튜닝 기본값 — 피크/세션/휴식 개인화(behavioral_profile 반영)는 후속.
+# 재계획 튜닝 폴백 — 완료 인터뷰가 없어 outcome 을 못 얻을 때만 사용.
+# 정상 경로는 `_replan_tuning_for` 가 First Plan 과 동일한 개인화(세션 길이·선호 시간)를 유도한다.
 _REPLAN_TUNING = replan.ReplanTuning(
     peak_windows=(),
     focus_chunk_min=60,
     break_min=10,
     daily_focus_cap_min=first_plan_adapter.DEFAULT_DAILY_FOCUS_CAP_MIN,
 )
+
+
+async def _replan_tuning_for(user: User, repo: InterviewRepo) -> replan.ReplanTuning:
+    """재계획 스케줄러 튜닝을 **First Plan 과 동일하게** outcome 에서 유도한다.
+
+    재계획이 세션 길이(goals.session_length)·선호 시간(goals.preferred_time)을 무시하고
+    60분 청크·free-time 아무데나 배치하면, First Plan 에서 넣은 개인화가 매주 리셋된다.
+    최근 '정상 종료' 인터뷰 outcome 을 복구해 `schedule_blocks` 와 같은 헬퍼로 튜닝을 조립한다.
+    outcome 을 못 얻으면(완료 인터뷰 없음·투영 실패) 기존 기본값으로 폴백한다.
+
+    density 는 재계획 시점에 요청 본문이 없어 알 수 없으므로 daily cap 은 기본(standard)을 쓴다.
+    """
+    latest = await repo.get_latest_finished(user.id)
+    if latest is None:
+        return _REPLAN_TUNING
+    try:
+        outcome = _apply_edited_availability(await _project_session_outcome(latest, repo), user)
+    except Exception:  # noqa: BLE001 — 투영 실패 시 재계획을 막지 말고 기본 튜닝으로 진행
+        return _REPLAN_TUNING
+    return replan.ReplanTuning(
+        peak_windows=tuple(first_plan_adapter.peak_windows_for_plan(outcome)),
+        focus_chunk_min=first_plan_adapter.focus_chunk_min_from_outcome(outcome),
+        break_min=first_plan_adapter.break_min_from_outcome(outcome),
+        daily_focus_cap_min=first_plan_adapter.DEFAULT_DAILY_FOCUS_CAP_MIN,
+    )
 
 
 class _RulePolicy:
@@ -805,6 +831,7 @@ async def generate_replan(
     fixed_repo: FixedRepoDep,
     draft_repo: DraftRepoDep,
     review_repo: ReviewRepoDep,
+    repo: RepoDep,
     session: SessionDep,
 ) -> ReplanResponse:
     """주간 리포트를 작성하고, 남은 작업 + 수락한 회복을 **다음 주부터 마감까지** 다시 배치.
@@ -917,7 +944,7 @@ async def generate_replan(
             horizon_day=deadline,
             candidates=candidates,
             committed_busy=committed,
-            tuning=_REPLAN_TUNING,
+            tuning=await _replan_tuning_for(user, repo),
         )
 
         payload: dict[str, Any] = {

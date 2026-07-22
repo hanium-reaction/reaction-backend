@@ -23,11 +23,20 @@ from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.fixed_schedule import FixedSchedule
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
-from reaction_backend.schemas.common import KST
+from reaction_backend.schemas.common import KST, now_kst
+from reaction_backend.schemas.interview import (
+    AvailabilityProfile,
+    GoalCandidate,
+    IdentityContext,
+    InterviewOutcome,
+    PreferenceProfile,
+    TimeRange,
+)
 from tests.conftest import (
     DEMO_USER_UUID,
     FakeActionItemRepo,
     FakeFixedScheduleRepo,
+    FakeInterviewRepo,
     FakePlanDraftRepo,
     FakeScheduledBlockRepo,
 )
@@ -931,6 +940,107 @@ def test_get_plan_does_not_500_on_replan_draft(
     resp = client.get(f"/plans/{draft_id}")
     assert resp.status_code == 404, resp.text
     assert resp.json()["code"] == "PLAN_DRAFT_NOT_FOUND"
+
+
+# ── 개인화 파리티 (세션 길이·선호 시간) ─────────────────────────────────────
+# First Plan 이 넣은 goals.session_length / goals.preferred_time 를 재계획도 반영해야 한다.
+# 안 그러면 매주 재계획 때마다 60분 청크·free-time 아무데나로 리셋된다(B 백로그).
+
+
+def _finish_session(repo: FakeInterviewRepo) -> None:
+    """정상 종료 인터뷰 세션 1개 시드 — get_latest_finished 가 outcome 복구를 시도하게."""
+    from reaction_backend.db.models.interview_session import InterviewSession
+
+    row = InterviewSession()
+    row.id = uuid4()
+    row.user_id = DEMO_USER_UUID
+    row.end_reason = "completed"
+    row.total_turns = 5
+    row.ambiguity_final = 0.1
+    row.ended_at = FROZEN_NOW
+    row.used_fallback = False
+    repo._sessions[row.id] = row
+    repo._answers[row.id] = {}
+
+
+def _craft_outcome(*, session_min: int, preferred_time: str) -> InterviewOutcome:
+    """heaviest 목표에 세션 길이·선호 시간을 실은 outcome(재계획 튜닝 유도 대상)."""
+    return InterviewOutcome(
+        session_id="iv_replan",
+        generated_at=now_kst(),
+        end_reason="completed",
+        ambiguity_final=0.1,
+        analysis_source="llm",
+        identity=IdentityContext(role="대3", season="학기중"),
+        core_goals=[
+            GoalCandidate(
+                title="논문 읽기",
+                category="study",
+                is_heaviest=True,
+                tentative_tier="focus",
+                confidence=0.9,
+                session_length_min=session_min,
+                preferred_time=preferred_time,
+            )
+        ],
+        availability=AvailabilityProfile(
+            activity_window=TimeRange(start="06:00", end="23:00"),
+            peak_window=["저녁"],  # 전역 peak 은 저녁 — 목표별 preferred_time 이 이겨야 함
+        ),
+        preferences=PreferenceProfile(recovery_tone="담백", rest_ok=True, downscope_unit_min=10),
+        horizon=None,
+    )
+
+
+def test_generate_replan_honors_session_length_and_preferred_time(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_interview_repo: FakeInterviewRepo,
+) -> None:
+    """재계획이 세션 길이(90분)를 60분으로 쪼개지 않고, 선호 시간(오전)에 배치한다.
+
+    폴백(focus_chunk_min=60·peak=())이었다면 90분 액션이 60+30 으로 분할되고 저녁/free-time
+    아무데나 놓인다. outcome 을 복구해 First Plan 과 같은 튜닝을 유도하면 90분 단일 세션이
+    오전(06~12)에 놓인다.
+    """
+    _freeze_now(monkeypatch)
+    _finish_session(fake_interview_repo)
+
+    import reaction_backend.api.routes.planning as planning_mod
+
+    async def _fake_project(row: Any, repo: Any) -> InterviewOutcome:
+        return _craft_outcome(session_min=90, preferred_time="오전")
+
+    monkeypatch.setattr(planning_mod, "_project_session_outcome", _fake_project)
+
+    action = _seed_action(
+        fake_action_item_repo, title="논문 읽기", est=90, target=date(2026, 7, 16)
+    )
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    mine = [b for b in resp.json()["blocks"] if b["actionId"] == f"action_{action.id}"]
+    assert len(mine) == 1, f"90분 세션이 분할됐다: {mine}"
+    start = datetime.fromisoformat(mine[0]["start"])
+    end = datetime.fromisoformat(mine[0]["end"])
+    assert (end - start).total_seconds() / 60 == 90, "세션 길이 90분이 유지되지 않았다"
+    assert 6 <= start.hour < 12, f"선호 시간(오전)이 아닌 {start.hour}시에 배치됐다"
+
+
+def test_generate_replan_falls_back_without_finished_interview(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_interview_repo: FakeInterviewRepo,
+) -> None:
+    """완료 인터뷰가 없으면(outcome 복구 불가) 기존 기본 튜닝으로 폴백해 여전히 배치된다."""
+    _freeze_now(monkeypatch)  # 인터뷰 세션 미시드 → get_latest_finished 는 None
+    action = _seed_action(fake_action_item_repo, title="백로그", est=45, target=date(2026, 7, 16))
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    assert [b for b in resp.json()["blocks"] if b["actionId"] == f"action_{action.id}"]
 
 
 def test_weekly_replan_approve_schema_name_does_not_collide_with_recovery() -> None:
