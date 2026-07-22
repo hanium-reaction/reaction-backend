@@ -38,6 +38,7 @@ REQUIRED_SLOT_KEYS: tuple[str, ...] = (
     "goals.weekly_time",
     "goals.session_length",
     "goals.preferred_time",
+    "goals.frequency",
     "goals.deadlines",
     "goals.success_image",
     "goals.approach",
@@ -209,6 +210,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
     weekly_hours = _chip_hours(slot_answers.get("goals.weekly_time"))
     session_length = _chip_duration_min(slot_answers.get("goals.session_length"))
     preferred_time = _first(_chip_values(slot_answers.get("goals.preferred_time")))
+    frequency = _chip_frequency(slot_answers.get("goals.frequency"))
     approach_note = _text_raw(slot_answers.get("goals.approach"))
     materials_note = _text_raw(slot_answers.get("goals.materials"))
 
@@ -237,6 +239,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
                 weekly_hours=weekly_hours if is_heaviest else None,
                 session_length_min=session_length if is_heaviest else None,
                 preferred_time=preferred_time if is_heaviest else None,
+                frequency_per_week=frequency if is_heaviest else None,
                 approach_note=approach_note if is_heaviest else None,
                 materials_note=materials_note if is_heaviest else None,
                 tentative_tier="focus" if is_heaviest else "maintain",
@@ -313,6 +316,22 @@ def _chip_duration_min(value: Mapping[str, Any] | None) -> int | None:
             total += int(num)
             num = ""
     return total or None
+
+
+def _chip_frequency(value: Mapping[str, Any] | None) -> int | None:
+    """'매일'·'주 3회' 같은 빈도 chip 에서 주당 횟수를 추출. '몰아서/상관없음'·미입력은 None.
+
+    '매일'은 7로, '주 N회'는 N으로 환원한다. 숫자도 '매일'도 아니면(몰아서·상관없음) None →
+    볼륨(weekly_hours) 기반 세션 수 산정으로 폴백한다.
+    """
+    chips = _chip_values(value)
+    if not chips:
+        return None
+    first = chips[0]
+    if "매일" in first:
+        return 7
+    digits = "".join(c for c in first if c.isdigit())
+    return int(digits) if digits else None
 
 
 def _max_deadline(goals: Sequence[GoalCandidate]) -> str | None:

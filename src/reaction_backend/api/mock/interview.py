@@ -88,6 +88,17 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
         "goals",
         options=("오전", "오후", "저녁", "심야", "상관없음"),
     ),
+    # 목표별 빈도(케이던스) — 주당 며칠 할지. 볼륨(weekly_time)과 별개로 '매일/주3회' 의도를 받아
+    # 서로 다른 날에 분산 배치한다('몰아서'는 빈도 무관 → 볼륨 기반). '매일 운동'이 주 1일로만
+    # 반영되던 문제를 해결(#per-goal-frequency).
+    InterviewSlot(
+        "goals.frequency",
+        "이 목표는 얼마나 자주 하고 싶어요?",
+        "chip",
+        True,
+        "goals",
+        options=("매일", "주 5회", "주 4회", "주 3회", "주 2회", "주 1회", "몰아서 · 상관없음"),
+    ),
     InterviewSlot("goals.deadlines", "마감일이 정해진 게 있어요?", "date_picker", True, "goals"),
     InterviewSlot(
         "goals.why_now", "그건 이번 학기에 꼭 끝내야 하는 이유가 있나요?", "text", False, "goals"

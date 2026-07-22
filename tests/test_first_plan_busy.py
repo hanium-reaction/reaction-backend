@@ -191,3 +191,89 @@ async def test_schedule_blocks_no_db_busy_uses_full_window() -> None:
     config: Any = {"configurable": {"session": session, "tone_mode": None}}
     new_state = await first_plan.schedule_blocks(_state(), config)
     assert len(new_state["scheduled_blocks"]) == 3  # 3 액션 전부 배치(막는 busy 없음)
+
+
+def _freq_state() -> Any:
+    """'매일'(frequency=7) 목표 + 7개 세션 leaf — 요일 분산을 end-to-end 로 검증하기 위한 상태."""
+    outcome = InterviewOutcome(
+        session_id="t-freq",
+        generated_at=datetime.now(KST),
+        end_reason="completed",
+        ambiguity_final=0.1,
+        analysis_source="llm",
+        identity=IdentityContext(role="대3", season="학기중"),
+        core_goals=[
+            GoalCandidate(
+                title="아침 운동",
+                category="health",
+                is_heaviest=True,
+                tentative_tier="focus",
+                confidence=0.9,
+                session_length_min=50,
+                frequency_per_week=7,  # 매일
+                deadline="2026-08-01",
+            )
+        ],
+        availability=AvailabilityProfile(
+            activity_window=TimeRange(start="06:00", end="23:30"), peak_window=["오전"]
+        ),
+        preferences=PreferenceProfile(recovery_tone="담백", rest_ok=True, downscope_unit_min=10),
+        horizon="2026-08-01",
+    )
+    state = first_plan.initial_state(
+        user_id=DEMO_USER_UUID, outcome=outcome, target_date=TUE.isoformat(), scope="horizon"
+    )
+    gp = GoalDecomposition(
+        goal_nodes=[
+            GoalNodeDraft(
+                node_id="n1",
+                parent_id=None,
+                title="root",
+                node_type="root",
+                order_index=0,
+                is_leaf=False,
+            ),
+            *(
+                GoalNodeDraft(
+                    node_id=f"l{i}",
+                    parent_id="n1",
+                    title=f"운동 {i + 1}회차",
+                    node_type="leaf",
+                    order_index=i,
+                    is_leaf=True,
+                )
+                for i in range(7)
+            ),
+        ],
+        action_items=[
+            ActionItemDraft(
+                node_id=f"l{i}",
+                title=f"운동 {i + 1}회차",
+                estimated_minutes=50,
+                category="health",
+                first_step="스트레칭 5분",
+            )
+            for i in range(7)
+        ],
+        policy_violations=[],
+    )
+    return {**state, "goal_plan": gp}
+
+
+async def test_schedule_blocks_daily_frequency_spreads_across_seven_days() -> None:
+    """'매일'(frequency=7) → 7개 세션이 한 주(weeks_needed=1) 안 **서로 다른 7일**에 분산된다.
+
+    회귀 방지: '매일 운동' 이 주 1일로만 몰리던 문제. frequency 가 주당 rate=7 → schedule_blocks
+    의 weeks_needed=ceil(7/7)=1 로 배치 창을 한 주로 좁히고, 스케줄러 stride 가 요일마다 하나씩 편다.
+    """
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+    new_state = await first_plan.schedule_blocks(_freq_state(), config)
+    blocks = new_state["scheduled_blocks"]
+    assert len(blocks) == 7, "7개 세션이 모두 배치돼야 한다"
+    distinct_days = {b.start.astimezone(KST).date() for b in blocks}
+    assert len(distinct_days) == 7, (
+        f"서로 다른 7일에 분산돼야 하는데 {len(distinct_days)}일에 몰렸다"
+    )
+    # 배치 창이 한 주(TUE~+6일)로 좁혀졌는지 — 먼 마감(08-01)까지 흩뿌리지 않는다.
+    assert max(distinct_days) <= TUE + timedelta(days=6)
