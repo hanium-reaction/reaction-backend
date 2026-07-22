@@ -94,6 +94,9 @@ class ProfileResponse(CamelModel):
     interaction: InteractionStyleView | None
     downscope_unit_min: int | None = None  # 회복 시 이 분(min) 단위까지 줄이면 해볼 만함
     rest_ok: bool | None = None  # 회복 시 휴식 제안 수용 여부
+    # 계획을 잡아도 되는 활동 시간대 "HH:MM"(자정=24:00) — 편집 시 users.focus_mode_preferences.
+    activity_start: str | None = None
+    activity_end: str | None = None
 
 
 class ProfileUpdateRequest(CamelModel):
@@ -112,6 +115,9 @@ class ProfileUpdateRequest(CamelModel):
     # 회복 선호 (users.focus_mode_preferences JSONB) — 재인터뷰 없이 편집.
     downscope_unit_min: int | None = Field(default=None, ge=1, le=120)
     rest_ok: bool | None = None
+    # 계획을 잡아도 되는 활동 시간대 "HH:MM"(자정=24:00). 계획 생성이 이 시간대만 사용.
+    activity_start: str | None = None
+    activity_end: str | None = None
 
 
 # ── S28 Privacy — Consent (#23-B) ──

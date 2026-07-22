@@ -45,6 +45,7 @@ from reaction_backend.db.models.action_item import ACTION_CATEGORY_VALUES
 from reaction_backend.db.models.interview_session import InterviewSession
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
+from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
 from reaction_backend.orchestrator import (
     first_plan,
@@ -77,7 +78,7 @@ from reaction_backend.repositories.user_repo import UserRepo, get_user_repo
 from reaction_backend.scheduler.weekly_review_precompute import run_weekly_review_for_user
 from reaction_backend.schemas.common import KST, now_kst, to_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
-from reaction_backend.schemas.interview import InterviewEndReason, InterviewOutcome
+from reaction_backend.schemas.interview import InterviewEndReason, InterviewOutcome, TimeRange
 from reaction_backend.schemas.planning import (
     ActionItemDraft,
     BlockEditRequest,
@@ -278,6 +279,19 @@ async def _load_draft(repo: PlanDraftRepo, user_id: UUID, plan_id: str) -> PlanD
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _apply_edited_availability(outcome: InterviewOutcome, user: User) -> InterviewOutcome:
+    """설정에서 편집한 활동 시간대(users.focus_mode_preferences)가 있으면 outcome 의 활동창을
+    그 값으로 덮는다 — 재인터뷰 없이 계획 배치 시간대를 바로잡게(#editable-activity-window)."""
+    fmp = user.focus_mode_preferences or {}
+    start, end = fmp.get("activity_start"), fmp.get("activity_end")
+    if not start or not end:
+        return outcome
+    availability = outcome.availability.model_copy(
+        update={"activity_window": TimeRange(start=start, end=end)}
+    )
+    return outcome.model_copy(update={"availability": availability})
+
+
 @router.post("/milestones")
 async def generate_milestones(
     body: FirstPlanGenerateRequest,
@@ -289,7 +303,7 @@ async def generate_milestones(
 
     입력은 generate 와 동일(interviewSessionId/outcome + density). LLM 1콜 + 룰 폴백이라 가볍다.
     """
-    outcome = await _resolve_outcome(body, user.id, repo)
+    outcome = _apply_edited_availability(await _resolve_outcome(body, user.id, repo), user)
     milestones, fell_back = await first_plan_milestones.generate_milestones(
         outcome=outcome,
         density=body.density,
@@ -316,7 +330,7 @@ async def generate_plan(
 
     동시성 lock(ADR-0005 §7.6): 다중 디바이스 동시 생성으로 인한 state race 방지.
     """
-    outcome = await _resolve_outcome(body, user.id, repo)
+    outcome = _apply_edited_availability(await _resolve_outcome(body, user.id, repo), user)
     target_date = _resolve_target_date(body.target_date)
 
     async with user_agent_lock(session, user.id, _LOCK_AGENT):

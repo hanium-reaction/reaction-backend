@@ -420,8 +420,11 @@ def test_preferred_time_outside_activity_becomes_available() -> None:
         "goals.preferred_time": {"type": "chip", "values": ["오전"]},
     }
     outcome = interview_adapter.build_outcome(
-        session_id="iv_av", slot_answers=sa, ambiguity_final=0.1,
-        end_reason="completed", analysis_source="llm",
+        session_id="iv_av",
+        slot_answers=sa,
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
     )
     pols = first_plan_adapter.time_policies_from_outcome(outcome)
     day = date(2026, 7, 23)
@@ -430,6 +433,63 @@ def test_preferred_time_outside_activity_becomes_available() -> None:
     assert any(f.start.hour < 12 for f in free), [
         (str(f.start.time()), str(f.end.time())) for f in free
     ]
+
+
+def test_shape_action_plan_covers_horizon_not_just_one_week() -> None:
+    """마감까지 여러 주면 세션 상한이 target×주수 로 늘어, 유한 목표(20강)를 끝까지 커버(#horizon-cap).
+
+    회귀: 예전엔 1주치(target)로 잘라 마감 전 뒷부분 세션을 아예 안 만들었다(사용자 발견).
+    """
+    from datetime import date
+
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_hz",
+        slot_answers=SLOT_ANSWERS,  # weekly 6 + session 60분 → target 6/주, 마감 2026-06-20
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    nodes = [
+        GoalNodeDraft(
+            node_id="root",
+            parent_id=None,
+            title="목표",
+            node_type="root",
+            order_index=0,
+            is_leaf=False,
+        )
+    ]
+    actions = []
+    for i in range(12):
+        nodes.append(
+            GoalNodeDraft(
+                node_id=f"l{i}",
+                parent_id="root",
+                title=f"l{i}",
+                node_type="leaf",
+                order_index=i,
+                is_leaf=True,
+            )
+        )
+        actions.append(
+            ActionItemDraft(
+                node_id=f"l{i}",
+                title=f"t{i}",
+                estimated_minutes=60,
+                category="study",
+                first_step="s",
+            )
+        )
+    gp = GoalDecomposition(goal_nodes=nodes, action_items=actions, policy_violations=[])
+
+    # target_date 2주 전 → 마감(06-20)까지 2주 → 상한 6×2=12 → 12세션 전부 유지.
+    two_weeks_before = date(2026, 6, 6)
+    shaped = first_plan_adapter.shape_action_plan(
+        outcome, "standard", gp, target_date=two_weeks_before
+    )
+    assert len(shaped.action_items) == 12
+    # target_date 없으면 1주치(6)로 잘림(하위호환).
+    assert len(first_plan_adapter.shape_action_plan(outcome, "standard", gp).action_items) == 6
 
 
 def test_daily_cap_scales_with_density() -> None:

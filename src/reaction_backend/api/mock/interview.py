@@ -113,7 +113,11 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
     ),
     # [C] 시간
     InterviewSlot(
-        "time.activity_window", "보통 몇 시부터 몇 시까지 활동해요?", "time_range", True, "time"
+        "time.activity_window",
+        "하루 중 계획을 잡아도 되는 시간대는 몇 시부터 몇 시까지예요? (이 시간 밖엔 일정을 안 잡아요)",
+        "time_range",
+        True,
+        "time",
     ),
     InterviewSlot(
         # 필수 아님(#audit): 답이 fixed_block_hints 로만 남고 스케줄러가 소비하지 않아 계획에

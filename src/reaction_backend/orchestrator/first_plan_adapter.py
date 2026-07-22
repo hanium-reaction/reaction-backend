@@ -127,15 +127,35 @@ def normalize_action_minutes(
     ]
 
 
+# 마감이 아주 멀어도 한 번에 계획하는 최대 주 수 — 나머지는 주간 재계획이 이어간다.
+_MAX_PLAN_WEEKS = 8
+
+
+def _horizon_weeks(target_date: date | None, horizon: str | None) -> int:
+    """target_date~마감(horizon)이 몇 주인지 (최소 1, 최대 _MAX_PLAN_WEEKS). 정보 없으면 1주."""
+    if target_date is None or not horizon:
+        return 1
+    try:
+        days = (date.fromisoformat(horizon) - target_date).days
+    except ValueError:
+        return 1
+    return max(1, min(_MAX_PLAN_WEEKS, -(-max(days, 0) // 7)))
+
+
 def shape_action_plan(
-    outcome: InterviewOutcome, density: str, goal_plan: GoalDecomposition
+    outcome: InterviewOutcome,
+    density: str,
+    goal_plan: GoalDecomposition,
+    *,
+    target_date: date | None = None,
 ) -> GoalDecomposition:
     """분해 결과를 목표별 세션 길이·주당 시간에 맞춰 결정적으로 다듬는다(#per-goal 준수 보장).
 
     1) 세션 길이 정규화 — 각 leaf estimated_minutes 를 세션 길이 밴드로(9분 등 방지).
-    2) 세션 수 상한 — weekly_hours 가 있으면 target_sessions_per_week 로 잘라, 이번 주 분량이
-       주당 시간을 넘지 않게 한다(LLM 이 과다 생성하면 앞쪽 = 진행 순서대로 유지, 나머지는 이후
-       주간 재계획이 이어감). 잘려서 고아가 된 leaf 노드도 함께 제거해 트리를 깨끗이 둔다.
+    2) 세션 수 상한 — weekly_hours 가 있으면 **마감까지 주당 rate 로 담을 수 있는 만큼**
+       (target/주 × 마감까지 주 수)으로 자른다. 주당 분량은 유지하되 **마감까지 전 구간을
+       커버**한다(예: 20강 강의는 여러 주에 걸쳐 다 계획). 주당 rate 자체는 스케줄러가 weeks_needed
+       로 여러 날에 분산. target_date 미지정이면 1주치(하위호환). 고아 leaf 노드도 함께 제거.
 
     목표별 입력(session_length / weekly_hours)이 없으면 각 단계는 no-op → 기존 동작 보존.
     """
@@ -143,9 +163,10 @@ def shape_action_plan(
     nodes = list(goal_plan.goal_nodes)
     heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
     if heaviest.weekly_hours and heaviest.weekly_hours > 0:
-        target = target_sessions_per_week(outcome, density)
-        if len(items) > target:
-            items = items[:target]
+        per_week = target_sessions_per_week(outcome, density)
+        max_sessions = per_week * _horizon_weeks(target_date, outcome.horizon)
+        if len(items) > max_sessions:
+            items = items[:max_sessions]
             kept = {a.node_id for a in items}
             nodes = [n for n in nodes if (not n.is_leaf) or n.node_id in kept]
     return goal_plan.model_copy(update={"action_items": items, "goal_nodes": nodes})
