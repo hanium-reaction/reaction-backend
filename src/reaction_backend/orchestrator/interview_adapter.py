@@ -23,7 +23,6 @@ from reaction_backend.schemas.interview import (
     IdentityContext,
     InterviewEndReason,
     InterviewOutcome,
-    NoTouchWindow,
     PreferenceProfile,
     TimeRange,
 )
@@ -45,16 +44,15 @@ REQUIRED_SLOT_KEYS: tuple[str, ...] = (
     "goals.materials",
     "time.activity_window",
     "time.peak_window",
-    "time.no_touch",
     "recovery.tone",
     "recovery.rest_ok",
     "recovery.downscope_unit",
 )
 
 # 재인터뷰 시 지난 완료 인터뷰에서 그대로 이어받는 '지속형(너에 대한)' 슬롯 — 매번 다시 묻지
-# 않는다(#reduce-reask). 목표 관련(goals.*)과 이번 주 한정(energy.weekly_drain '이번 주 컨디션',
-# constraints.* '이번 달 일정')은 계획 주기마다 바뀌므로 제외하고 새로 묻는다. 프로필은 설정에서
-# 수정 가능하므로, 여기서 이어받아도 사용자가 언제든 바꿀 수 있다.
+# 않는다(#reduce-reask). 목표 관련(goals.*)과 이번 주 한정(energy.weekly_drain '이번 주 컨디션')은
+# 계획 주기마다 바뀌므로 제외하고 새로 묻는다. 프로필은 설정에서 수정 가능하므로, 여기서 이어받아도
+# 사용자가 언제든 바꿀 수 있다.
 CARRY_OVER_SLOT_KEYS: frozenset[str] = frozenset(
     {
         "identity.role",
@@ -62,7 +60,6 @@ CARRY_OVER_SLOT_KEYS: frozenset[str] = frozenset(
         "identity.major",
         "time.activity_window",
         "time.peak_window",
-        "time.no_touch",
         "time.fixed_blocks",
         "energy.focus_duration",
         "energy.break_pattern",
@@ -254,17 +251,12 @@ def _build_availability(
 ) -> AvailabilityProfile:
     activity = _range(slot_answers.get("time.activity_window")) or _DEFAULT_ACTIVITY
     peak = _chip_values(slot_answers.get("time.peak_window"))
-    no_touch_chips = _chip_values(slot_answers.get("time.no_touch"))
-    no_touch_windows = (
-        [NoTouchWindow(days_of_week=[], window=activity, label=", ".join(no_touch_chips))]
-        if no_touch_chips
-        else []
-    )
+    # no_touch_windows 는 인터뷰에서 더 이상 채우지 않는다(#audit): chip 카테고리만으로는
+    # 스케줄러가 쓸 실제 시각이 없어 무효였다. 실제 시각 차단은 활동창 + 고정일정(S05)이 담당.
     fixed_hints = _text_items(slot_answers.get("time.fixed_blocks"))
     return AvailabilityProfile(
         activity_window=activity,
         peak_window=peak,
-        no_touch_windows=no_touch_windows,
         fixed_block_hints=fixed_hints,
     )
 

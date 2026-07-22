@@ -55,7 +55,6 @@ SLOT_ANSWERS: dict[str, dict[str, Any] | None] = {
     "goals.materials": {"type": "text", "raw": "1주차 스레드, 2주차 유저프로그램, 3주차 VM"},
     "time.activity_window": {"type": "range", "start": "09:00", "end": "23:00"},
     "time.peak_window": {"type": "chip", "values": ["오전", "저녁"]},
-    "time.no_touch": {"type": "chip", "values": ["일요일"]},
     "time.fixed_blocks": {"type": "text", "raw": "화목 수업", "normalized": ["화목 수업"]},
     "recovery.tone": {"type": "chip", "values": ["담백"]},
     "recovery.rest_ok": {"type": "chip", "values": ["네"]},
@@ -913,14 +912,13 @@ async def test_planning_calls_enable_thinking_with_longer_timeout(
 
 
 def test_summary_variables_include_deadline_and_prefs() -> None:
-    """요약 변수가 마감·성공 이미지·노터치·휴식 수용·다운스코프 단위까지 실어낸다 (P1-4)."""
+    """요약 변수가 마감·성공 이미지·휴식 수용·다운스코프 단위까지 실어낸다 (P1-4)."""
     state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
     state["slot_answers"] = dict(SLOT_ANSWERS)
 
     v = interview._summary_variables(state)
     assert v["deadlines"] == "2026-06-20"
     assert v["success_image"] == "데모 동작"
-    assert v["no_touch"] == "일요일"
     assert v["rest_ok"] == "네"
     assert v["downscope_unit"] == "10분"
 

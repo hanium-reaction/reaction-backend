@@ -46,7 +46,6 @@ CODE_VARS: dict[str, set[str]] = {
         "success_image",
         "time_window",
         "peak_window",
-        "no_touch",
         "tone",
         "rest_ok",
         "downscope_unit",

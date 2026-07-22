@@ -136,7 +136,6 @@ _CONTEXT_LABELS: dict[str, str] = {
     "goals.materials": "참고 자료 원문",
     "time.activity_window": "활동 시간대",
     "time.peak_window": "집중 시간대",
-    "time.no_touch": "노터치",
     "recovery.tone": "회복 톤",
     "recovery.rest_ok": "휴식 수용",
     "recovery.downscope_unit": "최소 실행 단위",
@@ -245,7 +244,7 @@ def _rule_ambiguity_update(state: InterviewState, slot_key: str) -> AmbiguityUpd
 def _rule_summary(state: InterviewState) -> InterviewSummary:
     """슬롯에서 결정적으로 빌드한 룰 요약 — LLM 실패 시 그대로 노출.
 
-    LLM 요약과 같은 슬롯 소스를 쓰되, 값이 있는 항목(마감·성공 이미지·노터치·휴식·다운스코프)만
+    LLM 요약과 같은 슬롯 소스를 쓰되, 값이 있는 항목(마감·성공 이미지·휴식·다운스코프)만
     골라 문장에 덧붙인다 — "아직 정하지 않음" 은 지어내지 않으려 생략.
     """
     v = _summary_variables(state)
@@ -260,8 +259,6 @@ def _rule_summary(state: InterviewState) -> InterviewSummary:
     time_summary = (
         f"활동 시간대는 {v['time_window']}, 집중은 {v['peak_window']} 가 좋다고 하셨어요."
     )
-    if v["no_touch"] != _NOT_SET:
-        time_summary += f" '{v['no_touch']}' 시간은 비워둘게요."
 
     preference_summary = f"못 한 날엔 '{v['tone']}' 톤을 선호하세요."
     if v["rest_ok"] != _NOT_SET:
@@ -785,7 +782,6 @@ def _summary_variables(state: InterviewState) -> dict[str, str]:
         else _NOT_SET
     )
     peak = ", ".join(_slot_chips(answers.get("time.peak_window"))) or _NOT_SET
-    no_touch = ", ".join(_slot_chips(answers.get("time.no_touch"))) or _NOT_SET
     tone = _slot_first_chip(answers.get("recovery.tone")) or "담백"
     rest_ok = _slot_first_chip(answers.get("recovery.rest_ok")) or _NOT_SET
     downscope_unit = _slot_first_chip(answers.get("recovery.downscope_unit")) or _NOT_SET
@@ -798,7 +794,6 @@ def _summary_variables(state: InterviewState) -> dict[str, str]:
         "success_image": success_image,
         "time_window": time_window,
         "peak_window": peak,
-        "no_touch": no_touch,
         "tone": tone,
         "rest_ok": rest_ok,
         "downscope_unit": downscope_unit,
@@ -865,7 +860,6 @@ _DEFAULT_SLOT_QUESTIONS: dict[str, str] = {
     "time.activity_window": "하루 중 계획을 잡아도 되는 시간대는 몇 시부터 몇 시까지예요? (이 시간 밖엔 일정을 안 잡아요)",
     "time.fixed_blocks": "매주 고정으로 비워야 하는 시간 있어요?",
     "time.peak_window": "가장 잘 집중되는 시간대는요?",
-    "time.no_touch": "절대 일정 잡으면 안 되는 시간은요?",
     "recovery.tone": "못 한 날 어떤 톤이 좋아요?",
     "recovery.rest_ok": "쉬는 게 어때요 하는 제안을 받을 의향 있어요?",
     "recovery.downscope_unit": "밀렸을 때 할 일을 몇 분짜리까지 줄이면 해볼 만해요?",
