@@ -34,6 +34,7 @@ from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.session import get_db
 from reaction_backend.repositories.action_item_repo import ActionItemRepo, get_action_item_repo
 from reaction_backend.repositories.execution_repo import ExecutionRepo, get_execution_repo
+from reaction_backend.repositories.recovery_repo import RecoveryRepo, get_recovery_repo
 from reaction_backend.safety.encryption import encrypt_memo
 from reaction_backend.scheduler.expire_reflections import pending_reflection_since
 from reaction_backend.schemas.common import now_kst, to_kst
@@ -62,6 +63,7 @@ _TAGGABLE_STATUSES = ("failed", "partial_done")
 
 ExecutionRepoDep = Annotated[ExecutionRepo, Depends(get_execution_repo)]
 ActionRepoDep = Annotated[ActionItemRepo, Depends(get_action_item_repo)]
+RecoveryRepoDep = Annotated[RecoveryRepo, Depends(get_recovery_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 
 
@@ -192,6 +194,7 @@ async def batch_reflect(
     user: CurrentUser,
     repo: ExecutionRepoDep,
     action_repo: ActionRepoDep,
+    recovery_repo: RecoveryRepoDep,
     session: SessionDep,
 ) -> ReflectionBatchResponse:
     """저녁 회고 일괄 처리 (S17) — 오늘+어제+그제 미체크 카드를 한 번에 종결.
@@ -273,6 +276,14 @@ async def batch_reflect(
         action = await action_repo.get_by_id(user.id, execution.action_item_id)
         if action is not None:
             action.status = item.completion_status
+
+        # 회복 카드면 그 RecoveryAttempt 에 완료 스탬프 (check-in 과 동일, #20).
+        await recovery_repo.complete_for_action(
+            user.id,
+            execution.action_item_id,
+            completed_at=ended_at,
+            completion_status=item.completion_status,
+        )
 
         if codes:
             memo_encrypted = encrypt_memo(item.memo) if item.memo else None
