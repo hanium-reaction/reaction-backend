@@ -18,6 +18,10 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
+
+# alias — 아래 라우트 핸들러 이름이 `get_settings` 라 config 함수를 가린다.
+from reaction_backend.config import Settings
+from reaction_backend.config import get_settings as get_app_settings
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.session import get_db
 from reaction_backend.repositories.notification_repo import (
@@ -30,6 +34,7 @@ from reaction_backend.schemas.notifications import (
     NotificationSettings,
     NotificationSettingsUpdateRequest,
     PushSubscribeRequest,
+    VapidPublicKeyResponse,
 )
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -80,6 +85,7 @@ def _enforce_evening(t: time) -> None:
 RepoDep = Annotated[NotificationRepo, Depends(get_notification_repo)]
 UserRepoDep = Annotated[UserRepo, Depends(get_user_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
+SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 
 
 @router.get("/settings")
@@ -137,6 +143,21 @@ async def update_settings(
 
 
 # ───── Web Push subscription (Issue #16 BE 측) ─────
+
+
+@router.get("/vapid-public-key")
+async def get_vapid_public_key(settings: SettingsDep) -> VapidPublicKeyResponse:
+    """FE 가 `pushManager.subscribe(applicationServerKey)` 에 쓸 VAPID public key.
+
+    서버가 **자기 private key 의 짝**을 직접 알려줘 키 불일치를 원천 차단한다. FE 가
+    public key 를 하드코딩·빌드타임 주입하면, 서버가 키를 rotate 하는 순간 구독은 옛 키에
+    묶인 채 발송이 전부 push 서비스 403 으로 실패한다(조용히 — 구독 자체는 성공하므로).
+    런타임에 받아가면 진실 소스가 서버 하나로 모여 rotate 에도 자동으로 따라온다.
+
+    미설정이면 `publicKey=null` — FE 는 구독을 만들지 않는다(스키마 docstring 참조).
+    이 경로는 notifications 라우터에 속해 인증 필수(#16 DoD) — 구독 흐름 자체가 로그인 후다.
+    """
+    return VapidPublicKeyResponse(public_key=settings.vapid_public_key or None)
 
 
 @router.post("/subscribe", status_code=status.HTTP_201_CREATED)
