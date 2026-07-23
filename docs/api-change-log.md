@@ -7,6 +7,17 @@
 
 ---
 
+## v1.25 — 2026-07-22 (VAPID public key 엔드포인트, #16)
+
+- **신규** `GET /notifications/vapid-public-key` → `{ publicKey: string | null }`. FE 가
+  `pushManager.subscribe(applicationServerKey)` 에 쓸 공개키를 **런타임에** 받아간다.
+- 왜: 서버 private key 와 짝이 안 맞으면 발송이 push 서비스 403 으로 전부 실패하는데
+  구독은 성공해 조용히 새어나간다. 하드코딩·빌드타임 주입은 rotate 시 이 상태가 되므로
+  서버가 진실 소스로서 직접 노출한다.
+- `publicKey: null` = 서버 미설정 → FE 는 구독 생성 금지(도달 불가 구독 방지).
+- 인증 필수(notifications 라우터). 기존 계약 불변 — 추가만.
+- ⚠️ **FE 후속(#25)**: `lib/push.ts` 의 하드코딩 더미 fallback 제거 + 이 엔드포인트 fetch.
+
 ## v1.24 — 2026-07-21 (알림 cron 2종 + 발송 게이트 — §15 가드 의미 확정, #20)
 
 - endpoint 변경 없음 — §15 가드 3줄의 **미정의였던 적용 의미를 명문화** (ADR-0006):
