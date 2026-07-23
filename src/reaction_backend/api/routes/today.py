@@ -40,6 +40,7 @@ from reaction_backend.repositories.habit_instance_repo import (
     get_habit_instance_repo,
 )
 from reaction_backend.repositories.habit_repo import current_week_start_kst
+from reaction_backend.repositories.recovery_repo import RecoveryRepo, get_recovery_repo
 from reaction_backend.safety.encryption import encrypt_memo
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
@@ -136,6 +137,7 @@ def _fixed_schema(s: FixedSchedule) -> AgendaFixedSchedule:
 
 ActionRepoDep = Annotated[ActionItemRepo, Depends(get_action_item_repo)]
 ExecutionRepoDep = Annotated[ExecutionRepo, Depends(get_execution_repo)]
+RecoveryRepoDep = Annotated[RecoveryRepo, Depends(get_recovery_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 BriefRepoDep = Annotated[DailyBriefRepo, Depends(get_daily_brief_repo)]
 HabitInstRepoDep = Annotated[HabitInstanceRepo, Depends(get_habit_instance_repo)]
@@ -270,6 +272,7 @@ async def quick_check_in(
     user: CurrentUser,
     action_repo: ActionRepoDep,
     execution_repo: ExecutionRepoDep,
+    recovery_repo: RecoveryRepoDep,
     session: SessionDep,
 ) -> CheckInResponse:
     """Quick Check-in 4칩 (S13/S17) — 완료/조금함/못함/더함 (#19-B).
@@ -311,6 +314,15 @@ async def quick_check_in(
     action = await action_repo.get_by_id(user.id, execution.action_item_id)
     if action is not None:
         action.status = body.completion_status
+
+    # 이 카드가 회복 카드(resulting_action_item)면 그 RecoveryAttempt 에 완료 스탬프
+    # (average_recovery_minutes 생산자, #20). 회복이 아니면 no-op.
+    await recovery_repo.complete_for_action(
+        user.id,
+        execution.action_item_id,
+        completed_at=ended_at,
+        completion_status=body.completion_status,
+    )
 
     await session.commit()
 

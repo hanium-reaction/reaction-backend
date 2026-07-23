@@ -45,6 +45,11 @@ ADOPTED_DECISION_VALUES = ("accepted", "edited")
 
 RECOVERY_RESULT_VALUES = ("completed", "abandoned", "pending")
 
+# 회복 카드를 **성공적으로 마친** completion_status — 이때만 duration 을 기록해
+# average_recovery_minutes 에 반영한다. weekly_review._SUCCESS_STATUSES 와 같은 정의
+# (done/over_done). failed·partial_done 은 abandoned 로 두고 평균에서 제외한다.
+RECOVERY_SUCCESS_STATUSES = ("done", "over_done")
+
 
 class RecoveryAttempt(Base, TimestampMixin):
     __tablename__ = "recovery_attempts"

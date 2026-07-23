@@ -131,7 +131,12 @@ class ReviewRepo:
     async def collect_recovery_stats(
         self, user_id: UUID, start_dt: datetime, end_dt: datetime
     ) -> list[RecoveryStat]:
-        """[start_dt, end_dt) 안에 결정된 수락 회복의 소요분 (average_recovery_minutes)."""
+        """[start_dt, end_dt) 안에 결정된 수락 회복의 소요분 (average_recovery_minutes).
+
+        `recovery_duration_minutes` 생산자는 `RecoveryRepo.complete_for_action`(#20) —
+        회복 카드를 done/over_done 으로 마쳐야 채워진다. 아직 안 마친(pending)·실패한
+        (abandoned, duration NULL) 회복은 여기서 NULL 로 나와 `_avg_recovery` 가 제외한다.
+        """
         stmt = select(RecoveryAttempt.recovery_duration_minutes).where(
             RecoveryAttempt.user_id == user_id,
             RecoveryAttempt.user_decision.in_(ADOPTED_DECISION_VALUES),

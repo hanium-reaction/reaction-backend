@@ -1043,6 +1043,39 @@ class FakeRecoveryRepo:
         self._attempts[a.id] = a
         return a
 
+    async def complete_for_action(
+        self,
+        user_id: UUID,
+        action_item_id: UUID,
+        *,
+        completed_at: datetime,
+        completion_status: str,
+    ) -> RecoveryAttempt | None:
+        # 실 repo 의 WHERE/UPDATE 는 test_recovery_completion 이 실 SQL 로 별도 고정.
+        from reaction_backend.db.models.recovery_attempt import RECOVERY_SUCCESS_STATUSES
+
+        attempt = next(
+            (
+                a
+                for a in self._attempts.values()
+                if a.user_id == user_id
+                and a.resulting_action_item_id == action_item_id
+                and a.recovery_result == "pending"
+            ),
+            None,
+        )
+        if attempt is None:
+            return None
+        if completion_status in RECOVERY_SUCCESS_STATUSES:
+            attempt.recovery_result = "completed"
+            attempt.recovery_completed_at = completed_at
+            if attempt.recovery_started_at is not None:
+                delta = completed_at - attempt.recovery_started_at
+                attempt.recovery_duration_minutes = max(int(delta.total_seconds() // 60), 0)
+        else:
+            attempt.recovery_result = "abandoned"
+        return attempt
+
 
 # 마이그레이션 d09c105520b5 의 13종 실패 사유 미러 (Issue #19-B)
 _FAILURE_TAG_SEED: list[tuple[str, str, int]] = [
