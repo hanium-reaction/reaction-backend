@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
+from reaction_backend.config import get_settings
 from reaction_backend.db.models.user import User
 from tests.conftest import DEMO_USER_UUID, FakeNotificationRepo
 
@@ -116,3 +118,30 @@ def test_unsubscribe_is_idempotent_without_subscription(client: TestClient) -> N
     """구독한 적 없어도 204 — FE 가 상태 확인 없이 안전하게 호출할 수 있게."""
     resp = client.delete("/notifications/subscribe")
     assert resp.status_code == 204
+
+
+def test_vapid_public_key_returned_when_configured(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """서버가 자기 public key 를 알려준다 — FE 가 rotate 에도 따라오게 (하드코딩 제거)."""
+    monkeypatch.setenv("VAPID_PUBLIC_KEY", "BExamplePublicKeyForTest123")
+    get_settings.cache_clear()
+
+    resp = client.get("/notifications/vapid-public-key")
+    assert resp.status_code == 200
+    assert resp.json()["publicKey"] == "BExamplePublicKeyForTest123"
+
+
+def test_vapid_public_key_null_when_unconfigured(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """미설정이면 null — FE 는 도달 못 하는 구독을 만들지 않는다 (403 무한 재시도 방지).
+
+    빈 문자열이 아니라 null 로 내려야 FE 가 '미설정' 을 명확히 분기할 수 있다.
+    """
+    monkeypatch.setenv("VAPID_PUBLIC_KEY", "")
+    get_settings.cache_clear()
+
+    resp = client.get("/notifications/vapid-public-key")
+    assert resp.status_code == 200
+    assert resp.json()["publicKey"] is None

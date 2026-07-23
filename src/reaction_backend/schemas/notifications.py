@@ -30,6 +30,17 @@ class NotificationSettingsUpdateRequest(CamelModel):
     pre_card_enabled: bool | None = None
 
 
+class VapidPublicKeyResponse(CamelModel):
+    """GET /notifications/vapid-public-key 응답 — FE `applicationServerKey` 용 공개값.
+
+    `publicKey` 가 null 이면 서버에 VAPID 미설정 → FE 는 **구독을 만들지 말고** '알림 미지원'
+    을 표시해야 한다. 서버가 발송할 수 없는데 구독만 만들면, 브라우저 subscribe 는 성공해도
+    발송 시 push 서비스가 키 불일치로 403 을 던져 도달 못 하는 구독이 조용히 쌓인다.
+    """
+
+    public_key: str | None
+
+
 class PushSubscribeRequest(CamelModel):
     """POST /notifications/subscribe 요청 — Web Push subscription 객체.
 

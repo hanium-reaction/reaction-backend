@@ -528,8 +528,17 @@ PARK       → PARK_DEFAULT
 | --- | --- | --- |
 | GET | `/notifications/settings` | 내 알림 설정 |
 | PATCH | `/notifications/settings` | morningTime / eveningTime / preCardEnabled |
+| GET | `/notifications/vapid-public-key` | FE `applicationServerKey` 용 공개키 |
 | POST | `/notifications/subscribe` | Web Push subscription 등록 (201, 갱신된 설정 반환) |
 | DELETE | `/notifications/subscribe` | 구독 해제 (204, 멱등 — 구독 없어도 204) |
+
+`GET /notifications/vapid-public-key` → `{ "publicKey": string | null }`:
+
+- `publicKey` 는 서버 private key 의 **짝**. FE 는 구독 직전 이걸 **런타임에 받아** 쓴다 —
+  하드코딩·빌드타임 주입은 키 rotate 시 조용히 깨진다(구독은 옛 키에 묶인 채 발송이 push
+  서비스 403 으로 전부 실패, 구독 자체는 성공하므로 알아채기 어렵다).
+- `publicKey: null` = 서버에 VAPID 미설정. FE 는 **구독을 만들지 말고** '알림 미지원' 표시.
+- 인증 필수(구독 흐름 자체가 로그인 후). 값은 사용자 무관한 서버 상수.
 
 `POST /notifications/subscribe` 요청 = 브라우저 `PushSubscription.toJSON()`:
 
