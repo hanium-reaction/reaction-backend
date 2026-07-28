@@ -36,6 +36,7 @@ from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING
 
 from reaction_backend.repositories.execution_repo import ExecutionRepo
+from reaction_backend.repositories.recovery_repo import RecoveryRepo
 from reaction_backend.schemas.common import KST, now_kst
 
 if TYPE_CHECKING:
@@ -62,6 +63,29 @@ def pending_reflection_since(today: date) -> datetime:
     (`scheduler/weekly_review_precompute.py` ← `api/routes/review.py`).
     """
     return datetime.combine(today - timedelta(days=PENDING_WINDOW_DAYS - 1), time.min, tzinfo=KST)
+
+
+async def run_abandon_stale_recoveries(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+    repo: RecoveryRepo | None = None,
+) -> int:
+    """회고 창 밖의 미완주 회복을 포기(abandoned) 처리하고 commit. 반환: 처리 건수.
+
+    만료 cron과 **같은 04:00·같은 경계**(`pending_reflection_since`)를 쓴다 — 카드가 정리되는
+    날 그 카드의 회복 시도도 같이 종결되어야 `recovery_result` 가 "아직 진행 중"으로 남지
+    않는다. 판정 규칙과 가드는 `RecoveryRepo.abandon_stale` docstring 참조.
+
+    **idempotent** — 이미 종결된(completed/abandoned) 시도는 건드리지 않는다 (AGENTS §2).
+    """
+    repo = repo or RecoveryRepo(session)
+    now_dt = now or now_kst()
+    abandoned = await repo.abandon_stale(before=pending_reflection_since(now_dt.date()).date())
+    await session.commit()
+    if abandoned:
+        _log.info("abandon_stale_recoveries: %d attempts abandoned", abandoned)
+    return abandoned
 
 
 async def run_expire_unreflected_cards(

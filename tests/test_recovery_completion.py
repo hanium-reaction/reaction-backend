@@ -39,6 +39,12 @@ class _OneResult:
     def scalar_one_or_none(self) -> Any:
         return self._obj
 
+    def scalars(self) -> _OneResult:
+        return self
+
+    def all(self) -> list[Any]:
+        return []
+
 
 class _InjectSession:
     """complete_for_action 의 SELECT 가 돌려줄 attempt 를 주입하는 세션."""
@@ -147,6 +153,43 @@ def _sql(stmt: object) -> str:
     return " ".join(raw.split())
 
 
+async def test_abandon_stale_pins_where_and_set() -> None:
+    """포기 처리 UPDATE 의 WHERE·SET 고정 — 이 경로는 fake 가 없어 실 SQL 이 전부다.
+
+    지키는 것:
+    - SET 은 `recovery_result='abandoned'` **하나뿐** — 다른 컬럼(특히 duration·completed_at)을
+      건드리면 지표가 오염된다.
+    - `recovery_result='pending'` 가드 = 멱등 + **completed 를 포기로 덮지 않음**(지표 파괴 방지).
+    - 카드 status 가 done/over_done 이면 제외 — 실제로 해낸 회복을 포기로 만들지 않는다.
+    - `action_items` 는 **읽기만** — 원본 status 를 UPDATE 하면 AGENTS §2 위반.
+    """
+    from reaction_backend.repositories.recovery_repo import RecoveryRepo
+
+    session = _RecordingSession()
+    repo = RecoveryRepo(session)  # type: ignore[arg-type]
+    await repo.abandon_stale(before=date(2026, 7, 22))
+
+    sql = _sql(session.statements[0])
+    set_clause = sql.split(" WHERE ", 1)[0]
+
+    assert sql.startswith("UPDATE recovery_attempts"), f"엉뚱한 테이블을 갱신한다: {sql}"
+    assert "recovery_result='abandoned'" in set_clause, f"SET 이 abandoned 가 아니다: {set_clause}"
+    # SET 에 결과 외 컬럼이 끼면 지표가 오염된다 (updated_at 은 TimestampMixin onupdate).
+    assert "recovery_duration_minutes" not in set_clause, (
+        f"SET 이 duration 을 건드린다: {set_clause}"
+    )
+    assert "recovery_completed_at" not in set_clause, (
+        f"SET 이 completed_at 을 건드린다: {set_clause}"
+    )
+
+    assert "recovery_attempts.recovery_result = 'pending'" in sql, f"멱등 가드가 풀렸다: {sql}"
+    assert "action_items.target_date < '2026-07-22'" in sql, f"창 경계가 안 걸렸다: {sql}"
+    assert "action_items.status NOT IN ('done', 'over_done')" in sql, (
+        f"완주 카드 제외가 풀렸다: {sql}"
+    )
+    assert "UPDATE action_items" not in sql, "원본 카드 status 를 갱신한다 (AGENTS §2 위반)"
+
+
 async def test_complete_for_action_select_pins_where() -> None:
     """실 SELECT 가 resulting_action_item_id + result='pending' 로 잡는다.
 
@@ -162,6 +205,51 @@ async def test_complete_for_action_select_pins_where() -> None:
     assert "recovery_attempts.resulting_action_item_id =" in sql
     assert "recovery_attempts.recovery_result = 'pending'" in sql, f"멱등 가드가 풀렸다: {sql}"
     assert "recovery_attempts.user_id =" in sql
+
+
+async def test_abandon_cron_uses_the_same_window_as_expiry() -> None:
+    """포기 판정 경계가 만료 cron과 **같은 단일 소스**(pending_reflection_since)다.
+
+    회귀: 여기서 자체 상수를 쓰면 카드는 정리됐는데 회복 시도는 남거나(또는 반대로) 되어
+    "3일 지나면 정리된다"는 사용자 관점이 깨진다. 잠금 결정(AGENTS §1 3일)에서 파생.
+    """
+    from reaction_backend.scheduler.expire_reflections import (
+        pending_reflection_since,
+        run_abandon_stale_recoveries,
+    )
+
+    captured: dict[str, Any] = {}
+
+    class _Repo:
+        async def abandon_stale(self, *, before: Any) -> int:
+            captured["before"] = before
+            return 0
+
+    class _Session:
+        async def commit(self) -> None:
+            return None
+
+    now = datetime(2026, 7, 24, 4, 0, tzinfo=KST)
+    await run_abandon_stale_recoveries(_Session(), now=now, repo=_Repo())  # type: ignore[arg-type]
+
+    assert captured["before"] == pending_reflection_since(now.date()).date()
+    assert captured["before"] == date(2026, 7, 22), (
+        "3일 창 경계가 아니다 (7/22·23·24 는 살아있어야)"
+    )
+
+
+def test_expire_job_also_abandons_stale_recoveries() -> None:
+    """04:00 job 이 만료와 포기 처리를 **둘 다** 부른다 — 배선 guard.
+
+    회귀: runtime 에서 abandon 호출을 지우면 카드만 정리되고 회복 시도는 영영 pending 이다.
+    """
+    import inspect
+
+    from reaction_backend.scheduler import runtime
+
+    src = inspect.getsource(runtime._expire_reflections_job)
+    assert "run_expire_unreflected_cards" in src
+    assert "run_abandon_stale_recoveries" in src, "만료 job 이 회복 포기 처리를 안 부른다"
 
 
 # ── 라우트 배선: check-in 이 생산자를 부른다 (누가 지워도 잡힘) ──

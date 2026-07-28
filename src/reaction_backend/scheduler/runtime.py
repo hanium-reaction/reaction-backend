@@ -32,6 +32,7 @@ from reaction_backend.repositories.interruption_event_repo import InterruptionEv
 from reaction_backend.repositories.notification_repo import NotificationRepo
 from reaction_backend.repositories.notification_send_repo import NotificationSendRepo
 from reaction_backend.repositories.plan_draft_repo import PlanDraftRepo
+from reaction_backend.repositories.recovery_repo import RecoveryRepo
 from reaction_backend.repositories.review_repo import ReviewRepo
 from reaction_backend.repositories.user_repo import UserRepo
 from reaction_backend.scheduler import (
@@ -100,8 +101,14 @@ async def _expire_drafts_job() -> None:
 
 async def _expire_reflections_job() -> None:
     async for session in _session_scope():
+        now = now_kst()
         await expire_reflections.run_expire_unreflected_cards(
-            session, now=now_kst(), repo=ExecutionRepo(session)
+            session, now=now, repo=ExecutionRepo(session)
+        )  # 내부 commit
+        # 같은 경계로 회복 시도도 종결 — 카드만 정리하고 attempt 를 두면 포기한 회복이
+        # 영영 'pending'(진행 중)으로 남는다 (#20).
+        await expire_reflections.run_abandon_stale_recoveries(
+            session, now=now, repo=RecoveryRepo(session)
         )  # 내부 commit
 
 
