@@ -161,13 +161,16 @@ async def test_abandon_stale_pins_where_and_set() -> None:
       건드리면 지표가 오염된다.
     - `recovery_result='pending'` 가드 = 멱등 + **completed 를 포기로 덮지 않음**(지표 파괴 방지).
     - 카드 status 가 done/over_done 이면 제외 — 실제로 해낸 회복을 포기로 만들지 않는다.
+    - 조인 키가 `resulting_action_item_id` — 채택(ADOPTED) 필터의 유일한 근거.
+    - **회고 창 기준식(`greatest(plan_start_at, actual_start_at)`) 가드** — 아직 회고할 수
+      있는 회복을 포기로 확정하면 이후 완주 스탬프가 영영 막혀 KPI 가 사라진다.
     - `action_items` 는 **읽기만** — 원본 status 를 UPDATE 하면 AGENTS §2 위반.
     """
     from reaction_backend.repositories.recovery_repo import RecoveryRepo
 
     session = _RecordingSession()
     repo = RecoveryRepo(session)  # type: ignore[arg-type]
-    await repo.abandon_stale(before=date(2026, 7, 22))
+    await repo.abandon_stale(before=datetime(2026, 7, 22, 0, 0, tzinfo=KST))
 
     sql = _sql(session.statements[0])
     set_clause = sql.split(" WHERE ", 1)[0]
@@ -186,6 +189,16 @@ async def test_abandon_stale_pins_where_and_set() -> None:
     assert "action_items.target_date < '2026-07-22'" in sql, f"창 경계가 안 걸렸다: {sql}"
     assert "action_items.status NOT IN ('done', 'over_done')" in sql, (
         f"완주 카드 제외가 풀렸다: {sql}"
+    )
+    # 조인 키 — execution_id 등 다른 컬럼으로 바뀌면 채택 필터가 통째로 무너진다.
+    assert "recovery_attempts.resulting_action_item_id IN (SELECT action_items.id" in sql, (
+        f"채택 필터(조인 키)가 풀렸다: {sql}"
+    )
+    # 회고 창 기준식 가드 — 만료 cron 과 **같은 식**이어야 여집합이 성립한다 (#20).
+    assert "greatest(execution_events.plan_start_at" in sql, f"회고 창 기준식이 빠졌다: {sql}"
+    assert "coalesce(execution_events.actual_start_at" in sql, f"실 착수 시각을 안 본다: {sql}"
+    assert "NOT (EXISTS (SELECT execution_events.id" in sql, (
+        f"회고 가능한 실행 제외 가드가 풀렸다: {sql}"
     )
     assert "UPDATE action_items" not in sql, "원본 카드 status 를 갱신한다 (AGENTS §2 위반)"
 
@@ -212,6 +225,9 @@ async def test_abandon_cron_uses_the_same_window_as_expiry() -> None:
 
     회귀: 여기서 자체 상수를 쓰면 카드는 정리됐는데 회복 시도는 남거나(또는 반대로) 되어
     "3일 지나면 정리된다"는 사용자 관점이 깨진다. 잠금 결정(AGENTS §1 3일)에서 파생.
+
+    경계는 **datetime 그대로** 넘긴다 — repo 가 만료 cron 과 같은 기준식
+    (`greatest(plan_start_at, actual_start_at)`)에 비교하므로 date 로 잘라내면 안 된다.
     """
     from reaction_backend.scheduler.expire_reflections import (
         pending_reflection_since,
@@ -232,8 +248,8 @@ async def test_abandon_cron_uses_the_same_window_as_expiry() -> None:
     now = datetime(2026, 7, 24, 4, 0, tzinfo=KST)
     await run_abandon_stale_recoveries(_Session(), now=now, repo=_Repo())  # type: ignore[arg-type]
 
-    assert captured["before"] == pending_reflection_since(now.date()).date()
-    assert captured["before"] == date(2026, 7, 22), (
+    assert captured["before"] == pending_reflection_since(now.date())
+    assert captured["before"] == datetime(2026, 7, 22, 0, 0, tzinfo=KST), (
         "3일 창 경계가 아니다 (7/22·23·24 는 살아있어야)"
     )
 

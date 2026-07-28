@@ -54,7 +54,7 @@ rolling 24h 로 구현하면 매일 같은 시각대 cron 이 **래칫**된다: 
 
 빈 회고 화면으로 부르는 푸시는 소음이고, 주 3건 예산에서 진짜 회고 기회를 밀어낸다.
 pending 판정은 회고 화면·만료 cron 과 **같은 경계**(`pending_reflection_since` +
-`_reflectable_from`)를 재사용한다 — 알림을 받고 들어왔는데 화면이 비는 불일치를
+`reflectable_from`)를 재사용한다 — 알림을 받고 들어왔는데 화면이 비는 불일치를
 구조적으로 차단.
 
 ## 5. `notification_sends` 테이블 (설계서 외 추가)

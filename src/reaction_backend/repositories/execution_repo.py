@@ -31,7 +31,7 @@ from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
 
 
-def _reflectable_from() -> ColumnElement[datetime]:
+def reflectable_from() -> ColumnElement[datetime]:
     """실행을 **회고할 수 있게 된 시각** = 계획 시각과 실제 착수 시각 중 나중 (#20).
 
     회고 창의 단일 기준식 — `list_pending_reflection`(창 안: `>= since`)과
@@ -206,7 +206,7 @@ class ExecutionRepo:
 
         시작만 하고 체크인하지 않은 실행 = 저녁 회고에서 소급 처리할 대상.
 
-        경계 식은 `_reflectable_from()` — 만료 cron(`expire_unreflected`)이 쓰는 것과 **반드시
+        경계 식은 `reflectable_from()` — 만료 cron(`expire_unreflected`)이 쓰는 것과 **반드시
         같아야** 이 창과 만료가 정확한 여집합이 된다(#20). 두 쪽이 서로 다른 컬럼을 보면 어느
         집합에도 안 드는 카드가 생긴다: 지난 블록을 뒤늦게 [▶시작] 하면 `plan_start_at` 은
         이미 창 밖이라 회고 화면에 **한 번도 안 뜨는데**, 만료는 `actual_start_at` 기준이라
@@ -217,7 +217,7 @@ class ExecutionRepo:
             .where(
                 ExecutionEvent.user_id == user_id,
                 ExecutionEvent.completion_status == "in_progress",
-                _reflectable_from() >= since,
+                reflectable_from() >= since,
             )
             .order_by(ExecutionEvent.plan_start_at)
         )
@@ -227,7 +227,7 @@ class ExecutionRepo:
     async def expire_unreflected(self, *, before: datetime, archived_at: datetime) -> int:
         """회고 창 밖의 미체크 실행의 카드를 만료. 반환: 만료 카드 수.
 
-        `list_pending_reflection` 의 **정확한 여집합** — 두 쪽 다 `_reflectable_from()` 을 기준으로
+        `list_pending_reflection` 의 **정확한 여집합** — 두 쪽 다 `reflectable_from()` 을 기준으로
         저 쪽이 `>= since` 를 보여주고 이 쪽이 `< since` 를 만료시킨다. 전역(모든 사용자) 일괄 처리 — cron 전용(Issue #20).
 
         만료 = `system_failure_reason='reflection_skipped'` + `archived_at`(soft delete)
@@ -263,7 +263,7 @@ class ExecutionRepo:
         """
         unreflected = select(ExecutionEvent.action_item_id).where(
             ExecutionEvent.completion_status == "in_progress",
-            _reflectable_from() < before,
+            reflectable_from() < before,
         )
         # 창 안/이후에 아직 미종결 블록이 남았다면 그 카드는 '진행 중인 계획' — 만료 대상 아님.
         has_live_block = (

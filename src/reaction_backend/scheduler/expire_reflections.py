@@ -4,7 +4,7 @@ DevBaseline §1.4 잠금 결정(AGENTS.md §1): "누적 정책: 미회고 카드
 `system_failure_reason='reflection_skipped'` 자동 만료."
 
 만료 대상 = `GET /reflection/pending` 창의 **정확한 여집합**. 양쪽 다 `execution_repo` 의
-`_reflectable_from()`(= 계획 시각과 실제 착수 시각 중 **나중**)을 기준으로, pending 은
+`reflectable_from()`(= 계획 시각과 실제 착수 시각 중 **나중**)을 기준으로, pending 은
 `>= pending_reflection_since(오늘)` 을 보여주고 이 cron 은 그 반대편(`<`)을 만료시킨다 —
 즉 **사용자가 아직 회고할 수 있는 카드는 절대 건드리지 않는다**. 카드는 만료 전에 저녁 회고
 기회를 정확히 3회 갖는다 (X일 카드 → X·X+1·X+2 의 21:00 노출 → X+3 04:00 만료). 이슈 원문의
@@ -55,7 +55,7 @@ def pending_reflection_since(today: date) -> datetime:
     노출하고, 만료 cron 은 `< ` 인 실행의 카드를 만료시킨다(정확한 여집합). 두 쪽이 각자
     계산하면 한쪽만 바뀌었을 때 회고 가능한 카드를 지우거나(데이터 손실) 영영 안 지워진다.
 
-    ⚠️ 경계와 짝을 이루는 **기준식**은 `ExecutionRepo._reflectable_from()`
+    ⚠️ 경계와 짝을 이루는 **기준식**은 `execution_repo.reflectable_from()`
     (= `greatest(plan_start_at, actual_start_at)`) 이다. 이 함수는 경계'값'만 정하고,
     무엇을 그 값과 비교하는지는 저쪽이 정한다 — 양쪽 다 같은 식을 써야 여집합이 성립한다.
 
@@ -81,7 +81,7 @@ async def run_abandon_stale_recoveries(
     """
     repo = repo or RecoveryRepo(session)
     now_dt = now or now_kst()
-    abandoned = await repo.abandon_stale(before=pending_reflection_since(now_dt.date()).date())
+    abandoned = await repo.abandon_stale(before=pending_reflection_since(now_dt.date()))
     await session.commit()
     if abandoned:
         _log.info("abandon_stale_recoveries: %d attempts abandoned", abandoned)

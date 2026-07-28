@@ -23,10 +23,14 @@ from reaction_backend.db.models.recovery_attempt import (
     RecoveryAttempt,
 )
 from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
+from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.session import get_db
 
+# 회고 창의 단일 기준식 — `abandon_stale` 이 만료 cron 과 **같은 식**을 써야 한다(#20).
+from reaction_backend.repositories.execution_repo import reflectable_from
+
 if TYPE_CHECKING:
-    from datetime import date, datetime
+    from datetime import datetime
 
 
 class RecoveryRepo:
@@ -148,7 +152,7 @@ class RecoveryRepo:
         await self._session.flush()
         return attempt
 
-    async def abandon_stale(self, *, before: date) -> int:
+    async def abandon_stale(self, *, before: datetime) -> int:
         """회고 창을 벗어났는데 아직 완주 안 된 회복을 포기 처리. 반환: 처리 건수 (#20).
 
         **왜 필요한가**: `complete_for_action` 은 회복 카드를 **체크인했을 때만** 스탬프한다.
@@ -156,22 +160,55 @@ class RecoveryRepo:
         `result='pending'`(아직 진행 중) 으로 남는다 — 특히 (b) 는 execution 이 없어
         `expire_unreflected` 대상도 아니다(그건 `in_progress` 실행만 본다).
 
-        **경계는 만료 cron과 같은 단일 소스** — `pending_reflection_since(오늘).date()`.
-        새 기준을 만들지 않고 잠금 결정("미회고 카드 최대 3일", AGENTS.md §1)을 그대로 쓴다.
-        같은 04:00 에 같은 경계로 정리되므로 사용자 관점의 "3일 지나면 정리된다" 가 일관된다.
+        **경계도 기준식도 만료 cron과 같은 단일 소스** — 경계값은
+        `pending_reflection_since(오늘)`, 기준식은 `execution_repo.reflectable_from()`.
+        예전엔 경계'값'만 공유하고 실제로 재는 **대상**은 `ActionItem.target_date` 였다.
+        그 비대칭이 데이터를 파괴했다: `find_open_block` 에 날짜 필터가 없어 지난 카드를
+        뒤늦게 [▶시작] 하면 `target_date` 는 창 밖인데 회고는 아직 가능하다. 그 상태에서
+        여기가 'abandoned' 로 확정해 버리면, 이후 사용자가 실제로 그 회복을 done 으로
+        마쳐도 `complete_for_action` 의 `recovery_result='pending'` 가드에 막혀
+        `recovery_duration_minutes` 가 영영 NULL 로 남는다 — **완주한 회복이
+        `average_recovery_minutes` 에서 통째로 사라진다**(#20 이 만든 KPI 자체의 손실).
 
-        가드 3개 (전부 데이터 보호 목적):
+        가드 5개 (전부 데이터 보호 목적):
         1. `recovery_result='pending'` — 멱등. **이미 completed 인 회복을 덮으면 지표가 파괴**된다.
         2. 카드 status 가 완주(done/over_done)면 제외 — `complete_for_action` 이 생기기 전
            데이터나 스탬프를 놓친 경우, 실제로 해낸 회복을 '포기' 로 오염시키지 않는다.
         3. `resulting_action_item_id` 매칭 자체가 채택(ADOPTED) 필터 — 그 컬럼은 채택 시에만 찬다.
+        4. **아직 회고할 수 있는 실행이 남은 카드는 제외** — `reflectable_from() >= before`.
+           `expire_unreflected` 와 같은 식이라 "사용자가 회고할 수 있는 건 안 건드린다" 가
+           두 cron 에서 같은 뜻이 된다.
+        5. 경계 이후에 살아있는 블록(scheduled/started)이 남은 카드도 제외 — `_after_block_time`
+           이 `plan_start_at` 기준이라 블록 날짜가 `target_date` 와 어긋날 수 있고, S15 이동으로
+           일정을 미래로 옮긴 회복도 여기 해당한다. 아직 하기로 되어 있는 회복을 포기로 덮지 않는다.
 
         ⚠️ `action_item.status` 는 **건드리지 않는다** (AGENTS.md §2) — 포기는
         `recovery_attempts.recovery_result` 에만 기록한다. 전역(모든 사용자) 일괄 — cron 전용.
         """
+        # 가드 4 — 회고 창 안의 실행이 하나라도 남았으면 아직 완주할 수 있는 회복이다.
+        still_reflectable = (
+            select(ExecutionEvent.id)
+            .where(
+                ExecutionEvent.action_item_id == ActionItem.id,
+                reflectable_from() >= before,
+            )
+            .exists()
+        )
+        # 가드 5 — 경계 이후에 아직 살아있는 블록이 남은 카드는 '진행 중인 계획'.
+        has_live_block = (
+            select(ScheduledBlock.id)
+            .where(
+                ScheduledBlock.action_item_id == ActionItem.id,
+                ScheduledBlock.block_status.in_(("scheduled", "started")),
+                ScheduledBlock.start_at >= before,
+            )
+            .exists()
+        )
         stale_cards = select(ActionItem.id).where(
-            ActionItem.target_date < before,
+            ActionItem.target_date < before.date(),
             ActionItem.status.notin_(RECOVERY_SUCCESS_STATUSES),
+            ~still_reflectable,
+            ~has_live_block,
         )
         stmt = (
             update(RecoveryAttempt)

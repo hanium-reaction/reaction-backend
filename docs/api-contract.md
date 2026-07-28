@@ -88,6 +88,12 @@
 
 같은 key 재호출 → 캐시된 응답 그대로. `IDEMPOTENCY_KEY_MISMATCH` 시 409.
 
+캐시는 **(호출자, endpoint, key)** 로 스코프된다 (DB 설계의 `UNIQUE(user_id, endpoint, key)`
+와 정렬). 키 값만으로 캐싱하면 body 없는 endpoint(`/replan/{id}/approve`)는 모든 호출의
+body 해시가 같아 mismatch 409 로도 안 걸러지고, 다른 사용자의 응답이 그대로 재생된다.
+→ **FE 는 키를 사용자·대상 스코프로 만들 것** (`replan-{executionId}` 형태. `Date.now()`
+같은 전역 타임스탬프는 충돌한다).
+
 ### 1.8 ID 표기
 
 - 문자열, 도메인 prefix 권장: `user_*`, `goal_*`, `action_*`, `block_*`, `exec_*`, `interview_*`, `recovery_*`, `policy_*`, `inbox_*` …
@@ -423,6 +429,11 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   pending 카드가 있으면 그대로 반환 (재호출 안전). 응답은 Draft Layer
   (`isDraft=true`, `aiSource=llm|rule`) + `cards[]` (attemptId/optionGroup/strategyType/
   labelKo/suggestedActionText/minRecoveryUnitMinutes/allowRestMode/triggerTag).
+  **이미 결정된 실행(pending 0건 + 결정 이력 있음)은 `RECOVERY_ALREADY_DECIDED`(409)** —
+  회복 카드 세트는 실행 1건당 1세트다. 재생성을 허용하면 `/recovery/decisions` 의 409 가
+  무력화돼 같은 실패에 회복 ActionItem 이 여러 개 생기고, replan 은 `created_at` 오름차순의
+  **첫** 채택 카드에 고정돼 사용자가 다시 고른 최신 회복이 영영 배치되지 않는다.
+  → FE 는 회복 화면 재진입 시 409 를 "이미 결정함"으로 처리한다(에러 토스트 X).
 - 룰 선택: `recovery_strategy_catalog.primary_trigger_tags` ↔ 실패 태그 매칭,
   그룹별 최고 1장, 최소 2장 패딩 (orchestrator/recovery.py).
 - `POST /recovery/decisions` 요청 `{ executionId, decision: accepted|edited|skipped,
@@ -453,6 +464,9 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   `scheduled_blocks`(source=`recovery`) 로 배치. 멱등: 이미 배치돼 있으면 같은 block 반환
   (중복 INSERT 방지). 응답 `{ executionId, scheduledBlockId, actionItemId, startAt, endAt,
   isDraft=false }`. 원본 `action_item.status` 불변.
+  멱등·`alreadyApproved` 판정은 **블록 소스와 무관**하게 그 회복 카드의 미취소 블록 유무로
+  한다 — S15 이동이 `source`를 `user_edit` 로 덮거나 주간 재계획이 `ai_plan` 으로 만들어도
+  '이미 배치됨'이다. 소스로 거르면 CTA 가 되살아나 블록이 중복 생성된다.
 - 재배치 대상은 **새 ActionItem 을 만든 그룹(DOWNSCOPE/CARRY_OVER)** 뿐. skipped/
   RESCHEDULE/PARK 는 `RECOVERY_NO_REPLAN`(422) — RESCHEDULE/PARK 의 시간 조정은 S15
   주간 편집기에서 처리.

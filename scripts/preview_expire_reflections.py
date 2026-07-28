@@ -8,7 +8,7 @@
 **아무것도 쓰지 않는다** — SELECT 뿐. --apply 같은 옵션 자체가 없다.
 
 정확성: 후보 판정은 `ExecutionRepo.expire_unreflected` 의 WHERE 와 **글자 단위로 같아야**
-한다. 창 기준식(`_reflectable_from`)과 경계(`pending_reflection_since`)는 그쪽 모듈에서
+한다. 창 기준식(`reflectable_from`)과 경계(`pending_reflection_since`)는 그쪽 모듈에서
 직접 import 하고, 나머지 조건은 미러다 — 두 쿼리의 WHERE 가 동일함을
 `tests/test_preview_expire_reflections.py` 가 compile 된 SQL 로 고정한다(어긋나면 CI 가
 깨져서, 만료 쿼리를 고치고 프리뷰를 잊는 사고를 막는다).
@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models import ActionItem, ExecutionEvent, ScheduledBlock, User
 from reaction_backend.db.session import get_sessionmaker
-from reaction_backend.repositories.execution_repo import _reflectable_from
+from reaction_backend.repositories.execution_repo import reflectable_from
 from reaction_backend.scheduler.expire_reflections import pending_reflection_since
 from reaction_backend.schemas.common import now_kst, to_kst
 
@@ -41,7 +41,7 @@ def expire_candidates_stmt(before: datetime) -> Select[Any]:
     """
     unreflected = select(ExecutionEvent.action_item_id).where(
         ExecutionEvent.completion_status == "in_progress",
-        _reflectable_from() < before,
+        reflectable_from() < before,
     )
     has_live_block = (
         select(ScheduledBlock.id)

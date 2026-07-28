@@ -7,6 +7,28 @@
 
 ---
 
+## v1.26 — 2026-07-29 (회복 상태 머신·멱등 정합성, #20)
+
+- ⚠️ **`POST /recovery/proposals/generate`** — 이미 결정된 실행은 `RECOVERY_ALREADY_DECIDED`(409).
+  기존엔 pending 이 0건이면 가드를 통과해 **두 번째 카드 세트**가 생겼다. 그 결과
+  `/recovery/decisions` 의 409 가 무력화돼 같은 실패에 회복 ActionItem 이 2개 생기고,
+  replan 은 `created_at` 오름차순의 첫 채택 카드에 고정돼 사용자가 다시 고른 최신 회복이
+  영영 배치되지 않았다. 새 에러 코드 없음(기존 §12 코드 재사용).
+  - **FE 후속**: 회복 화면 재진입 시 409 를 "이미 결정함"으로 처리 (에러 토스트 X).
+- **`POST /replan/{executionId}/approve` · `GET /replan/{executionId}`** — 멱등·`alreadyApproved`
+  판정에서 **블록 소스 필터 제거**. S15 이동(`source='user_edit'`)이나 주간 재계획
+  (`ai_plan`)으로 소스가 바뀐 블록을 못 보고 중복 배치하던 문제. 응답 스키마 불변.
+- ⚠️ **§1.7 Idempotency** — 캐시 키를 **(호출자, endpoint, key)** 로 스코프.
+  기존엔 헤더 값만 키라서, body 가 없는 `/replan/{id}/approve` 는 모든 호출의 body 해시가
+  같아 mismatch 409 로도 안 걸러지고 **다른 사용자의 응답이 재생**됐다(캐시 히트는 라우트
+  인증을 타지 않아 토큰 없이도 가능). 같은 호출자·같은 키의 재시도 보장은 그대로.
+  - ⚠️ **FE 후속**: `replanApi.approve` 의 키가 `replan-${Date.now()}` — 전역 타임스탬프라
+    충돌한다. `replan-${executionId}` 같은 대상 스코프 키로 교체할 것.
+- (계약 외) `RecoveryRepo.abandon_stale` 이 회고 창과 **같은 기준식**
+  (`greatest(plan_start_at, actual_start_at)`)을 쓴다. 기존엔 경계값만 공유하고 실제로는
+  `target_date` 를 재서, 아직 회고 가능한 회복을 '포기'로 확정 → 이후 완주해도 스탬프가
+  막혀 `average_recovery_minutes` 에서 사라졌다.
+
 ## v1.25 — 2026-07-22 (VAPID public key 엔드포인트, #16)
 
 - **신규** `GET /notifications/vapid-public-key` → `{ publicKey: string | null }`. FE 가

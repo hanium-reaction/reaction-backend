@@ -41,6 +41,7 @@ from reaction_backend.db.models.recovery_attempt import (
     RecoveryAttempt,
 )
 from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
+from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.session import get_db
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator.recovery import (
@@ -178,6 +179,18 @@ async def generate_recovery_proposals(
             execution_id=body.execution_id,
             cards=[_to_card(a, catalog.get(a.recovery_strategy_type)) for a in pending],
             ai_source="rule" if all(a.llm_fallback_used for a in pending) else "llm",
+        )
+    if existing:
+        # 결정이 끝난 실행 — pending 이 0건이라 위 가드를 그냥 통과해 **두 번째 카드 세트**가
+        # INSERT 되던 구멍. 그 결과 `/recovery/decisions` 의 409 가 무력화되고(같은 실패에
+        # 회복 ActionItem 2개), `_accepted_replan_attempt` 는 created_at 오름차순에서 처음
+        # 만난 채택 카드를 잡으므로 replan 은 **옛 결정**에 고정된다 — 사용자가 다시 고른
+        # 최신 회복은 화면에도 안 뜨고 블록도 영영 안 생긴다.
+        # decisions 와 같은 에러 코드로 상태 머신을 한 곳에서 닫는다 (api-contract §12).
+        raise ApiError(
+            ErrorCode.RECOVERY_ALREADY_DECIDED,
+            "이 실행의 회복 카드는 이미 결정됐어요.",
+            http_status=HTTPStatus.CONFLICT,
         )
 
     failure_tags = await repo.list_failure_tag_codes(execution.id)
@@ -428,6 +441,26 @@ def _after_block_time(
     return start_at, end_at
 
 
+async def _existing_replan_block(
+    user_id: UUID, recovery_action_id: UUID, block_repo: ScheduledBlockRepo
+) -> ScheduledBlock | None:
+    """회복 카드에 이미 배치된 블록 — GET 의 `alreadyApproved` 와 approve 멱등의 단일 소스.
+
+    **소스로 거르지 않는다.** 예전엔 `source == 'recovery'` 인 블록만 기존 배치로 인정했는데,
+    같은 회복 카드의 블록 소스는 다른 경로에서 바뀌거나 다른 값으로 생긴다:
+    S15 블록 이동(`PATCH /plans/{planId}/blocks/{blockId}`)이 `source='user_edit'` 로
+    덮어쓰고, 주간 forward 재계획은 `source='ai_plan'` 으로 만든다. 둘 다 소스 필터에
+    안 걸려 `alreadyApproved=false` 가 되고(FE 에 '배치하기' CTA 재노출), approve 가
+    블록을 하나 더 INSERT 했다 — `create_block` 은 겹침 검사도 하지 않는다.
+
+    형제 경로가 이미 같은 판정을 소스 무관으로 한다 (`planning.py` 주간 승인: "백로그인데
+    그새 활성 블록이 생겼으면 중복 방지로 skip"). `list_by_action_item` 은 cancelled 를
+    제외하고 start_at 오름차순이라, 첫 건을 고르는 것이 결정적이다.
+    """
+    blocks = await block_repo.list_by_action_item(user_id, recovery_action_id)
+    return blocks[0] if blocks else None
+
+
 async def _load_replan_context(
     user_id: UUID,
     raw_execution_id: str,
@@ -466,8 +499,9 @@ async def get_replan_diff(
         user.id, execution_id, repo, action_repo
     )
     start_at, end_at = _after_block_time(execution, original, recovery_action)
-    existing = await block_repo.list_by_action_item(user.id, recovery_action.id)
-    already_approved = any(b.source == _REPLAN_BLOCK_SOURCE for b in existing)
+    already_approved = (
+        await _existing_replan_block(user.id, recovery_action.id, block_repo) is not None
+    )
 
     return ReplanDiffResponse(
         execution_id=execution_id,
@@ -512,8 +546,7 @@ async def approve_replan(
         user.id, execution_id, repo, action_repo
     )
 
-    existing = await block_repo.list_by_action_item(user.id, recovery_action.id)
-    block = next((b for b in existing if b.source == _REPLAN_BLOCK_SOURCE), None)
+    block = await _existing_replan_block(user.id, recovery_action.id, block_repo)
     if block is None:
         start_at, end_at = _after_block_time(execution, original, recovery_action)
         block = await block_repo.create_block(

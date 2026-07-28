@@ -47,6 +47,32 @@ def _requires_idempotency(method: str, path: str) -> bool:
     return method == "POST" and any(p.match(path) for p in _IDEMPOTENT_ROUTES)
 
 
+def _cache_key(scope: Scope, key: str) -> str:
+    """캐시 키를 (호출자, 경로, 키) 로 스코프한다 — 헤더 값 하나로는 격리가 없다.
+
+    DB 설계서의 `idempotency_keys` 는 `UNIQUE(user_id, endpoint, key)` 인데, in-memory
+    구현이 헤더 값만 키로 쓰면서 그 스코프를 잃었다. 두 구멍이 실제로 뚫린다:
+
+    1. **교차 사용자 재생** — `POST /replan/{id}/approve` 는 body 가 없어 모든 호출의
+       `body_hash` 가 sha256(b"") 로 같다. 그래서 mismatch 409 로 걸러지지도 않고, 키만
+       겹치면 남의 200 응답(scheduledBlockId·actionItemId·남의 executionId)이 그대로
+       재생되고 정작 자기 블록은 생성되지 않는다. FE 가 쓰는 키가 `replan-{Date.now()}`
+       (밀리초 타임스탬프) 라 우연이 아니라 같은 ms 승인만으로 충돌한다.
+    2. **인증 우회** — 캐시 히트는 `self.app` 을 호출하지 않고 곧장 반환하므로, 라우트
+       레벨 `Depends(get_current_user)` 를 타지 않는다. 즉 JWT 없이도 캐시된 응답을
+       받아낼 수 있었다.
+
+    호출자 식별에 Authorization 헤더의 해시를 쓴다 — 미들웨어는 인증 전 계층이라
+    `user_id` 를 알 수 없고, 여기서 JWT 를 검증하면 인증 로직이 두 벌이 된다. 토큰이
+    갱신되면 네임스페이스가 갈려 캐시 미스가 되지만, 그때는 요청이 실제로 한 번 더
+    실행될 뿐이고 5개 대상 endpoint 는 모두 도메인 레벨에서 멱등하다(회복 결정은 409,
+    replan 승인은 기존 블록 반환).
+    """
+    caller = _header(scope, "authorization")
+    fingerprint = hashlib.sha256(caller.encode("utf-8")).hexdigest()[:32] if caller else "anon"
+    return f"{scope['path']}|{fingerprint}|{key}"
+
+
 @dataclass(slots=True)
 class StoredResponse:
     """캐시된 응답 스냅샷."""
@@ -190,7 +216,8 @@ class IdempotencyMiddleware:
             return
 
         body_hash = hashlib.sha256(body).hexdigest()
-        cached = self.store.get(key)
+        scoped_key = _cache_key(scope, key)
+        cached = self.store.get(scoped_key)
         if cached is not None:
             if cached.body_hash != body_hash:
                 await _send_error(
@@ -209,7 +236,7 @@ class IdempotencyMiddleware:
         # 성공(2xx) 응답만 캐시 — 실패 응답은 재시도 가능하게 둔다.
         if 200 <= capture.status < 300:
             self.store.put(
-                key,
+                scoped_key,
                 StoredResponse(
                     status=capture.status,
                     headers=capture.headers,
