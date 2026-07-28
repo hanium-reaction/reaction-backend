@@ -1005,11 +1005,13 @@ class FakeRecoveryRepo:
             if a.user_id == user_id and a.execution_id == execution_id
         ]
 
-    async def get_attempt(self, user_id: UUID, attempt_id: UUID) -> RecoveryAttempt | None:
-        a = self._attempts.get(attempt_id)
-        if a is None or a.user_id != user_id:
-            return None
-        return a
+    async def get_strategy(self, strategy_type: str) -> RecoveryStrategyCatalog | None:
+        # 실 repo 와 같이 **is_active 필터 포함** — 비활성이면 None 이라 호출자가 기본
+        # 회복 단위(5분)로 떨어지는 동작이 fake 에서도 재현돼야 한다.
+        return next(
+            (s for s in self._strategies if s.strategy_type == strategy_type and s.is_active),
+            None,
+        )
 
     async def create_attempt(
         self,

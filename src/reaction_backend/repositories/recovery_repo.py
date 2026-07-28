@@ -75,10 +75,16 @@ class RecoveryRepo:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
-    async def get_attempt(self, user_id: UUID, attempt_id: UUID) -> RecoveryAttempt | None:
-        stmt = select(RecoveryAttempt).where(
-            RecoveryAttempt.id == attempt_id,
-            RecoveryAttempt.user_id == user_id,
+    async def get_strategy(self, strategy_type: str) -> RecoveryStrategyCatalog | None:
+        """활성 전략 1건. 카탈로그 전체를 긁어 파이썬에서 찾던 것을 대체한다.
+
+        ⚠️ `is_active` 필터를 빼지 말 것 — 비활성 전략이면 None 이 나와 호출자가 기본
+        회복 단위(5분)로 떨어지는 것이 의도다. 필터를 빼면 새 카드의 estimated_minutes 가
+        비활성 전략의 min_recovery_unit_minutes 로 바뀐다.
+        """
+        stmt = select(RecoveryStrategyCatalog).where(
+            RecoveryStrategyCatalog.strategy_type == strategy_type,
+            RecoveryStrategyCatalog.is_active.is_(True),
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()

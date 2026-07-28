@@ -6,14 +6,21 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
-from reaction_backend.orchestrator.recovery import render_template, select_strategies
+from reaction_backend.orchestrator.recovery import (
+    recovery_target_date,
+    recovery_unit_minutes,
+    render_template,
+    select_strategies,
+    shift_to_recovery_day,
+)
+from reaction_backend.schemas.common import KST
 from tests.conftest import (
     DEMO_USER_UUID,
     FakeActionItemRepo,
@@ -598,6 +605,53 @@ def test_render_template_missing_var_is_safe() -> None:
         render_template("{suspended_step} 부터 다시", {"suspended_step": "ERD 검토"})
         == "ERD 검토 부터 다시"
     )
+
+
+def test_recovery_target_date_only_carry_over_moves_to_tomorrow() -> None:
+    """'내일로 이어가기'는 CARRY_OVER 뿐 — 나머지 그룹은 결정한 날 그대로."""
+    decided_on = date(2026, 7, 29)
+    assert recovery_target_date(decided_on, "CARRY_OVER") == date(2026, 7, 30)
+    for group in ("DOWNSCOPE", "RESCHEDULE", "PARK"):
+        assert recovery_target_date(decided_on, group) == decided_on
+
+
+def test_recovery_unit_minutes_floors_at_default() -> None:
+    """전략이 없거나(비활성/삭제) 최소 단위가 더 짧으면 기본 5분."""
+    assert recovery_unit_minutes(None) == 5
+    assert recovery_unit_minutes(3) == 5
+    assert recovery_unit_minutes(5) == 5
+    assert recovery_unit_minutes(30) == 30
+
+
+def test_shift_to_recovery_day_preserves_wall_clock_across_days() -> None:
+    """일 단위 시프트라 KST 벽시계 시각이 보존된다 (KST 는 DST 가 없다)."""
+    plan_start = datetime(2026, 7, 29, 14, 0, tzinfo=KST)
+    start_at, end_at = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 7, 29),
+        recovery_target_date=date(2026, 7, 30),  # CARRY_OVER
+        estimated_minutes=30,
+    )
+    assert start_at == datetime(2026, 7, 30, 14, 0, tzinfo=KST)
+    assert end_at == datetime(2026, 7, 30, 14, 30, tzinfo=KST)
+
+
+def test_shift_to_recovery_day_same_day_keeps_original_slot() -> None:
+    """DOWNSCOPE(같은 날)는 day_delta=0 → 원본 슬롯 시각 그대로.
+
+    이건 **의도된 현재 계약**이다 (api-contract.md §12 "일 단위 시프트"). 21시 회고에서
+    수락하면 결과가 이미 지난 시각이 되는 알려진 한계라, 바꾸려면 계약 개정이 선행돼야
+    한다 (AGENTS.md §8). 이 테스트는 그 계약을 고정해 **모르는 사이에 바뀌는 것**을 막는다.
+    """
+    plan_start = datetime(2026, 7, 29, 14, 0, tzinfo=KST)
+    start_at, end_at = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 7, 29),
+        recovery_target_date=date(2026, 7, 29),
+        estimated_minutes=5,
+    )
+    assert start_at == plan_start
+    assert end_at == datetime(2026, 7, 29, 14, 5, tzinfo=KST)
 
 
 # ───────────────────────── decisions: edited (#20 DoD 7) ─────────────────

@@ -10,13 +10,22 @@ LLM(Recovery Coach)은 선두 카드의 if-then 문구 personalize 에만 쓰이
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from datetime import date, datetime
+
     from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
 
 MIN_CARDS = 2
 MAX_CARDS = 4
+
+# 회복 카드가 '내일'로 넘어가는 그룹 — CARRY_OVER 만 하루 뒤다 (UX 4 그룹 중 1).
+_CARRY_OVER_GROUP = "CARRY_OVER"
+
+# 카탈로그에 전략이 없을 때(비활성 등) 회복 카드의 기본 소요 시간 — 최소 회복 단위.
+DEFAULT_RECOVERY_MINUTES = 5
 
 
 class _SafeFormatDict(dict[str, str]):
@@ -87,3 +96,44 @@ def first_matching_tag(failure_tags: list[str], strategy: RecoveryStrategyCatalo
         if tag in primary:
             return tag
     return None
+
+
+def recovery_target_date(decided_on: date, option_group: str) -> date:
+    """회복 카드를 언제 할 것인가 — 기본은 결정한 날, CARRY_OVER 만 '내일로 이어가기'.
+
+    제품 규칙(UX 4 그룹)이라 HTTP 핸들러가 아니라 여기 산다. DOWNSCOPE 는 "지금 작게라도
+    해보기"라 같은 날, CARRY_OVER 는 그룹 이름 그대로 하루 뒤다.
+    """
+    return decided_on + timedelta(days=1) if option_group == _CARRY_OVER_GROUP else decided_on
+
+
+def recovery_unit_minutes(min_recovery_unit_minutes: int | None) -> int:
+    """회복 카드의 소요 시간 — 전략의 최소 회복 단위, 없거나 더 짧으면 기본값.
+
+    전략이 비활성이거나 카탈로그에서 사라진 경우 `None` 이 들어온다.
+    """
+    if min_recovery_unit_minutes is None:
+        return DEFAULT_RECOVERY_MINUTES
+    return max(min_recovery_unit_minutes, DEFAULT_RECOVERY_MINUTES)
+
+
+def shift_to_recovery_day(
+    plan_start_at: datetime,
+    *,
+    original_target_date: date,
+    recovery_target_date: date,
+    estimated_minutes: int,
+) -> tuple[datetime, datetime]:
+    """회복 카드 제안 시각 — 원본 계획 시각대를 회복 날짜로 그대로 이동 (api-contract §12).
+
+    일(day) 단위 시프트라 시간대(KST/UTC offset)는 그대로 보존된다 — KST 는 DST 가 없어
+    UTC 인스턴트에 정수 일을 더하면 벽시계 시각이 유지된다. 룰 기반이라 freebusy 와 무관.
+
+    ⚠️ 알려진 한계 — DOWNSCOPE 는 `recovery_target_date == 결정한 날` 이라 day_delta 가 0 이
+    되고, 회복 결정은 21시 회고에서 일어나므로 결과 시각이 **이미 지나간 원본 슬롯**이 된다.
+    계약(api-contract.md §12 "일 단위 시프트")이 이 계산을 명시하고 있어 여기서 임의로
+    보정하지 않는다 — 시각 보정은 계약 개정과 함께 가야 한다 (AGENTS.md §8).
+    """
+    day_delta = (recovery_target_date - original_target_date).days
+    start_at = plan_start_at + timedelta(days=day_delta)
+    return start_at, start_at + timedelta(minutes=estimated_minutes)

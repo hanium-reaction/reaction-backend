@@ -25,9 +25,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from http import HTTPStatus
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
@@ -46,8 +46,11 @@ from reaction_backend.db.session import get_db
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator.recovery import (
     first_matching_tag,
+    recovery_target_date,
+    recovery_unit_minutes,
     render_template,
     select_strategies,
+    shift_to_recovery_day,
 )
 from reaction_backend.repositories.action_item_repo import (
     ActionItemRepo,
@@ -73,6 +76,9 @@ from reaction_backend.schemas.recovery import (
 )
 
 router = APIRouter(tags=["recovery"])
+
+# 응답의 aiSource 리터럴 (DraftMixin 과 같은 집합 — 계약 동결).
+AiSource = Literal["llm", "rule"]
 
 _EXEC_PREFIX = "exec_"
 _ATTEMPT_PREFIX = "rec_"
@@ -120,6 +126,15 @@ def _attempt_not_found() -> ApiError:
         "해당 회복 카드를 찾을 수 없어요.",
         http_status=HTTPStatus.NOT_FOUND,
     )
+
+
+def _ai_source(fell_back: bool) -> AiSource:
+    """응답의 `aiSource` — 룰 폴백이었으면 'rule', LLM 문구가 반영됐으면 'llm'.
+
+    generate 응답(신규/pending 재사용)과 replan diff 세 곳이 같은 판정을 해야 한다.
+    리터럴 값은 계약 동결(api-contract §12)이라 문자열 자체는 바꾸지 않는다.
+    """
+    return "rule" if fell_back else "llm"
 
 
 def _to_card(attempt: RecoveryAttempt, strategy: RecoveryStrategyCatalog | None) -> RecoveryCard:
@@ -178,7 +193,7 @@ async def generate_recovery_proposals(
         return RecoveryProposalsResponse(
             execution_id=body.execution_id,
             cards=[_to_card(a, catalog.get(a.recovery_strategy_type)) for a in pending],
-            ai_source="rule" if all(a.llm_fallback_used for a in pending) else "llm",
+            ai_source=_ai_source(all(a.llm_fallback_used for a in pending)),
         )
     if existing:
         # 결정이 끝난 실행 — pending 이 0건이라 위 가드를 그냥 통과해 **두 번째 카드 세트**가
@@ -270,8 +285,120 @@ async def generate_recovery_proposals(
     return RecoveryProposalsResponse(
         execution_id=body.execution_id,
         cards=[_to_card(a, catalog.get(a.recovery_strategy_type)) for a in attempts],
-        ai_source="rule" if result.fell_back else "llm",
+        ai_source=_ai_source(result.fell_back),
     )
+
+
+def _validated_target(
+    body: RecoveryDecisionRequest, pending: list[RecoveryAttempt], edited_text: str
+) -> RecoveryAttempt:
+    """수락 대상 카드를 찾고 채택 관련 검증을 **전부** 끝낸다 (부수효과 0).
+
+    호출자가 이 함수를 첫 대입보다 앞에서 부르는 한, 422/404 가 나도 세션에 부분 변경이
+    남지 않는다 — 그게 이 함수가 순수한 이유다.
+    """
+    if body.accepted_attempt_id is None:
+        raise ApiError(
+            ErrorCode.COMMON_VALIDATION_ERROR,
+            "수락할 카드(acceptedAttemptId)를 알려주세요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="acceptedAttemptId",
+        )
+    attempt_id = _parse_id(body.accepted_attempt_id, _ATTEMPT_PREFIX, _attempt_not_found())
+    target = next((a for a in pending if a.id == attempt_id), None)
+    if target is None:
+        raise _attempt_not_found()
+
+    if body.decision == "edited":
+        if not edited_text:
+            raise ApiError(
+                ErrorCode.COMMON_VALIDATION_ERROR,
+                "고친 문구(editedActionText)를 알려주세요.",
+                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                field="editedActionText",
+            )
+        if target.recovery_option_group not in _GROUP_TO_SOURCE:
+            # 이 그룹은 새 카드를 만들지 않아 문구를 담을 곳이 없다. 계약상 이들의 조정은
+            # 문구가 아니라 시간이고, 그 경로는 S15 주간 편집기(PATCH blocks)다.
+            raise ApiError(
+                ErrorCode.RECOVERY_EDIT_NOT_SUPPORTED,
+                "이 회복은 문구 대신 시간을 조정해요. 주간 편집기에서 옮겨 주세요.",
+                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                field="editedActionText",
+            )
+    return target
+
+
+def _adopt(
+    target: RecoveryAttempt, decision: str, decision_reason: str | None, decided_at: datetime
+) -> str:
+    """채택 스탬프. `recovery_started_at` = 결정 시각 (average_recovery_minutes 의 기점)."""
+    target.user_decision = decision
+    target.recovery_decided_at = decided_at
+    target.recovery_started_at = decided_at
+    target.decision_reason = decision_reason
+    return f"{_ATTEMPT_PREFIX}{target.id}"
+
+
+def _reject_siblings(
+    pending: list[RecoveryAttempt], target: RecoveryAttempt, decided_at: datetime
+) -> list[str]:
+    """수락 카드를 뺀 나머지 pending 을 rejected 로 — 같은 그룹 동시 노출 1카드 규칙의 뒷면."""
+    rejected: list[str] = []
+    for sibling in pending:
+        if sibling.id == target.id:
+            continue
+        sibling.user_decision = "rejected"
+        sibling.recovery_decided_at = decided_at
+        rejected.append(f"{_ATTEMPT_PREFIX}{sibling.id}")
+    return rejected
+
+
+def _skip_all(
+    pending: list[RecoveryAttempt], decision_reason: str | None, decided_at: datetime
+) -> list[str]:
+    """'오늘은 쉬기' — 모든 pending 카드를 skipped 로."""
+    skipped: list[str] = []
+    for sibling in pending:
+        sibling.user_decision = "skipped"
+        sibling.recovery_decided_at = decided_at
+        sibling.decision_reason = decision_reason
+        skipped.append(f"{_ATTEMPT_PREFIX}{sibling.id}")
+    return skipped
+
+
+async def _create_recovery_action(
+    *,
+    user_id: UUID,
+    execution: ExecutionEvent,
+    target: RecoveryAttempt,
+    source: str,
+    edited_text: str,
+    decided_at: datetime,
+    repo: RecoveryRepo,
+    action_repo: ActionItemRepo,
+) -> UUID:
+    """DOWNSCOPE/CARRY_OVER 수락 → 회복 ActionItem 생성. 반환: 새 카드 ID.
+
+    원본 카드는 **읽기만** 한다 (category 상속). `action_item.status` 는 건드리지 않는다
+    — AGENTS.md §2, Resilience 지표의 전제.
+    """
+    original = await action_repo.get_by_id(user_id, execution.action_item_id)
+    strategy = await repo.get_strategy(target.recovery_strategy_type)
+    new_action = await action_repo.create_from_recovery(
+        user_id=user_id,
+        parent_action_item_id=execution.action_item_id,
+        # 편집 수락이면 사용자 문구가 카드 제목이 된다. `target.suggested_action_text`
+        # (AI 원문)는 그대로 둔다 — 덮어쓰면 "얼마나 고쳐 썼나"를 영영 못 잰다.
+        title=edited_text or (target.suggested_action_text or "회복 액션")[:300],
+        category=original.category if original is not None else "other",
+        source=source,
+        target_date=recovery_target_date(decided_at.date(), target.recovery_option_group),
+        estimated_minutes=recovery_unit_minutes(
+            strategy.min_recovery_unit_minutes if strategy is not None else None
+        ),
+    )
+    return new_action.id
 
 
 @router.post("/recovery/decisions")
@@ -316,84 +443,29 @@ async def decide_recovery(
         )
 
     if body.decision in ADOPTED_DECISION_VALUES:
-        if body.accepted_attempt_id is None:
-            raise ApiError(
-                ErrorCode.COMMON_VALIDATION_ERROR,
-                "수락할 카드(acceptedAttemptId)를 알려주세요.",
-                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-                field="acceptedAttemptId",
-            )
-        attempt_id = _parse_id(body.accepted_attempt_id, _ATTEMPT_PREFIX, _attempt_not_found())
-        target = next((a for a in pending if a.id == attempt_id), None)
-        if target is None:
-            raise _attempt_not_found()
+        # ⚠️ 검증이 **전부** 첫 대입보다 앞에 온다 — 그래서 422 가 나도 부분 변경이 없다.
+        # 이 순서가 뒤집히면 "실패했는데 일부만 반영된" 상태가 커밋될 수 있다.
+        target = _validated_target(body, pending, edited_text)
 
-        if body.decision == "edited":
-            if not edited_text:
-                raise ApiError(
-                    ErrorCode.COMMON_VALIDATION_ERROR,
-                    "고친 문구(editedActionText)를 알려주세요.",
-                    http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-                    field="editedActionText",
-                )
-            if target.recovery_option_group not in _GROUP_TO_SOURCE:
-                # 이 그룹은 새 카드를 만들지 않아 문구를 담을 곳이 없다. 계약상 이들의 조정은
-                # 문구가 아니라 시간이고, 그 경로는 S15 주간 편집기(PATCH blocks)다.
-                raise ApiError(
-                    ErrorCode.RECOVERY_EDIT_NOT_SUPPORTED,
-                    "이 회복은 문구 대신 시간을 조정해요. 주간 편집기에서 옮겨 주세요.",
-                    http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-                    field="editedActionText",
-                )
-
-        target.user_decision = body.decision
-        target.recovery_decided_at = decided_at
-        target.recovery_started_at = decided_at
-        target.decision_reason = body.decision_reason
-        accepted_id = f"{_ATTEMPT_PREFIX}{target.id}"
-
-        for sibling in pending:
-            if sibling.id == target.id:
-                continue
-            sibling.user_decision = "rejected"
-            sibling.recovery_decided_at = decided_at
-            rejected_ids.append(f"{_ATTEMPT_PREFIX}{sibling.id}")
+        accepted_id = _adopt(target, body.decision, body.decision_reason, decided_at)
+        rejected_ids = _reject_siblings(pending, target, decided_at)
 
         source = _GROUP_TO_SOURCE.get(target.recovery_option_group)
         if source is not None:
-            original = await action_repo.get_by_id(user.id, execution.action_item_id)
-            strategy = next(
-                (
-                    s
-                    for s in await repo.list_active_strategies()
-                    if s.strategy_type == target.recovery_strategy_type
-                ),
-                None,
-            )
-            target_date = decided_at.date()
-            if target.recovery_option_group == "CARRY_OVER":
-                target_date = target_date + timedelta(days=1)
-            new_action = await action_repo.create_from_recovery(
+            new_action_id = await _create_recovery_action(
                 user_id=user.id,
-                parent_action_item_id=execution.action_item_id,
-                # 편집 수락이면 사용자 문구가 카드 제목이 된다. `target.suggested_action_text`
-                # (AI 원문)는 그대로 둔다 — 덮어쓰면 "얼마나 고쳐 썼나"를 영영 못 잰다.
-                title=edited_text or (target.suggested_action_text or "회복 액션")[:300],
-                category=original.category if original is not None else "other",
+                execution=execution,
+                target=target,
                 source=source,
-                target_date=target_date,
-                estimated_minutes=(
-                    max(strategy.min_recovery_unit_minutes, 5) if strategy is not None else 5
-                ),
+                edited_text=edited_text,
+                decided_at=decided_at,
+                repo=repo,
+                action_repo=action_repo,
             )
-            target.resulting_action_item_id = new_action.id
-            resulting_action_id = f"{_ACTION_PREFIX}{new_action.id}"
+            target.resulting_action_item_id = new_action_id
+            resulting_action_id = f"{_ACTION_PREFIX}{new_action_id}"
     else:  # skipped
-        for sibling in pending:
-            sibling.user_decision = "skipped"
-            sibling.recovery_decided_at = decided_at
-            sibling.decision_reason = body.decision_reason
-            skipped_ids.append(f"{_ATTEMPT_PREFIX}{sibling.id}")
+        skipped_ids = _skip_all(pending, body.decision_reason, decided_at)
 
     await session.commit()
 
@@ -431,14 +503,17 @@ def _accepted_replan_attempt(attempts: list[RecoveryAttempt]) -> RecoveryAttempt
 def _after_block_time(
     execution: ExecutionEvent, original: ActionItem, recovery_action: ActionItem
 ) -> tuple[datetime, datetime]:
-    """회복 카드 제안 시각 — 원본 계획 시각대를 회복 target_date 로 그대로 이동.
+    """회복 카드 제안 시각 — ORM 객체에서 원시값을 꺼내 orchestrator 규칙에 넘긴다.
 
-    일(day) 단위 시프트라 시간대(KST/UTC offset)는 그대로 보존된다 (룰 기반, freebusy 무관).
+    계산 자체(및 알려진 한계)는 `orchestrator.recovery.shift_to_recovery_day` 에 있다 —
+    DB/요청 객체가 필요 없는 순수 규칙이라 그쪽에서 단위 테스트로 고정된다.
     """
-    day_delta = (recovery_action.target_date - original.target_date).days
-    start_at = execution.plan_start_at + timedelta(days=day_delta)
-    end_at = start_at + timedelta(minutes=recovery_action.estimated_minutes)
-    return start_at, end_at
+    return shift_to_recovery_day(
+        execution.plan_start_at,
+        original_target_date=original.target_date,
+        recovery_target_date=recovery_action.target_date,
+        estimated_minutes=recovery_action.estimated_minutes,
+    )
 
 
 async def _existing_replan_block(
@@ -522,7 +597,7 @@ async def get_replan_diff(
             end_at=end_at,
             estimated_minutes=recovery_action.estimated_minutes,
         ),
-        ai_source="rule" if attempt.llm_fallback_used else "llm",
+        ai_source=_ai_source(attempt.llm_fallback_used),
         already_approved=already_approved,
     )
 
