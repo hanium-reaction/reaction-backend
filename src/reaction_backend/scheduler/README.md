@@ -14,6 +14,7 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 | 6시간마다 | `interruption_resolver` — `resumed_after_interrupt IS NULL AND created_at < now()-6h` → `false` | `interruption_events` UPDATE |
 | 6시간마다 | `expire_stale_drafts` — `plan_drafts.status='draft' AND expires_at < now()` → `expired` (72h, §7.8) | `plan_drafts` UPDATE |
 | 매일 04:00 KST | `expire_unreflected_cards` — 회고 창(3일) 밖 미체크 실행의 카드 → `system_failure_reason='reflection_skipped'` + `archived_at` + 미종결 블록 cancel | `action_items` / `scheduled_blocks` UPDATE |
+| 매일 04:00 KST | `abandon_stale_recoveries` — 회고 창 밖 미완주 회복 → `recovery_result='abandoned'` (같은 job 안에서 만료 뒤 실행) | `recovery_attempts` UPDATE |
 | 매일 04:00 KST | `anonymize_inactive_users` — last_active_at < now()-90d → 익명화 | `users` UPDATE |
 | 1시간마다 | `oauth_token_refresher` — 만료 임박 토큰 갱신 | `calendar_connections` UPDATE |
 | ~~5분마다~~ | ~~`notification_dispatcher` — 예약된 알림 발송~~ — **발송 게이트로 대체** (`safety/push_gate.py`, ADR-0006 §1: 큐 없이 cron → 게이트 직접발송, enforce 지점은 게이트 단일) | — |
@@ -29,6 +30,7 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 | `run_expire_stale_drafts(session, *, now, repo)` | `expire_drafts.py` | #62 | ✅ job 로직 (72h 미응답 Draft expired, idempotent) |
 | `run_weekly_review_for_user(user_id, week_start, now_kst_dt, *, repo, force=False)` | `weekly_review_precompute.py` | #21-A | ✅ job 로직 (룰 KPI 집계 → `period_summaries` upsert, 같은 주 skip) |
 | `run_expire_unreflected_cards(session, *, now, repo)` | `expire_reflections.py` | #20 | ✅ job 로직 (회고 창 밖 미체크 카드 만료, idempotent). 창 경계 `pending_reflection_since(today)` 는 **라우터도 재사용하는 단일 소스** — `GET /reflection/pending` 이 `>=`, cron 이 `<` (정확한 여집합) |
+| `run_abandon_stale_recoveries(session, *, now, repo)` | `expire_reflections.py` | #20 | ✅ job 로직 (회고 창 밖 미완주 회복 포기, idempotent). 만료 cron 과 **경계값도 기준식도 같은 소스** — `pending_reflection_since(today)` + `execution_repo.reflectable_from()`. 두 쪽이 다른 컬럼을 재면 아직 회고 가능한 회복이 포기로 확정돼 `average_recovery_minutes` 가 사라진다 |
 | `run_evening_reflection_notify_sweep(now, *, user_repo, notif_repo, execution_repo, send_repo, sender, session)` | `notify_sweeps.py` | #20 | ✅ 사용자별 `evening_reflection_time` 이후 첫 폴에서 발송 (pending 있을 때만 — 창 경계는 위와 동일 소스). 발송 판단은 전부 `safety/push_gate.py` (주 ≤3건·23~07 금지·클래스 하루 1건) |
 | `run_pre_card_notify_sweep(now, *, execution_repo, notif_repo, send_repo, sender, session)` | `notify_sweeps.py` | #20 | ✅ `[now+2m, now+7m)` 시작 `scheduled` 블록 → opt-in 사용자에게 사전 알림. 동일 게이트 경유 |
 

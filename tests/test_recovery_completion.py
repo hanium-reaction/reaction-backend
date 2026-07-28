@@ -194,12 +194,29 @@ async def test_abandon_stale_pins_where_and_set() -> None:
     assert "recovery_attempts.resulting_action_item_id IN (SELECT action_items.id" in sql, (
         f"채택 필터(조인 키)가 풀렸다: {sql}"
     )
-    # 회고 창 기준식 가드 — 만료 cron 과 **같은 식**이어야 여집합이 성립한다 (#20).
-    assert "greatest(execution_events.plan_start_at" in sql, f"회고 창 기준식이 빠졌다: {sql}"
-    assert "coalesce(execution_events.actual_start_at" in sql, f"실 착수 시각을 안 본다: {sql}"
-    assert "NOT (EXISTS (SELECT execution_events.id" in sql, (
-        f"회고 가능한 실행 제외 가드가 풀렸다: {sql}"
-    )
+    # 가드 4 — 회고 창 기준식. 만료 cron 과 **같은 식**이어야 여집합이 성립한다 (#20).
+    # ⚠️ 기준식의 '존재'만 보면 안 된다. `>=` 를 `<` 로 뒤집는 뮤턴트는 이 커밋이 고친
+    # 버그의 정확한 역전(창 안 회복을 골라 포기 처리)인데, 부분 문자열만 보면 살아남는다.
+    # abandon_stale 은 fake 가 없어(cron 전용) 이 테스트가 유일한 방어선이므로
+    # **연산자와 경계 리터럴까지 한 문자열로** 고정한다.
+    assert (
+        "NOT (EXISTS (SELECT execution_events.id FROM execution_events "
+        "WHERE execution_events.action_item_id = action_items.id "
+        "AND greatest(execution_events.plan_start_at, "
+        "coalesce(execution_events.actual_start_at, execution_events.plan_start_at)) "
+        ">= '2026-07-22 00:00:00+09:00')"
+    ) in sql, f"회고 창 가드(기준식·방향·경계)가 풀렸다: {sql}"
+
+    # 가드 5 — 경계 이후 살아있는 블록이 남은 카드는 제외. expire_unreflected 의
+    # `has_live_block` 과 술어가 같아야 한다(복사본이라 한쪽만 바뀌면 조용히 드리프트).
+    # 부정(~)·상태 집합·경계를 전부 고정 — 셋 다 뒤집으면 정반대 대상을 포기 처리한다.
+    assert (
+        "NOT (EXISTS (SELECT scheduled_blocks.id FROM scheduled_blocks "
+        "WHERE scheduled_blocks.action_item_id = action_items.id "
+        "AND scheduled_blocks.block_status IN ('scheduled', 'started') "
+        "AND scheduled_blocks.start_at >= '2026-07-22 00:00:00+09:00')"
+    ) in sql, f"살아있는 블록 가드(부정·상태·경계)가 풀렸다: {sql}"
+
     assert "UPDATE action_items" not in sql, "원본 카드 status 를 갱신한다 (AGENTS §2 위반)"
 
 
