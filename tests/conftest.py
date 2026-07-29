@@ -930,8 +930,8 @@ def default_recovery_strategies() -> list[RecoveryStrategyCatalog]:
         _make_strategy(
             "FREEZE_SLOT",
             "CARRY_OVER",
-            "슬롯 예약 (다음 주)",
-            "이번 슬롯은 비워두고 다음 주 같은 시간에 예약할게요.",
+            "급한 일 먼저, 같은 슬롯 유지",
+            "급한 일이 먼저였잖아요. 같은 시간대를 그대로 지켜서 다시 잡아드릴까요?",
             30,
             ["EMERGENCY"],
             False,
@@ -973,14 +973,17 @@ class FakeRecoveryRepo:
         action_item_id: UUID,
         completion_status: str = "failed",
         failure_tags: list[str] | None = None,
+        plan_start_at: datetime | None = None,
     ) -> ExecutionEvent:
         e = ExecutionEvent()
         e.id = uuid4()
         e.user_id = user_id
         e.action_item_id = action_item_id
         e.scheduled_block_id = uuid4()
-        e.plan_start_at = datetime.now(UTC)
-        e.plan_end_at = datetime.now(UTC)
+        # 기본값(now)은 카드 target_date(2026-06-05 고정)와 어긋나 day_delta 가 수십 일이 된다
+        # — 그래서 기본 시드로는 #174(과거 슬롯)가 재현되지 않는다. 재현하려면 명시로 넘길 것.
+        e.plan_start_at = plan_start_at or datetime.now(UTC)
+        e.plan_end_at = e.plan_start_at
         e.completion_status = completion_status
         self._executions[e.id] = e
         self._failure_tags[e.id] = list(failure_tags or [])

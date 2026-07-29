@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from reaction_backend.orchestrator.recovery import (
+    RECOVERY_NIGHT_CUTOFF_HOUR,
     recovery_target_date,
     recovery_unit_minutes,
     render_template,
@@ -36,26 +37,35 @@ def _seed_failed_execution(
     completion_status: str = "failed",
     failure_tags: list[str] | None = None,
     title: str = "GROUP BY 실습",
+    target_date: date = date(2026, 6, 5),
+    plan_start_at: datetime | None = None,
 ) -> str:
-    """실패한 실행 1건 시드 → `exec_<uuid>` ID 반환."""
-    action = _seed_action(action_repo, title=title)
+    """실패한 실행 1건 시드 → `exec_<uuid>` ID 반환.
+
+    `target_date`/`plan_start_at` 기본값은 서로 수십 일 떨어져 있어 day_delta 가 커진다
+    (= 시프트 결과가 미래). #174 의 과거 슬롯을 재현하려면 **둘을 같은 날로** 넘길 것.
+    """
+    action = _seed_action(action_repo, title=title, target_date=target_date)
     execution = recovery_repo.register_execution(
         user_id=DEMO_USER_UUID,
         action_item_id=action.id,
         completion_status=completion_status,
         failure_tags=failure_tags or ["AMBIGUITY"],
+        plan_start_at=plan_start_at,
     )
     return f"exec_{execution.id}"
 
 
-def _seed_action(action_repo: FakeActionItemRepo, *, title: str) -> Any:
+def _seed_action(
+    action_repo: FakeActionItemRepo, *, title: str, target_date: date = date(2026, 6, 5)
+) -> Any:
     from reaction_backend.db.models.action_item import ActionItem
 
     a = ActionItem()
     a.id = uuid4()
     a.user_id = DEMO_USER_UUID
     a.title = title
-    a.target_date = date(2026, 6, 5)
+    a.target_date = target_date
     a.category = "study"
     a.source = "manual"
     a.status = "failed"
@@ -517,6 +527,74 @@ def test_replan_approve_respects_blocks_from_other_sources(
     assert client.get(f"/replan/{exec_id}").json()["alreadyApproved"] is True
 
 
+def test_replan_approve_never_places_past_block(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: Any,
+    monkeypatch: Any,
+) -> None:
+    """21시 회고에서 DOWNSCOPE 를 수락해도 블록이 과거에 생기지 않는다 (#174 라우트 회귀).
+
+    이전에는 `day_delta=0` 이라 원본 실패 슬롯(14:00) 시각이 그대로 쓰여, 결정 시점(21시)
+    기준 7시간 전 블록이 INSERT 됐다. 그 블록은 pre_card 스윕 창을 영영 만나지 못한다.
+
+    시계를 고정하는 이유: 밤 컷오프(23시) 때문에 실제 실행 시각에 따라 결과가 달라지면
+    CI 가 새벽에만 깨진다.
+    """
+    from reaction_backend.api.routes import recovery as recovery_routes
+
+    fixed_now = datetime(2026, 7, 29, 21, 3, tzinfo=KST)
+    monkeypatch.setattr(recovery_routes, "now_kst", lambda: fixed_now)
+
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo,
+        fake_action_item_repo,
+        target_date=date(2026, 7, 29),
+        plan_start_at=datetime(2026, 7, 29, 14, 0, tzinfo=KST),
+    )
+    _accept_group(client, exec_id, "DOWNSCOPE")
+
+    body = _approve_replan(client, exec_id).json()
+    assert body["startAt"] == "2026-07-29T21:15:00+09:00", body
+    block = next(b for b in fake_scheduled_block_repo._blocks.values() if b.source == "recovery")
+    assert block.start_at > fixed_now, "과거 시각에 블록을 만들었다"
+
+
+def test_replan_diff_returns_placed_block_after_approve(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """승인 후 프리뷰는 **실제 배치된 블록** 시각을 돌려준다 — 재계산하면 화면과 DB 가 갈린다.
+
+    보정이 `now` 의존이라, 승인 뒤에 다시 조회할 때마다 재계산하면 사용자가 보는 시각과
+    실제 블록이 계속 어긋난다.
+    """
+    from reaction_backend.api.routes import recovery as recovery_routes
+
+    monkeypatch.setattr(
+        recovery_routes, "now_kst", lambda: datetime(2026, 7, 29, 21, 3, tzinfo=KST)
+    )
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo,
+        fake_action_item_repo,
+        target_date=date(2026, 7, 29),
+        plan_start_at=datetime(2026, 7, 29, 14, 0, tzinfo=KST),
+    )
+    _accept_group(client, exec_id, "DOWNSCOPE")
+    approved = _approve_replan(client, exec_id).json()
+
+    # 40분 뒤 재조회 — 재계산이면 21:55 로 밀린다.
+    monkeypatch.setattr(
+        recovery_routes, "now_kst", lambda: datetime(2026, 7, 29, 21, 43, tzinfo=KST)
+    )
+    diff = client.get(f"/replan/{exec_id}").json()
+    assert diff["alreadyApproved"] is True
+    assert diff["after"]["startAt"] == approved["startAt"], "프리뷰가 실제 블록과 어긋난다"
+
+
 def test_replan_diff_already_approved_after_approve(
     client: TestClient,
     fake_recovery_repo: FakeRecoveryRepo,
@@ -624,24 +702,27 @@ def test_recovery_unit_minutes_floors_at_default() -> None:
 
 
 def test_shift_to_recovery_day_preserves_wall_clock_across_days() -> None:
-    """일 단위 시프트라 KST 벽시계 시각이 보존된다 (KST 는 DST 가 없다)."""
+    """일 단위 시프트라 KST 벽시계 시각이 보존된다 (KST 는 DST 가 없다).
+
+    회복 날짜가 내일이면 보정 대상이 아니다 — 보정은 **같은 날 안에서만** 한다.
+    """
     plan_start = datetime(2026, 7, 29, 14, 0, tzinfo=KST)
     start_at, end_at = shift_to_recovery_day(
         plan_start,
         original_target_date=date(2026, 7, 29),
         recovery_target_date=date(2026, 7, 30),  # CARRY_OVER
         estimated_minutes=30,
+        now=datetime(2026, 7, 29, 21, 3, tzinfo=KST),
     )
     assert start_at == datetime(2026, 7, 30, 14, 0, tzinfo=KST)
     assert end_at == datetime(2026, 7, 30, 14, 30, tzinfo=KST)
 
 
-def test_shift_to_recovery_day_same_day_keeps_original_slot() -> None:
-    """DOWNSCOPE(같은 날)는 day_delta=0 → 원본 슬롯 시각 그대로.
+def test_shift_to_recovery_day_floors_past_slot_to_next_quarter() -> None:
+    """DOWNSCOPE(day_delta=0)의 과거 슬롯을 `지금+10분` 15분 격자로 당긴다 (#174 회귀 핀).
 
-    이건 **의도된 현재 계약**이다 (api-contract.md §12 "일 단위 시프트"). 21시 회고에서
-    수락하면 결과가 이미 지난 시각이 되는 알려진 한계라, 바꾸려면 계약 개정이 선행돼야
-    한다 (AGENTS.md §8). 이 테스트는 그 계약을 고정해 **모르는 사이에 바뀌는 것**을 막는다.
+    예전엔 원본 슬롯(14:00)을 그대로 써서, 21시 회고에서 수락하면 **7시간 전 과거**에
+    블록이 생겼다. 그 블록은 pre_card 스윕 창을 영영 만나지 못한다.
     """
     plan_start = datetime(2026, 7, 29, 14, 0, tzinfo=KST)
     start_at, end_at = shift_to_recovery_day(
@@ -649,9 +730,101 @@ def test_shift_to_recovery_day_same_day_keeps_original_slot() -> None:
         original_target_date=date(2026, 7, 29),
         recovery_target_date=date(2026, 7, 29),
         estimated_minutes=5,
+        now=datetime(2026, 7, 29, 21, 3, tzinfo=KST),
+    )
+    assert start_at == datetime(2026, 7, 29, 21, 15, tzinfo=KST)  # 21:13 → 격자 올림
+    assert end_at == datetime(2026, 7, 29, 21, 20, tzinfo=KST)
+
+
+def test_shift_to_recovery_day_leaves_future_same_day_slot_untouched() -> None:
+    """같은 날이어도 **아직 오지 않은** 슬롯은 건드리지 않는다.
+
+    부등호를 뒤집는 뮤턴트(`earliest < start_at`)는 날짜 가드를 통과하므로 이 케이스만 잡는다.
+    """
+    plan_start = datetime(2026, 7, 29, 22, 0, tzinfo=KST)
+    start_at, end_at = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 7, 29),
+        recovery_target_date=date(2026, 7, 29),
+        estimated_minutes=5,
+        now=datetime(2026, 7, 29, 21, 3, tzinfo=KST),
+    )
+    assert start_at == plan_start
+    assert end_at == datetime(2026, 7, 29, 22, 5, tzinfo=KST)
+
+
+def test_shift_to_recovery_day_never_moves_to_another_day() -> None:
+    """어제 결정한 회복을 오늘 조회해도 블록 날짜는 안 바뀐다 — 카드 `target_date` 와 어긋나면 안 된다.
+
+    밤 가드는 통과하는 케이스라(09:00) `same_day` 가드를 지우는 뮤턴트를 이 테스트만 잡는다.
+    """
+    plan_start = datetime(2026, 7, 29, 14, 0, tzinfo=KST)
+    start_at, end_at = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 7, 29),
+        recovery_target_date=date(2026, 7, 29),
+        estimated_minutes=5,
+        now=datetime(2026, 7, 30, 9, 0, tzinfo=KST),  # 다음 날 조회
     )
     assert start_at == plan_start
     assert end_at == datetime(2026, 7, 29, 14, 5, tzinfo=KST)
+
+
+def test_shift_to_recovery_day_skips_correction_at_night() -> None:
+    """밤(23시 이후로 넘어가면)엔 보정하지 않는다 — `create_block` 이 정책 검사를 안 하기 때문."""
+    plan_start = datetime(2026, 7, 29, 14, 0, tzinfo=KST)
+    start_at, _ = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 7, 29),
+        recovery_target_date=date(2026, 7, 29),
+        estimated_minutes=30,
+        now=datetime(2026, 7, 29, 22, 52, tzinfo=KST),  # earliest 23:05 → 컷오프 밖
+    )
+    assert start_at == plan_start, "밤 가드가 풀렸다"
+
+
+def test_shift_to_recovery_day_allows_block_ending_exactly_at_cutoff() -> None:
+    """컷오프에 **정확히** 닿는 블록은 허용 — 경계 부등호(`<=`)를 좁히는 뮤턴트를 잡는다."""
+    plan_start = datetime(2026, 7, 29, 14, 0, tzinfo=KST)
+    start_at, end_at = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 7, 29),
+        recovery_target_date=date(2026, 7, 29),
+        estimated_minutes=15,
+        now=datetime(2026, 7, 29, 22, 35, tzinfo=KST),  # earliest 22:45, 종료 23:00 = 컷오프
+    )
+    assert start_at == datetime(2026, 7, 29, 22, 45, tzinfo=KST)
+    assert end_at == datetime(2026, 7, 29, 23, 0, tzinfo=KST)
+
+
+def test_shift_to_recovery_day_lead_always_covers_pre_card_window() -> None:
+    """보정된 블록은 항상 `지금+10분` 이후 · 15분 격자 — pre_card 스윕이 최소 1회 본다.
+
+    스윕은 5분 폴로 `[now+2m, now+7m)` 만 보므로 리드가 7분 아래로 내려가면 알림이 샌다.
+    21:00~21:59 매 분을 돌려 lead 축소·라운딩 제거 뮤턴트를 잡는다.
+    """
+    plan_start = datetime(2026, 7, 29, 14, 0, tzinfo=KST)
+    for minute in range(60):
+        now = datetime(2026, 7, 29, 21, minute, tzinfo=KST)
+        start_at, _ = shift_to_recovery_day(
+            plan_start,
+            original_target_date=date(2026, 7, 29),
+            recovery_target_date=date(2026, 7, 29),
+            estimated_minutes=5,
+            now=now,
+        )
+        assert start_at - now >= timedelta(minutes=10), f"{now:%H:%M} 리드 부족: {start_at:%H:%M}"
+        assert start_at.minute % 15 == 0, f"{now:%H:%M} 격자 이탈: {start_at:%H:%M}"
+
+
+def test_night_cutoff_matches_push_gate_quiet_hours() -> None:
+    """회복 밤 컷오프 = 알림 quiet hours 시작. 두 상수가 갈라지면 여기서 잡는다.
+
+    orchestrator 는 순수 유지를 위해 safety 를 import 하지 않으므로 **테스트가 유일한 연결**이다.
+    """
+    from reaction_backend.safety.push_gate import QUIET_START_HOUR
+
+    assert RECOVERY_NIGHT_CUTOFF_HOUR == QUIET_START_HOUR
 
 
 # ───────────────────────── decisions: edited (#20 DoD 7) ─────────────────

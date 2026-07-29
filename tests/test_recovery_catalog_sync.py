@@ -91,3 +91,27 @@ def test_uncovered_tags_are_a_design_decision_not_a_gap() -> None:
     assert all_tags - covered == {"TIME_SHORTAGE", "OVERRUN", "AVOIDANCE"}
     # 커버되는 태그가 유령을 참조하지 않는다 (오타 방어).
     assert covered <= all_tags, f"존재하지 않는 태그를 참조: {covered - all_tags}"
+
+
+def test_carry_over_copy_does_not_promise_a_different_day() -> None:
+    """CARRY_OVER 문구는 '다음 주'를 약속하지 않는다 — 날짜 규칙은 결정일 +1일 (#175).
+
+    문구는 DB(카탈로그), 날짜는 코드(`recovery_target_date`) — 소스가 둘이라 다시 갈라질 수
+    있다. 실제로 FREEZE_SLOT 이 '슬롯 예약 (다음 주)' 인데 +1일에 배치돼, 사용자가 HITL 로
+    승인한 것과 다른 날짜가 나갔다. 여기서 두 소스의 방향을 고정한다.
+
+    '비워두고 예약(hold)'도 금지어다 — 스키마에 슬롯 예약 개념이 없어 구현되지 않는다.
+    """
+    from datetime import date, timedelta
+
+    from reaction_backend.orchestrator.recovery import recovery_target_date
+
+    decided_on = date(2026, 7, 29)
+    carry_over = [s for s in default_recovery_strategies() if s.option_group == "CARRY_OVER"]
+    assert carry_over, "CARRY_OVER 전략이 사라졌다"
+
+    for s in carry_over:
+        assert recovery_target_date(decided_on, s.option_group) == decided_on + timedelta(days=1)
+        for copy in (s.label_ko, s.if_then_template):
+            assert "다음 주" not in copy, f"{s.strategy_type}: 문구가 코드 규칙(+1일)과 어긋난다"
+            assert "비워두" not in copy, f"{s.strategy_type}: 슬롯 예약(hold)은 구현되지 않는다"

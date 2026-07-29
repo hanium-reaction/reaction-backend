@@ -181,8 +181,8 @@ RECOVERY_STRATEGIES: list[dict[str, object]] = [
     {
         "code": "FREEZE_SLOT",
         "group": "CARRY_OVER",
-        "label_ko": "슬롯 예약 (다음 주)",
-        "template": "이번 슬롯은 비워두고 다음 주 같은 시간에 예약할게요.",
+        "label_ko": "급한 일 먼저, 같은 슬롯 유지",
+        "template": "급한 일이 먼저였잖아요. 같은 시간대를 그대로 지켜서 다시 잡아드릴까요?",
         "min_unit": 30,
         "primary_tags": '["EMERGENCY"]',
         "allow_rest": False,

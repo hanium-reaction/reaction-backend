@@ -467,6 +467,20 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   (각각 actionItemId/title/targetDate/startAt/endAt/estimatedMinutes, 시각은 KST)
   + `alreadyApproved`. `before`=원본 실패 카드 계획 시각, `after`=회복 카드 제안 시각
   (원본 시간대를 회복 `targetDate` 로 일(day) 단위 시프트 — 룰 기반, freebusy 무관).
+  **날짜는 시프트가 정하고, 시각은 그 날 안에서만 보정한다** — 시프트 결과가 이미 지난
+  시각이면 `조회/승인 시각 + 10분`을 15분 격자로 올린 시각까지 앞당긴다. 보정은 (a) 같은
+  KST 날짜 안이고 (b) 보정된 블록이 그 날 **23:00**(알림 quiet hours 시작과 같은 경계) 전에
+  끝날 때만 한다. 둘 중 하나라도 어긋나면 보정하지 않는다 — 회복 `targetDate` 는 어떤
+  경우에도 바뀌지 않아 카드 날짜와 블록 날짜는 항상 같은 날이다.
+  왜: 회복 결정은 21시 일괄 회고(잠금 결정)에서만 일어나고 DOWNSCOPE 는 day_delta 가 0 이라,
+  보정이 없으면 결과가 항상 **이미 지나간 원본 슬롯**이 된다. 과거 블록은 `pre_card` 알림
+  창(`[now+2m, now+7m)`, 5분 폴)을 영영 만나지 못한다. 왜 밤엔 안 미는가: 블록 생성 경로는
+  시간 정책 검사를 하지 않는데 S15 주간 편집기는 같은 시각을 `POLICY_VIOLATION`(422)으로
+  거부한다 — 서버가 사용자보다 느슨한 블록을 만들지 않기 위한 하한선.
+  `freebusy`·`time_policies` 는 **여전히 보지 않는다**(명시적 비목표) — 방금 승인된 5~30분
+  행동이라 슬롯 탐색을 하지 않는다. 정책 인지 배치는 후속.
+  `alreadyApproved=true` 면 `after.startAt`/`endAt` 는 **실제 배치된 블록** 시각이다.
+  미승인 프리뷰는 "지금 승인하면 여기"라 조회 시각에 따라 달라진다.
 - `POST /replan/{executionId}/approve` (Idempotency-Key 필수) — 회복 ActionItem 을
   `scheduled_blocks`(source=`recovery`) 로 배치. 멱등: 이미 배치돼 있으면 같은 block 반환
   (중복 INSERT 방지). 응답 `{ executionId, scheduledBlockId, actionItemId, startAt, endAt,

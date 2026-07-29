@@ -501,18 +501,23 @@ def _accepted_replan_attempt(attempts: list[RecoveryAttempt]) -> RecoveryAttempt
 
 
 def _after_block_time(
-    execution: ExecutionEvent, original: ActionItem, recovery_action: ActionItem
+    execution: ExecutionEvent,
+    original: ActionItem,
+    recovery_action: ActionItem,
+    *,
+    now: datetime,
 ) -> tuple[datetime, datetime]:
     """회복 카드 제안 시각 — ORM 객체에서 원시값을 꺼내 orchestrator 규칙에 넘긴다.
 
-    계산 자체(및 알려진 한계)는 `orchestrator.recovery.shift_to_recovery_day` 에 있다 —
-    DB/요청 객체가 필요 없는 순수 규칙이라 그쪽에서 단위 테스트로 고정된다.
+    계산(일 단위 시프트 + 과거 배치 보정)은 `orchestrator.recovery.shift_to_recovery_day` 에
+    있다 — DB/요청 객체가 필요 없는 순수 규칙이라 그쪽에서 단위 테스트로 고정된다.
     """
     return shift_to_recovery_day(
         execution.plan_start_at,
         original_target_date=original.target_date,
         recovery_target_date=recovery_action.target_date,
         estimated_minutes=recovery_action.estimated_minutes,
+        now=now,
     )
 
 
@@ -569,14 +574,20 @@ async def get_replan_diff(
 
     before = 원본 실패 카드의 계획 시각, after = 회복 카드의 제안 시각.
     이미 approve 로 블록이 배치됐으면 `alreadyApproved=true`.
+
+    **승인 후에는 실제 배치된 블록이 단일 진실**이다 — 과거 배치 보정(#174)이 `now` 에
+    의존하므로, 승인 뒤에도 매번 재계산하면 프리뷰가 실제 블록과 어긋난다. 미승인 프리뷰는
+    정의상 "지금 승인하면 여기"라 조회 시각에 따라 달라진다.
     """
     execution, attempt, original, recovery_action = await _load_replan_context(
         user.id, execution_id, repo, action_repo
     )
-    start_at, end_at = _after_block_time(execution, original, recovery_action)
-    already_approved = (
-        await _existing_replan_block(user.id, recovery_action.id, block_repo) is not None
-    )
+    block = await _existing_replan_block(user.id, recovery_action.id, block_repo)
+    already_approved = block is not None
+    if block is not None:
+        start_at, end_at = block.start_at, block.end_at
+    else:
+        start_at, end_at = _after_block_time(execution, original, recovery_action, now=now_kst())
 
     return ReplanDiffResponse(
         execution_id=execution_id,
@@ -623,7 +634,7 @@ async def approve_replan(
 
     block = await _existing_replan_block(user.id, recovery_action.id, block_repo)
     if block is None:
-        start_at, end_at = _after_block_time(execution, original, recovery_action)
+        start_at, end_at = _after_block_time(execution, original, recovery_action, now=now_kst())
         block = await block_repo.create_block(
             user_id=user.id,
             action_item_id=recovery_action.id,
