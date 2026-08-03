@@ -8,7 +8,7 @@
 - 핵심 목표: {{goals}}
 - 가장 무거운 목표: {{heaviest}}
 - 마감: {{deadlines}}
-- 이번 주 성공 이미지: {{success_image}}
+- 목표 완료 기준(다 이뤘을 때의 모습): {{success_image}}
 - 활동 시간대: {{time_window}}
 - 집중 시간대: {{peak_window}}
 - 회복 톤 선호: {{tone}}

@@ -151,7 +151,7 @@ _CONTEXT_LABELS: dict[str, str] = {
     "goals.preferred_time": "선호 시간대",
     "goals.frequency": "빈도(주당 며칠)",
     "goals.deadlines": "마감",
-    "goals.success_image": "이번 주 목표 모습",
+    "goals.success_image": "목표 완료 기준",
     "goals.approach": "접근 방식",
     "goals.materials": "참고 자료 원문",
     "time.activity_window": "활동 시간대",
@@ -274,7 +274,7 @@ def _rule_summary(state: InterviewState) -> InterviewSummary:
     if v["deadlines"] != _NOT_SET:
         goal_summary += f" 마감은 {v['deadlines']} 예요."
     if v["success_image"] != _NOT_SET:
-        goal_summary += f" 이번 주엔 '{v['success_image']}' 모습을 그리셨어요."
+        goal_summary += f" 다 이뤘을 때 '{v['success_image']}' 모습을 그리셨어요."
 
     time_summary = (
         f"활동 시간대는 {v['time_window']}, 집중은 {v['peak_window']} 가 좋다고 하셨어요."
@@ -891,7 +891,7 @@ _DEFAULT_SLOT_QUESTIONS: dict[str, str] = {
     "goals.preferred_time": "이 목표는 주로 언제 하고 싶어요?",
     "goals.frequency": "이 목표는 얼마나 자주 하고 싶어요?",
     "goals.deadlines": "마감일이 정해진 게 있어요?",
-    "goals.success_image": "이번 주 끝에 어떤 모습이면 좋을까요?",
+    "goals.success_image": "이 목표를 다 이뤘다고 느낄 때, 어떤 모습일까요?",
     "goals.approach": "이 목표, 어떻게 해나가고 싶어요? 선호하는 방식·순서가 있으면 알려주세요.",
     "goals.materials": "참고할 자료가 있으면 그 내용을 그대로 붙여넣어 주세요.",
     "time.activity_window": "하루 중 계획을 잡아도 되는 시간대는 몇 시부터 몇 시까지예요? (이 시간 밖엔 일정을 안 잡아요)",

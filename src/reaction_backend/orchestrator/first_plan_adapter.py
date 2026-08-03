@@ -323,9 +323,20 @@ def llm_session_target(
 
 
 def _horizon_weeks(target_date: date | None, horizon: str | None) -> int:
-    """target_date~마감(horizon)이 몇 주인지 (최소 1, 최대 _MAX_PLAN_WEEKS). 정보 없으면 1주."""
-    if target_date is None or not horizon:
+    """target_date~마감(horizon)이 몇 주인지 (최소 1, 최대 _MAX_PLAN_WEEKS).
+
+    **마감이 없으면 지평 전체(_MAX_PLAN_WEEKS)** 로 본다. '마감 없음' 은 *짧다* 가 아니라
+    *끝이 없다* 는 뜻인데, 예전엔 1주를 돌려줘 정반대로 해석했다 — 습관형 목표('매일 운동',
+    '주 3회 러닝')가 3세션 / 7일짜리 계획을 받고 끝났다(실측: 주 3회 습관 → 블록 3개).
+    마감 있는 목표는 4주를 받는데 습관만 1주라, 사용자에게는 계획이 안 만들어진 것으로 보인다.
+
+    `target_date` 자체가 없으면 계산할 기준이 없으므로 1주(하위호환) — 이 경로는 호출자가
+    날짜를 안 넘긴 단위 테스트용이다.
+    """
+    if target_date is None:
         return 1
+    if not horizon:
+        return _MAX_PLAN_WEEKS
     try:
         days = (date.fromisoformat(horizon) - target_date).days
     except ValueError:

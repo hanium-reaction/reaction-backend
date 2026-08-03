@@ -123,7 +123,11 @@ SLOT_CATALOG: tuple[InterviewSlot, ...] = (
         "goals.why_now", "그건 이번 학기에 꼭 끝내야 하는 이유가 있나요?", "text", False, "goals"
     ),
     InterviewSlot(
-        "goals.success_image", "이번 주 끝에 어떤 모습이면 좋을까요?", "text", True, "goals"
+        "goals.success_image",
+        "이 목표를 다 이뤘다고 느낄 때, 어떤 모습일까요?",
+        "text",
+        True,
+        "goals",
     ),
     # 목표 접근 — 사용자가 선호하는 방식·순서로 분해를 grounding (없으면 넘겨도 됨).
     InterviewSlot(

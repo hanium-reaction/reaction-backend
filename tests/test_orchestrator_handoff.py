@@ -1669,6 +1669,63 @@ async def test_harvest_gate_measures_by_stripped_length() -> None:
     assert new_state["harvested"] == []  # 실제 내용은 짧다 → 호출 없음
 
 
+async def test_no_deadline_habit_gets_full_horizon_not_one_week() -> None:
+    """마감 없는 습관형 목표도 지평 전체(4주)를 받는다.
+
+    회귀 배경: `_horizon_weeks` 가 마감이 없으면 **1주**를 돌려줬다. '마감 없음' 은 *짧다* 가
+    아니라 *끝이 없다* 는 뜻인데 정반대로 읽은 것이다. 그 결과 '주 3회 러닝' 같은 습관형이
+    3세션 / 7일짜리 계획을 받고 끝났다 — 마감 있는 목표는 4주를 받는데 습관만 1주라,
+    사용자에게는 계획이 안 만들어진 것으로 보인다(실측 지적).
+    """
+    habit = _outcome_with(
+        "iv_habit_nodl",
+        **{
+            "goals.frequency": {"type": "chip", "values": ["주 3회"]},
+            "goals.deadlines": {"type": "text", "raw": ""},  # 마감 미입력(스킵)
+        },
+    )
+    assert habit.horizon is None  # 마감 미입력
+
+    target = date(2026, 7, 28)
+    pv = first_plan_adapter.context_from_outcome(habit, target_date=target)["prompt_vars"]
+    assert pv["horizon_weeks"] == "4"
+    # 주 3회 × 4주 = 12세션. 예전엔 3(= 1주치)이었다.
+    assert first_plan_adapter.horizon_session_target(habit, "standard", target_date=target) == 12
+
+
+async def test_no_deadline_still_bounded_by_max_plan_weeks() -> None:
+    """마감이 없어도 무한히 뻗지 않는다 — 지평 상한이 바운드다.
+
+    배치 창(`schedule_blocks`)이 세션 수에서 파생되므로, 세션 수가 캡되지 않으면 먼 미래까지
+    블록이 깔린다. 상한이 실제로 걸리는지 고정한다.
+    """
+    daily = _outcome_with(
+        "iv_habit_daily",
+        **{
+            "goals.frequency": {"type": "chip", "values": ["매일"]},
+            "goals.deadlines": {"type": "text", "raw": ""},
+        },
+    )
+    target = date(2026, 7, 28)
+    # 매일(7) × 4주 = 28 — _MAX_PLAN_WEEKS 를 넘지 않는다.
+    assert first_plan_adapter.horizon_session_target(daily, "standard", target_date=target) == 28
+    # 한 호출에 LLM 에 요구하는 양은 여전히 _MAX_LLM_SESSIONS 로 묶인다.
+    pv = first_plan_adapter.context_from_outcome(daily, target_date=target)["prompt_vars"]
+    assert pv["total_sessions"] == "20"
+
+
+async def test_missing_target_date_still_falls_back_to_one_week() -> None:
+    """`target_date` 자체가 없으면 계산 기준이 없어 1주(하위호환) — 마감 없음과 구분한다."""
+    habit = _outcome_with(
+        "iv_habit_no_target",
+        **{
+            "goals.frequency": {"type": "chip", "values": ["주 3회"]},
+            "goals.deadlines": {"type": "text", "raw": ""},
+        },
+    )
+    assert first_plan_adapter.horizon_session_target(habit, "standard") == 3
+
+
 def _goal(title: str, *, heaviest: bool = False) -> GoalCandidate:
     return GoalCandidate(
         title=title, category="study", is_heaviest=heaviest, tentative_tier="focus", confidence=0.9
