@@ -9,6 +9,7 @@
 - 가장 무거운 목표: {{heaviest}}
 - 마감: {{deadlines}}
 - 목표 완료 기준(다 이뤘을 때의 모습): {{success_image}}
+- 이 목표에 들이는 시간: {{weekly_load}}
 - 활동 시간대: {{time_window}}
 - 집중 시간대: {{peak_window}}
 - 회복 톤 선호: {{tone}}

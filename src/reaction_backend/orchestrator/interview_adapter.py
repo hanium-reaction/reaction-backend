@@ -38,10 +38,15 @@ REQUIRED_SLOT_KEYS: tuple[str, ...] = (
     "goals.list",
     "goals.heaviest",
     "goals.current_level",
-    "goals.weekly_time",
+    # 길이·빈도를 **먼저** 묻는다. 주당 시간 = 세션 길이 × 빈도라, 둘을 알면 세 번째는
+    # 계산된다(`derived_weekly_hours`). 사람은 "한 번에 얼마나"(체감)·"주 며칠"(달력)은
+    # 잘 답하지만 주 단위 총량은 곱셈이라 틀린다 — 실측에서 세 답이 다 있는 세션의 **절반**이
+    # 1시간 이상 어긋났고(최대 6시간), 그 불일치가 매 계획의 분량 경고로 새어 나왔다.
     "goals.session_length",
-    "goals.preferred_time",
     "goals.frequency",
+    "goals.preferred_time",
+    # 빈도를 '상관없음/몰아서'로 답해 계산이 안 될 때만 묻는다 (`is_slot_needed`).
+    "goals.weekly_time",
     "goals.deadlines",
     "goals.success_image",
     "goals.approach",
@@ -162,7 +167,11 @@ def build_outcome(
     빈 필수 슬롯은 default 로 채우고 `unresolved_slots` 에 키를 남긴다 (First Plan 이
     VALIDATING 에서 보완 질문/재입력 분기를 띄울 수 있도록).
     """
-    unresolved = [k for k in REQUIRED_SLOT_KEYS if not is_filled_answer(slot_answers.get(k))]
+    unresolved = [
+        k
+        for k in REQUIRED_SLOT_KEYS
+        if is_slot_needed(k, slot_answers) and not is_filled_answer(slot_answers.get(k))
+    ]
 
     identity = IdentityContext(
         role=_first(_chip_values(slot_answers.get("identity.role"))) or "미상",
@@ -208,7 +217,16 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
     success_image = _text_raw(slot_answers.get("goals.success_image"))
     why_now = _text_raw(slot_answers.get("goals.why_now"))
     current_level = _text_raw(slot_answers.get("goals.current_level"))
+    # **직접 답한 값이 이긴다.** 새 인터뷰는 길이·빈도를 답하면 주당 시간을 아예 묻지 않으므로
+    # (`is_slot_needed`) 자연히 유도값을 쓰고, 이미 저장된 세션은 종전 해석을 그대로 유지한다.
+    #
+    # 유도값을 우선하면 과거 데이터의 계획 분량이 말없이 바뀐다 — 실측에 '주 8시간 · 한 번
+    # 2시간 · 매일' 세션이 있는데, 유도하면 14시간이 되어 **부하가 두 배**가 된다. 사용자가
+    # 이미 승인한 계획의 전제를 뒤에서 바꾸는 셈이라 하위호환을 택한다.
     weekly_hours = _chip_hours(slot_answers.get("goals.weekly_time"))
+    if weekly_hours is None:
+        _derived = derived_weekly_hours(slot_answers)
+        weekly_hours = max(1, round(_derived)) if _derived else None
     session_length = _chip_duration_min(slot_answers.get("goals.session_length"))
     preferred_time = _first(_chip_values(slot_answers.get("goals.preferred_time")))
     frequency = _chip_frequency(slot_answers.get("goals.frequency"))
@@ -286,6 +304,32 @@ def _chip_minutes(value: Mapping[str, Any] | None) -> int | None:
         return None
     digits = "".join(c for c in chips[0] if c.isdigit())
     return int(digits) if digits else None
+
+
+def derived_weekly_hours(slot_answers: Mapping[str, Any]) -> float | None:
+    """세션 길이 × 빈도 → 주당 시간. 둘 중 하나라도 없으면 None.
+
+    주당 시간을 **묻지 않고 계산하는** 이유: 세 값은 수학적으로 종속(총량 = 길이 × 빈도)인데
+    셋 다 물으면 사용자가 곱셈을 대신해야 한다. 실측(세 답이 모두 있는 세션 8개) 중 4개가
+    1시간 이상 어긋났고 최대 6시간 차이였다 — '주 8시간 · 한 번에 2시간 · 매일'(= 실제 14시간)
+    같은 답이 거짓이 아니라, 머릿속에서 2×7 을 하지 않았을 뿐이다.
+    """
+    minutes = _chip_duration_min(slot_answers.get("goals.session_length"))
+    freq = _chip_frequency(slot_answers.get("goals.frequency"))
+    if not minutes or not freq:
+        return None
+    return round(minutes * freq / 60, 1)
+
+
+def is_slot_needed(slot_key: str, slot_answers: Mapping[str, Any]) -> bool:
+    """이 슬롯을 **지금 사용자에게 물어야 하는가**. 다른 답에서 유도되면 False.
+
+    FSM(`interview._next_required_slot`)과 `unresolved_slots` 판정이 **같은 술어**를 써야
+    한다 — 한쪽만 건너뛰면 묻지도 않은 슬롯이 영영 미해결로 남아 인터뷰가 끝나지 않는다.
+    """
+    if slot_key == "goals.weekly_time":
+        return derived_weekly_hours(slot_answers) is None
+    return True
 
 
 def _chip_hours(value: Mapping[str, Any] | None) -> int | None:

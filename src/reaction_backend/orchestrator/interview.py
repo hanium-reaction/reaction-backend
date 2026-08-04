@@ -226,9 +226,22 @@ def _is_filled(value: dict[str, Any] | None) -> bool:
 
 
 def _next_required_slot(state: InterviewState) -> str | None:
-    """아직 안 채운 첫 필수 슬롯 키. 모두 채웠으면 None (FSM 완료 신호)."""
+    """아직 안 채운 첫 필수 슬롯 키. 모두 채웠으면 None (FSM 완료 신호).
+
+    다른 답에서 **유도되는** 슬롯은 건너뛴다(`interview_adapter.is_slot_needed`) — 주당 시간은
+    세션 길이 × 빈도로 계산되므로 둘을 답했으면 묻지 않는다. `build_outcome` 의
+    `unresolved_slots` 판정과 **같은 술어**를 써야 한다: 한쪽만 건너뛰면 묻지도 않은 슬롯이
+    영영 미해결로 남아 인터뷰가 끝나지 않는다.
+    """
     answers = state["slot_answers"]
-    return next((k for k in REQUIRED_SLOT_SEQUENCE if not _is_filled(answers.get(k))), None)
+    return next(
+        (
+            k
+            for k in REQUIRED_SLOT_SEQUENCE
+            if interview_adapter.is_slot_needed(k, answers) and not _is_filled(answers.get(k))
+        ),
+        None,
+    )
 
 
 def _all_required_filled(state: InterviewState) -> bool:
@@ -279,6 +292,12 @@ def _rule_summary(state: InterviewState) -> InterviewSummary:
     time_summary = (
         f"활동 시간대는 {v['time_window']}, 집중은 {v['peak_window']} 가 좋다고 하셨어요."
     )
+    # 계산된 주당 총량을 **되돌려 보여준다**(C안). 주당 시간을 직접 묻지 않게 된 대신,
+    # 확인 카드에서 곱셈 결과를 확인하고 조정할 수 있어야 한다 — 그러지 않으면 사용자는
+    # 자기가 주 14시간을 약속했다는 걸 계획이 나온 뒤에야 안다. LLM 요약이 죽어도 보이도록
+    # 룰 폴백에도 싣는다(프롬프트의 {{weekly_load}} 와 같은 값).
+    if v["weekly_load"] != _NOT_SET:
+        time_summary += f" 이 목표에는 {v['weekly_load']} 정도 쓰게 돼요."
 
     preference_summary = f"못 한 날엔 '{v['tone']}' 톤을 선호하세요."
     if v["rest_ok"] != _NOT_SET:
@@ -822,8 +841,19 @@ def _summary_variables(state: InterviewState) -> dict[str, str]:
     rest_ok = _slot_first_chip(answers.get("recovery.rest_ok")) or _NOT_SET
     downscope_unit = _slot_first_chip(answers.get("recovery.downscope_unit")) or _NOT_SET
     identity = f"{role} {season}".strip()
+    # 계산된 주당 총량 — 사용자에게 **곱셈 결과를 되돌려준다**. '한 번에 2시간 · 매일' 이
+    # 주 14시간이라는 걸 확인 카드에서 보고 조정할 수 있게(그동안은 셋을 따로 묻고, 어긋나면
+    # 계획 단계에서 경고만 냈다). 빈도가 '상관없음' 이면 계산이 안 되므로 답한 값을 그대로.
+    derived = interview_adapter.derived_weekly_hours(answers)
+    if derived:
+        length = _slot_first_chip(answers.get("goals.session_length")) or "?"
+        freq = _slot_first_chip(answers.get("goals.frequency")) or "?"
+        weekly_load = f"약 주 {derived:g}시간 (한 번 {length} × {freq})"
+    else:
+        weekly_load = _slot_first_chip(answers.get("goals.weekly_time")) or _NOT_SET
     return {
         "identity": identity,
+        "weekly_load": weekly_load,
         "goals": goals,
         "heaviest": heaviest,
         "deadlines": deadlines,

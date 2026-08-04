@@ -1726,6 +1726,84 @@ async def test_missing_target_date_still_falls_back_to_one_week() -> None:
     assert first_plan_adapter.horizon_session_target(habit, "standard") == 3
 
 
+# ── 주당 시간 유도 (묻지 않고 계산) ─────────────────────────────────────────
+
+
+def test_weekly_hours_derived_from_length_and_frequency() -> None:
+    """주당 시간 = 세션 길이 × 빈도. 셋 다 묻지 않는다.
+
+    실측 근거: 세 답이 모두 있는 세션 8개 중 **4개가 1시간 이상 어긋났다**(최대 6시간).
+    '주 8시간 · 한 번에 2시간 · 매일'(= 실제 14시간) 같은 답이 거짓이 아니라, 머릿속에서
+    2×7 을 하지 않았을 뿐이다. 사람이 잘 답하는 것(체감 길이 · 달력 빈도)만 묻고 곱셈은
+    코드가 한다.
+    """
+    sa = {
+        "goals.session_length": {"type": "chip", "values": ["2시간"]},
+        "goals.frequency": {"type": "chip", "values": ["매일"]},
+    }
+    assert interview_adapter.derived_weekly_hours(sa) == 14.0
+    # 계산되면 주당 시간을 **묻지 않는다**.
+    assert interview_adapter.is_slot_needed("goals.weekly_time", sa) is False
+
+
+def test_weekly_time_still_asked_when_frequency_unknown() -> None:
+    """빈도를 '상관없음/몰아서'로 답하면 계산이 안 되므로 주당 시간을 묻는다."""
+    sa = {
+        "goals.session_length": {"type": "chip", "values": ["1시간"]},
+        "goals.frequency": {"type": "chip", "values": ["상관없음"]},
+    }
+    assert interview_adapter.derived_weekly_hours(sa) is None
+    assert interview_adapter.is_slot_needed("goals.weekly_time", sa) is True
+
+
+def test_explicit_weekly_time_wins_over_derived() -> None:
+    """이미 답한 주당 시간이 유도값을 이긴다 — 저장된 세션의 해석을 바꾸지 않는다.
+
+    유도를 우선하면 과거 데이터의 계획 분량이 말없이 바뀐다: 실측에 있는 '주 8시간 · 한 번
+    2시간 · 매일' 세션이 14시간이 되어 부하가 두 배가 된다. 사용자가 이미 승인한 계획의
+    전제를 뒤에서 바꾸는 셈이라 하위호환을 택한다. 새 인터뷰는 애초에 묻지 않으므로
+    자연히 유도값을 쓴다.
+    """
+    legacy = _outcome_with(
+        "iv_legacy_conflict",
+        **{
+            "goals.weekly_time": {"type": "chip", "values": ["8시간 이상"]},
+            "goals.session_length": {"type": "chip", "values": ["2시간"]},
+            "goals.frequency": {"type": "chip", "values": ["매일"]},
+        },
+    )
+    heaviest = next(g for g in legacy.core_goals if g.is_heaviest)
+    assert heaviest.weekly_hours == 8  # 유도했다면 14
+
+
+def test_fsm_and_outcome_agree_on_skipping() -> None:
+    """FSM 이 건너뛴 슬롯은 unresolved 에도 남지 않는다.
+
+    한쪽만 건너뛰면 묻지도 않은 슬롯이 영영 미해결로 남아 인터뷰가 끝나지 않는다.
+    """
+    filled = {
+        k: {"type": "text", "raw": "x"}
+        for k in interview_adapter.REQUIRED_SLOT_KEYS
+        if k != "goals.weekly_time"
+    }
+    filled["goals.session_length"] = {"type": "chip", "values": ["1시간"]}
+    filled["goals.frequency"] = {"type": "chip", "values": ["주 3회"]}
+
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = filled
+    assert interview._next_required_slot(state) is None  # FSM 완료
+
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_skip_agree",
+        slot_answers=filled,
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="rule",
+    )
+    assert "goals.weekly_time" not in outcome.unresolved_slots
+    assert next(g for g in outcome.core_goals if g.is_heaviest).weekly_hours == 3  # 1h × 3
+
+
 def _goal(title: str, *, heaviest: bool = False) -> GoalCandidate:
     return GoalCandidate(
         title=title, category="study", is_heaviest=heaviest, tentative_tier="focus", confidence=0.9

@@ -9,6 +9,11 @@
 
 `CODE_VARS` 는 `orchestrator/interview.py` 의 `ask_question`/`validate_answer`/
 `summarize_interview` 가 넘기는 variables 와 동기화한다 (바뀌면 여기도 갱신).
+
+⚠️ `interview/summary` 만은 **하드코딩하지 않고 코드에서 뽑는다**(`_summary_variables`).
+나머지는 호출부에 변수가 인라인이라 목록으로 둘 수밖에 없지만, 요약은 빌더 함수가 단일
+진실 소스라 뽑아 쓸 수 있다 — 하드코딩하면 빌더에 키를 더할 때 이 테스트가 따라오지 않아
+계약이 조용히 표류한다(`plan_quality` 가 정확히 그렇게 표류했다).
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from pathlib import Path
 import pytest
 
 import reaction_backend
+from reaction_backend.orchestrator import interview
 from reaction_backend.prompts import registry
 from reaction_backend.prompts.registry import PromptRenderError
 
@@ -38,6 +44,7 @@ CODE_VARS: dict[str, set[str]] = {
     },
     "interview/ambiguity_score": {"slot_key", "answer", "answer_type", "options", "today"},
     "interview/slot_extraction": {"answer", "answered_slot", "today", "open_slots"},
+    # 아래 집합은 _summary_var_keys() 로 대체된다 (파일 하단에서 갱신) — 참고용 원본.
     "interview/summary": {
         "identity",
         "goals",
@@ -51,6 +58,17 @@ CODE_VARS: dict[str, set[str]] = {
         "downscope_unit",
     },
 }
+
+
+def _summary_var_keys() -> set[str]:
+    """요약 프롬프트에 실제로 넘어가는 키 — 빌더에서 직접 뽑는다(계약의 단일 진실 소스)."""
+    from uuid import uuid4
+
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    return set(interview._summary_variables(state))
+
+
+CODE_VARS["interview/summary"] = _summary_var_keys()
 
 _FILES = {
     "interview/next_question": "next_question.v1.md",
