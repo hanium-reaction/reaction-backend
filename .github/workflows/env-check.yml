@@ -1,0 +1,106 @@
+name: Env check (EC2, read-only)
+
+# prod EC2 인스턴스의 라이브 .env 가 레포 기본값과 어긋나 있는지 **읽기만 해서** 확인한다 (#104).
+#
+# 왜 필요한가: deploy.yml 의 rsync 는 `.env` 를 --exclude 로 절대 건드리지 않는다 —
+# 즉 인스턴스 .env 는 최초 수기 설정 이후 아무 배포 이력도 남기지 않는다. LLM_MODEL 같은
+# 값이 레포 기본값(gemini-3.5-flash-lite)과 다르게 굳어 있어도 알아챌 창구가 없었다.
+#
+# 안전:
+# - workflow_dispatch 전용 · 읽기만 한다 (.env 를 고치는 스텝 없음)
+# - **비밀값은 절대 원문 출력 안 함**: GEMINI_API_KEY·COLUMN_ENCRYPTION_KEY·
+#   GOOGLE_OAUTH_CLIENT_ID 는 SET/UNSET(+길이)만, DATABASE_URL 은 호스트만 (자격증명 마스킹)
+# - 값이 있는지/레포 기본값과 같은지만 비교 — .env 를 고치는 건 이 워크플로의 책임이 아니다
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  # 같은 러너를 쓰므로 배포·로그 조회와 직렬화 (app-logs.yml / deploy.yml 과 동일 그룹).
+  group: deploy-ec2
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  env-check:
+    name: .env drift check (read-only)
+    runs-on: [self-hosted, ec2, reaction-backend]
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare live .env against repo defaults
+        run: |
+          set -uo pipefail
+
+          ENV_FILE="/home/ubuntu/reaction-backend/.env"
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "::error::.env 를 찾을 수 없음: $ENV_FILE"
+            exit 1
+          fi
+
+          get_val() {
+            # 같은 키가 여러 줄이면 dotenv 관례상 마지막 줄이 유효.
+            grep -E "^${1}=" "$ENV_FILE" | tail -n1 | sed -E "s/^${1}=//"
+          }
+          repo_default() {
+            grep -E "^\s*${1}:\s*str\s*=" src/reaction_backend/config.py | head -n1 | sed -E 's/.*=\s*"([^"]*)".*/\1/'
+          }
+          presence() {
+            if [ -z "$1" ]; then echo "UNSET"; else echo "SET (${#1} chars)"; fi
+          }
+          compare_model() {
+            local key="$1" pyattr="$2"
+            local actual default
+            actual=$(get_val "$key")
+            default=$(repo_default "$pyattr")
+            if [ -z "$actual" ]; then
+              echo "  ${key}: (미설정 → 레포 기본값 '${default}' 적용됨)"
+            elif [ "$actual" = "$default" ]; then
+              echo "  ${key}: ${actual} (레포 기본값과 일치)"
+            else
+              echo "  ${key}: ${actual}  ⚠️ DRIFT (레포 기본값은 '${default}')"
+            fi
+          }
+
+          {
+            echo "=== 모델 (config.py 기본값과 비교) ==="
+            compare_model LLM_MODEL llm_model
+            compare_model LLM_MODEL_PLANNING llm_model_planning
+            compare_model LLM_MODEL_RECOVERY llm_model_recovery
+
+            echo ""
+            echo "=== 환경/모드 (원문 출력 — 비밀값 아님) ==="
+            echo "  APP_ENV: $(get_val APP_ENV)"
+            echo "  AUTH_STUB_MODE: $(get_val AUTH_STUB_MODE)"
+            echo "  CORS_ALLOW_ORIGINS: $(get_val CORS_ALLOW_ORIGINS)"
+
+            echo ""
+            echo "=== DB (호스트만 — 자격증명 마스킹) ==="
+            DB_URL=$(get_val DATABASE_URL)
+            if [ -z "$DB_URL" ]; then
+              echo "  DATABASE_URL: UNSET"
+            else
+              DB_HOST=$(echo "$DB_URL" | sed -E 's#.+@([^:/]+).+#\1#')
+              echo "  DATABASE_URL host: ${DB_HOST}"
+              case "$DB_HOST" in
+                *supabase*)
+                  echo "  ⚠️ DRIFT: Supabase 호스트 — #184 로 해당 staging 프로젝트는 삭제됨. RDS 를 가리켜야 함."
+                  ;;
+              esac
+            fi
+
+            echo ""
+            echo "=== 비밀값 (SET/UNSET 만 — 원문·마스킹값 모두 출력 안 함) ==="
+            echo "  GEMINI_API_KEY: $(presence "$(get_val GEMINI_API_KEY)")"
+            echo "  GOOGLE_OAUTH_CLIENT_ID: $(presence "$(get_val GOOGLE_OAUTH_CLIENT_ID)")"
+            echo "  COLUMN_ENCRYPTION_KEY: $(presence "$(get_val COLUMN_ENCRYPTION_KEY)")"
+          } | tee /tmp/env-check-output.txt
+
+          {
+            echo "### Env check — $(date -u +%FT%TZ)"
+            echo '```'
+            cat /tmp/env-check-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
