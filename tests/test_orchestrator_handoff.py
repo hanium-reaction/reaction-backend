@@ -972,9 +972,6 @@ def test_materials_link_only_is_treated_as_no_content() -> None:
         )
         == "로그인이 필요한 페이지라 제가 열 수 없었어요."
     )
-    # 자료가 애초에 링크뿐이 아니면 fetch 결과와 무관하게 조용하다.
-    assert first_plan_adapter.materials_link_only_warning(link_only, fetched=False) is not None
-
     # 링크 + 설명이면 설명이 실제 내용이므로 그대로 싣는다.
     mixed = _outcome_with(
         "iv_mixed",
@@ -992,6 +989,15 @@ def test_materials_link_only_is_treated_as_no_content() -> None:
         "1주차 스레드" in first_plan_adapter.context_from_outcome(mixed)["prompt_vars"]["materials"]
     )
     assert first_plan_adapter.materials_link_only_warning(mixed) is None
+    # 자료가 애초에 링크뿐이 아니면 fetch 결과와 **무관하게** 조용하다.
+    # (예전엔 이 주석이 link_only 를 넘기고 있어 위 단언의 중복이었다 — 실제로 검사된 적 없음.)
+    assert first_plan_adapter.materials_link_only_warning(mixed, fetched=True) is None
+    assert (
+        first_plan_adapter.materials_link_only_warning(
+            mixed, fetch_notice="로그인이 필요한 페이지라 제가 열 수 없었어요."
+        )
+        is None
+    )
 
     # 원문만 붙여넣은 기존 경로는 그대로(회귀 방지).
     plain = _outcome_with("iv_plain")

@@ -246,22 +246,33 @@ def _format_milestones(milestones: list[MilestoneDraft] | None) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def tier_violation_for(outcome: InterviewOutcome) -> str | None:
+    """Focus ≤ 3 / Maintain ≤ 5 초과 여부 (DevBaseline §1.4 잠금). 위반 없으면 None.
+
+    `validate_inputs` 에서 떼어낸 **순수** 함수다. 라우트가 LLM 분해 전에 값싸게 422 를
+    던지려면 이 판정만 필요한데, `validate_inputs` 는 #226 이후 링크를 여는 I/O 노드가
+    됐다. 라우트가 게이트 용도로 노드를 통째로 부르면 그래프 진입 노드가 같은 일을 또 해서
+    **사용자 링크를 버튼 한 번에 두 번** 요청하고 8s 타임아웃을 두 번 태운다. 판정만
+    떼어내 양쪽이 같은 규칙을 쓰되 I/O 는 노드 한 곳에만 남긴다.
+    """
+    focus_count = sum(1 for g in outcome.core_goals if g.tentative_tier == "focus")
+    maintain_count = sum(1 for g in outcome.core_goals if g.tentative_tier == "maintain")
+    if focus_count > 3:
+        return "focus_cap_exceeded"
+    if maintain_count > 5:
+        return "maintain_cap_exceeded"
+    return None
+
+
 async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> FirstPlanState:
     """VALIDATING — 필수 슬롯 누락 + Focus/Maintain cap 검증.
 
     누락은 outcome.unresolved_slots 를 그대로 승계(인터뷰가 이미 결정적으로 계산).
     Focus ≤ 3 / Maintain ≤ 5 초과 시 tier_violation 기록 (DevBaseline §1.4 잠금) —
-    라우터가 GOAL_TIER_LIMIT_EXCEEDED 422. 룰만(LLM 0회).
+    라우터가 GOAL_TIER_LIMIT_EXCEEDED 422. cap 판정 자체는 `tier_violation_for`.
     """
     outcome = state["outcome"]
-    focus_count = sum(1 for g in outcome.core_goals if g.tentative_tier == "focus")
-    maintain_count = sum(1 for g in outcome.core_goals if g.tentative_tier == "maintain")
-    if focus_count > 3:
-        violation: str | None = "focus_cap_exceeded"
-    elif maintain_count > 5:
-        violation = "maintain_cap_exceeded"
-    else:
-        violation = None
+    violation = tier_violation_for(outcome)
     # 참고 자료를 링크로만 줬으면 여기서 한 번 열어본다 (#226). I/O 는 이 노드가 하고
     # 컨텍스트 조립은 순수 함수로 남긴다. 실패해도 예외는 안 나오고, 그때는 예전처럼
     # '(없음)' 으로 내려가 프롬프트의 지어내기 방지 가드가 그대로 작동한다.

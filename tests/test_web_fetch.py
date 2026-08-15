@@ -192,6 +192,25 @@ async def test_redirect_to_internal_address_is_blocked(monkeypatch: pytest.Monke
     assert len(seen) == 1, "차단된 목적지에 요청을 보냈다"
 
 
+async def test_first_hop_is_validated_at_the_public_entry_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`fetch_text` 에 사설 주소를 **바로** 넣어도 요청 없이 막힌다.
+
+    기존 내부 대역 테스트는 `url_guard.validate_url` 을 직접 부르고, `fetch_text` 를 타는
+    테스트는 전부 공개 URL 에서 출발한다. 그래서 검사를 리다이렉트 홉에만 남기는 뮤턴트가
+    전 스위트를 초록으로 통과하면서 **첫 홉은 그대로 나가는** 구멍이 생긴다 —
+    `fetcher.py` 스스로 "이 한 줄이 이 기능의 가장 큰 위험" 이라 적어둔 그 경로다.
+    사용자가 붙여넣는 값이 곧 첫 홉이므로 진입점에서 직접 고정한다.
+    """
+    _dns(monkeypatch, {"169.254.169.254": ["169.254.169.254"]})
+    seen = _serve(monkeypatch)
+    result = await fetcher.fetch_text("http://169.254.169.254/latest/meta-data/")
+    assert not result.ok
+    assert result.reason == url_guard.REASON_PRIVATE
+    assert seen == [], "사설 주소에 요청이 나갔다"
+
+
 async def test_redirect_chain_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
     hops = [
         _FakeResponse(status=302, headers={"Location": f"https://example.com/{i}"})

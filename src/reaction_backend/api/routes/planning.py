@@ -352,8 +352,10 @@ async def generate_plan(
             milestones=body.milestones,
         )
         # Validation Agent — LLM 분해 전에 Focus≤3 / Maintain≤5 게이트 (LLM 0회, 룰만).
-        gate = await first_plan.validate_inputs(state, config)
-        if gate["tier_violation"] is not None:
+        # 노드가 아니라 **순수 판정 함수**를 부른다: `validate_inputs` 는 #226 이후 참고
+        # 링크를 여는 I/O 노드라, 게이트로 통째로 부르면 그래프 진입 노드가 같은 링크를
+        # 또 열어 한 번의 요청에 외부 사이트를 2회 두드리고 8s 타임아웃을 2회 태운다.
+        if first_plan.tier_violation_for(outcome) is not None:
             raise _tier_limit_exceeded()
 
         graph = first_plan.build_first_plan_graph()

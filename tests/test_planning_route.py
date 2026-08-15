@@ -708,6 +708,130 @@ def test_milestones_rule_fallback(client: TestClient, monkeypatch: Any) -> None:
     assert body["aiSource"] == "rule"
 
 
+def _link_only_outcome() -> InterviewOutcome:
+    """참고 자료를 **링크로만** 준 목표 — materials_resolver 가 실제로 열어보는 조건."""
+    outcome = _outcome()
+    outcome.core_goals[0].materials_note = "https://lecture.example/syllabus"
+    return outcome
+
+
+def test_generate_fetches_the_users_link_exactly_once(client: TestClient, monkeypatch: Any) -> None:
+    """한 번의 POST /plans/generate 는 사용자 링크를 **정확히 1회**만 연다 (#226).
+
+    라우트가 tier 게이트로 `validate_inputs` 노드를 통째로 부르고 그래프가 같은 노드를
+    진입점으로 또 부르면 요청 1회에 외부 사이트를 2회 두드리고 8s 타임아웃을 2회 태운다
+    (#179 가 지적한 20s 예산에 직격). 호출 **횟수**를 세지 않으면 결과는 똑같이 정상이라
+    이 회귀가 조용히 지나간다 — 실제로 그렇게 머지됐다.
+    """
+    from reaction_backend.integrations.web_fetch import fetcher
+
+    calls: list[str] = []
+
+    async def counting_fetch(url: str) -> Any:
+        calls.append(url)
+        return fetcher.FetchResult("주차별 강의계획: 1주차 개요", None)
+
+    monkeypatch.setattr(fetcher, "fetch_text", counting_fetch)
+    monkeypatch.setattr(aiClient, "run", _stub())
+
+    res = client.post("/plans/generate", json=_body(_link_only_outcome()))
+    assert res.status_code == 200
+    assert calls == ["https://lecture.example/syllabus"], (
+        f"링크를 {len(calls)}회 열었다 — 요청 1회당 1회여야 한다: {calls}"
+    )
+
+
+def test_tier_gate_rejects_without_opening_the_link(client: TestClient, monkeypatch: Any) -> None:
+    """Focus 한도 초과로 422 를 던질 땐 링크를 **아예 열지 않는다** (#226).
+
+    게이트가 순수 판정이어야 성립한다. 노드를 부르면 버릴 응답을 위해 남의 서버를 두드린다.
+    """
+    from reaction_backend.integrations.web_fetch import fetcher
+
+    calls: list[str] = []
+
+    async def counting_fetch(url: str) -> Any:
+        calls.append(url)
+        return fetcher.FetchResult("본문", None)
+
+    monkeypatch.setattr(fetcher, "fetch_text", counting_fetch)
+
+    outcome = _outcome(focus_goals=4)
+    outcome.core_goals[0].materials_note = "https://lecture.example/syllabus"
+    res = client.post("/plans/generate", json=_body(outcome))
+
+    assert res.status_code == 422
+    assert res.json()["code"] == "GOAL_TIER_LIMIT_EXCEEDED"
+    assert calls == [], f"422 로 버릴 요청인데 링크를 열었다: {calls}"
+
+
+def test_milestones_stage_a_receives_the_fetched_material(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """Stage A(마일스톤)도 링크 본문을 프롬프트로 받는다 (#226).
+
+    계획의 뼈대를 정하는 게 이 단계다. 여기서 자료가 '(없음)' 이면 일반론 마일스톤이 나오고
+    Stage B 는 그 위에 '추가·삭제·병합·개명 금지' 로 묶여, 자료를 준 사용자에게 링크를
+    무시한 계획이 나간다 — FE 가 #226 을 연 이유.
+    """
+    from reaction_backend.integrations.web_fetch import fetcher
+    from reaction_backend.schemas.planning import MilestoneDraft, MilestonePlan
+
+    seen: dict[str, Any] = {}
+
+    async def stub_fetch(url: str) -> Any:
+        return fetcher.FetchResult("주차별 강의계획: 1주차 개요, 2주차 함수", None)
+
+    async def capture_run(**kwargs: Any) -> RunResult[Any]:
+        seen.update(kwargs["variables"])
+        return RunResult(
+            value=MilestonePlan(milestones=[MilestoneDraft(title="t", summary="s")]),
+            fell_back=False,
+            reason=None,
+            prompt_id=kwargs["prompt_id"],
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(fetcher, "fetch_text", stub_fetch)
+    monkeypatch.setattr(aiClient, "run", capture_run)
+
+    res = client.post("/plans/milestones", json=_body(_link_only_outcome()))
+    assert res.status_code == 200
+    assert "주차별 강의계획" in seen["materials"], (
+        f"Stage A 가 받은 materials={seen.get('materials')!r}"
+    )
+
+
+def test_milestones_stage_a_falls_back_to_none_when_fetch_fails(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """링크 열기에 실패하면 Stage A 는 예전처럼 '(없음)' 으로 내려간다 — 회귀 위험 0 (#226)."""
+    from reaction_backend.integrations.web_fetch import fetcher
+    from reaction_backend.schemas.planning import MilestoneDraft, MilestonePlan
+
+    seen: dict[str, Any] = {}
+
+    async def failing_fetch(url: str) -> Any:
+        return fetcher.FetchResult(None, "timeout")
+
+    async def capture_run(**kwargs: Any) -> RunResult[Any]:
+        seen.update(kwargs["variables"])
+        return RunResult(
+            value=MilestonePlan(milestones=[MilestoneDraft(title="t", summary="s")]),
+            fell_back=False,
+            reason=None,
+            prompt_id=kwargs["prompt_id"],
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(fetcher, "fetch_text", failing_fetch)
+    monkeypatch.setattr(aiClient, "run", capture_run)
+
+    res = client.post("/plans/milestones", json=_body(_link_only_outcome()))
+    assert res.status_code == 200
+    assert seen["materials"] == "(없음)"
+
+
 def test_generate_passes_confirmed_milestones_to_decompose(
     client: TestClient, monkeypatch: Any
 ) -> None:
