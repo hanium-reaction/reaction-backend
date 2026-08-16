@@ -128,6 +128,7 @@ def test_build_scheduler_registers_expected_jobs() -> None:
         "interruption_resolver",
         "expire_drafts",
         "expire_reflections",
+        "expire_proposed_goals",
         "evening_reflection_notify",
         "pre_card_notify",
         "habit_instances",
@@ -147,6 +148,23 @@ def test_expire_reflections_job_is_wired_to_the_right_function_and_time() -> Non
     job = next(j for j in runtime.build_scheduler().get_jobs() if j.id == "expire_reflections")
 
     assert job.func is runtime._expire_reflections_job
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"] == "4", f"만료 cron 시각이 04시가 아니다: {fields}"
+    assert fields["minute"] == "0", f"만료 cron 분이 00분이 아니다: {fields}"
+    assert str(job.trigger.timezone) == "Asia/Seoul"
+
+
+def test_expire_proposed_goals_job_is_wired_to_the_right_function_and_time() -> None:
+    """잠정 목표 만료 cron 이 **매일 04:00 KST 에 만료 job 을** 부른다 (#178).
+
+    회귀: job id 집합만 보는 위 테스트는 (a) 다른 함수를 꽂거나 (b) 시각을 바꿔도 통과한다
+    — `expire_reflections` 와 같은 함정. 같은 04:00 배치에 합류시켰는지도 여기서 고정한다.
+    """
+    from reaction_backend.scheduler import runtime
+
+    job = next(j for j in runtime.build_scheduler().get_jobs() if j.id == "expire_proposed_goals")
+
+    assert job.func is runtime._expire_proposed_goals_job
     fields = {f.name: str(f) for f in job.trigger.fields}
     assert fields["hour"] == "4", f"만료 cron 시각이 04시가 아니다: {fields}"
     assert fields["minute"] == "0", f"만료 cron 분이 00분이 아니다: {fields}"

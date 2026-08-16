@@ -14,7 +14,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.goal import Goal
@@ -138,6 +138,35 @@ class GoalRepo:
         goal.archived_at = datetime.now(UTC)
         goal.status = "archived"
         await self._session.flush()
+
+    async def expire_stale_proposed(self, *, before: datetime, archived_at: datetime) -> int:
+        """`before` 이전에 만들어진 잠정(proposed) 목표를 일괄 보관. 반환: 보관된 행 수.
+
+        `proposed` 는 계획을 승인하지 않은 잠정 상태(#176)인데, 도입 당시 탈출구를 **사건**
+        (다음 인터뷰의 supersede)에만 달아둬서, 인터뷰 한 번 하고 안 돌아온 사용자에게는
+        흡수 상태가 됐다(#178). 이 레포의 다른 과도 상태는 전부 시간 탈출구를 갖는다
+        (`plan_drafts` 72h, 미회고 카드 3일) — 그 패턴에 맞춘다.
+
+        멱등 — `status == "proposed"` + `archived_at IS NULL` 쌍이 곧 가드라 이미 보관·활성·
+        완료인 행은 건드리지 않는다(`PlanDraftRepo.expire_stale` 과 같은 역할). soft 보관만
+        하므로 hard delete 금지(AGENTS §2)를 지키고, `supersede_proposed_goals` 가 이미 쓰는
+        것과 **같은 필드 쌍**을 써서 하위 코드는 바뀔 게 없다.
+
+        기준은 `updated_at` 이 아니라 `created_at` 이다 — `updated_at` 은 `onupdate=func.now()`
+        라서 무관한 `PATCH /goals/{id}` 한 번이 조용히 TTL 을 새로 사버리고, 그러면 경계가
+        비결정적이 되어 테스트로 고정할 수 없다.
+        """
+        stmt = (
+            update(Goal)
+            .where(
+                Goal.status == "proposed",
+                Goal.archived_at.is_(None),
+                Goal.created_at < before,
+            )
+            .values(status="archived", archived_at=archived_at)
+        )
+        result = await self._session.execute(stmt)
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]  # CursorResult (UPDATE)
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_db)]

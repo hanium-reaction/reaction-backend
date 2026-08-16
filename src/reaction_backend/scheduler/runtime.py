@@ -40,6 +40,7 @@ from reaction_backend.repositories.review_repo import ReviewRepo
 from reaction_backend.repositories.user_repo import UserRepo
 from reaction_backend.scheduler import (
     expire_drafts,
+    expire_proposed_goals,
     expire_reflections,
     habit_instances,
     interruption_resolver,
@@ -117,6 +118,13 @@ async def _expire_reflections_job() -> None:
         )  # 내부 commit
 
 
+async def _expire_proposed_goals_job() -> None:
+    async for session in _session_scope():
+        await expire_proposed_goals.run_expire_stale_proposed_goals(
+            session, now=now_kst(), repo=GoalRepo(session)
+        )  # 내부 commit
+
+
 async def _evening_reflection_notify_job() -> None:
     async for session in _session_scope():
         await notify_sweeps.run_evening_reflection_notify_sweep(
@@ -186,6 +194,13 @@ def build_scheduler() -> AsyncIOScheduler:
         _expire_reflections_job,
         CronTrigger(hour=4, minute=0, timezone=KST),
         id="expire_reflections",
+        replace_existing=True,
+    )
+    # 매일 04:00 — 다른 04:00 만료 배치(expire_reflections)와 합류. 잠정 목표 TTL(#178).
+    scheduler.add_job(
+        _expire_proposed_goals_job,
+        CronTrigger(hour=4, minute=0, timezone=KST),
+        id="expire_proposed_goals",
         replace_existing=True,
     )
     # 매일 00:05 — 설계서 표기는 "매주 월요일 00:00" 이지만 **일 단위로 돌린다**.

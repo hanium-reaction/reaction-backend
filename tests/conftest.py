@@ -505,6 +505,17 @@ class FakeGoalRepo:
         goal.archived_at = datetime.now(UTC)
         goal.status = "archived"
 
+    async def expire_stale_proposed(self, *, before: datetime, archived_at: datetime) -> int:
+        # 실 GoalRepo.expire_stale_proposed 의 WHERE 를 손으로 그대로 옮긴다 (#178) —
+        # status=='proposed' + archived_at IS NULL + created_at < before, 셋 다 있어야 한다.
+        n = 0
+        for g in self._items.values():
+            if g.status == "proposed" and g.archived_at is None and g.created_at < before:
+                g.status = "archived"
+                g.archived_at = archived_at
+                n += 1
+        return n
+
 
 class FakeHabitRepo:
     """in-memory HabitRepo — Issue #22."""
