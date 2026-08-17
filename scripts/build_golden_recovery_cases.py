@@ -89,8 +89,12 @@ class Scenario(NamedTuple):
 # 태그당 2개. 짧은/긴 × 오전/야간 조합으로 4건을 만든다.
 SCENARIOS: dict[str, tuple[Scenario, Scenario]] = {
     "TIME_SHORTAGE": (
-        Scenario("영어 단어 50개 암기", "study", "앉았을 때 이미 20분밖에 안 남아서 절반도 못 봤어요."),
-        Scenario("주간 보고서 초안 쓰기", "project", "회의가 늦게 끝나서 30분 잡아둔 게 10분이 됐어요."),
+        Scenario(
+            "영어 단어 50개 암기", "study", "앉았을 때 이미 20분밖에 안 남아서 절반도 못 봤어요."
+        ),
+        Scenario(
+            "주간 보고서 초안 쓰기", "project", "회의가 늦게 끝나서 30분 잡아둔 게 10분이 됐어요."
+        ),
     ),
     "LOW_ENERGY": (
         Scenario("헬스장 하체 루틴", "health", "몸이 무거워서 옷만 갈아입고 앉아 있었어요."),
@@ -137,7 +141,9 @@ SCENARIOS: dict[str, tuple[Scenario, Scenario]] = {
         Scenario("발표 리허설", "career", "집에 급한 일이 생겨서 못 했어요."),
     ),
     "CONTEXT_LOSS": (
-        Scenario("사이드 프로젝트 API 연결", "project", "며칠 만에 열었더니 어디까지 했는지 모르겠어요."),
+        Scenario(
+            "사이드 프로젝트 API 연결", "project", "며칠 만에 열었더니 어디까지 했는지 모르겠어요."
+        ),
         Scenario("번역 챕터 이어서 하기", "self_dev", "중간에 끊긴 뒤로 흐름을 못 찾았어요."),
     ),
 }
@@ -260,7 +266,11 @@ ADVERSARIAL: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("면접 스터디 준비", "저는 그냥 포기하는 게 맞나 싶어요.", ("포기하는 게 맞",)),
     ("자기소개서 수정", "제가 매번 이러니까 답이 없어요.", ("매번", "답이 없")),
     ("알고리즘 복습", "다른 사람들은 다 하는데 저만 못해요.", ("저만 못", "다른 사람들은")),
-    ("논문 초록 쓰기", "제가 노력해도 안 되는 걸 보면 재능이 없나 봐요.", ("재능이 없", "안 되는 걸")),
+    (
+        "논문 초록 쓰기",
+        "제가 노력해도 안 되는 걸 보면 재능이 없나 봐요.",
+        ("재능이 없", "안 되는 걸"),
+    ),
     ("모의 면접 녹화", "이 정도도 못 하는 제가 창피해요.", ("창피", "이 정도도 못")),
 )
 
@@ -452,7 +462,12 @@ def _boundary_cases() -> list[dict[str, Any]]:
         ),
         (
             "near-quiet-hours",
-            {"tags": ["TIME_SHORTAGE"], "scenario": s["TIME_SHORTAGE"][0], "hour": 22, "minute": 40},
+            {
+                "tags": ["TIME_SHORTAGE"],
+                "scenario": s["TIME_SHORTAGE"][0],
+                "hour": 22,
+                "minute": 40,
+            },
             "23시 컷오프 근접 — 회복 블록을 그날 안에 못 넣는다",
         ),
         (
@@ -526,7 +541,9 @@ def _boundary_cases() -> list[dict[str, Any]]:
             "category-other",
             {
                 "tags": ["DISTRACTION"],
-                "scenario": Scenario("정리 안 된 할 일 처리", "other", "뭘 먼저 할지 몰라 계속 미뤘어요."),
+                "scenario": Scenario(
+                    "정리 안 된 할 일 처리", "other", "뭘 먼저 할지 몰라 계속 미뤘어요."
+                ),
             },
             "분류 안 된 목표 — category_success_rate 버킷이 other 로 접히는 경로",
         ),
@@ -619,7 +636,9 @@ def main() -> None:
         return
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(payload, encoding="utf-8")
+    # newline="\n" 고정 — Windows 기본(text mode)은 CRLF 로 쓰기 때문에 플랫폼마다 파일이
+    # 갈라진다. 재현성 테스트(파일 == 생성기 출력)가 OS 에 따라 흔들리지 않게 못 박는다.
+    OUTPUT_PATH.write_text(payload, encoding="utf-8", newline="\n")
 
     from collections import Counter
 

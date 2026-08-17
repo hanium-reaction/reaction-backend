@@ -18,7 +18,6 @@ import json
 from datetime import date
 
 import pytest
-
 from scripts.build_golden_recovery_cases import (
     ADVERSARIAL,
     ALL_TAGS,

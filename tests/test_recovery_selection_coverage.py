@@ -67,7 +67,7 @@ def test_park_group_is_unreachable_for_every_contract_valid_input() -> None:
     (b) 선택 함수가 정서/부담 신호를 인자로 받게 됐다
     """
     strategies = default_recovery_strategies()
-    exposures = {g: 0 for g in RECOVERY_OPTION_GROUP_VALUES}
+    exposures = dict.fromkeys(RECOVERY_OPTION_GROUP_VALUES, 0)
 
     for tags in _all_contract_valid_inputs():
         for card in select_strategies(tags, strategies):
