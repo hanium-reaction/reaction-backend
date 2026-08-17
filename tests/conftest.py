@@ -1008,6 +1008,47 @@ def default_recovery_strategies() -> list[RecoveryStrategyCatalog]:
             True,
             90,
         ),
+        # alembic 8680c4567ca6 — 태그 구멍(TIME_SHORTAGE/OVERRUN/AVOIDANCE) + PARK 도달 경로.
+        _make_strategy(
+            "TIMEBOX_REBUDGET",
+            "RESCHEDULE",
+            "실측 시간으로 재산정",
+            "이 카드는 보통 그보다 시간이 더 걸렸어요. 다음엔 여유를 두고 다시 잡아드릴까요?",
+            15,
+            ["TIME_SHORTAGE", "OVERRUN"],
+            False,
+            55,
+        ),
+        _make_strategy(
+            "BUFFER_INSERT",
+            "RESCHEDULE",
+            "다음 슬롯에 여유 넣기",
+            "직전 일이 길어졌던 날이었어요. 다음 슬롯 앞에 15분 여유를 넣어둘까요?",
+            15,
+            ["OVERRUN"],
+            False,
+            58,
+        ),
+        _make_strategy(
+            "SELF_FORGIVENESS_NANO",
+            "DOWNSCOPE",
+            "지난 일은 접어두고 한 걸음만",
+            "어제 미룬 건 이미 지난 일로 두어요. 지금은 딱 한 걸음만 떼어볼까요?",
+            5,
+            ["AVOIDANCE", "HARD_TO_START"],
+            False,
+            15,
+        ),
+        _make_strategy(
+            "GOAL_RECHECK",
+            "PARK",
+            "목표 다시 확인하기",
+            "이 목표, 지금도 하고 싶은 게 맞을까요? 잠시 접어두고 다음 주 리뷰 때 다시 볼까요?",
+            0,
+            ["AVOIDANCE", "PRIORITY_SHIFT"],
+            True,
+            85,
+        ),
     ]
 
 

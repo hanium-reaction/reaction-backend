@@ -1,7 +1,7 @@
-"""RecoveryStrategyCatalog — 회복 전략 마스터 (v0.7, 9전략).
+"""RecoveryStrategyCatalog — 회복 전략 마스터 (v0.7, 원본 9전략 + 2026-08-17 gap-fill 4전략).
 
-UX 4 그룹 (DOWNSCOPE / RESCHEDULE / CARRY_OVER / PARK) ↔ 내부 9 전략 분리.
-같은 그룹은 동시에 1개 카드만 사용자에게 노출, 내부는 9 전략 모두 살아있어 통계/감사.
+UX 4 그룹 (DOWNSCOPE / RESCHEDULE / CARRY_OVER / PARK) ↔ 내부 13 전략 분리.
+같은 그룹은 동시에 1개 카드만 사용자에게 노출, 내부는 13 전략 모두 살아있어 통계/감사.
 
 DB 설계서 v0.7.1 §5.17: **PK = strategy_type VARCHAR(30)** (enum-like 사용)
 ADR 0001 §3.3 — 마스터 테이블 string PK 채택.
@@ -17,7 +17,18 @@ v0.7.1 신규 (§6.10): primary_trigger_tags JSONB — failure_tag ↔ strategy 
   ACTIVE_RECOVERY   ← LOW_ENERGY, FATIGUE
   CARRYOVER_DEFAULT ← PRIORITY_SHIFT
   FREEZE_SLOT       ← EMERGENCY
-  PARK_DEFAULT      ← overwhelm_level >= 4
+  PARK_DEFAULT      ← overwhelm_level >= 4 (미구현 — select_strategies 가 overwhelm 을 안 받는다)
+
+신설 4전략 (alembic 8680c4567ca6 — `docs/research/recovery-evidence-base.md` §4.1):
+  TIMEBOX_REBUDGET      ← TIME_SHORTAGE, OVERRUN
+  BUFFER_INSERT         ← OVERRUN
+  SELF_FORGIVENESS_NANO ← AVOIDANCE, HARD_TO_START
+  GOAL_RECHECK          ← AVOIDANCE, PRIORITY_SHIFT   (PARK 그룹 — 정적 태그로 PARK 를 연다)
+
+신설 전엔 TIME_SHORTAGE/OVERRUN/AVOIDANCE 가 어떤 전략에도 안 걸렸고, PARK 그룹은 92개
+계약상 가능 입력(`tests/test_recovery_selection_coverage.py`) 전부에서 0회 노출됐다.
+지금은 13태그 전부 커버되고 PARK 도 GOAL_RECHECK 로 도달 가능하다 — 단, `select_strategies`
+시그니처는 그대로라 PARK_DEFAULT 개별 전략(동적 조건)은 여전히 미도달이다.
 """
 
 from __future__ import annotations

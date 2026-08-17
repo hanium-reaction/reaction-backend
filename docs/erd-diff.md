@@ -96,7 +96,11 @@ e4f5a6b7c8d9 (create notification_sends, #20)  ← HEAD
 · `FATIGUE` · `AMBIGUITY` · `CONFLICT` · `OVERRUN` · `AVOIDANCE` · `DISTRACTION`
 · `EMERGENCY` · `CONTEXT_LOSS`
 
-### recovery_strategy_catalog — 9전략 + primary_trigger_tags (v0.7.1 §6.10)
+### recovery_strategy_catalog — 13전략 + primary_trigger_tags (v0.7.1 §6.10 + 2026-08-17 gap-fill)
+
+원본 9전략(d09c105520b5) + 태그 구멍/PARK 도달 경로를 메우는 신설 4전략(8680c4567ca6,
+`docs/research/recovery-evidence-base.md` §4.1). 신설분은 전부 **정적 태그 매칭**이라
+`select_strategies` 순수 함수 시그니처는 그대로다.
 
 | 전략 | 그룹 | primary_trigger_tags | 동적 조건 |
 |---|---|---|---|
@@ -104,11 +108,20 @@ e4f5a6b7c8d9 (create notification_sends, #20)  ← HEAD
 | DOWNSCOPE_DEFAULT | DOWNSCOPE | `["FATIGUE", "PLAN_TOO_BIG"]` | — |
 | ENVIRONMENT_SHIFT | DOWNSCOPE | `["DISTRACTION"]` | location=home |
 | CONTEXT_REWARMING | DOWNSCOPE | `["CONTEXT_LOSS"]` | resumed_after_interrupt=false |
+| **SELF_FORGIVENESS_NANO** (신설) | DOWNSCOPE | `["AVOIDANCE", "HARD_TO_START"]` | — |
 | RESCHEDULE_DEFAULT | RESCHEDULE | `["CONFLICT"]` | — |
 | ACTIVE_RECOVERY | RESCHEDULE | `["LOW_ENERGY", "FATIGUE"]` | allow_rest_mode=true |
+| **TIMEBOX_REBUDGET** (신설) | RESCHEDULE | `["TIME_SHORTAGE", "OVERRUN"]` | — |
+| **BUFFER_INSERT** (신설) | RESCHEDULE | `["OVERRUN"]` | — |
 | CARRYOVER_DEFAULT | CARRY_OVER | `["PRIORITY_SHIFT"]` | — |
 | FREEZE_SLOT | CARRY_OVER | `["EMERGENCY"]` | — |
-| PARK_DEFAULT | PARK | `[]` | overwhelm_level ≥ 4 |
+| PARK_DEFAULT | PARK | `[]` | overwhelm_level ≥ 4 (미구현 — `select_strategies` 가 overwhelm 을 안 받음) |
+| **GOAL_RECHECK** (신설) | PARK | `["AVOIDANCE", "PRIORITY_SHIFT"]` | — |
+
+**13태그 전부 커버.** 신설 전에는 `TIME_SHORTAGE`/`OVERRUN`/`AVOIDANCE` 가 어떤 전략에도
+안 걸렸고(패딩으로만 노출) PARK 그룹은 92개 계약상 가능 입력 전부에서 0회 노출됐다
+(`tests/test_recovery_selection_coverage.py` 의 전수 열거로 실증). `PARK_DEFAULT` 개별
+전략은 여전히 정적 태그가 없다 — PARK 그룹 자체는 `GOAL_RECHECK` 가 연다.
 
 ## 7. 공통 규약
 

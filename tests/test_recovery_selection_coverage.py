@@ -5,19 +5,22 @@ api-contract "failureTags?(0~2)"). 13태그에서 0~2개를 고르는 조합은
 `1 + 13 + C(13,2) = 92` 가지뿐이라, 표본이 아니라 **입력 공간 전체를 열거**할 수 있다.
 따라서 아래 수치는 추정이 아니라 현재 시드에 대한 **완전한 특성 기술**이다.
 
-⚠️ **이 파일은 현재 동작을 고정하는 characterization test 다.** 신규 전략 4종을 추가하면
-여기가 의도적으로 빨강이 되어야 하고, 그때 수치를 갱신하는 것이 곧 "무엇이 바뀌었나" 의
-증거가 된다 (`tests/test_recovery_catalog_sync.py::test_uncovered_tags_are_a_design_decision_not_a_gap`
-와 같은 성격의 핀).
+⚠️ **이 파일은 현재 동작을 고정하는 characterization test 다.** 시드가 바뀌면 여기가
+의도적으로 빨강이 되어야 하고, 그때 수치를 갱신하는 것이 곧 "무엇이 바뀌었나" 의 증거가
+된다 (`tests/test_recovery_catalog_sync.py` 와 같은 성격의 핀).
 
-여기서 드러난 것 (2026-08-17, 시드 d09c105520b5 기준):
-1. **PARK 그룹은 92개 입력 전부에서 단 한 번도 노출되지 않는다.** 세 겹으로 막혀 있다 —
-   `primary_trigger_tags=[]`(매칭 불가) + `display_priority=90`(최하위라 패딩으로도 도달
-   불가, 2장만 채우므로 10/50/70 이 먼저) + `select_strategies` 가 **overwhelm 을 인자로
-   받지 않는다**(설계된 동적 트리거를 구현할 자리 자체가 없다).
-2. 계약 문구는 "총 2~4장"이지만 실제 도달 가능한 카드 수는 **2장 또는 3장**뿐이다.
-   4장은 서로 다른 4그룹이 매칭돼야 하는데 태그가 최대 2개라 원리적으로 불가능하다.
-3. 매칭이 0건인 입력이 **7가지** 존재하고, 그 경우 노출되는 2장은 전부 패딩이다.
+## 2026-08-17 갱신 — 신설 4전략(8680c4567ca6, PR #257) **전후** 비교
+
+첫 버전(PR #256)은 원본 9전략 기준 기준선을 잡았다. `TIMEBOX_REBUDGET` /
+`BUFFER_INSERT` / `SELF_FORGIVENESS_NANO` / `GOAL_RECHECK` 4종이 들어오면서 그 기준선이
+바뀌었고, 아래는 **바뀐 뒤**의 값이다(이전 값은 각 테스트 docstring 에 대조로 남긴다).
+
+| 지표 | 이전(9전략) | 이후(13전략) |
+|---|---|---|
+| PARK 노출 | **0 / 92** | **25 / 92** (전부 실매칭, 패딩 0) |
+| 패딩률(전 공간) | 62/186 = 33.3% | 28/203 = **13.8%** |
+| 매칭 0건 입력 | 7가지 | **1가지**(태그 미선택뿐) |
+| 카드 수 분포 | {2, 3} | {2, 3, **4**} |
 """
 
 from __future__ import annotations
@@ -54,53 +57,65 @@ def test_input_space_is_exactly_92_combinations() -> None:
     assert len(inputs) == 1 + 13 + 78 == 92
 
 
-def test_park_group_is_unreachable_for_every_contract_valid_input() -> None:
-    """**PARK 은 도달 불가**. 92개 입력 전부에서 0회 노출.
+def test_park_group_is_reachable_via_goal_recheck() -> None:
+    """**PARK 이 도달 가능해졌다.** 92개 입력 중 25건에서 노출, 전부 실매칭(패딩 0).
 
-    설계 문서(`db/models/recovery_strategy_catalog.py:20`)는 `PARK_DEFAULT ← overwhelm_level >= 4`
-    라고 적어 두었지만, `select_strategies(failure_tags, strategies)` 는 overwhelm 을 **받지
-    않는다**. 즉 `context_snapshot` 캡처(#19-B-2)가 완성돼도 이 함수는 여전히 PARK 를 낼 수
-    없다 — 데이터 공백이 아니라 **시그니처 공백**이다.
+    이전(9전략, PR #256): PARK 노출 0/92 — `primary_trigger_tags=[]`(매칭 불가) +
+    `display_priority=90`(패딩으로도 도달 불가) + `select_strategies` 가 overwhelm 을
+    받지 않아(시그니처 공백) `PARK_DEFAULT` 의 동적 트리거를 구현할 자리가 없었다.
 
-    이 테스트가 빨강이 되는 경우는 둘뿐이고, 둘 다 의도된 변경이어야 한다:
-    (a) PARK 전략에 `primary_trigger_tags` 를 부여했다
-    (b) 선택 함수가 정서/부담 신호를 인자로 받게 됐다
+    지금: `GOAL_RECHECK`(PARK, `primary_trigger_tags=["AVOIDANCE","PRIORITY_SHIFT"]`)가
+    기존 9전략과 **완전히 같은 정적 태그 매칭 경로**로 PARK 를 연다.
+    `select_strategies` 의 시그니처는 손대지 않았다 — 순수 함수 계약 유지.
+
+    ⚠️ `PARK_DEFAULT` 자체는 여전히 도달 불가다(`primary_trigger_tags=[]` 그대로,
+    `tests/test_recovery_catalog_sync.py::test_park_default_itself_still_lacks_a_static_trigger`
+    가 그걸 별도로 고정). 여기서 도달 가능해진 것은 **PARK 그룹**이지 그 전략 개별이 아니다.
     """
     strategies = default_recovery_strategies()
     exposures = dict.fromkeys(RECOVERY_OPTION_GROUP_VALUES, 0)
+    park_padding = 0
 
     for tags in _all_contract_valid_inputs():
+        ts = set(tags)
         for card in select_strategies(tags, strategies):
             exposures[card.option_group] += 1
+            if card.option_group == "PARK" and _is_padding(card, ts):
+                park_padding += 1
 
-    assert exposures["PARK"] == 0, (
-        f"PARK 이 노출됐다 — 도달 가능해졌다면 이 핀을 의도적으로 갱신할 것: {exposures}"
-    )
-    # 나머지 3그룹은 실제로 쓰인다 — 전부 0이면 열거 자체가 잘못된 것이다.
+    assert exposures["PARK"] == 25, f"PARK 노출 횟수가 바뀌었다: {exposures}"
+    assert park_padding == 0, "PARK 노출이 전부 실매칭이어야 한다(GOAL_RECHECK 는 패딩으로 안 뜬다)"
     for group in ("DOWNSCOPE", "RESCHEDULE", "CARRY_OVER"):
         assert exposures[group] > 0, f"{group} 이 한 번도 안 나왔다 — 열거가 잘못됐다"
 
 
-def test_four_cards_are_structurally_unreachable() -> None:
-    """계약은 "2~4장"이지만 실제 도달 범위는 2~3장이다.
+def test_four_cards_is_reachable_when_two_tags_span_all_four_groups() -> None:
+    """카드 수 분포 = {2, 3, 4} — **4장이 이제 도달 가능하다.**
 
-    4장은 서로 다른 4그룹이 동시에 매칭돼야 하는데, 태그가 최대 2개이므로 매칭되는 그룹은
-    최대 2개다(+ 패딩으로 채워도 `MIN_CARDS` 까지만 채운다). `MAX_CARDS=4` 는 현재
-    **도달 불가능한 상한**이다.
+    이전(9전략): 태그가 최대 2개인데 매칭 그룹이 최대 2개뿐이라 4장(4그룹 동시)은
+    원리적으로 불가능했다({2, 3}만 도달). GOAL_RECHECK 가 PARK 를 열면서, **한 태그가
+    두 그룹에 걸치는 조합**이 가능해졌다 — 예: `["PRIORITY_SHIFT", "FATIGUE"]` 는
+    FATIGUE 가 DOWNSCOPE(`DOWNSCOPE_DEFAULT`)+RESCHEDULE(`ACTIVE_RECOVERY`) 를,
+    PRIORITY_SHIFT 가 CARRY_OVER(`CARRYOVER_DEFAULT`)+PARK(`GOAL_RECHECK`) 를 열어
+    2태그로 4그룹이 전부 채워진다.
     """
     strategies = default_recovery_strategies()
     counts = {len(select_strategies(tags, strategies)) for tags in _all_contract_valid_inputs()}
 
-    assert counts == {2, 3}, f"도달 가능한 카드 수가 바뀌었다: {sorted(counts)}"
+    assert counts == {2, 3, 4}, f"도달 가능한 카드 수가 바뀌었다: {sorted(counts)}"
     assert MIN_CARDS == 2
-    assert MAX_CARDS == 4, "상한이 바뀌었으면 위 주장(4장 불가)을 재검토할 것"
+    assert MAX_CARDS == 4
+
+    # 위 주장의 구체 사례 — 이 조합이 실제로 4장을 낸다는 것을 직접 확인한다.
+    four = select_strategies(["PRIORITY_SHIFT", "FATIGUE"], strategies)
+    assert {c.option_group for c in four} == set(RECOVERY_OPTION_GROUP_VALUES)
 
 
-def test_padding_rate_over_the_whole_input_space_is_one_third() -> None:
-    """전 입력 공간의 패딩률 = 62/186 (33.3%).
+def test_padding_rate_over_the_whole_input_space_dropped_by_more_than_half() -> None:
+    """전 입력 공간의 패딩률 = 28/203 (13.8%) — 신설 전(62/186=33.3%)의 절반 이하.
 
     '패딩' = 그 카드의 `primary_trigger_tags` 와 사용자의 실패 사유의 교집합이 공집합.
-    `MIN_CARDS=2` 때문에 매칭 그룹이 0~1개인 입력에서는 패딩이 **강제**된다.
+    분모(총 카드 수)가 186→203으로 늘어난 것은 카드 수 분포에 4장 케이스가 생겼기 때문이다.
 
     ⚠️ 이 수치는 입력을 균등 가중한 것이다. 실사용 분포는 태그 선택 빈도에 따라 달라지므로
     보고서에 "실사용 패딩률"로 옮겨 쓰면 안 된다 — 분모를 반드시 명시할 것.
@@ -115,14 +130,16 @@ def test_padding_rate_over_the_whole_input_space_is_one_third() -> None:
             if _is_padding(card, tag_set):
                 padding += 1
 
-    assert (padding, total) == (62, 186), f"패딩률이 바뀌었다: {padding}/{total}"
+    assert (padding, total) == (28, 203), f"패딩률이 바뀌었다: {padding}/{total}"
 
 
-def test_seven_inputs_get_no_matching_card_at_all() -> None:
-    """매칭 0건 입력 7가지 — 노출되는 2장이 전부 사용자의 사유와 무관하다.
+def test_only_the_no_tag_input_gets_no_matching_card() -> None:
+    """매칭 0건 입력 = **1가지뿐**(태그를 아예 안 고른 경우).
 
-    미커버 3태그(TIME_SHORTAGE/OVERRUN/AVOIDANCE)의 단독 3가지 + 그들끼리의 조합 3가지
-    + 태그 미선택 1가지 = 7. 신규 전략이 이 3태그를 덮으면 **0이 되어야 한다.**
+    이전(9전략): 7가지(미커버 3태그 단독 3 + 그들끼리 조합 3 + 태그 미선택 1). 신설
+    4전략이 TIME_SHORTAGE/OVERRUN/AVOIDANCE 를 전부 덮으면서 6가지가 사라졌다.
+    남은 1가지(태그 미선택)는 애초에 태그 매칭으로 해소할 수 없는 입력이라 그대로 둔다 —
+    이 경우 `MIN_CARDS` 패딩이 여전히 "선택지를 항상 보여준다"는 원래 취지대로 동작한다.
     """
     strategies = default_recovery_strategies()
     zero_match = [
@@ -131,35 +148,53 @@ def test_seven_inputs_get_no_matching_card_at_all() -> None:
         if all(_is_padding(card, set(tags)) for card in select_strategies(tags, strategies))
     ]
 
-    assert len(zero_match) == 7, f"매칭 0건 입력이 바뀌었다: {zero_match}"
-
-    uncovered = {"TIME_SHORTAGE", "OVERRUN", "AVOIDANCE"}
-    for tags in zero_match:
-        assert set(tags) <= uncovered, (
-            f"미커버 3태그 밖의 입력이 매칭 0건이 됐다: {tags} — 회귀 가능성"
-        )
+    assert zero_match == [[]], f"매칭 0건 입력이 바뀌었다: {zero_match}"
 
 
-def test_uncovered_tags_produce_only_padding() -> None:
-    """미커버 태그 단독 입력은 **패딩 2장**만 받는다 — 사용자는 자기 사유와 무관한
+def test_previously_uncovered_tags_now_produce_real_matches() -> None:
+    """`TIME_SHORTAGE` / `OVERRUN` / `AVOIDANCE` 단독 입력이 더 이상 패딩만 받지 않는다.
 
-    선택지를 보게 된다. 이것이 '회복이 약하다'의 구조적 원인 중 하나다.
+    이전(9전략)에는 이 3태그가 어떤 전략에도 안 걸려 매칭 0건·패딩 2장이었다
+    (`tests/test_recovery_catalog_sync.py::test_all_thirteen_tags_are_now_covered` 가
+    커버리지 자체를, 여기서는 **실제로 카드가 실매칭으로 뜨는지**를 확인한다).
     """
     strategies = default_recovery_strategies()
-    for tag in ("TIME_SHORTAGE", "OVERRUN", "AVOIDANCE"):
+    expected_strategy = {
+        "TIME_SHORTAGE": "TIMEBOX_REBUDGET",
+        "OVERRUN": "TIMEBOX_REBUDGET",  # BUFFER_INSERT 와 같은 그룹, priority 낮은 쪽이 이김
+        "AVOIDANCE": "SELF_FORGIVENESS_NANO",
+    }
+    for tag, expected_code in expected_strategy.items():
         cards = select_strategies([tag], strategies)
-        assert len(cards) == MIN_CARDS
-        assert all(_is_padding(c, {tag}) for c in cards), (
-            f"{tag}: 매칭 카드가 생겼다 — 신규 전략이 들어왔다면 이 핀을 갱신할 것"
+        real_matches = [c for c in cards if not _is_padding(c, {tag})]
+        assert real_matches, f"{tag}: 여전히 패딩만 받는다"
+        assert real_matches[0].strategy_type == expected_code, (
+            f"{tag}: 선두 실매칭이 {real_matches[0].strategy_type} — 기대: {expected_code}"
         )
 
 
-def test_golden_set_padding_rate_is_higher_by_design() -> None:
-    """골든셋(120건) 패딩률 = 141/240 (58.8%) — 전 입력 공간(33.3%)보다 높다.
+def test_avoidance_alone_surfaces_both_downscope_and_park_without_padding() -> None:
+    """AVOIDANCE 단독 입력은 이제 **패딩 없이 2장**을 받는다(DOWNSCOPE + PARK 각 1장).
 
-    골든셋이 미커버 3태그를 **의도적으로 과표집**했기 때문이다(uncovered_tag 블록 12건 +
-    적대적 10건이 AVOIDANCE/HARD_TO_START 에 몰려 있다). 두 수치는 분모가 다르므로
-    보고서에서 섞어 쓰면 안 된다 — 이 테스트가 그 차이를 명시적으로 기록한다.
+    회피는 착수 장벽(→ 축소/분해)과 목표 자체에 대한 의구심(→ 재확인) 둘 다로 이어질 수
+    있다는 것이 근거 대장의 설계 의도였다(`SELF_FORGIVENESS_NANO` + `GOAL_RECHECK`).
+    두 전략이 서로 다른 그룹이라 동시에 노출된다 — 같은 그룹 동시 노출 금지 규칙과 충돌하지 않는다.
+    """
+    strategies = default_recovery_strategies()
+    cards = select_strategies(["AVOIDANCE"], strategies)
+
+    assert len(cards) == MIN_CARDS
+    assert all(not _is_padding(c, {"AVOIDANCE"}) for c in cards), "패딩이 섞여 있다"
+    assert {c.option_group for c in cards} == {"DOWNSCOPE", "PARK"}
+    assert {c.strategy_type for c in cards} == {"SELF_FORGIVENESS_NANO", "GOAL_RECHECK"}
+
+
+def test_golden_set_padding_rate_also_dropped() -> None:
+    """골든셋(120건) 패딩률 = 79/243 (32.5%) — 신설 전(141/240=58.8%)에서 절반 가까이 하락.
+
+    여전히 전 입력 공간(13.8%)보다 높은 이유는 골든셋이 경계·적대적 케이스(태그 미선택,
+    3태그 계약위반 등)를 의도적으로 과표집했기 때문이다 — 두 수치는 분모가 다르므로
+    보고서에서 섞어 쓰면 안 된다.
     """
     import json
 
@@ -177,5 +212,4 @@ def test_golden_set_padding_rate_is_higher_by_design() -> None:
             if _is_padding(card, tag_set):
                 padding += 1
 
-    assert (padding, total) == (141, 240), f"골든셋 패딩률이 바뀌었다: {padding}/{total}"
-    assert padding / total > 0.33, "골든셋은 미커버 태그를 과표집하므로 전 공간보다 높아야 한다"
+    assert (padding, total) == (79, 243), f"골든셋 패딩률이 바뀌었다: {padding}/{total}"

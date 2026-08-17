@@ -92,7 +92,7 @@ class RecoveryAttempt(Base, TimestampMixin):
         nullable=False,
     )
 
-    # 내부 9 전략 (FK → recovery_strategy_catalog.strategy_type, string PK)
+    # 내부 13 전략 (FK → recovery_strategy_catalog.strategy_type, string PK)
     recovery_strategy_type: Mapped[str] = mapped_column(
         String(30),
         ForeignKey("recovery_strategy_catalog.strategy_type", ondelete="RESTRICT"),

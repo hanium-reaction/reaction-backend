@@ -14,7 +14,7 @@ LLM 호출은 [`../llm/`](../llm/) 의 Tool Executor 경유 (직접 SDK 호출 �
 | `review_agent.py` | 플랜 품질 독립 검토 → feedback[] | ④ | Goal Structuring (REVIEWING) |
 | `execution_logger_agent.py` | start/pause/resume/check-in 단일 트랜잭션 기록 | (없음) | Today routes |
 | `failure_diagnosis_agent.py` | 실패 유형 진단 (8종) + confidence | ⑤ | Recovery Orchestrator (DIAGNOSING) |
-| `recovery_coach_agent.py` | if-then 코핑 옵션 2~4개 생성 (UX 4 그룹, 내부 9 전략) | ⑥ | Recovery (COACHING) |
+| `recovery_coach_agent.py` | if-then 코핑 옵션 2~4개 생성 (UX 4 그룹, 내부 13 전략) | ⑥ | Recovery (COACHING) |
 | `policy_update_agent.py` | KPI 기반 PolicySnapshot 갱신 후보 도출 | (선택) | 주간 cron |
 | `weekly_review_agent.py` | adherence/consistency/resilience/insight 생성 | (있음) | 주간 cron |
 

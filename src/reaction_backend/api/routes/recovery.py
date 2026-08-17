@@ -5,7 +5,7 @@
 
 핵심 결정 (AGENTS.md §1):
 - UX 4 그룹 (DOWNSCOPE / RESCHEDULE / CARRY_OVER / PARK) — 같은 그룹 동시 노출 1카드.
-- 내부 9 전략은 `recovery_strategy_catalog` 기준, 통계/감사용 보존.
+- 내부 13 전략(원본 9 + 2026-08-17 gap-fill 4)은 `recovery_strategy_catalog` 기준, 통계/감사용 보존.
 - 8초 안에 LLM 응답 못 받으면 heuristic fallback (PRD §9) — 룰 선택 + 카탈로그 템플릿.
 - 원본 `action_item.status` (FAILED 등)는 절대 변경 X — Resilience 지표 전제.
 - AI 출력 = Draft Layer (`is_draft=True`) → `/recovery/decisions` 에서만 확정.

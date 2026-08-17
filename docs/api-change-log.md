@@ -7,6 +7,26 @@
 
 ---
 
+## v1.60 — 2026-08-17 (회복 전략 4종 신설 — 태그 구멍 3개 + PARK 도달 경로, #257)
+
+계약(스키마·에러) 변경 없음. `recovery_strategy_catalog` **행 추가**(alembic
+`8680c4567ca6`, `ON CONFLICT DO NOTHING` 멱등)에 따른 응답 **내용** 변경 — `option_group`
+enum 값·`strategy_type` FK 값의 집합이 늘어난다.
+
+- 근거: `docs/research/recovery-evidence-base.md` §4.1. 전수 열거로 실증된 두 문제
+  (`tests/test_recovery_selection_coverage.py`, PR #256)를 해소한다 — ① `TIME_SHORTAGE`/
+  `OVERRUN`/`AVOIDANCE` 태그가 어떤 전략에도 안 걸려 패딩으로만 노출됨 ② PARK 그룹이
+  92개 계약상 가능 입력 전부에서 0회 노출(정적 매칭 불가 + `select_strategies` 가
+  overwhelm 을 안 받아 동적 조건 구현 자리 자체가 없음).
+- 신설 4종: `TIMEBOX_REBUDGET`(RESCHEDULE), `BUFFER_INSERT`(RESCHEDULE),
+  `SELF_FORGIVENESS_NANO`(DOWNSCOPE), `GOAL_RECHECK`(PARK). 전부 **정적 태그 매칭**이라
+  `select_strategies` 순수 함수 시그니처는 손대지 않았다.
+- `PARK_DEFAULT` 개별 전략은 여전히 `primary_trigger_tags=[]` — 동적 조건(overwhelm≥4)은
+  이 PR 범위 밖. PARK **그룹**은 `GOAL_RECHECK` 로 도달 가능해졌다.
+- `docs/erd-diff.md` §6.10, `docs/api-contract.md` 의 UX 그룹/전략 매핑표 동반 갱신.
+- 클라이언트 영향: `recovery_option_group`/`recovery_strategy_type` 값으로 분기하는 코드가
+  있다면 새 값 4종을 처리해야 한다. 신규 값이 추가된 것뿐이라 기존 분기는 그대로 동작한다.
+
 ## v1.59 — 2026-08-16 (잠정 목표에 시간 탈출구를 준다 — 14일 미승격 시 자동 보관, #178)
 
 계약(스키마·에러) 변경 없음. `status` enum 값도 그대로. **`proposed` 목표가 `archived` 로

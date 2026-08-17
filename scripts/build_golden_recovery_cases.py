@@ -6,7 +6,7 @@
 |---|---|---|
 | single_tag     | 13태그 × 4 = 52 | 태그당 짧은/긴 카드 × 오전/야간 블록 |
 | multi_tag      | 13 × 2   = 26 | 실제로 함께 나올 수 있는 2태그 조합 |
-| uncovered_tag  |  3 × 4   = 12 | TIME_SHORTAGE / OVERRUN / AVOIDANCE 집중 보강 |
+| uncovered_tag  |  3 × 4   = 12 | TIME_SHORTAGE / OVERRUN / AVOIDANCE 집중 보강 (블록명은 2026-08-17 gap-fill 이전 명명 유지 — 이 3태그가 실매칭을 받는지를 지금도 감시한다) |
 | boundary       |            20 | overwhelm·연속실패·시각·이력 경계 |
 | adversarial    |            10 | 자기비난 회고 — LLM 이 동조/아첨하는지 |
 | **합계**       |       **120** | |
@@ -67,8 +67,10 @@ ALL_TAGS = (
     "CONTEXT_LOSS",
 )
 
-# 현재 카탈로그의 `primary_trigger_tags` 에 **등장하지 않는** 태그 (2026-08-17 시드 기준).
-# 신규 전략 4종이 들어가면 이 집합은 비어야 한다 — 그게 L1-3 의 관측 대상이다.
+# gap-fill(alembic 8680c4567ca6, 2026-08-17) 이전엔 카탈로그의 `primary_trigger_tags` 에
+# **등장하지 않던** 태그. 지금은 TIMEBOX_REBUDGET/BUFFER_INSERT/SELF_FORGIVENESS_NANO 가
+# 덮는다. 상수·블록명은 회귀 감시용으로 그대로 둔다 — L1-3(패딩률) 이 이 3태그에서
+# 다시 나빠지면 가장 먼저 여기가 흔들려야 한다.
 UNCOVERED_TAGS = ("TIME_SHORTAGE", "OVERRUN", "AVOIDANCE")
 
 # 기준 날짜 — 난수 대신 인덱스로 날짜를 밀어 재현성을 지킨다.
@@ -175,7 +177,7 @@ DESIGN_INTENT: dict[str, dict[str, str]] = {
         "group": "RESCHEDULE",
         "strategy": "TIMEBOX_REBUDGET",
         "bct": "1.2 Problem solving",
-        "why": "실측 소요를 근거로 다음 슬롯 크기를 다시 잡는다 (계획 오류 — Buehler 1994). 신규 전략 전제.",
+        "why": "실측 소요를 근거로 다음 슬롯 크기를 다시 잡는다 (계획 오류 — Buehler 1994). TIMEBOX_REBUDGET (alembic 8680c4567ca6).",
     },
     "LOW_ENERGY": {
         "group": "RESCHEDULE",
@@ -223,13 +225,13 @@ DESIGN_INTENT: dict[str, dict[str, str]] = {
         "group": "RESCHEDULE",
         "strategy": "BUFFER_INSERT",
         "bct": "1.4 Action planning",
-        "why": "원인이 이 카드가 아니라 선행 카드라 축소가 아니라 버퍼가 맞다. 신규 전략 전제.",
+        "why": "원인이 이 카드가 아니라 선행 카드라 축소가 아니라 버퍼가 맞다. BUFFER_INSERT (alembic 8680c4567ca6).",
     },
     "AVOIDANCE": {
         "group": "DOWNSCOPE",
         "strategy": "SELF_FORGIVENESS_NANO",
         "bct": "13.2 Framing/reframing",
-        "why": "회피는 정서조절 문제 (Sirois & Pychyl 2013) — 자기용서 1문장 + 최소 착수. 신규 전략 전제.",
+        "why": "회피는 정서조절 문제 (Sirois & Pychyl 2013) — 자기용서 1문장 + 최소 착수. SELF_FORGIVENESS_NANO (alembic 8680c4567ca6).",
     },
     "DISTRACTION": {
         "group": "DOWNSCOPE",
@@ -381,10 +383,14 @@ def _multi_tag_cases() -> list[dict[str, Any]]:
 
 
 def _uncovered_tag_cases() -> list[dict[str, Any]]:
-    """3 × 4 = 12. 지금 어떤 전략에도 안 걸리는 태그 집중 보강.
+    """3 × 4 = 12. 2026-08-17 gap-fill(alembic 8680c4567ca6) 이전엔 어떤 전략에도
 
-    맥락을 4가지로 흔들어(부담 낮음/높음 × 연속실패 없음/있음) 신규 전략이 들어왔을 때
-    실제로 선두로 올라오는지, 지금은 무엇이 패딩으로 채워지는지를 본다.
+    안 걸리던 태그 집중 보강. 지금은 TIMEBOX_REBUDGET/BUFFER_INSERT/SELF_FORGIVENESS_NANO
+    가 이 3태그를 덮는다 — 블록명은 회귀 감시를 위해 그대로 두었다(이 3태그가 다시
+    패딩만 받게 되면 여기가 가장 먼저 흔들려야 한다).
+
+    맥락을 4가지로 흔들어(부담 낮음/높음 × 연속실패 없음/있음) 실제로 선두 카드가
+    실매칭인지, 부담·연속실패 조건에 따라 다른 전략이 올라오는지를 본다.
     """
     out: list[dict[str, Any]] = []
     # (overwhelm, consecutive, 시나리오 인덱스, 소요분)
@@ -403,8 +409,8 @@ def _uncovered_tag_cases() -> list[dict[str, Any]]:
                     consecutive=consecutive,
                     intent=DESIGN_INTENT[tag],
                     notes=(
-                        f"매칭 전략 없음(현 시드) · overwhelm={overwhelm} · "
-                        f"연속실패={consecutive} — 지금은 패딩으로 채워질 것"
+                        f"gap-fill 대상 태그 · overwhelm={overwhelm} · "
+                        f"연속실패={consecutive} — 실매칭이 선두인지 회귀 감시"
                     ),
                 )
             )

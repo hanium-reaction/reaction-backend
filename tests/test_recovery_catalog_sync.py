@@ -18,31 +18,43 @@ from typing import Any
 import reaction_backend
 from tests.conftest import default_failure_tags, default_recovery_strategies
 
-_SEED_FILE = (
-    Path(reaction_backend.__file__).parent.parent.parent
-    / "alembic"
-    / "versions"
-    / "d09c105520b5_seed_master_data_v0_7_1_failure_tags_.py"
+_VERSIONS_DIR = Path(reaction_backend.__file__).parent.parent.parent / "alembic" / "versions"
+_SEED_FILE = _VERSIONS_DIR / "d09c105520b5_seed_master_data_v0_7_1_failure_tags_.py"
+
+# recovery_strategy_catalog 는 두 마이그레이션에 걸쳐 채워진다 — 원본 9전략(d09c105520b5)
+# + 태그 구멍/PARK 도달 경로를 메우는 신설 4전략(8680c4567ca6, PR #257).
+# 시드가 갈라지면 이 목록에 새 파일을 추가하고 `_load_all_seeded_strategies` 가 합친다.
+_STRATEGY_SEED_FILES = (
+    _SEED_FILE,
+    _VERSIONS_DIR / "8680c4567ca6_seed_recovery_strategy_gap_fill.py",
 )
 
 
-def _load_seed_module() -> Any:
-    spec = importlib.util.spec_from_file_location("seed_master_data", _SEED_FILE)
-    assert spec is not None and spec.loader is not None, f"시드 파일 없음: {_SEED_FILE}"
+def _load_seed_module(path: Path = _SEED_FILE) -> Any:
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    assert spec is not None and spec.loader is not None, f"시드 파일 없음: {path}"
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
+def _load_all_seeded_strategies() -> list[dict[str, Any]]:
+    """RECOVERY_STRATEGIES 를 정의하는 모든 시드 마이그레이션을 합친다."""
+    rows: list[dict[str, Any]] = []
+    for path in _STRATEGY_SEED_FILES:
+        module = _load_seed_module(path)
+        rows.extend(module.RECOVERY_STRATEGIES)
+    return rows
+
+
 def test_conftest_strategies_mirror_seed_exactly() -> None:
-    """conftest 카탈로그 미러 == 시드 마이그레이션. 필드 단위 전수 대조.
+    """conftest 카탈로그 미러 == **두 시드 마이그레이션의 합**. 필드 단위 전수 대조.
 
     한쪽만 고치면 여기서 터진다 — 시드를 바꾸는 마이그레이션은 반드시 미러도 함께.
     """
     import json
 
-    seed = _load_seed_module()
-    seed_by_code = {s["code"]: s for s in seed.RECOVERY_STRATEGIES}
+    seed_by_code = {s["code"]: s for s in _load_all_seeded_strategies()}
     fixture_by_code = {s.strategy_type: s for s in default_recovery_strategies()}
 
     assert set(seed_by_code) == set(fixture_by_code), "전략 코드 집합이 다르다"
@@ -72,25 +84,45 @@ def test_conftest_failure_tags_mirror_seed_exactly() -> None:
         assert t.sort_order == row["sort_order"], f"{code}: sort_order 불일치"
 
 
-def test_uncovered_tags_are_a_design_decision_not_a_gap() -> None:
-    """primary_trigger_tags 에 안 걸리는 태그 = 정확히 {TIME_SHORTAGE, OVERRUN, AVOIDANCE}.
+def test_all_thirteen_tags_are_now_covered() -> None:
+    """primary_trigger_tags 가 13태그 전부를 덮는다 (2026-08-17, 8680c4567ca6 이후).
 
-    이것은 **갭이 아니라 DB 설계서 §6.10 의 설계**다(`docs/erd-diff.md` 매핑표와 일치):
-    - PARK_DEFAULT 는 태그가 아니라 **동적 조건**(context_snapshot.overwhelm_level ≥ 4)으로
-      트리거하도록 설계됐고, 그 캡처는 #19-B-2 유예 중이다.
-    - 미커버 태그는 select_strategies 의 패딩("항상 선택지를 보여준다")이 받는다.
+    이 테스트는 **이전 설계를 뒤집은 결정**을 고정한다. 과거엔 `test_uncovered_tags_are_a_design_decision_not_a_gap`
+    이 `{TIME_SHORTAGE, OVERRUN, AVOIDANCE}` 를 "갭이 아니라 설계"로 핀했다 —
+    `tests/test_recovery_selection_coverage.py` 의 92개 입력 전수 열거가 그 설계의 실제
+    귀결(패딩 카드만 받는 사용자, PARK 그룹 도달 불가 0/92)을 드러낸 뒤, 근거 대장
+    (`docs/research/recovery-evidence-base.md` §4.1)이 신설 4전략으로 메우기로 했다.
 
-    이 집합을 바꾸려면(예: TIME_SHORTAGE→RESCHEDULE 정적 매핑 추가) 설계서 §6.10 과
-    `docs/erd-diff.md` 를 함께 개정하고 이 테스트를 의식적으로 갱신할 것 — DoD 문구만 보고
-    시드를 '보강'하는 실수를 막는 마지막 방어선이다.
+    PARK_DEFAULT 는 여전히 `primary_trigger_tags=[]` 다 — **동적 조건**
+    (`context_snapshot.overwhelm_level ≥ 4`)으로 트리거하도록 설계됐고, 그 캡처는
+    #19-B-2 유예 중이다. PARK 자체는 GOAL_RECHECK(정적 태그)로 도달 가능해졌지만,
+    PARK_DEFAULT 개별 전략은 여전히 미도달이다 — `select_strategies` 가 overwhelm 을
+    인자로 받지 않기 때문(시그니처 확장은 이 PR 범위 밖).
+
+    이 집합을 다시 바꾸려면(신규 태그 추가 등) 설계서 §6.10 과 `docs/erd-diff.md` 를
+    함께 개정하고 이 테스트를 의식적으로 갱신할 것.
     """
     strategies = default_recovery_strategies()
     covered = {tag for s in strategies for tag in (s.primary_trigger_tags or [])}
     all_tags = {t.tag_code for t in default_failure_tags()}
 
-    assert all_tags - covered == {"TIME_SHORTAGE", "OVERRUN", "AVOIDANCE"}
+    assert all_tags - covered == set(), f"아직 미커버: {all_tags - covered}"
     # 커버되는 태그가 유령을 참조하지 않는다 (오타 방어).
     assert covered <= all_tags, f"존재하지 않는 태그를 참조: {covered - all_tags}"
+
+
+def test_park_default_itself_still_lacks_a_static_trigger() -> None:
+    """PARK_DEFAULT(9전략 원본)는 여전히 `primary_trigger_tags=[]` — 지운 게 아니라
+
+    동적 조건(overwhelm) 구현을 기다리는 중이다. GOAL_RECHECK(신설)가 PARK 그룹 자체는
+    도달 가능하게 만들었지만, PARK_DEFAULT 라는 개별 전략은 아직 정적 태그로 못 뜬다.
+    """
+    strategies = {s.strategy_type: s for s in default_recovery_strategies()}
+    assert strategies["PARK_DEFAULT"].primary_trigger_tags == []
+    assert strategies["PARK_DEFAULT"].option_group == "PARK"
+    # GOAL_RECHECK 가 같은 그룹에서 실제 도달 경로를 맡는다.
+    assert strategies["GOAL_RECHECK"].option_group == "PARK"
+    assert strategies["GOAL_RECHECK"].primary_trigger_tags != []
 
 
 def test_carry_over_copy_does_not_promise_a_different_day() -> None:
