@@ -107,7 +107,10 @@ def _is_followthrough(rows: list[AttemptRow], derived_done_ids: set[UUID]) -> bo
         if r.user_decision not in ADOPTED_DECISION_VALUES:
             continue
         if r.option_group in _CARD_BEARING_GROUPS:
-            if r.resulting_action_item_id is not None and r.resulting_action_item_id in derived_done_ids:
+            if (
+                r.resulting_action_item_id is not None
+                and r.resulting_action_item_id in derived_done_ids
+            ):
                 return True
         else:
             if r.recovery_result == "completed":
