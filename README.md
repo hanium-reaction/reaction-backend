@@ -1,197 +1,432 @@
-# reaction-backend
+# Re:Action Backend
 
-한이음 프로젝트 **re:action** 의 백엔드 — 청년 대학생을 위한 AI 실행 회복 코치.
+> 계획 실패를 기록하고, 사용자가 선택한 회복 행동으로 다시 실행에 연결하는 AI 코칭 백엔드
 
-> 단순 RESTful CRUD 백엔드가 아니라 **AI 에이전트 + 4계층 메모리** 시스템.
-> 도메인 흐름과 데이터 모델은 `Reaction_DevBaseline_v1.0` + `Reaction_DB_설계서_v0.7.1` 을 진실 소스로 한다.
+이 저장소는 한이음 프로젝트 **Re:Action**의 서버(백엔드)입니다. 사용자가 보는 화면은 프론트엔드 저장소에 있고, 이 저장소는 화면 뒤에서 데이터를 판단하고 저장하고 발송하는 쪽을 담당합니다. 로그인, 목표, 계획, 오늘의 실행, 회고, 회복, 주간 리뷰 기능과 데이터베이스 저장, AI 호출 관리, 알림 발송, 정해진 시각에 도는 자동 작업을 제공합니다.
 
-| 문서 | 위치 |
+### 쉽게 말하면
+
+- 사용자가 앱에서 목표를 이야기하면, AI가 이번 주 계획 **초안**을 만듭니다.
+- 계획이 어긋난 날에는 이유를 고르고, AI가 "그러면 이렇게 바꿔보자"는 **회복안 초안**을 제안합니다.
+- 어떤 초안도 사용자가 직접 `수락`을 누르기 전에는 실제 일정에 반영되지 않습니다.
+- 이 저장소는 그 판단, 저장, 알림을 처리하는 서버 코드입니다.
+
+Re:Action은 데이터를 넣고 빼기만 하는 단순 저장과 조회 서비스가 아니라, 다음 세 원칙을 중심으로 설계되었습니다.
+
+1. AI가 만든 결과는 **초안**이며, 사용자가 승인하기 전에는 실제로 적용하지 않습니다.
+2. 실패한 원본 기록을 고쳐 쓰지 않고, 회복 시도를 별도 기록으로 남깁니다. (실패를 지우지 않아야 "얼마나 다시 일어섰는지"를 측정할 수 있습니다.)
+3. 외부 서비스 호출과 자동 작업은 비용, 보안, 중복 실행 방지 장치를 통과해야만 실행됩니다.
+
+> 기술 용어가 낯설다면 아래 [용어 사전](#용어-사전)을 먼저 보세요. 이 문서에 나오는 영어 약어는 모두 한 줄 설명으로 정리해 두었습니다.
+
+- 프론트엔드: [hanium-reaction/reaction-frontend](https://github.com/hanium-reaction/reaction-frontend)
+- API 계약: [`docs/api-contract.md`](docs/api-contract.md)
+- 아키텍처: [`docs/architecture.md`](docs/architecture.md)
+- 작업 규칙: [`AGENTS.md`](AGENTS.md)
+
+## 제품 흐름
+
+```text
+구글 로그인 (개발 중에는 임시 로그인)
+      ↓
+AI 인터뷰 → 목표와 생활 리듬 저장 → 첫 계획 초안 → 사용자 승인
+                                      ↓
+                              오늘의 행동과 집중 기록
+                                      ↓
+                         완료 / 부분 완료 / 잘 안됨
+                                      ↓
+                    실패 사유 → 회복안 초안 → 사용자 결정
+                                      ↓
+                               재계획과 주간 리뷰
+```
+
+## 용어 사전
+
+이 문서와 발표 자료에서 쓰는 용어를 한 줄로 정리했습니다.
+
+### 서비스 개념
+
+| 용어 | 쉬운 설명 |
 | --- | --- |
-| API 계약 (16 도메인) | [`docs/api-contract.md`](docs/api-contract.md) |
-| 아키텍처 (Orchestrator/Agent/Tool/Memory) | [`docs/architecture.md`](docs/architecture.md) |
-| 에이전트/Claude 작업 규칙 | [`AGENTS.md`](AGENTS.md) |
-| 프론트엔드 레포 | [hanium-reaction/reaction-frontend](https://github.com/hanium-reaction/reaction-frontend) |
+| 초안(Draft) | AI가 만든 제안. 아직 확정이 아니며 사용자가 수락해야 실제 계획이 됩니다. |
+| HITL(Human-in-the-loop) | "사람이 중간에 반드시 개입한다"는 설계 방식. 여기서는 AI 제안에 대한 `수락 / 수정 / 거절` 3단계 확인을 뜻합니다. |
+| 회복(Recovery) | 계획을 못 지킨 뒤, 포기 대신 더 작게 하거나 다른 시간으로 다시 시도하도록 잇는 단계. |
+| if-then 코핑 플랜 | "A 상황이면 B를 한다"처럼 조건과 행동을 미리 짝지어 두는 심리학 기법. 회복안은 이 형태로 제시됩니다. |
+| 마일스톤 | 큰 목표를 몇 단계로 쪼갠 중간 목표. |
+| 블록 | 주간 시간표 위의 일정 한 칸(예: 화요일 20:00, 60분). |
+| 슬롯(slot) | AI 인터뷰가 채워야 하는 질문 항목(목표, 마감일, 가능한 시간 등). |
+| 아젠다 | 오늘 하기로 되어 있는 행동 목록. |
+| 4계층 메모리 | 사용자 정보를 성격이 다른 4종류(프로필, 목표, 최근 실행, 대화 맥락)로 나눠 기억한다는 설계 개념. |
 
----
+### 서버 구조
 
-## 요구사항
+| 용어 | 쉬운 설명 |
+| --- | --- |
+| 백엔드 / 프론트엔드 | 백엔드는 화면 뒤의 서버, 프론트엔드는 사용자가 보는 화면. |
+| API | 화면과 서버가 주고받는 약속된 통신 창구. |
+| 엔드포인트(endpoint) | API 창구 하나하나의 주소(예: `/today/agenda`). |
+| FastAPI | 이 서버를 만든 파이썬 웹 프레임워크. |
+| 라우트(route) | 특정 주소로 들어온 요청을 처리하는 코드. |
+| 오케스트레이터 | 여러 단계를 순서대로 진행시키는 "지휘자" 역할 코드(인터뷰 → 목표 정리 → 계획 생성 등). |
+| 리포지토리(repository) | 데이터베이스에 읽고 쓰는 일만 담당하는 계층. 나머지 코드는 DB 문법을 몰라도 됩니다. |
+| 도메인 규칙 | 기술과 무관한 서비스 자체의 규칙(예: 집중 목표는 최대 3개). |
+| ORM / SQLAlchemy | 파이썬 객체와 데이터베이스 표를 자동으로 연결해 주는 도구. |
+| 마이그레이션 / Alembic | 데이터베이스 표 구조를 바꾼 이력을 코드로 관리하고 되돌릴 수 있게 하는 도구. |
+| 스케줄러 / APScheduler | 정해진 시각에 자동 실행되는 작업(예: 매일 21시 저녁 회고 알림)을 돌리는 장치. |
+| LLM | 대형 언어 모델. 이 프로젝트에서는 구글 **Gemini**를 사용합니다. |
+| 프롬프트 | AI에게 주는 지시문. 버전을 매겨 파일로 관리합니다. |
+| 게이트(gate) | 통과 검사대. AI 호출과 알림 발송 전에 비용과 안전 규칙을 검사해 통과한 것만 내보냅니다. |
+| stub(스텁) | 아직 실제로 연결하지 않은 기능을 대신하는 임시 응답. 예: 구글 캘린더 연동은 현재 스텁입니다. |
 
-| 도구 | 버전 |
+### 데이터와 보안
+
+| 용어 | 쉬운 설명 |
+| --- | --- |
+| 멱등성(Idempotency) | 같은 요청이 실수로 두 번 도착해도 결과가 한 번 실행한 것과 같도록 만드는 성질. 계획 승인이 중복 저장되는 사고를 막습니다. |
+| soft delete | 실제로 지우지 않고 "보관됨" 표시만 남기는 삭제. 복구와 통계 보존이 가능합니다. |
+| append-only | 기록을 고치지 않고 새 줄만 덧붙이는 방식. 동의 이력처럼 위조나 변조가 있으면 안 되는 기록에 씁니다. |
+| 익명화 | 계정을 지우는 대신 개인 식별 정보만 없애는 처리. |
+| PII | 이름이나 이메일처럼 개인을 특정할 수 있는 정보. |
+| AES-GCM 암호화 | 저장된 값을 열쇠 없이는 읽을 수 없게 바꾸는 표준 암호 방식. |
+| JWT / 액세스 토큰 | 로그인 후 발급되는 출입증 문자열. 요청마다 함께 보내 본인임을 증명합니다. |
+| refresh 토큰 | 출입증이 만료됐을 때 다시 로그인하지 않고 새로 발급받는 열쇠. |
+| OAuth / 구글 ID 토큰 | 구글이 "이 사람 맞다"고 보증해 주는 로그인 방식과 그 증명서. |
+| Web Push / VAPID | 앱을 켜지 않아도 브라우저로 알림을 보내는 기술과, 그 발송자가 우리임을 증명하는 키. |
+| UTC / KST | UTC는 세계 표준시, KST는 한국 시간(UTC+9). 저장은 UTC로, 응답은 한국 시간으로 내보냅니다. |
+
+### 개발과 운영 도구
+
+| 용어 | 쉬운 설명 |
+| --- | --- |
+| OpenAPI / Swagger UI | 서버가 제공하는 API 목록을 기계가 읽을 수 있게 정리한 문서(OpenAPI)와, 그것을 브라우저에서 눌러 볼 수 있게 보여 주는 화면(Swagger UI). |
+| uv | 파이썬 라이브러리 설치와 실행 도구. |
+| Docker / Docker Compose | 서버와 데이터베이스를 각자 컴퓨터 환경과 무관하게 똑같이 띄워 주는 도구. |
+| CI | 코드를 올릴 때마다 자동으로 검사와 빌드를 돌리는 장치. |
+| ruff / mypy / pytest | 각각 코드 스타일 검사, 타입 검사, 자동 테스트 도구. |
+| 404 / 422 / 501 | 서버 응답 번호. 404는 "그런 주소 없음", 422는 "규칙 위반이라 처리 못 함"(예: 일정 겹침), 501은 "아직 구현 안 됨". |
+| CORS | 어떤 웹 주소에서 이 서버를 호출할 수 있는지 허용 목록. |
+
+## 구현 범위
+
+| 영역 | 상태 | 주요 범위 |
+| --- | --- | --- |
+| 로그인 | 구현 | 구글 로그인 검증, 자체 출입증(토큰) 발급, 갱신, 로그아웃, 개발용 임시 로그인 |
+| AI 인터뷰와 초기 설정 | 구현 | 대화 세션, 항목별 답변 수집, 다음 질문 결정, 완료 후 목표와 생활 리듬 반영 |
+| 목표, 습관, Inbox | 구현 | 등록, 조회, 수정, 삭제, 목표 계층(집중/유지/보류), 주간 습관, 추천 자료의 "한 걸음" 채택 |
+| 계획 | 구현 | 중간 목표(마일스톤), 첫 계획 생성, 일정 칸 편집, 승인, 폐기, 재계획 |
+| 오늘 실행 | 구현 | 오늘 할 일 목록, 상세, 시작, 일시정지, 재개, 결과 기록과 취소 |
+| 회고와 회복 | 구현 | 실패 사유 선택, 저녁 일괄 회고, 회복안 제안, 사용자 결정, 회복 반영 재계획 |
+| 주간 리뷰 | 구현 | 한 주 지표 집계, 과한 습관 줄이기 제안과 수락 |
+| 설정과 개인정보 | 구현 | 말투와 프로필, 동의 이력, 2단계 확인 후 익명화 |
+| 알림 | 구현 | 알림 수신 등록과 해제, 발송 키 제공, 발송 전 안전 규칙 검사 |
+| 구글 캘린더 | 임시 응답(준비 중) | 연결과 해제는 아직 미구현 응답(501), 빈 시간 조회, 미리보기, 등록은 고정된 예시 응답만 반환 |
+| 자동 작업(스케줄러) | 구현 | 정해진 시각에 도는 작업 9종 등록. 기본값은 꺼짐 |
+
+운영 사용자 수, 완료율 개선, 회복률 향상 같은 성과 수치는 코드만으로 입증할 수 없습니다. 보고서와 발표에는 별도의 실험이나 운영 근거가 있을 때만 사용하세요.
+
+## 심사와 리뷰를 위한 안내
+
+### 5분 안에 확인하는 방법
+
+1. `uv sync`를 실행한 뒤 `uv run uvicorn reaction_backend.main:app --reload`로 서버를 띄웁니다.
+2. `http://localhost:8000/docs`에 접속하면 API 목록이 나오고, 그 화면에서 바로 호출해 응답을 확인할 수 있습니다.
+3. `uv run pytest -q`로 자동 테스트를 실행합니다. 2026년 8월 기준 **1,202건**이 등록되어 있습니다.
+4. 실제 화면까지 함께 보려면 [프론트엔드 저장소](https://github.com/hanium-reaction/reaction-frontend)를 같이 실행하세요.
+
+### 자주 나오는 질문
+
+| 질문 | 답 | 확인할 위치 |
+| --- | --- | --- |
+| AI를 실제로 어디에 쓰나요? | 인터뷰(질문 선택, 답변 추출, 모호한 답 판단, 요약), 목표 쪼개기, 계획 생성과 품질 검토, 실패 사유 진단, 회복안 생성, 모닝 브리프 문구, Inbox 자료 분류, 습관 조정 판단입니다. 지시문 13개를 영역별 파일로 나눠 버전을 매겨 관리합니다. | `src/reaction_backend/prompts/` |
+| AI 응답 품질은 어떻게 검증했나요? | 회복 상황 120건을 정답 세트로 만들어, 사용자 없이 반복 실행하는 오프라인 평가를 돌립니다. | [`eval/`](eval/) |
+| 단순 저장과 조회 서비스와 무엇이 다른가요? | 승인 전에는 적용하지 않기, 실패한 원본 기록을 고치지 않기, 외부 호출은 검사대를 통과하기. 이 세 규칙이 코드로 강제됩니다. | `safety/`, `llm/` |
+| AI가 사용자를 탓하는 말을 하면 어떻게 하나요? | 응답에서 금지 표현을 걸러 내고, 자기비난 문구를 되풀이하지 않는지 별도 사례 10건으로 검증합니다. | `safety/`, [`eval/`](eval/) |
+| 개인정보는 어떻게 다루나요? | 민감한 값은 암호화해 저장하고, 동의 이력은 고칠 수 없는 방식으로 남기며, 90일 동안 사용하지 않은 계정은 익명화합니다. 사용자가 직접 요청할 때는 2단계 확인을 거칩니다. | `safety/`, `api/routes/settings.py` |
+| AI 비용이 계속 늘어나면 어떻게 하나요? | 사용자마다 하루 사용 한도를 두고, 작업 종류에 따라 가벼운 모델과 무거운 모델을 나눠 씁니다. 5개월 예산도 문서로 계산해 두었습니다. | [`docs/BUDGET.md`](docs/BUDGET.md) |
+| 아직 안 된 부분은 무엇인가요? | 구글 캘린더 연동이 임시 응답 상태입니다. 나머지 미완성 항목도 아래에 그대로 적어 두었습니다. | [현재 제한 사항](#현재-제한-사항) |
+
+### 회복안 품질 평가 데이터
+
+계획이 무너진 상황 120건을 직접 만들어, 규칙이 어떤 회복안을 고르는지 반복해서 검증합니다.
+
+| 구성 | 건수 | 확인 목적 |
+| --- | ---: | --- |
+| 단일 사유 | 52 | 실패 사유 13종 각각에 대해 짧은 카드와 긴 카드, 오전과 야간 조합 |
+| 복수 사유 | 26 | 두 사유가 함께 들어올 때 어느 쪽을 먼저 볼지 |
+| 회귀 검증 | 12 | 과거에 전략이 없던 사유가 다시 비지 않는지 |
+| 경계값 | 20 | 23시 경계, 연속 실패 이력, 사유를 고르지 않거나 너무 많이 고른 경우 |
+| 자기비난 방어 | 10 | 사용자가 스스로를 탓하는 문구를 시스템이 따라 하지 않는지 |
+
+## 아키텍처
+
+```text
+요청 접수와 형식 검사        FastAPI routes + Pydantic schemas
+              ↓
+단계 진행과 서비스 규칙       Orchestrators / domain rules
+              ↓
+데이터 읽기와 쓰기            Repositories + SQLAlchemy models
+        ↙        ↓         ↘
+   AI 호출     데이터베이스    외부 연동
+   Gemini      PostgreSQL    OAuth / Web Push / 웹 문서 수집
+   + 통과 검사
+              ↓
+자동 작업 + 안전 검사       Scheduler + Safety gates
+```
+
+위에서 아래로 읽으면 됩니다. 화면에서 온 요청이 형식 검사를 거쳐 들어오고 → 서비스 규칙에 따라 단계가 진행되고 → 데이터가 저장되며, AI 호출과 외부 발송은 반드시 검사대를 거칩니다.
+
+### API 레이어 — 요청을 받는 곳
+
+`src/reaction_backend/main.py`가 기능별 라우트 파일 18개를 등록합니다. 성공했을 때는 결과 객체를 그대로 돌려주고, 실패했을 때만 정해진 오류 형식(`ErrorResponse`)을 사용합니다. 시간은 내부적으로 세계 표준시(UTC)로 저장하고, 응답에서는 한국 시간(+09:00)이 표시된 표준 날짜 형식으로 내보냅니다.
+
+API를 바꿀 때는 [`docs/api-contract.md`](docs/api-contract.md)와 변경 이력을 같은 PR에서 함께 갱신해야 합니다.
+
+### 오케스트레이션 — 단계를 진행시키는 곳
+
+여러 단계를 순서대로 진행시키는 코드는 `src/reaction_backend/orchestrator/`에 있습니다.
+
+- 인터뷰 질문 선택과 답변 수집, 수집된 답을 실제 목표 데이터로 만들기
+- 중간 목표와 첫 계획 생성, 생성 결과 검토
+- 일정 배치와 시간표 칸 편집
+- 회복안 제안과 재계획
+- 사용자 리듬 기억과 주간 리뷰
+- Inbox에 담긴 자료 해석과 행동으로 채택
+
+`agents/` 폴더는 향후 독립 실행 단위를 두기 위한 자리만 잡아 둔 상태이고, 현재 실행 로직의 중심은 오케스트레이터입니다. README와 발표에서 `agents/`에 구현이 있다고 과장하지 마세요.
+
+### AI 호출 검사대 (LLM 게이트)
+
+모든 Gemini 호출은 `src/reaction_backend/llm/`을 반드시 통과합니다.
+
+- 작업 종류에 맞는 모델 선택
+- 응답 지연 제한, 실패 시 재시도, 대체 경로 확보
+- 결과를 정해진 형식(JSON 등)으로 강제
+- 사용량과 비용 기록
+- 사용자별 하루 사용 한도
+- 응답에 남은 금지 표현 제거
+
+라우트나 오케스트레이터에서 AI 라이브러리를 직접 부르면 안 됩니다. AI에게 주는 지시문(프롬프트)은 `src/reaction_backend/prompts/<도메인>/*.vN.md`처럼 버전을 붙여 관리합니다.
+
+### 데이터와 기억
+
+- 데이터베이스는 PostgreSQL, 연결은 비동기 방식(SQLAlchemy + asyncpg)
+- 표 구조 변경은 Alembic 이력으로 관리
+- 사용자, 목표, 계획, 실행, 회복, 리뷰, 알림, 동의 데이터 모델
+- 이벤트와 동의 기록은 덧붙이기만 하고 고치지 않음(append-only)
+- 삭제는 표시만 남기는 방식(soft delete)과 익명화로 처리
+- 민감한 값은 암호화해 저장
+
+`memory/` 폴더는 4계층 메모리라는 개념상의 경계이고, 실제 저장은 `db/models/`와 `repositories/`가 담당합니다.
+
+### 안전 장치
+
+- AI 초안은 사용자가 승인해야만 적용 (HITL)
+- 실패한 원본 기록의 상태값은 회복 결정으로 바꾸지 않음
+- 민감 정보 암호화와 개인정보 가리기
+- 알림은 주당 횟수 제한, 야간 발송 금지, 같은 종류 중복 방지
+- 사용자별 AI 사용량 한도
+- 배포 환경에서는 개발용 임시 로그인 차단
+- 중복 요청이 위험한 승인과 일괄 처리 창구는 중복 방지 키로 보호
+
+## 요구 사항
+
+| 도구 | 기준 |
 | --- | --- |
 | Python | 3.12 |
-| [uv](https://docs.astral.sh/uv/) | 0.9.x |
-| Docker / Docker Compose | 26+ (선택) |
+| 패키지 관리 | uv 0.9.x |
+| 데이터베이스 | PostgreSQL 17 권장 |
+| 컨테이너 | Docker / Docker Compose(선택) |
 
----
+의존성의 정확한 버전은 [`uv.lock`](uv.lock)을 기준으로 합니다.
 
 ## 빠른 시작
 
-### 로컬 (uv)
+### 1. uv로 실행
 
 ```bash
 uv sync
-cp .env.example .env   # 선택 — 기본값만으로도 동작
+cp .env.example .env
 uv run uvicorn reaction_backend.main:app --reload
-# → http://localhost:8000/health
-# → http://localhost:8000/docs  (Swagger UI)
 ```
 
-### Docker Compose (backend + 로컬 postgres)
+Windows PowerShell:
+
+```powershell
+uv sync
+Copy-Item .env.example .env
+uv run uvicorn reaction_backend.main:app --reload
+```
+
+- 서버 생존 확인: `http://localhost:8000/health`
+- API 문서 화면(눌러서 시험 호출 가능): `http://localhost:8000/docs`
+- API 목록 원본 파일: `http://localhost:8000/openapi.json`
+
+데이터베이스 주소(`DATABASE_URL`) 없이도 서버는 뜨지만, 데이터를 쓰는 기능은 동작하지 않습니다. 연동까지 확인하려면 PostgreSQL 설정이 필요합니다.
+
+### 2. Docker Compose로 실행
+
+`docker-compose.yml`은 `.env`를 읽으므로 먼저 파일을 준비해야 합니다.
 
 ```bash
+cp .env.example .env
 docker compose up --build
-# → http://localhost:8000/health   (DB ping 포함)
-# → postgres on localhost:5432 (user/db: reaction, pass: reaction)
 ```
 
-소스 (`src/`) 가 마운트되어 hot reload 됨.
-`.env` 에 `DATABASE_URL` 이 있으면 Supabase 등 외부 DB 우선, 없으면 docker compose 내부 postgres 사용.
+Windows PowerShell:
 
----
+```powershell
+Copy-Item .env.example .env
+docker compose up --build
+```
 
-## 자주 쓰는 명령어
+- API: `http://localhost:8000`
+- PostgreSQL: `localhost:5432`
+- 로컬 DB 기본값: user/db/password = `reaction`
 
-| 목적 | 명령 |
+## 환경 변수
+
+전체 목록과 주석은 [`.env.example`](.env.example)을 기준으로 합니다.
+
+### 필수 또는 배포 시 필수
+
+| 변수 | 용도 |
 | --- | --- |
-| 의존성 설치 | `uv sync` |
-| 새 의존성 | `uv add <pkg>` / `uv add --dev <pkg>` |
-| 개발 서버 | `uv run uvicorn reaction_backend.main:app --reload` |
-| 린트 | `uv run ruff check .` |
-| 포맷 | `uv run ruff format .` |
-| 포맷 검사 | `uv run ruff format --check .` |
-| 타입 검사 | `uv run mypy src` |
-| 테스트 | `uv run pytest -v` |
-| **Alembic 현재 버전** | `uv run alembic current` |
-| **새 마이그레이션** | `uv run alembic revision --autogenerate -m "..."` |
-| **마이그레이션 적용** | `uv run alembic upgrade head` |
-| **한 단계 되돌리기** | `uv run alembic downgrade -1` |
-| Docker 빌드 | `docker compose build` |
-| Docker (postgres 포함) | `docker compose up` |
+| `DATABASE_URL` | 데이터베이스 접속 주소 |
+| `JWT_SECRET` | 로그인 출입증에 서명할 비밀키. 32바이트 이상 권장 |
+| `GOOGLE_OAUTH_CLIENT_ID` | 실제 구글 로그인 검증에 필요한 앱 식별자 |
+| `COLUMN_ENCRYPTION_KEY` | 캘린더 토큰, 메모, AI 요청 내용을 암호화하는 열쇠 |
+| `GEMINI_API_KEY` | 실제 Gemini(AI) 호출용 키 |
 
----
+### 선택 기능
 
-## 폴더 구조
+| 변수 | 용도 |
+| --- | --- |
+| `AUTH_STUB_MODE` | 개발용 임시 로그인 허용. 스테이징과 운영 환경에서는 켜져 있으면 서버가 아예 뜨지 않음 |
+| `SCHEDULER_ENABLED` | 정해진 시각의 자동 작업 실행 여부. 기본값 `false`(꺼짐) |
+| `VAPID_PRIVATE_KEY` / `VAPID_PUBLIC_KEY` | 브라우저 알림 발송용 키 한 쌍 |
+| `LLM_MODEL*` | 작업 종류별로 사용할 Gemini 모델 고정 |
+| `LLM_*BUDGET*` / `LLM_*TIMEOUT*` | AI 비용 상한과 응답 대기 시간 상한 |
+| `CORS_ALLOW_ORIGINS` | 이 서버를 호출할 수 있는 웹 주소 허용 목록 |
 
+실제 `.env` 파일과 비밀키, 토큰, 비밀번호는 절대 커밋하지 마세요.
+
+## 데이터베이스
+
+```bash
+uv run alembic current
+uv run alembic upgrade head
+uv run alembic revision --autogenerate -m "describe_change"
+uv run alembic downgrade -1
 ```
+
+위 명령은 각각 현재 적용된 버전 확인, 최신까지 적용, 변경분 자동 생성, 한 단계 되돌리기입니다.
+
+데이터 구조 변경 절차:
+
+1. `src/reaction_backend/db/models/` 수정
+2. 변경 이력(마이그레이션) 파일 생성
+3. 생성된 변경문과 되돌리기 문장이 맞는지 검토
+4. `uv run alembic upgrade head`로 실제 반영
+5. 테스트 실행과 모델과 DB 불일치 검사
+
+초기화 스크립트는 데이터를 지우므로 대상 환경을 반드시 확인한 뒤 사용하세요. 운영 환경(`APP_ENV=prod`)에서는 초기화가 거부됩니다.
+
+## 자동 작업(스케줄러)
+
+`SCHEDULER_ENABLED=true`일 때만 서버가 뜨면서 자동 작업 실행기가 함께 시작됩니다. 현재는 서버 한 대 운영을 전제로 하며, 모든 작업은 여러 번 실행돼도 결과가 어긋나지 않아야 합니다.
+
+등록 작업:
+
+- 모닝 브리프 사전 생성
+- 주간 리뷰 사전 계산
+- 장기 중단 상태 해소
+- 만료된 계획 초안 정리
+- 회고하지 않은 카드와 미완주 회복 정리
+- 오래된 잠정 목표 보관
+- 저녁 회고와 사전 카드 알림
+- 주간 습관 인스턴스 생성
+
+세부 시간표와 함수 계약은 [`src/reaction_backend/scheduler/README.md`](src/reaction_backend/scheduler/README.md)를 참고하세요.
+
+## 검증
+
+```bash
+uv run ruff check .          # 코드 규칙 검사
+uv run ruff format --check . # 코드 서식 검사
+uv run mypy src              # 타입 검사
+uv run pytest -v             # 자동 테스트 실행
+```
+
+테스트는 API 창구, 데이터 저장, 단계 진행, AI 지시문, 자동 작업, 회복 규칙, 알림 발송을 포함합니다. 외부 서비스 호출(AI, 캘린더, 알림)은 실제로 부르지 않고 흉내 내는 가짜 응답으로 대체해 테스트합니다.
+
+## 프로젝트 구조
+
+```text
 reaction-backend/
-├── .github/workflows/ci.yml         # PR 검증 (lint·typecheck·test·docker build)
-├── docs/
-│   ├── api-contract.md              # 16 도메인 API 계약 v0.3
-│   └── architecture.md              # Orchestrator/Agent/Tool/Memory
-├── src/reaction_backend/
-│   ├── main.py                      # FastAPI 앱 + 16 라우터 include
-│   ├── config.py                    # 환경설정 (pydantic-settings)
-│   │
-│   ├── api/routes/                  # 16 도메인 라우터 (health만 구현, 나머지 placeholder 501)
-│   │   ├── health.py                # ✅ 구현됨
-│   │   ├── auth.py / onboarding.py / interview.py
-│   │   ├── time_policies.py / goals.py / habits.py
-│   │   ├── planning.py / calendar.py / today.py
-│   │   ├── reflection.py / recovery.py / review.py
-│   │   ├── policy.py / notifications.py / settings.py
-│   │
-│   ├── schemas/                     # 공통 + 도메인 스키마
-│   │   └── common.py                # ErrorResponse, HealthResponse, KST helper
-│   │
-│   ├── domain/                      # 순수 도메인 모델 (entity/VO) — 후속
-│   ├── db/                          # SQLAlchemy + 마이그레이션 — Issue #2
-│   ├── repositories/                # Repository 패턴 — Issue #2
-│   │
-│   ├── orchestrator/                # 3 Orchestrator (goal_structuring/recovery/interview)
-│   ├── agents/                      # 9 Worker Agent
-│   ├── llm/                         # Gemini Tool Executor (circuit breaker + fallback)
-│   ├── prompts/                     # Prompt Registry — Issue #5
-│   ├── safety/                      # 금지어 필터, PII 마스킹 — Issue #5
-│   │
-│   ├── integrations/
-│   │   ├── google_oauth/            # id_token 검증, JWT 발급
-│   │   └── google_calendar/         # freebusy + events.insert (idempotent)
-│   │
-│   ├── scheduler/                   # 8 cron 작업
-│   ├── memory/                      # 4 계층 메모리 추상화
-│   └── observability/               # llm_runs · metrics · audit
-│
-├── tests/
-├── .env.example
-├── Dockerfile                       # multi-stage: builder / dev / runtime
-├── docker-compose.yml
-└── pyproject.toml
+├─ .github/workflows/          자동 검사, 배포, 운영 작업
+├─ alembic/                    데이터베이스 구조 변경 이력
+├─ docs/                       API, 아키텍처, 배포, 결정 기록
+├─ eval/                       회복안 품질 평가용 정답 사례 모음
+├─ scripts/                    초기 데이터 넣기, 과거 데이터 보정, 운영 도구
+├─ src/reaction_backend/
+│  ├─ api/                     요청을 받는 창구와 공통 처리
+│  ├─ auth/                    로그인과 확인 토큰 보조
+│  ├─ content/                 사용자에게 그대로 보여 주는 안내 문구
+│  ├─ db/                      데이터베이스 연결과 표 정의
+│  ├─ domain/                  기술과 무관한 서비스 규칙
+│  ├─ integrations/            구글 로그인, 알림 발송, 외부 웹 문서 수집
+│  ├─ llm/                     AI 호출 창구와 통과 검사
+│  ├─ orchestrator/            인터뷰, 계획, 회복 단계 진행
+│  ├─ prompts/                 버전 관리되는 AI 지시문
+│  ├─ repositories/            데이터 읽기와 쓰기 담당
+│  ├─ safety/                  금지 표현, 암호화, 비용, 알림 안전 검사
+│  ├─ scheduler/               정해진 시각에 도는 자동 작업
+│  └─ schemas/                 요청과 응답 데이터 형식 정의
+└─ tests/                      자동 테스트
 ```
 
-각 폴더의 `README.md` 가 그 레이어의 책임 / 후속 모듈 / 규약을 설명한다.
+각 주요 계층의 상세 규칙은 해당 폴더의 README를 참고하세요.
 
----
+## 배포
 
-## 데이터베이스 (Issue #2)
+- 현재 저장소에는 AWS EC2 서버에 직접 올리는 방식과 Render 서비스 설정 자료가 함께 있습니다.
+- 환경별 실제 주소는 API 계약 문서에서 아직 미정(`TBD`)입니다.
+- 배포 방식을 고를 때 [`docs/DEPLOY.md`](docs/DEPLOY.md), [`docs/DEPLOY_AWS.md`](docs/DEPLOY_AWS.md), [`docs/cicd.md`](docs/cicd.md)의 현재 상태를 함께 확인하세요.
+- 스테이징과 운영 설정은 팀 합의 없이 바꾸지 않습니다.
 
-**진실 소스:** `Reaction_DB_설계서_v0.7.1` + `Reaction_DB_시나리오별_상세분석.md`.
-**스택:** Supabase PostgreSQL (호스팅된 표준 PG) + SQLAlchemy(async) + asyncpg + Alembic.
-**전략:** Supabase 부가 서비스(Auth/Storage/Realtime/Edge)는 미사용 — vendor-neutral 코드 유지. AWS 이전 시 DB는 `pg_dump | psql` 로 매끄럽게.
+## 기여 규칙
 
-### 첫 셋업
+1. `main` 브랜치에 직접 올리지 않고, 새 브랜치와 코드 리뷰 요청(PR)을 사용합니다.
+2. 라이브러리 추가와 삭제는 `uv add` / `uv remove`로만 합니다.
+3. `uv.lock` 파일은 손으로 고치지 않습니다.
+4. API를 바꾸면 계약 문서도 같은 PR에 포함합니다.
+5. 데이터베이스 구조 변경, 새 외부 서비스 도입, 로그인과 개인정보 보관 방식 변경은 먼저 합의합니다.
+6. AI 결과나 캘린더 변경을 사용자 승인 없이 자동 적용하거나, 금지 표현 필터를 우회하는 코드는 허용하지 않습니다.
 
-1. Supabase 프로젝트 생성 → **Session pooler URL** 복사
-2. `.env` 만들고 `DATABASE_URL=postgresql://postgres.<ref>:<pw>@aws-X-ap-northeast-2.pooler.supabase.com:5432/postgres`
-   (코드가 자동으로 `postgresql+asyncpg://` 로 변환)
-3. `uv run alembic current` 로 연결 확인 (PR 2-A 시점)
+자세한 규칙은 [`AGENTS.md`](AGENTS.md)에 있습니다.
 
-### 로컬 Postgres (Supabase 없이)
+## 현재 제한 사항
 
-`.env` 에서 `DATABASE_URL` 비우거나 빼면 `docker compose` 의 내부 postgres 사용:
-```
-DATABASE_URL=postgresql://reaction:reaction@localhost:5432/reaction
-```
+숨기지 않고 그대로 적습니다. 심사나 리뷰에서 물어볼 만한 항목입니다.
 
-### 모델/마이그레이션 위치
+| 항목 | 현재 상태 | 영향 |
+| --- | --- | --- |
+| 구글 캘린더 연동 | 연결과 읽기, 쓰기 모두 임시 응답 | 수업 같은 고정 일정은 사용자가 직접 입력해야 합니다 |
+| `agents/`, `memory/`, `observability/` 폴더 | 구조상의 자리만 잡아 둔 상태 | 실행 로직은 오케스트레이터에 있습니다. 이 폴더를 근거로 기능을 설명하면 안 됩니다 |
+| 자동 작업 실행 방식 | 서버 메모리 안에서 일정 관리 | 서버를 여러 대로 늘리면 같은 작업이 중복 실행될 수 있어 별도 조치가 필요합니다 |
+| 문서와 코드의 시차 | API 계약 문서와 오래된 주석에 과거 상태가 남아 있을 수 있음 | 판단 기준은 항상 실행 코드입니다 |
+| 라이선스 | 별도 파일 없음 | 외부 공개나 재사용 전에 팀 정책 확인이 필요합니다 |
 
-- ORM 모델: `src/reaction_backend/db/models/` (Issue #2 후속 PR에서 채워짐)
-- 마이그레이션: `alembic/versions/`
-- 모델 변경 시: 모델 수정 → `alembic revision --autogenerate -m "..."` → 생성된 파일 리뷰 → `alembic upgrade head`
+## 문서 인덱스
 
-### DB reset / seed
+- [`docs/api-contract.md`](docs/api-contract.md): API 주소, 응답, 오류, 중복 방지 규약
+- [`docs/api-change-log.md`](docs/api-change-log.md): API 변경 이력
+- [`docs/architecture.md`](docs/architecture.md): 아키텍처와 제품 원칙
+- [`docs/erd-diff.md`](docs/erd-diff.md): 데이터 구조도와 실제 코드 매핑
+- [`docs/cicd.md`](docs/cicd.md): 자동 검사와 배포 설정
+- [`docs/DEPLOY.md`](docs/DEPLOY.md), [`docs/DEPLOY_AWS.md`](docs/DEPLOY_AWS.md): 배포 절차서
+- [`docs/BUDGET.md`](docs/BUDGET.md): 인프라와 AI 비용 메모
+- [`eval/README.md`](eval/README.md): 회복안 품질 평가 데이터
+- [GitHub contributors](https://github.com/hanium-reaction/reaction-backend/graphs/contributors)
 
-| 목적 | 명령 |
-| --- | --- |
-| 전체 drop + 재생성 + 마스터 seed | `uv run python -m scripts.db_reset` |
-| Demo user 1명 + 부속 데이터 | `uv run python -m scripts.db_seed_demo` |
-
-`db_reset` 은 `app_env=prod` 에서는 거부됨. `yes` 입력 확인 단계 있음.
-**마스터 데이터** (13 failure tags + 9 recovery strategies) 는 `alembic upgrade head` 만으로 자동 seed 됨 (마이그레이션 `a96678e9ffe5`).
-
-### ERD ↔ 코드 매핑
-
-[`docs/erd-diff.md`](docs/erd-diff.md) — 29개 도메인 테이블 / 29개 ENUM / 마스터 데이터 / 의도적 누락 모두 한눈에.
-
-### CI/CD
-
-- **CI** (`.github/workflows/ci.yml`): PR 마다 lint / typecheck / test / docker build + **alembic check (drift 감지) + downgrade smoke**
-- **CD** (`.github/workflows/deploy.yml`): main 머지 시 **EC2 staging 에 자동 배포** — self-hosted runner 가 EC2 위에서 직접 코드 반영 → `alembic upgrade head` → 앱 재기동 → `/health` 확인
-- (dormant) `.github/workflows/migrate.yml`: Supabase staging 전제로 작성된 이전 CD — 현재 EC2+RDS 조합으로 대체되어 미사용
-- 가이드: [`docs/cicd.md`](docs/cicd.md) — self-hosted runner 등록, deploy.yml 동작 흐름, Supabase staging 재활성화 방법
-
----
-
-## 후속 이슈와의 연결
-
-| 이슈 | 채워질 영역 |
-| --- | --- |
-| #1 follow-up | Auth / Onboarding / Interview 핵심 (`agents/interview_agent.py`, `orchestrator/interview.py`) |
-| **#2-A** | `db/{session,base}.py`, `alembic/`, docker compose postgres, `/health` DB ping |
-| **#2-B** | 사용자/온보딩 8 모델 (users, interview, behavioral, interaction, notification, calendar, fixed_schedule) |
-| **#2-C** | 계획 9 모델 (time_policies, goals, goal_nodes, habits, habit_instances, inbox_items, action_items, scheduled_blocks, dependency_links) |
-| **#2-D** | 실행/회복 7 모델 (execution_events, interruption_events, context_snapshots, failure_reason_tags, execution_failure_tags, recovery_strategy_catalog, recovery_attempts) |
-| **#2-E** | 집계/시스템 5 모델 (period_summaries, daily_briefs, policy_snapshots, llm_runs, idempotency_keys) + 마스터 seed + reset 스크립트 + ERD diff |
-| #3 Backend API Contract v0 | 도메인 라우터 실제 구현 |
-| #5 LLM Infrastructure | `llm/`, `prompts/`, `safety/`, `agents/` 본 구현 |
-| #6 Deep Interview + Analysis Confirm | 인터뷰 흐름 통합 (`orchestrator/interview.py` 완성 + S03 commit 트랜잭션) |
-
----
-
-## 기여 가이드
-
-1. `main` 에 직접 push 금지. 반드시 PR.
-2. 새 의존성은 `uv add` 만 사용 (`pip install` X).
-3. 새 endpoint 추가 시 [`docs/api-contract.md`](docs/api-contract.md) 같은 PR에 포함.
-4. CI (lint · typecheck · test · docker build) 가 초록불일 때만 머지.
-
-AI 에이전트(Claude Code, Codex 등)는 [`AGENTS.md`](AGENTS.md) 를 먼저 읽어 주세요.
+외부 공개, 배포, 재사용 전에 팀의 라이선스 정책을 확인하세요.

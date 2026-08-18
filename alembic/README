@@ -1,1 +1,83 @@
-Generic single-database configuration with an async dbapi.
+# `alembic/` — PostgreSQL 스키마와 기준 데이터 이력
+
+이 디렉터리는 Reaction 백엔드의 데이터베이스 변경 이력을 관리한다. 애플리케이션 모델의
+`Base.metadata`와 운영 데이터베이스 사이의 차이를 Alembic revision으로 기록하며, 일부
+revision은 실패 사유 태그와 회복 전략 같은 기준 데이터도 함께 배포한다.
+
+## 구성
+
+- [`env.py`](env.py): [`reaction_backend.db.models`](../src/reaction_backend/db/models/__init__.py)를
+  import해 모든 모델을 등록하고 `Base.metadata`를 Alembic에 연결한다. `DATABASE_URL`은 앱
+  설정에서 읽어 asyncpg URL로 정규화하며, 온라인 migration은 비동기 엔진과 `NullPool`을
+  사용한다. 타입과 서버 기본값 변경도 비교한다.
+- [`script.py.mako`](script.py.mako): 새 revision 파일의 템플릿이다.
+- [`versions/`](versions/): 적용 순서가 보존된 revision 스크립트다.
+- [`../alembic.ini`](../alembic.ini): Alembic 로깅과 파일 위치 설정이다. 접속 URL은 파일에
+  두지 않고 애플리케이션 설정을 사용한다.
+
+현재 이력은 단일 선형 체인이며 head는 `8680c4567ca6`이다.
+
+| 순서 | revision | 변경 내용 |
+| --- | --- | --- |
+| 1 | `59acd6c5f086` | 초기 애플리케이션 테이블 생성 |
+| 2 | `d09c105520b5` | 실패 사유 태그와 회복 전략 기준 데이터 seed |
+| 3 | `b1f2a3c4d5e6` | `plan_drafts` 추가 |
+| 4 | `c2d3e4f5a6b7` | `user_consents` 추가 |
+| 5 | `d3e4f5a6b7c8` | 인터뷰 fallback 사용 여부 기록 |
+| 6 | `e4f5a6b7c8d9` | `notification_sends` 추가 |
+| 7 | `f5a6b7c8d9e0` | 목표의 `proposed` 상태 지원 |
+| 8 | `a6b7c8d9e0f1` | 이월 규칙과 freeze-slot 문구 동기화 |
+| 9 | `b7c8d9e0f1a2` | `llm_runs.cost_micro_usd` 추가 |
+| 10 | `c8d9e0f1a2b3` | 인박스 자료 출처와 resource slug 추가 |
+| 11 | `8680c4567ca6` | 회복 전략 커버리지 보완 seed |
+
+## 사용법
+
+프로젝트 루트에서 실행한다.
+
+```bash
+uv run alembic current
+uv run alembic upgrade head
+uv run alembic revision --autogenerate -m "describe change"
+uv run alembic downgrade -1
+```
+
+새 revision을 만들기 전에는 관련 ORM 모델이
+[`db/models/__init__.py`](../src/reaction_backend/db/models/__init__.py)에서 import되는지 먼저
+확인한다. 자동 생성 결과는 초안일 뿐이므로 컬럼 타입, 제약조건, 인덱스, 데이터 migration,
+`upgrade()`와 `downgrade()`의 대칭성을 사람이 검토해야 한다. 기준 데이터 변경은 재적용과
+부분 실패 상황을 고려해 멱등성을 유지한다.
+
+## 핵심 규약
+
+- 운영 스키마 변경은 반드시 revision으로 남긴다. 애플리케이션 시작 시 `create_all()`로
+  운영 스키마를 암묵적으로 바꾸지 않는다.
+- 모든 시간 컬럼은 timezone-aware PostgreSQL 타입을 사용하고 UTC로 저장한다.
+- 애플리케이션 데이터는 hard delete 대신 `archived_at` 기반 보관을 우선한다.
+- 비밀값과 개인정보 원문을 migration 또는 seed 파일에 넣지 않는다.
+- 기존 revision은 이미 적용됐을 수 있으므로 수정하지 않고 새 revision으로 보완한다.
+- downgrade는 데이터 손실을 일으킬 수 있다. 특히 운영 환경에서는 revision 내용을 검토하고
+  백업·복구 절차가 준비됐을 때만 실행한다.
+
+## 검증
+
+CI의 migration 검증은 임시 PostgreSQL에 `upgrade head`를 적용하고 현재 상태를 확인한 뒤
+downgrade smoke test와 SQL preview를 수행한다. 로컬에서는 최소한 다음을 확인한다.
+
+```bash
+uv run alembic upgrade head
+uv run alembic current
+uv run pytest -v tests/test_db.py tests/test_recovery_catalog_sync.py
+```
+
+모델과 시간 직렬화 계약은 [`tests/test_db.py`](../tests/test_db.py),
+[`tests/test_kst_serialization.py`](../tests/test_kst_serialization.py), 기준 데이터 동기화는
+[`tests/test_recovery_catalog_sync.py`](../tests/test_recovery_catalog_sync.py)에서 검증한다.
+
+## 제약과 운영 주의
+
+- 실행에는 접근 가능한 PostgreSQL과 유효한 `DATABASE_URL`이 필요하다.
+- `env.py`는 애플리케이션 설정을 읽으므로 필수 설정 누락도 migration 시작 전에 실패할 수
+  있다.
+- 이력은 현재 단일 head지만 새 branch revision을 만들면 merge revision이 필요하다.
+- 배포는 애플리케이션 코드가 새 스키마를 요구하기 전에 `upgrade head`가 성공해야 한다.
