@@ -25,6 +25,11 @@ class RecoveryProposalLLM(CamelModel):
     JSON 형식과 1:1. 새 버전을 올릴 땐 이 schema 와 출력 형식을 맞출 것
     (`tests/prompts/test_recovery_prompts.py` 가 변수 계약을 강제한다).
     fallback 룰도 같은 schema 로 반환 (Tool Executor 가 강제 검증).
+
+    `obstacle`/`coping_clause`/`acknowledgment` 는 v3 부터 쓰는 필드(근거 대장 §4 S5/S1).
+    v1/v2 는 이 필드들을 채우지 않으므로 기본값을 빈 문자열로 둔다 — route 의 fallback
+    구성(`RecoveryProposalLLM(strategy_code=..., if_clause="", ...)`)이 이 필드들을 명시하지
+    않아도 검증이 통과해야 한다.
     """
 
     strategy_code: str
@@ -32,6 +37,9 @@ class RecoveryProposalLLM(CamelModel):
     then_clause: str
     rationale: str
     estimated_workload_change_minutes: int = 0
+    obstacle: str = ""
+    coping_clause: str = ""
+    acknowledgment: str = ""
 
 
 class RecoveryCard(CamelModel):

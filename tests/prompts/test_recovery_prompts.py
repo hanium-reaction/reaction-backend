@@ -170,3 +170,39 @@ def test_production_prompt_id_matches_code_variables() -> None:
     assert _placeholders(resolved.body) == CODE_VARS["recovery/if_then_proposal"], (
         f"{resolved.full_id}(프로덕션 고정 버전) 의 placeholder 가 route 변수와 다르다."
     )
+
+
+# ── v3 (L1-1 오프라인 평가용, 근거 대장 §4 S1/S5) ──
+
+
+def test_v3_output_schema_includes_coping_and_acknowledgment_fields() -> None:
+    """v3 출력 형식 블록에 obstacle/coping_clause/acknowledgment 3필드가 있다.
+
+    이 필드들은 `RecoveryProposalLLM` 스키마에도 기본값(빈 문자열)으로 있어 v1/v2 의
+    fallback 구성(이 필드들을 안 채움, `tests/test_recovery.py` 의 스텁 참고)이 계속
+    검증을 통과한다.
+    """
+    body = registry.get("recovery/if_then_proposal@v3").body
+    for field in ("obstacle", "coping_clause", "acknowledgment"):
+        assert f'"{field}"' in body, f"v3 출력 형식 블록에 {field} 가 없다"
+
+
+def test_v3_acknowledgment_is_gated_on_avoidance_tag() -> None:
+    """acknowledgment 는 AVOIDANCE 태그 조건부다(근거 대장 §4 S1) — 매번 위로하지 않는다.
+
+    overwhelm≥4 / 연속실패≥2 조건은 아직 실 데이터가 없어(도그푸딩 #258 미착수,
+    근거 대장 §5.4 "로그에서 추정할 것") v3 프롬프트에 포함하지 않았다 — AVOIDANCE
+    태그 조건 하나만 지금 있는 변수(failure_type)로 구현 가능한 부분 구현이다.
+    """
+    body = registry.get("recovery/if_then_proposal@v3").body
+    assert "AVOIDANCE" in body
+    assert "빈 문자열" in body
+
+
+def test_v3_does_not_repeat_v2_prompt_id_pin() -> None:
+    """v3 를 추가해도 프로덕션 고정(`_PROMPT_ID`)은 v2 그대로다.
+
+    L1-1 오프라인 평가가 v3 승률을 검증하기 전까지는 승격하지 않는다(발견 ②의 재발 방지).
+    """
+    assert _PROMPT_ID == "recovery/if_then_proposal@v2"
+    assert registry.get(_PROMPT_ID).version == "2"
