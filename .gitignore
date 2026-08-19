@@ -39,6 +39,10 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# L1-1 실 LLM 호출 산출물 — 비결정적이라 골든셋(eval/golden_recovery_cases.jsonl)과
+# 달리 커밋 대상이 아니다 (docs/experiments/preregistration-v1.md §2).
+eval/l1_1_*.jsonl
+
 # Logs
 *.log
 logs/
