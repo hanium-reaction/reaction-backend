@@ -34,7 +34,7 @@ from sqlalchemy import select
 from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
 from reaction_backend.db.session import get_sessionmaker
 from reaction_backend.orchestrator.recovery import render_template, select_strategies
-from reaction_backend.schemas.recovery import RecoveryProposalLLM
+from reaction_backend.schemas.recovery import RecoveryProposalLLM, RecoveryProposalLLMv3
 from scripts.l1_1_common import (
     REPEATS_PER_VERSION,
     VERSIONS,
@@ -96,11 +96,18 @@ async def _generate_one(
 ) -> GenerationRow:
     from reaction_backend.llm import aiClient
 
+    # v3 만 obstacle/coping_clause/acknowledgment 를 요구하는 확장 schema 를 쓴다. v1/v2 에도
+    # 이 schema 를 넘기면 프롬프트가 요청하지 않은 필드를 Gemini 가 알아서 채워버린다(실
+    # dispatch 로 실측 — v2 호출인데 coping_clause 가 실제 문장으로 채워져 나왔다). 그러면
+    # "v1/v2 는 이 필드를 구조적으로 안 가진다"는 루브릭의 전제(rubric-v1.md §1/§5)가
+    # 깨진다.
+    schema = RecoveryProposalLLMv3 if version == "3" else RecoveryProposalLLM
+
     result = await aiClient.run(
         module="recovery",
-        schema=RecoveryProposalLLM,
+        schema=schema,
         prompt_id=f"recovery/if_then_proposal@v{version}",
-        fallback=lambda: RecoveryProposalLLM(
+        fallback=lambda: schema(
             strategy_code=variables["strategy_group"].lower(),
             if_clause="",
             then_clause=variables["base_template"],
@@ -113,6 +120,22 @@ async def _generate_one(
         user_id=None,
     )
     v = result.value
+    acknowledgment = getattr(v, "acknowledgment", "")
+    if acknowledgment and "AVOIDANCE" not in variables["failure_type"]:
+        # v3 프롬프트는 "AVOIDANCE 아니면 반드시 빈 문자열"이라고 명시하지만, 실 dispatch
+        # 로 실측하니 gemini-3.5-flash-lite 가 이 조건부 지시를 신뢰성 있게 안 지킨다(5건
+        # 중 4건이 TIME_SHORTAGE/LOW_ENERGY 에도 acknowledgment 를 채워 옴). banned_words
+        # 가 이미 쓰는 것과 같은 패턴 — "지시로 되길 바라지 말고 코드가 마지막에 강제한다."
+        # 여기서 지우지 않으면 H1-1/S1 의 "조건부" 설계가 프롬프트 준수율에 좌우돼, L1-1
+        # 이 실제로 재는 게 "설계"가 아니라 "이 모델이 이 지시를 얼마나 잘 따르는가"로
+        # 새버린다.
+        _log.warning(
+            "acknowledgment 강제 제거: case=%s rep=%d (failure_type=%s 인데 채워져 옴)",
+            case_id,
+            repeat_index,
+            variables["failure_type"],
+        )
+        acknowledgment = ""
     return GenerationRow(
         case_id=case_id,
         version=version,
@@ -123,9 +146,9 @@ async def _generate_one(
         if_clause=v.if_clause,
         then_clause=v.then_clause,
         rationale=v.rationale,
-        obstacle=v.obstacle,
-        coping_clause=v.coping_clause,
-        acknowledgment=v.acknowledgment,
+        obstacle=getattr(v, "obstacle", ""),
+        coping_clause=getattr(v, "coping_clause", ""),
+        acknowledgment=acknowledgment,
         estimated_workload_change_minutes=v.estimated_workload_change_minutes,
         failure_type=variables["failure_type"],
         strategy_label=variables["strategy_label"],

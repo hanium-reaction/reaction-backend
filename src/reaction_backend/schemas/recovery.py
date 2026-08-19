@@ -21,15 +21,20 @@ RecoveryDecision = Literal["accepted", "edited", "skipped"]
 class RecoveryProposalLLM(CamelModel):
     """LLM Structured Output — `aiClient.run("recovery/if_then_proposal")` 응답 schema.
 
-    프롬프트(`prompts/recovery/if_then_proposal.v*.md` — registry 가 latest 자동 선택)의
-    JSON 형식과 1:1. 새 버전을 올릴 땐 이 schema 와 출력 형식을 맞출 것
+    프롬프트(`prompts/recovery/if_then_proposal.v1.md`/`v2.md`)의 JSON 형식과 1:1.
+    새 버전을 올릴 땐 이 schema 와 출력 형식을 맞출 것
     (`tests/prompts/test_recovery_prompts.py` 가 변수 계약을 강제한다).
     fallback 룰도 같은 schema 로 반환 (Tool Executor 가 강제 검증).
 
-    `obstacle`/`coping_clause`/`acknowledgment` 는 v3 부터 쓰는 필드(근거 대장 §4 S5/S1).
-    v1/v2 는 이 필드들을 채우지 않으므로 기본값을 빈 문자열로 둔다 — route 의 fallback
-    구성(`RecoveryProposalLLM(strategy_code=..., if_clause="", ...)`)이 이 필드들을 명시하지
-    않아도 검증이 통과해야 한다.
+    v3(`obstacle`/`coping_clause`/`acknowledgment` 포함)는 `RecoveryProposalLLMv3` 를
+    따로 쓴다 — 한때 이 필드들을 여기 직접 얹었더니(#272), `aiClient.run(schema=...)`
+    가 v1/v2 호출에도 **같은 확장 스키마**를 Gemini 에 넘겨 프롬프트가 요청하지도 않은
+    필드를 Gemini 가 알아서 채워버렸다(L1-1 실 dispatch 중 실측 — v2 호출인데
+    `coping_clause`/`acknowledgment` 에 실제 문장이 채워져 나옴). v1/v2 는 그 필드
+    자체를 "구조적으로 안 가진 것"이 루브릭(rubric-v1.md §1 축③/§5)의 전제라, 스키마가
+    새어 들어가면 그 전제가 깨진다. 프로덕션(`routes/recovery.py`, `_PROMPT_ID`=v2 고정)
+    도 같은 스키마를 쓰고 있었으므로 이건 실험만이 아니라 **불필요한 필드를 매 호출마다
+    생성하던 프로덕션 낭비이기도 했다.**
     """
 
     strategy_code: str
@@ -37,6 +42,16 @@ class RecoveryProposalLLM(CamelModel):
     then_clause: str
     rationale: str
     estimated_workload_change_minutes: int = 0
+
+
+class RecoveryProposalLLMv3(RecoveryProposalLLM):
+    """v3 전용 — `obstacle`/`coping_clause`/`acknowledgment` 추가(근거 대장 §4 S5/S1).
+
+    v3 프롬프트(`if_then_proposal.v3.md`)를 호출할 때만 이 schema 를 쓴다
+    (`scripts/l1_1_generate.py`). 프로덕션은 아직 `_PROMPT_ID`=v2 고정이라 이 클래스를
+    쓰지 않는다 — v3 가 L1-1 로 검증되기 전까지는.
+    """
+
     obstacle: str = ""
     coping_clause: str = ""
     acknowledgment: str = ""

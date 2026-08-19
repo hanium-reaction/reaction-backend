@@ -10,10 +10,10 @@ from typing import Any
 
 import pytest
 from scripts.l1_1_common import GenerationRow
-from scripts.l1_1_generate import build_variables, run
+from scripts.l1_1_generate import _generate_one, build_variables, run
 
 from reaction_backend.llm import RunResult, aiClient
-from reaction_backend.schemas.recovery import RecoveryProposalLLM
+from reaction_backend.schemas.recovery import RecoveryProposalLLMv3
 from tests.conftest import default_recovery_strategies
 
 
@@ -32,6 +32,17 @@ def _case(
         "action_item": {"title": title},
         "execution": {"completion_status": completion_status},
     }
+
+
+_VARIABLES_TEMPLATE = {
+    "strategy_label": "5분 단위로 쪼개기",
+    "strategy_group": "DOWNSCOPE",
+    "base_template": "딱 5분만",
+    "failure_type": "AMBIGUITY",
+    "confidence": "n/a",
+    "interruption_summary": "없음",
+    "context_summary": "실행 카드: X / 결과: failed",
+}
 
 
 def test_build_variables_matches_route_construction() -> None:
@@ -94,6 +105,7 @@ def _make_stub_run(*, fallback_on: set[tuple[str, int]] | None = None) -> Any:
         prompt_id = kwargs["prompt_id"]
         version = prompt_id.rsplit("@v", 1)[1]
         variables = kwargs["variables"]
+        schema_cls = kwargs["schema"]
 
         if (version, call_count["n"]) in fallback_on:
             return RunResult(
@@ -104,15 +116,17 @@ def _make_stub_run(*, fallback_on: set[tuple[str, int]] | None = None) -> Any:
                 prompt_version=version,
             )
 
+        # schema_cls 가 실제로 넘어온 것으로 만든다 — l1_1_generate.py 가 v1/v2 에
+        # RecoveryProposalLLMv3 를 잘못 넘기면(회귀) 여기서 obstacle= 등 미지원 kwarg 로
+        # TypeError 가 나서 바로 잡힌다.
+        extra = {"obstacle": "obstacle", "coping_clause": "coping"} if version == "3" else {}
         return RunResult(
-            value=RecoveryProposalLLM(
+            value=schema_cls(
                 strategy_code=variables["strategy_group"].lower(),
                 if_clause=f"if-v{version}",
                 then_clause=f"then-v{version}",
                 rationale="rationale",
-                obstacle="obstacle" if version == "3" else "",
-                coping_clause="coping" if version == "3" else "",
-                acknowledgment="",
+                **extra,
             ),
             fell_back=False,
             reason=None,
@@ -181,3 +195,64 @@ async def test_run_records_fallback_honestly(monkeypatch: pytest.MonkeyPatch) ->
     assert len(rows) == 1
     assert rows[0].fell_back is True
     assert rows[0].reason == "timeout"
+
+
+class TestAcknowledgmentGateEnforcement:
+    """v3 실 dispatch 실측(gemini-3.5-flash-lite) — 조건부 지시("AVOIDANCE 아니면 빈
+    문자열")를 모델이 신뢰성 있게 안 지켰다(5건 중 4건 위반). banned_words 와 같은 패턴으로
+    코드가 마지막에 강제한다 — `_generate_one` 이 그 강제를 실제로 하는지 고정한다.
+    """
+
+    @pytest.mark.asyncio
+    async def test_strips_acknowledgment_when_failure_type_is_not_avoidance(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def stub_run(**kwargs: Any) -> RunResult[Any]:
+            return RunResult(
+                value=RecoveryProposalLLMv3(
+                    strategy_code="reschedule",
+                    if_clause="if",
+                    then_clause="then",
+                    rationale="rationale",
+                    acknowledgment="지시를 어기고 채워진 위로 문장",
+                ),
+                fell_back=False,
+                reason=None,
+                prompt_id="recovery/if_then_proposal",
+                prompt_version="3",
+            )
+
+        monkeypatch.setattr(aiClient, "run", stub_run)
+
+        row = await _generate_one(
+            "c1", "3", 0, {**_VARIABLES_TEMPLATE, "failure_type": "TIME_SHORTAGE"}
+        )
+
+        assert row.acknowledgment == ""
+
+    @pytest.mark.asyncio
+    async def test_keeps_acknowledgment_when_failure_type_is_avoidance(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def stub_run(**kwargs: Any) -> RunResult[Any]:
+            return RunResult(
+                value=RecoveryProposalLLMv3(
+                    strategy_code="downscope",
+                    if_clause="if",
+                    then_clause="then",
+                    rationale="rationale",
+                    acknowledgment="누구나 시작이 막막할 때가 있어요",
+                ),
+                fell_back=False,
+                reason=None,
+                prompt_id="recovery/if_then_proposal",
+                prompt_version="3",
+            )
+
+        monkeypatch.setattr(aiClient, "run", stub_run)
+
+        row = await _generate_one(
+            "c1", "3", 0, {**_VARIABLES_TEMPLATE, "failure_type": "AVOIDANCE"}
+        )
+
+        assert row.acknowledgment == "누구나 시작이 막막할 때가 있어요"
