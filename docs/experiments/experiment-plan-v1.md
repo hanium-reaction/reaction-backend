@@ -285,7 +285,7 @@ F13 forest plot(전체/층별 OR+CI) · F14 next_day_return_rate **벤치마크 
 | 주 | **구현 트랙** | **실험 트랙** | 게이트 |
 |---|---|---|---|
 | **W1** | ✅ **3/3** — P4·P5·P6 컬럼(`09fa61fbf06f`) · P9(ADR 로 이미 해소돼 있었음) · 신규 전략 4종 시드 + 핀 반전 | ✅ **4/5** — 골든셋 120건·P1·루브릭·사전등록 완료. IRB 만 미착수(레포 밖, W4 게이트로 이월) | ✅ **충족** — 골든셋 해시 + 루브릭(`rubric-v1.md`) + 사전등록(`preregistration-v1.md`) 확보 |
-| **W2** | ⚠️ **프롬프트 v3 부분 완료(W1 에 앞당김)** — 파일·스키마 3필드는 끝났으나 acknowledgment 조건 중 AVOIDANCE 만 구현, overwhelm≥4/연속실패≥2 는 카운터 인프라가 없어 보류(근거 대장 §5.4). 변수 주입은 그래서 **미착수**(기존 7변수 계약 그대로 유지) | ⚠️ **L1-1 하네스 코드 완료(W1 에 앞당김), 실 dispatch 미실행** — 생성·판정·분석 3스크립트, L1-4 시스템 지표(1,800), ✅ L1-3 커버리지(**W1 에 앞당겨 완료**) | ✅ F1·F4·F5·F6·F7 초안 |
+| **W2** | ⚠️ **프롬프트 v3 부분 완료(W1 에 앞당김)** — 파일·스키마 3필드는 끝났으나 acknowledgment 조건 중 AVOIDANCE 만 구현, overwhelm≥4/연속실패≥2 는 카운터 인프라가 없어 보류(근거 대장 §5.4). 변수 주입은 그래서 **미착수**(기존 7변수 계약 그대로 유지) | ✅ **L1-1 완료(W1 에 앞당김)** — 생성 1,080건 + 판정 1,430건 실 dispatch 완료, [`l1-1-results.md`](l1-1-results.md) — 성공 기준 3개 AND 전부 PASS(v3 vs v1 승률 1.000, CI [1.000,1.000]). **단 self-enhancement bias 미배제(L1-2 대기)**. L1-4 시스템 지표(1,800)는 여전히 미착수, ✅ L1-3 커버리지(**W1 에 앞당겨 완료**) | ✅ F1·F4·F5·F6·F7 초안 |
 | **W3** | tone_gate + `tone_gate_rejected` 컬럼 | L1-2 인간 라벨 100건 × 2인 → κ, **L2-2 think-aloud 5인** | ✅ F2·F3·F9. **κ 미달 시 L1-1 강등 결정** |
 | **W4** | L3-1 배정 로직 + 로깅, 스테이징 배포 | L1-5 지표 재계산, L2-1 워크스루 24건, L2-3 BCT 코딩, **L2-4 도그푸딩** | 🚦 **L3 진입 게이트: ① IRB 회신 ② 로깅 결손 <2% ③ 배정 균형 ④ 참가자 N 확정** — **IRB 회신은 필수 조건이다** |
 | **W5** | 버퍼(회귀 수정) | **L3-1 수집 시작.** 안전 감시 담당자 주 2회 점검 | ✅ F10·F18 |
@@ -418,15 +418,15 @@ F13 forest plot(전체/층별 OR+CI) · F14 next_day_return_rate **벤치마크 
     그대로 사전등록에 옮기고, 1차 지표(v3 vs v1 승률)·분석 계획·블라인딩·무효화 조건을
     명문화. **v3 가 아직 미구현이라 데이터 수집은 W2(v3 작성) 이후에나 시작 가능** — 이
     문서는 그 이전에 분석 계획부터 고정해 두는 것.
-11. ✅ **L1-1 생성·판정·분석 하네스 — 코드 완료, 실 dispatch 는 미실행.**
-    [`scripts/l1_1_generate.py`](../../blob/main/scripts/l1_1_generate.py)(골든셋 120건 ×
-    v1/v2/v3 × 3반복 = 1,080건 생성) · [`scripts/l1_1_judge.py`](../../blob/main/scripts/l1_1_judge.py)
-    (3쌍 × 2반복 × 양방향 = 최대 1,440 판정, `provider.generate_structured()` 직접 호출 —
-    심판 프롬프트가 8도메인 잠금 밖이라 registry/Tool Executor 경유가 구조적으로 불가능함을
-    사용자와 상의해 확정) · [`scripts/l1_1_analyze.py`](../../blob/main/scripts/l1_1_analyze.py)
-    (swap consistency 정리 → 케이스 단위 클러스터 부트스트랩 95% CI → 사전등록 §5 의 3개
-    AND 성공 기준 판정, LLM 호출 없는 순수 계산). 합성 데이터로 세 스크립트를 실제로
-    실행해 배선을 끝까지 검증했다(생성 dry-run/무키 fallback 경로, 판정 dry-run/무키
-    fallback 경로, 분석 보고서 전체 출력). **실 GEMINI_API_KEY 로 최대 2,520회(1,080+1,440)
-    호출을 실제 dispatch 하는 것은 과금이 실제로 발생하는 별개의 결정**이라 이번 작업
-    범위에 넣지 않았다.
+11. ✅ **L1-1 생성·판정·분석 하네스 + 실 dispatch — 완료.**
+    [`scripts/l1_1_generate.py`](../../blob/main/scripts/l1_1_generate.py) ·
+    [`scripts/l1_1_judge.py`](../../blob/main/scripts/l1_1_judge.py)(`provider.generate_structured()`
+    직접 호출 — 심판 프롬프트가 8도메인 잠금 밖이라 registry/Tool Executor 경유가 구조적으로
+    불가능함을 사용자와 상의해 확정) · [`scripts/l1_1_analyze.py`](../../blob/main/scripts/l1_1_analyze.py)
+    로 실 GEMINI_API_KEY 를 받아 **1,080건 생성(21건 fallback) + 1,430건 판정(0건 실패)
+    을 실제로 dispatch** 했다. **소규모 검증 중 실제 버그 2건을 발견해 먼저 고쳤다**
+    (#275 — v1/v2 스키마 오염, v3 acknowledgment 게이트 프롬프트 미준수). 최종 결과는
+    [`l1-1-results.md`](l1-1-results.md) — 사전등록 §5 성공 기준 3개 AND 전부 PASS
+    (v3 vs v1 승률 1.000, CI [1.000, 1.000], swap consistency 0.987, 태그 층 전부 1.000).
+    **self-enhancement bias 는 아직 미배제 — L1-2(judge–human κ) 가 나와야 이 결과를
+    최종으로 쓸지 판단된다.**
