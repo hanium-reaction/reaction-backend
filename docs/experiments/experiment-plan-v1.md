@@ -319,7 +319,14 @@ F13 forest plot(전체/층별 OR+CI) · F14 next_day_return_rate **벤치마크 
 - `llm_runs.reason` 신설 — **L1-4 의 fallback 3분해가 이 컬럼 없이는 원리적으로 불가능**했다(timeout 은 `error` 가 빈 문자열이라 NULL 로 저장됨)
 - L1-3 커버리지 뮤테이션 가드 — W2 실험트랙 항목을 앞당겨 완료
 
-**FE 의존 항목 5종: 등록 0건** (2026-08-19 실측). 계획서가 "미수락 시 해당 실험을 자동 폐기"로 정한 항목이라, 등록이 늦어지면 M5(`re_engagement_rate`)·L3-1 2차지표·T1 배지 실험이 **판정 없이 표류**한다.
+**FE 의존 항목 5종: 등록 5건 완료** (2026-08-20) — `reaction-frontend`
+[#221](https://github.com/hanium-reaction/reaction-frontend/issues/221)(재관여 앵커
+UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
+(task_aversiveness 문항) · [#223](https://github.com/hanium-reaction/reaction-frontend/issues/223)
+(PARK 수락 플로우) · [#224](https://github.com/hanium-reaction/reaction-frontend/issues/224)
+(T1 인앱 배지) · [#225](https://github.com/hanium-reaction/reaction-frontend/issues/225)
+(주간 리뷰 신규 필드). **아직 FE 팀의 수락 여부 회신 대기 중** — 미수락 시 계획서
+원칙대로 해당 실험을 자동 폐기한다.
 
 ---
 
@@ -392,7 +399,6 @@ F13 forest plot(전체/층별 OR+CI) · F14 next_day_return_rate **벤치마크 
 
 1. **IRB 문의 발송.** 회신 2~4주. **W4 L3 진입 게이트의 필수 조건**이라, 지금 안 보내면 코드가 아무리 준비돼도 L3 가 통째로 폐기된다. 발송일·기관·회신 상태를 `docs/experiments/irb-status.md` 로 추적할 것.
 2. **도그푸딩(#258) 담당자 지정.** 라이브 `recovery_attempts` 0건이 **L1-5·L2·L3 전부**를 막고 있다. 코드는 이미 준비됐다 — 이제 필요한 건 사람이 실제로 실패하고 회고를 거치는 것뿐이다. *(assignee 0명, 코멘트 0건 — 2026-08-19 실측)*
-3. **FE 이슈 5건 등록.** 미수락 시 해당 실험을 자동 폐기하기로 이미 정해 둔 항목인데 **등록이 0건**이라, 지금은 폐기도 진행도 아닌 표류 상태다.
 
 **완료됨**
 
@@ -443,3 +449,12 @@ F13 forest plot(전체/층별 OR+CI) · F14 next_day_return_rate **벤치마크 
     지표 등급)**. inter-coder 선행 조건을 못 봐서 이 등급 자체가 잠정이라는 점을 명시.
     이 결과로 **L1-1(§7.1 항목 11)의 승률을 본문 핵심 결론이 아니라 보조 지표로
     재조정**했다.
+13. ✅ **FE 이슈 5건 등록 — 완료.** `reaction-frontend`
+    [#221](https://github.com/hanium-reaction/reaction-frontend/issues/221)(재관여 앵커
+    UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
+    (task_aversiveness 문항) · [#223](https://github.com/hanium-reaction/reaction-frontend/issues/223)
+    (PARK 수락 플로우) · [#224](https://github.com/hanium-reaction/reaction-frontend/issues/224)
+    (T1 인앱 배지) · [#225](https://github.com/hanium-reaction/reaction-frontend/issues/225)
+    (주간 리뷰 신규 필드) 등록. 각 이슈에 배경·구체적 요청·백엔드 현황·미수락 시 영향을
+    적어 FE 팀이 바로 판단할 수 있게 했다. **아직 폐기가 아니라 회신 대기** — 미수락
+    회신이 오면 그 실험만 계획서에서 자동 폐기한다.
