@@ -43,6 +43,9 @@ Thumbs.db
 # 달리 커밋 대상이 아니다 (docs/experiments/preregistration-v1.md §2).
 eval/l1_1_*.jsonl
 
+# L1-2 사람 라벨 — 개인 라벨러의 로컬 작업물. 결과 요약은 문서로 남기고 원본은 안 커밋.
+eval/l1_2_*.jsonl
+
 # Logs
 *.log
 logs/

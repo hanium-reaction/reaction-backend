@@ -61,6 +61,7 @@ from scripts.l1_1_common import (
     GenerationRow,
     JudgeVerdict,
     JudgmentRow,
+    candidate_payload,
     pair_key,
     read_generations,
     write_judgments,
@@ -137,23 +138,6 @@ def select_judgment_units(
                     )
                 )
     return units, shortfalls
-
-
-def _candidate_payload(row: GenerationRow) -> dict[str, object]:
-    """심판에게 넘길 블라인드 후보 JSON — 버전·case_id 등 정체 정보는 절대 포함 안 함.
-
-    루브릭 §4-1: `prompt_version`/`prompt_id`/파일 경로를 절대 포함하지 않는다.
-    """
-    return {
-        "strategy_code": row.strategy_code,
-        "if_clause": row.if_clause,
-        "then_clause": row.then_clause,
-        "rationale": row.rationale,
-        "obstacle": row.obstacle,
-        "coping_clause": row.coping_clause,
-        "acknowledgment": row.acknowledgment,
-        "estimated_workload_change_minutes": row.estimated_workload_change_minutes,
-    }
 
 
 def build_judge_prompt(
@@ -242,8 +226,8 @@ async def judge_unit(
     max_attempts: int,
 ) -> list[JudgmentRow]:
     """단위 하나 → 정방향/역방향 판정 최대 2건 (실패한 방향은 빠진다)."""
-    low_payload = _candidate_payload(unit.row_low)
-    high_payload = _candidate_payload(unit.row_high)
+    low_payload = candidate_payload(unit.row_low)
+    high_payload = candidate_payload(unit.row_high)
 
     # forward_a_is_low 가 그 case×pair×rep 의 "정방향" A/B 배정을 고정한다.
     # 역방향(swap=True)은 항상 그 반대 — 독립적으로 다시 뽑지 않는다(사전등록 §6).

@@ -69,6 +69,26 @@ class GenerationRow(NamedTuple):
         return cls(**json.loads(line))
 
 
+def candidate_payload(row: GenerationRow) -> dict[str, object]:
+    """심판(또는 사람 라벨러)에게 넘길 블라인드 후보 JSON — 버전·case_id 등 정체 정보는
+    절대 포함 안 함.
+
+    루브릭 §4-1: `prompt_version`/`prompt_id`/파일 경로를 절대 포함하지 않는다. LLM
+    심판(`l1_1_judge.py`)과 사람 라벨러(`l1_2_label.py`)가 **같은 후보 표현**을 봐야
+    두 판정을 공정하게 비교할 수 있으므로 여기 하나로 공유한다.
+    """
+    return {
+        "strategy_code": row.strategy_code,
+        "if_clause": row.if_clause,
+        "then_clause": row.then_clause,
+        "rationale": row.rationale,
+        "obstacle": row.obstacle,
+        "coping_clause": row.coping_clause,
+        "acknowledgment": row.acknowledgment,
+        "estimated_workload_change_minutes": row.estimated_workload_change_minutes,
+    }
+
+
 def read_generations(path: Path = GENERATIONS_PATH) -> list[GenerationRow]:
     with path.open(encoding="utf-8") as f:
         return [GenerationRow.from_json(line) for line in f if line.strip()]
