@@ -285,8 +285,8 @@ F13 forest plot(전체/층별 OR+CI) · F14 next_day_return_rate **벤치마크 
 | 주 | **구현 트랙** | **실험 트랙** | 게이트 |
 |---|---|---|---|
 | **W1** | ✅ **3/3** — P4·P5·P6 컬럼(`09fa61fbf06f`) · P9(ADR 로 이미 해소돼 있었음) · 신규 전략 4종 시드 + 핀 반전 | ✅ **4/5** — 골든셋 120건·P1·루브릭·사전등록 완료. IRB 만 미착수(레포 밖, W4 게이트로 이월) | ✅ **충족** — 골든셋 해시 + 루브릭(`rubric-v1.md`) + 사전등록(`preregistration-v1.md`) 확보 |
-| **W2** | ⚠️ **프롬프트 v3 부분 완료(W1 에 앞당김)** — 파일·스키마 3필드는 끝났으나 acknowledgment 조건 중 AVOIDANCE 만 구현, overwhelm≥4/연속실패≥2 는 카운터 인프라가 없어 보류(근거 대장 §5.4). 변수 주입은 그래서 **미착수**(기존 7변수 계약 그대로 유지) | ✅ **L1-1 완료(W1 에 앞당김)** — 생성 1,080건 + 판정 1,430건 실 dispatch 완료, [`l1-1-results.md`](l1-1-results.md) — 성공 기준 3개 AND 전부 PASS(v3 vs v1 승률 1.000, CI [1.000,1.000]). **단 self-enhancement bias 미배제(L1-2 대기)**. L1-4 시스템 지표(1,800)는 여전히 미착수, ✅ L1-3 커버리지(**W1 에 앞당겨 완료**) | ✅ F1·F4·F5·F6·F7 초안 |
-| **W3** | tone_gate + `tone_gate_rejected` 컬럼 | L1-2 인간 라벨 100건 × 2인 → κ, **L2-2 think-aloud 5인** | ✅ F2·F3·F9. **κ 미달 시 L1-1 강등 결정** |
+| **W2** | ⚠️ **프롬프트 v3 부분 완료(W1 에 앞당김)** — 파일·스키마 3필드는 끝났으나 acknowledgment 조건 중 AVOIDANCE 만 구현, overwhelm≥4/연속실패≥2 는 카운터 인프라가 없어 보류(근거 대장 §5.4). 변수 주입은 그래서 **미착수**(기존 7변수 계약 그대로 유지) | ✅ **L1-1 완료(W1 에 앞당김)** — 생성 1,080건 + 판정 1,430건 실 dispatch 완료, [`l1-1-results.md`](l1-1-results.md) — 성공 기준 3개 AND 전부 PASS(v3 vs v1 승률 1.000, CI [1.000,1.000]). ✅ **L1-2 도 완료(1인 축소판, W1 에 앞당김)** — [`l1-2-results.md`](l1-2-results.md), judge–human κ=0.482(보조 지표 등급) → **L1-1 결과는 본문 핵심이 아니라 보조 지표로 취급**. L1-4 시스템 지표(1,800)는 여전히 미착수, ✅ L1-3 커버리지(**W1 에 앞당겨 완료**) | ✅ F1·F4·F5·F6·F7 초안 |
+| **W3** | tone_gate + `tone_gate_rejected` 컬럼 | ✅ **L1-2 완료(1인 축소판, W1 에 앞당김)** — inter-coder κ 는 1인 개발이라 계산 불가, judge–human κ 만 계산. **L2-2 think-aloud 5인** | ✅ F2·F3·F9. **κ 미달 시 L1-1 강등 결정** — 0.41~0.60 구간이라 강등까지는 아니고 보조 지표로 조정 |
 | **W4** | L3-1 배정 로직 + 로깅, 스테이징 배포 | L1-5 지표 재계산, L2-1 워크스루 24건, L2-3 BCT 코딩, **L2-4 도그푸딩** | 🚦 **L3 진입 게이트: ① IRB 회신 ② 로깅 결손 <2% ③ 배정 균형 ④ 참가자 N 확정** — **IRB 회신은 필수 조건이다** |
 | **W5** | 버퍼(회귀 수정) | **L3-1 수집 시작.** 안전 감시 담당자 주 2회 점검 | ✅ F10·F18 |
 | **W6** | — | 수집. 중간 점검은 **인프라 지표만**(안전 감시는 예외) | ✅ L1·L2 절 초고 |
@@ -430,3 +430,16 @@ F13 forest plot(전체/층별 OR+CI) · F14 next_day_return_rate **벤치마크 
     (v3 vs v1 승률 1.000, CI [1.000, 1.000], swap consistency 0.987, 태그 층 전부 1.000).
     **self-enhancement bias 는 아직 미배제 — L1-2(judge–human κ) 가 나와야 이 결과를
     최종으로 쓸지 판단된다.**
+12. ✅ **L1-2 judge–human κ — 완료(1인 축소판).**
+    [`scripts/l1_2_common.py`](../../blob/main/scripts/l1_2_common.py) ·
+    [`scripts/l1_2_label.py`](../../blob/main/scripts/l1_2_label.py)(사람이 직접 실행하는
+    대화형 CLI — Claude 나 자동화가 대신 채점하면 "사람 라벨"이 아니게 되므로 의도적으로
+    자동화 불가) · [`scripts/l1_2_analyze.py`](../../blob/main/scripts/l1_2_analyze.py)
+    (Cohen's κ 직접 구현, LLM 호출 없음). 계획서 원안(코더 2인 + 중재 1인)을 1인 개발
+    프로젝트가 그대로 못 채워, **inter-coder κ 를 포기하고 judge–human κ 만** 계산하는
+    축소판으로 사용자와 상의해 진행([#277](https://github.com/hanium-reaction/reaction-backend/pull/277)).
+    사용자 본인이 40건을 직접 라벨링해 실행한 결과는
+    [`l1-2-results.md`](l1-2-results.md) — **judge–human κ = 0.482(0.41~0.60, 보조
+    지표 등급)**. inter-coder 선행 조건을 못 봐서 이 등급 자체가 잠정이라는 점을 명시.
+    이 결과로 **L1-1(§7.1 항목 11)의 승률을 본문 핵심 결론이 아니라 보조 지표로
+    재조정**했다.
