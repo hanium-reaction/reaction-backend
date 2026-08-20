@@ -12,17 +12,20 @@
 ## fallback 원인 분해 — 계획서의 "3분해"와 실제 `reason` 코드의 대응
 
 계획서 §2 L1-4 는 "timeout / 형식검증 실패 / 톤게이트 거부" 3분해를 요구하며 이를 위해
-"`tone_gate_rejected` 를 별도 컬럼으로"를 전제했다. 그 전용 컬럼(S6 톤·구조 게이트)은 아직
-없고, 대신 `llm_runs.reason`(8종: `rate_limited`/`timeout`/`validation`/`budget`/`banned`/
-`unavailable`/`no_prompt`/`provider_error`)이 이미 그 3분해를 포함하는 상위 집합이다:
+"`tone_gate_rejected` 를 별도 컬럼으로"를 전제했다. **별도 컬럼 대신 이미 있던
+`llm_runs.reason` 문자열 컬럼에 새 값을 추가하는 쪽을 택했다**(`safety/tone_gate.py`,
+S6 톤·구조 게이트 구현) — reason 컬럼이 이미 이 3분해를 포함하는 상위 집합이라, 의미가
+겹치는 두 번째 컬럼을 또 만들면 어느 쪽이 진실인지 갈라질 수 있기 때문이다. 지금
+`llm_runs.reason`(9종: `rate_limited`/`timeout`/`validation`/`budget`/`banned`/
+`tone_gate`/`unavailable`/`no_prompt`/`provider_error`)의 대응표:
 
 | 계획서 범주 | 지금의 `reason` 코드 |
 |---|---|
 | timeout | `timeout` |
 | 형식검증 실패 | `validation` |
-| 톤게이트 거부 | `banned` — **현재는 이것이 유일한 프록시다.** `banned_words` 필터가 지금
-  단계에서 "톤·구조 게이트"의 전부이고, 결정적 검증기(S6)가 붙기 전까지는 이 값이 곧
-  톤게이트 거부다 |
+| 톤게이트 거부 | **`tone_gate`** — `safety/tone_gate.py::check_structured()`, 사람 귀인·
+  자존감 부양 마커 검출 시. `banned`(명사 1:1 치환이 실패한 경우, `HARD_BLOCK_TERMS`
+  비어 있어 사실상 거의 안 남)와는 이제 분리된 값이다 |
 | (계획서에 없음) | `rate_limited`/`budget`/`unavailable`/`no_prompt`/`provider_error` —
   계획서가 예상 못 한 나머지 원인. 3분해보다 세분화됐을 뿐 상위 호환이다 |
 
@@ -30,10 +33,11 @@
 
 계획서는 "카드 1장 완성까지의 end-to-end(재생성 포함)"를 요구한다 — 톤 게이트가 위반 시
 **동기 재생성**을 한다면 최악 2배가 요청 경로에 들어가는데, 단발 호출만 재면 그걸 놓친다는
-경고다. **지금은 그 경고가 아직 발동하지 않는다**: `safety.banned_words.enforce_structured`
-는 위반 시 재생성이 아니라 **치환**을 한다(`llm/tool_executor.py` §4). 재생성 스텝 자체가
-없으므로, 지금의 `latency_ms`(재시도 루프 포함, 단일 `aiClient.run()` 호출 전체)가 곧
-"카드 1장 완성까지"와 같다. **S6 톤 게이트가 재생성 방식으로 바뀌면 이 문장부터 재검증할 것.**
+경고다. **이 경고는 여전히 발동하지 않는다**: `safety.banned_words.enforce_structured`
+는 치환, `safety.tone_gate.check_structured`(S6, 이제 구현됨)는 **재생성이 아니라 즉시
+거부(reject)** 다 — 둘 다 재생성 스텝이 없다(`llm/tool_executor.py` §4-5). 그래서 지금의
+`latency_ms`(재시도 루프 포함, 단일 `aiClient.run()` 호출 전체)가 여전히 "카드 1장
+완성까지"와 같다. **톤 게이트가 나중에 재생성 방식으로 바뀌면 이 문장부터 재검증할 것.**
 
 **아무것도 쓰지 않는다** — SELECT 뿐. `--apply` 같은 옵션 자체가 없다
 (선례: `report_recovery_followthrough.py`).
@@ -59,7 +63,8 @@ from reaction_backend.schemas.common import now_kst, to_kst
 _PLANNED_REASON_LABELS: dict[str, str] = {
     "timeout": "timeout",
     "validation": "형식검증 실패",
-    "banned": "톤게이트 거부(banned_words 프록시)",
+    "tone_gate": "톤게이트 거부",
+    "banned": "금지어 치환 실패(HARD_BLOCK_TERMS)",
 }
 
 

@@ -10,9 +10,11 @@ Gemini SDK 를 직접 import 하지 않고 `aiClient.run()` 만 호출한다 (AG
     1) `prompts.registry` 에서 prompt 렌더
     2) `safety.llm_budget.check()` 로 일일 예산 확인
     3) `provider.generate_structured()` 호출 — schema 강제 + JSON 검증
-    4) `safety.banned_words.enforce_structured()` 후처리
-    5) `safety.llm_budget.record()` 로 `llm_runs` INSERT (success=True, fell_back=False)
-    6) validated schema 인스턴스 반환
+    4) `safety.banned_words.enforce_structured()` 후처리 (명사 1:1 치환)
+    5) `safety.tone_gate.check_structured()` — 치환으로 못 고치는 문장 구조 문제(사람
+       귀인·자존감 부양) 검증. 걸리면 치환하지 않고 곧장 fallback(근거 대장 §4 S6)
+    6) `safety.llm_budget.record()` 로 `llm_runs` INSERT (success=True, fell_back=False)
+    7) validated schema 인스턴스 반환
 
 흐름 (fallback) — 어떤 단계든 실패하면 다음을 즉시 실행:
     - Rate limit (429/quota)
@@ -20,7 +22,8 @@ Gemini SDK 를 직접 import 하지 않고 `aiClient.run()` 만 호출한다 (AG
     - ProviderUnavailable (API key 누락 / SDK 미설치)
     - ProviderValidationError (schema 불일치, 재시도 후에도)
     - BudgetExceeded (일일 토큰 한도 초과)
-    - 금지어 차단 (재생성 1회 후에도 hits)
+    - 금지어 차단 (치환 후에도 재매칭되거나 `HARD_BLOCK_TERMS` 잔존)
+    - 톤 게이트 차단 (사람 귀인·자존감 부양 마커 검출, `reason="tone_gate"`)
 
 fallback 은 다음 형태 모두 지원:
     - `BaseModel` 인스턴스 (그대로 반환)
@@ -69,6 +72,7 @@ from reaction_backend.safety.llm_budget import (
 from reaction_backend.safety.llm_budget import (
     record as record_run,
 )
+from reaction_backend.safety.tone_gate import check_structured as tone_gate_check
 
 _log = logging.getLogger(__name__)
 
@@ -86,7 +90,8 @@ class RunResult[T: BaseModel]:
     value: T
     fell_back: bool
     reason: str | None
-    """fallback 사유 코드 (rate_limited / timeout / validation / budget / banned / unavailable / no_prompt)."""
+    """fallback 사유 코드 (rate_limited / timeout / validation / budget / banned /
+    tone_gate / unavailable / no_prompt / provider_error)."""
     prompt_id: str
     prompt_version: str
     tokens_in: int = 0
@@ -250,7 +255,7 @@ class LLMToolExecutor:
                 input_summary=prompt_text if log_payloads else None,
             )
 
-        # ── 4) 금지어 후처리 (마지막 단계) ──────────────────────────
+        # ── 4) 금지어 후처리 (명사 치환 — 톤 게이트는 다음 단계) ──────
         sanitized_payload, blocked, hits = enforce_structured(validated.model_dump())
         if blocked:
             return await self._fallback(
@@ -275,9 +280,35 @@ class LLMToolExecutor:
 
         # 치환 결과를 schema 로 재검증 — 안전.
         sanitized = schema.model_validate(sanitized_payload)
+
+        # ── 5) 톤 게이트 (근거 대장 §4 S6) ──────────────────────────
+        # banned_words 는 명사 1:1 치환이라 "당신이 게을러서" 류의 문장 구조 문제는 못
+        # 고친다 — 안전한 대체 표현이 없으므로 치환하지 않고 곧장 fallback 한다.
+        tone_blocked, tone_hits = tone_gate_check(sanitized.model_dump())
+        if tone_blocked:
+            return await self._fallback(
+                fallback,
+                module=module,
+                schema=schema,
+                prompt_id=resolved_prompt_id,
+                prompt_version=prompt_version,
+                reason="tone_gate",
+                error=f"tone_gate_blocked: {tone_hits}",
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                tokens_in=provider_resp.tokens_in,
+                tokens_out=provider_resp.tokens_out,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                log_payloads=log_payloads,
+                input_summary=prompt_text if log_payloads else None,
+                output_summary=sanitized.model_dump_json() if log_payloads else None,
+                banned_hits=tone_hits,
+            )
+
         latency_ms = int((time.monotonic() - started) * 1000)
 
-        # ── 5) llm_runs INSERT ──────────────────────────────────────
+        # ── 6) llm_runs INSERT ──────────────────────────────────────
         if session is not None:
             await record_run(
                 session,

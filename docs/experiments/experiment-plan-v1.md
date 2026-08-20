@@ -112,7 +112,7 @@
 | **선행** | **P9 (timeout 8 vs 12) 확정 후 시작.** 기준선이 흔들리면 결과가 무의미하다 |
 | **가설** | H1-4: v2·v3 는 출력 필드가 늘어 p95 지연·토큰이 증가하지만, **fallback rate 증가폭은 5%p 이내** |
 | **조작** | 3버전 × 120건 × 5회 = **1,800 호출**. 동일 시간대 **인터리브** 실행(시간대 교란 차단) |
-| **1차 지표** | **fallback rate 를 원인별 3분해**: timeout / 형식검증 실패 / 톤게이트 거부. 현재 `llm_fallback_used` 불리언 하나로는 분해 불가 → `tone_gate_rejected` 를 **별도 컬럼**으로 |
+| **1차 지표** | **fallback rate 를 원인별 3분해**: timeout / 형식검증 실패 / 톤게이트 거부. 현재 `llm_fallback_used` 불리언 하나로는 분해 불가 → ✅ `llm_runs.reason`(이미 있던 컬럼)에 `"tone_gate"` 값 추가로 해소 — **별도 `tone_gate_rejected` 컬럼은 안 만듦**(중복 컬럼이 갈라질 위험, `report_llm_run_metrics.py` 참고) |
 | **⚠️ 지표 정의 정정** | 지연은 "호출당"이 아니라 **"카드 1장 완성까지의 end-to-end (재생성 포함)"** 로 측정한다. 톤 게이트 재생성이 동기 재호출이면 최악 2배가 요청 경로에 들어가는데, 단발 호출만 재면 통과해도 프로덕션 p95 를 보증하지 못한다 |
 | **데이터 출처** | **`llm_runs` (이미 존재)** — `prompt_version, latency_ms, tokens_in, tokens_out, cost_micro_usd, success, fell_back`. 신규 테이블 불필요 |
 | **성공 기준** | ① p95 ≤ 확정 예산의 80% ② fallback rate ≤ 12%, timeout 기여 ≤ 8%p ③ 요청당 비용 증가 ≤ 40% |
@@ -239,7 +239,7 @@
 | **M5** | `re_engagement_rate` | PARK·CARRY_OVER 수락 중 앵커 도래 건 | 앵커 후 7일 내 같은 goal 계보 완주 | — | `re_engagement_anchor_at` | Wrosch 2003 |
 | **M6** | `consistency_rolling14` | 14 | 최근 14일 중 `done/over_done/partial_done` 이 있는 날 수 | — | — | Lally 2010 / Silverman 2023 |
 | **M7** | `padding_exposure_rate` | 선택된 전체 카드 | `primary_trigger_tags ∩ 입력태그 = ∅` 인 카드 | — | — | 룰엔진 품질 |
-| **M8** | `fallback_rate` (3분해) | LLM 호출 | timeout / 형식실패 / 톤게이트 | — | `tone_gate_rejected` | 시스템 품질 |
+| **M8** | `fallback_rate` (3분해) | LLM 호출 | timeout / 형식실패 / 톤게이트 | — | `llm_runs.reason`(값: `timeout`/`validation`/`tone_gate`) | 시스템 품질 |
 | **M9** | `p95_end_to_end_ms` | 카드 1장 완성 | **재생성 포함** | — | — | `llm_runs.latency_ms` |
 | **M10** | `cost_per_card_krw` | 카드 1장 | `cost_micro_usd` 합 × 환율 | — | — | `llm_runs` |
 | **M11** | `burden_index` | 주 | 카드 거절률 + 회고 미응답률 + 알림 해제 | — | — | **Cheng et al. — 해악 감시** |
@@ -286,7 +286,7 @@ F13 forest plot(전체/층별 OR+CI) · F14 next_day_return_rate **벤치마크 
 |---|---|---|---|
 | **W1** | ✅ **3/3** — P4·P5·P6 컬럼(`09fa61fbf06f`) · P9(ADR 로 이미 해소돼 있었음) · 신규 전략 4종 시드 + 핀 반전 | ✅ **4/5** — 골든셋 120건·P1·루브릭·사전등록 완료. IRB 만 미착수(레포 밖, W4 게이트로 이월) | ✅ **충족** — 골든셋 해시 + 루브릭(`rubric-v1.md`) + 사전등록(`preregistration-v1.md`) 확보 |
 | **W2** | ⚠️ **프롬프트 v3 부분 완료(W1 에 앞당김)** — 파일·스키마 3필드는 끝났으나 acknowledgment 조건 중 AVOIDANCE 만 구현, overwhelm≥4/연속실패≥2 는 카운터 인프라가 없어 보류(근거 대장 §5.4). 변수 주입은 그래서 **미착수**(기존 7변수 계약 그대로 유지) | ✅ **L1-1 완료(W1 에 앞당김)** — 생성 1,080건 + 판정 1,430건 실 dispatch 완료, [`l1-1-results.md`](l1-1-results.md) — 성공 기준 3개 AND 전부 PASS(v3 vs v1 승률 1.000, CI [1.000,1.000]). ✅ **L1-2 도 완료(1인 축소판, W1 에 앞당김)** — [`l1-2-results.md`](l1-2-results.md), judge–human κ=0.482(보조 지표 등급) → **L1-1 결과는 본문 핵심이 아니라 보조 지표로 취급**. L1-4 시스템 지표(1,800)는 여전히 미착수, ✅ L1-3 커버리지(**W1 에 앞당겨 완료**) | ✅ F1·F4·F5·F6·F7 초안 |
-| **W3** | tone_gate + `tone_gate_rejected` 컬럼 | ✅ **L1-2 완료(1인 축소판, W1 에 앞당김)** — inter-coder κ 는 1인 개발이라 계산 불가, judge–human κ 만 계산. **L2-2 think-aloud 5인** | ✅ F2·F3·F9. **κ 미달 시 L1-1 강등 결정** — 0.41~0.60 구간이라 강등까지는 아니고 보조 지표로 조정 |
+| **W3** | ✅ **tone_gate 완료(W1 에 앞당김)** — `safety/tone_gate.py`(사람 귀인·자존감 부양 결정적 검증기) + `llm/tool_executor.py` 배선. **별도 `tone_gate_rejected` 컬럼은 신설하지 않음** — 이미 있는 `llm_runs.reason` 에 `"tone_gate"` 값을 추가하는 쪽으로 대체(사유는 §7.1 참고) | ✅ **L1-2 완료(1인 축소판, W1 에 앞당김)** — inter-coder κ 는 1인 개발이라 계산 불가, judge–human κ 만 계산. **L2-2 think-aloud 5인** | ✅ F2·F3·F9. **κ 미달 시 L1-1 강등 결정** — 0.41~0.60 구간이라 강등까지는 아니고 보조 지표로 조정 |
 | **W4** | L3-1 배정 로직 + 로깅, 스테이징 배포 | L1-5 지표 재계산, L2-1 워크스루 24건, L2-3 BCT 코딩, **L2-4 도그푸딩** | 🚦 **L3 진입 게이트: ① IRB 회신 ② 로깅 결손 <2% ③ 배정 균형 ④ 참가자 N 확정** — **IRB 회신은 필수 조건이다** |
 | **W5** | 버퍼(회귀 수정) | **L3-1 수집 시작.** 안전 감시 담당자 주 2회 점검 | ✅ F10·F18 |
 | **W6** | — | 수집. 중간 점검은 **인프라 지표만**(안전 감시는 예외) | ✅ L1·L2 절 초고 |
@@ -458,3 +458,15 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
     (주간 리뷰 신규 필드) 등록. 각 이슈에 배경·구체적 요청·백엔드 현황·미수락 시 영향을
     적어 FE 팀이 바로 판단할 수 있게 했다. **아직 폐기가 아니라 회신 대기** — 미수락
     회신이 오면 그 실험만 계획서에서 자동 폐기한다.
+14. ✅ **톤·구조 게이트(S6) — 완료.** [`safety/tone_gate.py`](../../blob/main/src/reaction_backend/safety/tone_gate.py)
+    신설 — `banned_words`(명사 1:1 치환) 뒤에 붙는 결정적 검증기. 근거 A2(사람 귀인)·
+    A1/E2(자존감 부양)를 반영해 "당신이/네가/너가"(2인칭 귀인 마커)와 "역시 잘하/
+    똑똑하/능력있"(자아 수준 칭찬 마커, rubric-v1.md 축④ 5점 상한 조건과 동일 어휘)를
+    검출한다. 안전한 대체 표현이 없어 banned_words 처럼 치환하지 않고 **곧장 reject**
+    한다. `llm/tool_executor.py` 에 5단계로 배선 — `reason="tone_gate"` 로 fallback,
+    기존 `reason="banned"`(HARD_BLOCK_TERMS, 사실상 거의 안 남음)와 이제 구분된다.
+    **원안의 별도 `tone_gate_rejected` 컬럼은 만들지 않았다** — 이미 있던
+    `llm_runs.reason` 문자열 컬럼이 정확히 같은 정보를 더 일반적으로 담고 있어서,
+    중복 컬럼을 또 만들면 두 값이 갈라질 위험만 생긴다고 판단했다. 신규 테스트 18건
+    (마커별 검출, 중첩 구조 스캔, 치환 안 함 확인, `aiClient.run()` 전체 경로 통합
+    테스트 2건 — provider 모킹으로 "성공했지만 톤 위반"과 "정상" 양쪽 다 확인).

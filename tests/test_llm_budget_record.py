@@ -77,13 +77,14 @@ async def test_record_persists_reason_even_when_error_text_is_falsy() -> None:
 
 
 async def test_record_persists_each_reason_code_distinctly() -> None:
-    """원인별 3분해가 실제로 구분되는지 — 8개 사유 코드가 서로 다른 값으로 저장된다."""
+    """원인별 3분해가 실제로 구분되는지 — 9개 사유 코드가 서로 다른 값으로 저장된다."""
     codes = (
         "rate_limited",
         "timeout",
         "validation",
         "budget",
         "banned",
+        "tone_gate",
         "unavailable",
         "no_prompt",
         "provider_error",
