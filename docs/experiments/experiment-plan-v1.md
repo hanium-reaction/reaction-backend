@@ -470,3 +470,33 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
     중복 컬럼을 또 만들면 두 값이 갈라질 위험만 생긴다고 판단했다. 신규 테스트 18건
     (마커별 검출, 중첩 구조 스캔, 치환 안 함 확인, `aiClient.run()` 전체 경로 통합
     테스트 2건 — provider 모킹으로 "성공했지만 톤 위반"과 "정상" 양쪽 다 확인).
+15. ✅ **연속 실패 에스컬레이션(S3) — L0~L2 로직만 완료, 배선은 별도.**
+    [`orchestrator/escalation.py`](../../blob/main/src/reaction_backend/orchestrator/escalation.py)
+    신설 — `select_strategies` 와 같은 설계 원칙(세션 없는 순수 함수)으로 근거 대장
+    §5.1 카운터 4종(`consecutive_failure_count`/`same_tag_failure_count`/
+    `recovery_rejected_streak`/`recovery_abandoned_streak`, partial_done 동결 규칙
+    포함) + §5.2 레벨 판정(L0~L2, "설계자 판단"으로 이미 고정된 임계값 2/3회 사용)을
+    구현. **DB 에 별도 집계 테이블/뷰를 안 만들었다** — 이력(실행·회복 결정)이 이미
+    불변으로 쌓이므로, 매번 그 이력에서 계산하는 순수 함수가 마이그레이션·드리프트
+    위험 없이 같은 결과를 준다.
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **L3(재협상 3장)·L4(stand-down) 미구현** — L3 는 FE PARK 수락 플로우
+      ([reaction-frontend#223](https://github.com/hanium-reaction/reaction-frontend/issues/223))
+      회신 대기 중이고, L4 는 진입 조건(`overwhelm≥4`)의 신호 자체가 프로덕션에
+      없다(`context_snapshots` 캡처 미완, #19-B-2).
+    - **`routes/recovery.py`/`select_strategies` 실배선은 안 했다** — L2 의
+      "ENVIRONMENT_SHIFT 선두 강제 + 문구 다듬기 중단"은 `overwhelm_level`/
+      `PARK_DEFAULT` 선례(#262)와 같은 방식으로 비교적 쉽게 얹을 수 있어 보이지만,
+      L1 의 "acknowledgment 활성화"는 v3 프롬프트의 기존 AVOIDANCE 전용 조건
+      (#272/#275)에 "에스컬레이션 레벨"이라는 새 template 변수를 더해야 해서 모든
+      버전이 같은 placeholder 계약을 지켜야 하는 기존 테스트
+      (`test_every_version_matches_code_variables`)상 v1/v2 도 같이 손대야 한다 —
+      L1/L2 를 한 번에 배선하면 이 비대칭이 섞여 리뷰하기 어려워지므로, **로직만
+      먼저 완성하고 배선은 별도 PR로 미뤘다.**
+    - **"동일 카드"/"동일 (계보,tag_code)" 이력 조회**(회복으로 생성된 파생 카드까지
+      잇는 계보 그래프)는 구현 안 됨 — 호출부가 올바르게 필터링한 리스트를 넘긴다고
+      가정하는 순수 함수만 있다.
+
+    신규 테스트 29건(카운터별 경계값·partial_done 동결, 레벨 판정 5분기·OR 조건·
+    L2 우선순위, 통합 wrapper).
