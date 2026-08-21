@@ -273,6 +273,84 @@ def test_generate_does_not_escalate_one_below_l2_threshold(
     assert body["cards"][0]["strategyType"] == "NANO_STEP"
 
 
+def test_generate_excludes_downscope_default_at_l1_but_still_calls_llm(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """근거 대장 §5.2 L1 — 동일 카드 2회 연속 실패 → DOWNSCOPE_DEFAULT(축소 스타일) 배제,
+    패딩이 분해 스타일(NANO_STEP)로 채운다. L2 와 달리 "문구 다듬기 중단"이 아니므로
+    personalize 호출은 그대로 일어난다 — 그 차이를 직접 확인한다.
+    """
+    from reaction_backend.llm import RunResult, aiClient
+    from reaction_backend.schemas.recovery import RecoveryProposalLLM
+
+    call_count = 0
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        nonlocal call_count
+        call_count += 1
+        return RunResult(
+            value=RecoveryProposalLLM(
+                strategy_code="downscope",
+                if_clause="많이 지쳤으면",
+                then_clause="가벼운 산책 후 정리만 해볼까요",
+                rationale="",
+            ),
+            fell_back=False,
+            reason=None,
+            prompt_id="recovery/if_then_proposal",
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+    action = _seed_action(fake_action_item_repo, title="보고서 작성")
+    fake_recovery_repo.register_execution(
+        user_id=DEMO_USER_UUID,
+        action_item_id=action.id,
+        completion_status="failed",
+        failure_tags=["FATIGUE"],
+        plan_start_at=datetime(2026, 6, 1, tzinfo=KST),
+    )
+    current = fake_recovery_repo.register_execution(
+        user_id=DEMO_USER_UUID,
+        action_item_id=action.id,
+        completion_status="failed",
+        failure_tags=["FATIGUE"],
+        plan_start_at=datetime(2026, 6, 2, tzinfo=KST),
+    )
+
+    body = _generate(client, f"exec_{current.id}").json()
+
+    assert call_count == 1, "L1 은 personalize 호출을 건너뛰면 안 된다(L2 와 다름)"
+    types = {c["strategyType"] for c in body["cards"]}
+    assert "DOWNSCOPE_DEFAULT" not in types
+    assert "NANO_STEP" in types
+    assert body["aiSource"] == "llm"
+
+
+def test_generate_does_not_escalate_one_below_l1_threshold(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """경계 — 동일 카드 1회 실패(2회 미만)는 아직 L1 이 아니다. DOWNSCOPE_DEFAULT 가 그대로 뜬다."""
+    action = _seed_action(fake_action_item_repo, title="보고서 작성")
+    current = fake_recovery_repo.register_execution(
+        user_id=DEMO_USER_UUID,
+        action_item_id=action.id,
+        completion_status="failed",
+        failure_tags=["FATIGUE"],
+        plan_start_at=datetime(2026, 6, 1, tzinfo=KST),
+    )
+
+    body = _generate(client, f"exec_{current.id}").json()
+
+    assert "DOWNSCOPE_DEFAULT" in {c["strategyType"] for c in body["cards"]}
+
+
 def test_generate_no_tags_still_pads_to_min_cards(
     client: TestClient,
     fake_recovery_repo: FakeRecoveryRepo,

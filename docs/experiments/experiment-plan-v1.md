@@ -540,3 +540,41 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
     라우트 통합 2건(같은 그룹 정상 매칭을 실제로 갈아치우는지 + LLM 스텁이 한 번도
     안 불렸는지, 경계 미만 비활성화 — `test_recovery.py`), 나머지는 기존 스위트
     회귀 확인.
+17. ✅ **L1 배선(축소→분해) — 완료. acknowledgment 활성화는 별도 결정 필요해 계속 보류.**
+    16번이 "L1 은 그대로 미배선"이라 남겨둔 것 중 **"축소→분해"만** 마저 얹었다 —
+    "acknowledgment 활성화"는 프로덕션이 아직 `_PROMPT_ID`를 v2 에 고정해 두고 있어서
+    (`RecoveryProposalLLM` 5필드, acknowledgment 필드 자체가 없음) v3 프롬프트에 변수를
+    더하는 문제를 넘어 **"v3 를 프로덕션에 태울지"라는 별개의 큰 결정**이 걸려 있다고
+    판단해 사용자 확인 없이 진행하지 않았다.
+
+    - **`orchestrator/recovery.py::select_strategies`** 에 규칙 7 추가 —
+      `escalation_level` 이 `"L1"` **또는** `"L2"` 면(레벨이 아래에서 위로 누적된다는
+      §5.2 "순서의 근거"를 그대로 따름) `DOWNSCOPE_DEFAULT`("오늘은 절반만, 가능한
+      만큼만" — 원문이 금지한 "축소" 패턴과 스타일이 같은 카탈로그 내 유일한 전략)를
+      후보에서 **빼기만** 한다. 강제 로직 없이도 기존 패딩이 다음 우선순위 DOWNSCOPE
+      전략(`NANO_STEP` — 이미 "분해" 스타일)으로 자연히 채운다는 것을 테스트로 확인.
+    - **`RecoveryRepo.list_same_card_outcomes()`**(동일 카드, 태그·계보 무관) +
+      **`list_recovery_results()`**(회복 결과, 카드 무관 **사용자 전체**) 신설 — 후자의
+      범위는 §5.1 상태 변수 표가 `consecutive_failure_count`/`same_tag_failure_count`
+      두 행에만 "동일 카드"/"동일 (계보,tag_code)" 한정을 명시하고
+      `recovery_abandoned_streak` 에는 그런 한정이 없다는 점에서 "사용자 단위 신호"로
+      읽은 판단(문서에 명시 안 된 부분).
+    - `routes/recovery.py::generate_recovery_proposals` 가 이제 이 두 이력을 태그와
+      무관하게 한 번만 조회해 L1 베이스라인을 판정하고, L2 는 태그별로 다시 계산해
+      더 강한 레벨이 이기게 한다(`determine_escalation_level` 과 같은 우선순위).
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **acknowledgment 활성화는 여전히 보류** — 위 사유. 진행하려면 (a) `_PROMPT_ID` 를
+      v3 로 승격할지, (b) v2 스키마(`RecoveryProposalLLM`)에 acknowledgment 류 필드를
+      새로 얹을지 중 하나를 먼저 정해야 한다. 어느 쪽이든 L1-1 오프라인 A/B(승률
+      1.000)만으로 프로덕션 승격을 정당화할 수 있는지는 κ=0.482(보조 지표 강등, #278)
+      와 "실 도그푸딩 데이터 없음" 문제가 겹쳐 있어 이번 PR 혼자 결정할 사안이 아니다.
+    - **`recovery_rejected_streak` 는 여전히 레벨 판정에 안 씀** — escalation.py 가 이미
+      명시한 대로(§5.2 조건에 없음), 계산은 하지만 이번 배선에도 안 흘려보낸다.
+
+    신규 테스트 13건 — 순수함수 5건(`DOWNSCOPE_DEFAULT` 배제·L0/L1/L2 경계·패딩 낙수·
+    무관 태그 무영향 — `test_recovery_selection_coverage.py`), 리포지토리 6건(실
+    Postgres — 동일 카드 태그 무관 카운트, 정렬·in_progress 제외, 사용자 전역 확인,
+    pending 제외, L1 임계값 배선 2건 — `test_recovery_repo_lineage.py`), 라우트 통합
+    2건(L1 에서 DOWNSCOPE_DEFAULT 배제되면서도 personalize 호출은 그대로 되는지 +
+    경계 미만 비활성화 — `test_recovery.py`).

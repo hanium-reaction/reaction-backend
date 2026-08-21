@@ -383,3 +383,61 @@ def test_environment_shift_forcing_only_triggers_on_l2_not_l0_or_l1() -> None:
     for level in ("L0", "L1"):
         cards = select_strategies(["HARD_TO_START"], strategies, escalation_level=level)
         assert cards[0].strategy_type == "NANO_STEP", f"{level} 에서 강제가 발동했다"
+
+
+# ── L1 축소→분해 (escalation_level) ───────────────────────────────────────
+#
+# 근거 대장 §5.2 "then_clause 를 '전체를 15분만'(축소) 금지 → '하위 단계 정확히 하나'
+# (분해)" — DOWNSCOPE_DEFAULT("오늘은 절반만, 가능한 만큼만")만 이 스타일이라 그것만 뺀다.
+
+
+def test_downscope_default_reachable_without_escalation_argument() -> None:
+    """`escalation_level` 을 아예 안 넘기면(기본값) DOWNSCOPE_DEFAULT 가 정상적으로 뜬다."""
+    strategies = default_recovery_strategies()
+    cards = select_strategies(["FATIGUE"], strategies)
+    assert "DOWNSCOPE_DEFAULT" in {c.strategy_type for c in cards}
+
+
+def test_downscope_default_survives_at_l0() -> None:
+    """`escalation_level="L0"` 이면 이 규칙은 비활성 — L1/L2 전용이다."""
+    strategies = default_recovery_strategies()
+    cards = select_strategies(["FATIGUE"], strategies, escalation_level="L0")
+    assert "DOWNSCOPE_DEFAULT" in {c.strategy_type for c in cards}
+
+
+def test_downscope_default_excluded_at_l1_falls_back_to_nano_step_via_padding() -> None:
+    """L1 이면 DOWNSCOPE_DEFAULT 는 후보에서 아예 빠지고, 패딩이 다음 우선순위 DOWNSCOPE
+    전략(NANO_STEP — 분해 스타일)으로 채운다. 강제 로직 없이 기존 패딩만으로 분해가 이긴다.
+
+    `FATIGUE` 는 DOWNSCOPE_DEFAULT(DOWNSCOPE) 와 ACTIVE_RECOVERY(RESCHEDULE) 둘 다 실매칭
+    시키는 태그 — DOWNSCOPE_DEFAULT 가 빠지면 DOWNSCOPE 슬롯은 실매칭 0 이 되어 패딩 대상이
+    된다.
+    """
+    strategies = default_recovery_strategies()
+    cards = select_strategies(["FATIGUE"], strategies, escalation_level="L1")
+
+    types = {c.strategy_type for c in cards}
+    assert "DOWNSCOPE_DEFAULT" not in types
+    assert "NANO_STEP" in types, f"패딩이 분해 스타일로 안 채워졌다: {types}"
+    assert "ACTIVE_RECOVERY" in types, "무관한 RESCHEDULE 실매칭까지 건드리면 안 된다"
+
+
+def test_downscope_default_excluded_at_l2_too() -> None:
+    """레벨은 아래에서 위로 누적된다(§5.2 "순서의 근거") — L2 에서도 DOWNSCOPE_DEFAULT 는
+    여전히 후보에서 빠져 있어야 한다(비록 L2 자체가 ENVIRONMENT_SHIFT 로 그 슬롯을 다시
+    덮어써서 관찰 가능한 카드 목록에는 어차피 안 나오지만, 배제 자체는 유지돼야 한다).
+    """
+    strategies = default_recovery_strategies()
+    cards = select_strategies(["FATIGUE"], strategies, escalation_level="L2")
+    assert "DOWNSCOPE_DEFAULT" not in {c.strategy_type for c in cards}
+
+
+def test_downscope_default_exclusion_is_a_pure_removal_not_a_forced_swap() -> None:
+    """분해 스타일이 원래 뭘 골랐어도(다른 전략) 억지로 NANO_STEP 을 밀어넣지 않는다 —
+    "빼기만" 한다는 규칙 설명을 직접 검증. `HARD_TO_START` 단독이면 애초에 DOWNSCOPE_DEFAULT
+    가 후보도 아니라 L1 을 켜도 카드가 완전히 동일해야 한다.
+    """
+    strategies = default_recovery_strategies()
+    without = select_strategies(["HARD_TO_START"], strategies)
+    with_l1 = select_strategies(["HARD_TO_START"], strategies, escalation_level="L1")
+    assert [c.strategy_type for c in with_l1] == [c.strategy_type for c in without]

@@ -46,6 +46,10 @@ OVERWHELM_PARK_THRESHOLD = 4
 # L2 단서 전환(근거 대장 §5.2)의 강제 대상 — "ENVIRONMENT_SHIFT 선두 강제".
 ENVIRONMENT_SHIFT_STRATEGY_TYPE = "ENVIRONMENT_SHIFT"
 
+# L1 축소→분해(근거 대장 §5.2)의 금지 대상 — "오늘은 절반만, 가능한 만큼만"이 원문이 금지한
+# "전체를 15분만"(축소) 패턴과 같은 스타일(모호한 비율)인 유일한 DOWNSCOPE 전략.
+DOWNSCOPE_DEFAULT_STRATEGY_TYPE = "DOWNSCOPE_DEFAULT"
+
 
 class _SafeFormatDict(dict[str, str]):
     """템플릿 변수 누락 시 빈 문자열 치환 — `{first_step}` 등."""
@@ -95,8 +99,19 @@ def select_strategies(
        빠진다. 카탈로그에 `ENVIRONMENT_SHIFT` 가 없거나 비활성이면 이 규칙은 조용히
        no-op — 카드 개수가 깨지지 않는다. `escalation_level=None`(기본값)이면 완전히
        비활성 — 기존 동작과 100% 동일하다.
+    7. **L1 축소→분해** (근거 대장 §5.2): `escalation_level` 이 `"L1"` **또는** `"L2"`
+       면(레벨은 아래에서 위로 누적된다 — §5.2 "순서의 근거") `DOWNSCOPE_DEFAULT` 를
+       후보 자체에서 뺀다. 카탈로그 5개 DOWNSCOPE 전략 중 유일하게 "오늘은 절반만,
+       가능한 만큼만"처럼 모호한 비율(축소)로 쓰여 있고, 나머지(`NANO_STEP`/
+       `CONTEXT_REWARMING`/`SELF_FORGIVENESS_NANO`)는 이미 "딱 한 걸음/5분만"처럼
+       구체적 하위 단계(분해) 스타일이라 이 규칙은 **빼기만** 한다 — 나머지가 이기도록
+       두면 기존 점수·패딩 로직이 자연히 분해 스타일을 선택한다(별도 강제 로직 불필요).
+       `FATIGUE`/`PLAN_TOO_BIG` 실매칭이 있었다면 그 슬롯은 매칭 0 으로 떨어질 수 있고,
+       그러면 규칙 4 패딩이 다음 우선순위 DOWNSCOPE 전략(`NANO_STEP`)으로 채운다.
     """
     active = [s for s in strategies if s.is_active]
+    if escalation_level in ("L1", "L2"):
+        active = [s for s in active if s.strategy_type != DOWNSCOPE_DEFAULT_STRATEGY_TYPE]
     tag_set = set(failure_tags)
     park_default_triggered = (
         overwhelm_level is not None and overwhelm_level >= OVERWHELM_PARK_THRESHOLD

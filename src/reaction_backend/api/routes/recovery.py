@@ -225,21 +225,38 @@ async def generate_recovery_proposals(
     # 의 `overwhelm_level` 인자)를 쓸 실 데이터 출처가 아직 없다. `context_snapshots` 캡처는
     # #19-B-2 유예 중(`context_snapshot.py` 모듈 docstring) — 그게 붙으면 여기서 채운다.
     #
-    # escalation_level(L0~L2) 은 넘긴다 — `orchestrator/escalation.py` 의 카운터/레벨 판정은
-    # DB 이력만으로 이미 계산 가능하다(overwhelm_level 과 달리 새 캡처가 필요 없다). L1(축소→
-    # 분해, acknowledgment 활성화)은 여기서 판정만 하고 아직 안 쓴다 — v3 프롬프트에 새
-    # template 변수를 얹어야 해서(escalation.py 모듈 docstring 참고) 이번 스코프 밖이다.
-    # L2(단서 전환)만 실제로 select_strategies/개인화 스킵에 쓴다.
+    # escalation_level(L0~L2) 은 DB 이력만으로 계산해 넘긴다 — overwhelm_level 과 달리 새
+    # 캡처가 필요 없다. `consecutive_failure_count`(동일 카드)와 `recovery_abandoned_streak`
+    # (사용자 전체, §5.1 표에 "동일 카드" 한정이 없음)는 태그와 무관해 한 번만 조회한다.
+    # L2(동일 태그 3회 연속)만 태그별로 갈릴 수 있어 태그마다 다시 계산 — 하나라도 L2 면
+    # 그걸로 확정(가장 강한 레벨이 이긴다, determine_escalation_level 과 같은 우선순위).
+    # acknowledgment 활성화(v3 프롬프트 template 변수 추가, v1/v2 placeholder 계약까지
+    # 건드려야 함)는 별도 결정 사항이라 이번 스코프 밖 — L1 은 select_strategies 의 축소→
+    # 분해 규칙에만 쓴다.
+    same_card_history = await repo.list_same_card_outcomes(user.id, execution.action_item_id)
+    recovery_results_history = await repo.list_recovery_results(user.id)
+
     escalation_level: EscalationLevel | None = None
+    if (
+        compute_escalation_state(
+            same_card_outcomes_most_recent_first=same_card_history,
+            same_tag_outcomes_most_recent_first=[],
+            recovery_decisions_most_recent_first=[],
+            recovery_results_most_recent_first=recovery_results_history,
+        ).level
+        == "L1"
+    ):
+        escalation_level = "L1"
+
     for tag in failure_tags:
         tag_history = await repo.list_lineage_outcomes_for_tag(
             user.id, execution.action_item_id, tag
         )
         state = compute_escalation_state(
-            same_card_outcomes_most_recent_first=[],
+            same_card_outcomes_most_recent_first=same_card_history,
             same_tag_outcomes_most_recent_first=tag_history,
             recovery_decisions_most_recent_first=[],
-            recovery_results_most_recent_first=[],
+            recovery_results_most_recent_first=recovery_results_history,
         )
         if state.level == "L2":
             escalation_level = "L2"

@@ -32,7 +32,7 @@ from reaction_backend.repositories.execution_repo import reflectable_from
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from reaction_backend.orchestrator.escalation import ExecutionOutcome
+    from reaction_backend.orchestrator.escalation import ExecutionOutcome, RecoveryResultOutcome
 
 
 class RecoveryRepo:
@@ -124,6 +124,59 @@ class RecoveryRepo:
             else:
                 outcomes.append(cast("ExecutionOutcome", completion_status))
         return outcomes
+
+    async def list_same_card_outcomes(
+        self,
+        user_id: UUID,
+        action_item_id: UUID,
+        *,
+        limit: int = 20,
+    ) -> list[ExecutionOutcome]:
+        """L1 에스컬레이션(근거 대장 §5.2 "동일 카드 2회 연속 실패")용 이력 — 시간 역순.
+
+        `list_lineage_outcomes_for_tag` 와 달리 계보·태그 무관 — 이 action_item_id **자기
+        자신**의 실행 이력만 그대로 본다. `plan_start_at` 정렬 이유는 그쪽과 동일.
+        """
+        stmt = (
+            select(ExecutionEvent.completion_status)
+            .where(
+                ExecutionEvent.user_id == user_id,
+                ExecutionEvent.action_item_id == action_item_id,
+                ExecutionEvent.completion_status != "in_progress",
+            )
+            .order_by(ExecutionEvent.plan_start_at.desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return cast("list[ExecutionOutcome]", list(result.scalars().all()))
+
+    async def list_recovery_results(
+        self,
+        user_id: UUID,
+        *,
+        limit: int = 20,
+    ) -> list[RecoveryResultOutcome]:
+        """L1 에스컬레이션(근거 대장 §5.2 "회복 1회 abandoned")용 이력 — 시간 역순.
+
+        §5.1 상태 변수 표는 `consecutive_failure_count`/`same_tag_failure_count` 만
+        "동일 카드"/"동일 (계보,tag_code)" 로 명시한다 — `recovery_abandoned_streak` 는
+        그런 한정이 없어, 이 사용자의 **회복 결정 전체**(카드 무관)에서 본다: "최근 회복을
+        연달아 완주 못 하고 있는가"라는 사용자 단위 신호로 읽었다. `recovery_decided_at`
+        기준 정렬 — 결정(수락) 시점이 이 흐름의 자연스러운 시간축이고(`recovery_started_at`
+        도 같은 시각을 쓴다 — `create_attempt`/`_adopt` 참고), `recovery_result` 가
+        `pending` 인(아직 결정 안 됐거나 결정됐지만 안 끝난) 행은 애초에 제외한다.
+        """
+        stmt = (
+            select(RecoveryAttempt.recovery_result)
+            .where(
+                RecoveryAttempt.user_id == user_id,
+                RecoveryAttempt.recovery_result != "pending",
+            )
+            .order_by(RecoveryAttempt.recovery_decided_at.desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return cast("list[RecoveryResultOutcome]", list(result.scalars().all()))
 
     async def list_active_strategies(self) -> list[RecoveryStrategyCatalog]:
         stmt = (

@@ -1153,6 +1153,30 @@ class FakeRecoveryRepo:
                 outcomes.append(e.completion_status)
         return outcomes
 
+    async def list_same_card_outcomes(
+        self, user_id: UUID, action_item_id: UUID, *, limit: int = 20
+    ) -> list[str]:
+        rows = [
+            e
+            for e in self._executions.values()
+            if e.user_id == user_id
+            and e.action_item_id == action_item_id
+            and e.completion_status != "in_progress"
+        ]
+        rows.sort(key=lambda e: e.plan_start_at, reverse=True)
+        return [e.completion_status for e in rows[:limit]]
+
+    async def list_recovery_results(self, user_id: UUID, *, limit: int = 20) -> list[str]:
+        rows = [
+            a
+            for a in self._attempts.values()
+            if a.user_id == user_id and a.recovery_result != "pending"
+        ]
+        rows.sort(
+            key=lambda a: a.recovery_decided_at or datetime.min.replace(tzinfo=UTC), reverse=True
+        )
+        return [a.recovery_result for a in rows[:limit]]
+
     async def list_active_strategies(self) -> list[RecoveryStrategyCatalog]:
         return sorted(
             (s for s in self._strategies if s.is_active),

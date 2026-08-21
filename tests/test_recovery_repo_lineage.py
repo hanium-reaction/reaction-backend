@@ -1,10 +1,14 @@
-"""`RecoveryRepo.list_lineage_outcomes_for_tag` — 실 Postgres (근거 대장 §5.2 "동일 (계보,
-tag_code)").
+"""`RecoveryRepo` 의 L1/L2 에스컬레이션 이력 조회 3종 — 실 Postgres (근거 대장 §5.1/§5.2).
+
+- `list_lineage_outcomes_for_tag` — L2 "동일 (계보, tag_code) 3회 연속 실패"
+- `list_same_card_outcomes` — L1 "동일 카드 2회 연속 실패"
+- `list_recovery_results` — L1 "회복 1회 abandoned"
 
 `orchestrator/escalation.py` 의 순수 함수는 이미 이력 리스트만 있으면 검증됐다
 (`tests/test_escalation.py`). 여기서 검증하는 건 그 리스트를 **실제로 어떻게 만드는가** —
 "계보" = goal_id 그룹(§5.16 SQL과 같은 정의), 다른 태그의 failed 는 동결(partial_done
-취급), goal_id 가 없으면 계보는 자기 자신 하나뿐이라는 이번 배선의 구체적 설계 판단.
+취급), goal_id 가 없으면 계보는 자기 자신 하나뿐이라는 판단(L2), `recovery_abandoned_streak`
+는 §5.1 표에 "동일 카드" 한정이 없어 사용자 전체 이력으로 본다는 판단(L1).
 
 DATABASE_URL 이 없으면(로컬 기본값) 스킵 — `tests/test_recovery_evidence_sql.py` 와 같은
 게이트. 시드 헬퍼도 그 파일과 같은 정신(각 테스트가 필요한 만큼만, 진짜 INSERT)으로
@@ -23,9 +27,12 @@ from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.execution_failure_tag import ExecutionFailureTag
 from reaction_backend.db.models.goal import Goal
+from reaction_backend.db.models.recovery_attempt import RecoveryAttempt
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.user import User
 from reaction_backend.orchestrator.escalation import (
+    L1_CONSECUTIVE_FAILURE_THRESHOLD,
+    L1_RECOVERY_ABANDONED_THRESHOLD,
     L2_SAME_TAG_FAILURE_THRESHOLD,
     compute_escalation_state,
 )
@@ -116,6 +123,34 @@ async def _seed_execution(
         await session.flush()
 
     return execution_id
+
+
+async def _seed_recovery_attempt(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    execution_id: UUID,
+    recovery_result: str,
+    recovery_decided_at: datetime,
+) -> None:
+    """회복 결정 1건 시드 — `list_recovery_results` 는 카드/전략 무관하게 결과만 본다.
+
+    `recovery_strategy_type` 은 마이그레이션이 이미 커밋해 둔 마스터 시드(NANO_STEP)를
+    그대로 참조한다(FK) — 이 테스트의 관심사가 아니라 뭐든 상관없다.
+    """
+    session.add(
+        RecoveryAttempt(
+            id=uuid4(),
+            user_id=user_id,
+            execution_id=execution_id,
+            recovery_option_group="DOWNSCOPE",
+            recovery_strategy_type="NANO_STEP",
+            user_decision="accepted",
+            recovery_decided_at=recovery_decided_at,
+            recovery_result=recovery_result,
+        )
+    )
+    await session.flush()
 
 
 async def test_same_action_item_consecutive_same_tag_failures(
@@ -363,3 +398,228 @@ async def test_wires_into_escalation_state_as_l2_at_the_threshold(
     )
 
     assert state.level == "L2"
+
+
+# ═══════════════════ list_same_card_outcomes — L1 "동일 카드" ═══════════════════
+
+
+async def test_same_card_outcomes_ignores_tags_and_other_cards(
+    real_db_session: AsyncSession,
+) -> None:
+    """계보·태그 무관 — 이 action_item_id 자기 자신의 실행만, 다른 태그 실패도 그대로 센다."""
+    repo = RecoveryRepo(real_db_session)
+    user_id = await _seed_user(real_db_session)
+    action_item_id = await _seed_action_item(real_db_session, user_id=user_id)
+    other_card = await _seed_action_item(real_db_session, user_id=user_id)
+    await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=action_item_id,
+        completion_status="failed",
+        plan_start_at=_BASE_AT,
+        tag_code="DISTRACTION",
+    )
+    await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=action_item_id,
+        completion_status="failed",
+        plan_start_at=_BASE_AT + timedelta(days=1),
+        tag_code="HARD_TO_START",  # list_lineage_outcomes_for_tag 와 달리 동결 없이 그대로 count
+    )
+    await _seed_execution(  # 다른 카드 — 안 섞여야 한다
+        real_db_session,
+        user_id=user_id,
+        action_item_id=other_card,
+        completion_status="failed",
+        plan_start_at=_BASE_AT + timedelta(days=2),
+    )
+
+    outcomes = await repo.list_same_card_outcomes(user_id, action_item_id)
+
+    assert outcomes == ["failed", "failed"]
+
+
+async def test_same_card_outcomes_orders_by_plan_start_at_desc_and_excludes_in_progress(
+    real_db_session: AsyncSession,
+) -> None:
+    repo = RecoveryRepo(real_db_session)
+    user_id = await _seed_user(real_db_session)
+    action_item_id = await _seed_action_item(real_db_session, user_id=user_id)
+    await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=action_item_id,
+        completion_status="failed",
+        plan_start_at=_BASE_AT,
+    )
+    await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=action_item_id,
+        completion_status="in_progress",
+        plan_start_at=_BASE_AT + timedelta(days=1),
+    )
+    await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=action_item_id,
+        completion_status="done",
+        plan_start_at=_BASE_AT + timedelta(days=2),
+    )
+
+    outcomes = await repo.list_same_card_outcomes(user_id, action_item_id)
+
+    assert outcomes == ["done", "failed"]
+
+
+async def test_same_card_outcomes_wires_into_escalation_state_as_l1_at_the_threshold(
+    real_db_session: AsyncSession,
+) -> None:
+    repo = RecoveryRepo(real_db_session)
+    user_id = await _seed_user(real_db_session)
+    action_item_id = await _seed_action_item(real_db_session, user_id=user_id)
+    for i in range(L1_CONSECUTIVE_FAILURE_THRESHOLD):
+        await _seed_execution(
+            real_db_session,
+            user_id=user_id,
+            action_item_id=action_item_id,
+            completion_status="failed",
+            plan_start_at=_BASE_AT + timedelta(days=i),
+        )
+
+    outcomes = await repo.list_same_card_outcomes(user_id, action_item_id)
+    state = compute_escalation_state(
+        same_card_outcomes_most_recent_first=outcomes,
+        same_tag_outcomes_most_recent_first=[],
+        recovery_decisions_most_recent_first=[],
+        recovery_results_most_recent_first=[],
+    )
+
+    assert state.level == "L1"
+
+
+# ═══════════════════ list_recovery_results — L1 "회복 1회 abandoned" ═══════════════════
+
+
+async def test_recovery_results_is_user_global_not_scoped_to_one_card(
+    real_db_session: AsyncSession,
+) -> None:
+    """§5.1 표에 "동일 카드" 한정이 없다 — 서로 다른 카드/실행에 걸친 결정도 다 같이 본다."""
+    repo = RecoveryRepo(real_db_session)
+    user_id = await _seed_user(real_db_session)
+    card_a = await _seed_action_item(real_db_session, user_id=user_id)
+    card_b = await _seed_action_item(real_db_session, user_id=user_id)
+    exec_a = await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=card_a,
+        completion_status="failed",
+        plan_start_at=_BASE_AT,
+    )
+    exec_b = await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=card_b,
+        completion_status="failed",
+        plan_start_at=_BASE_AT + timedelta(days=1),
+    )
+    await _seed_recovery_attempt(
+        real_db_session,
+        user_id=user_id,
+        execution_id=exec_a,
+        recovery_result="abandoned",
+        recovery_decided_at=_BASE_AT,
+    )
+    await _seed_recovery_attempt(
+        real_db_session,
+        user_id=user_id,
+        execution_id=exec_b,
+        recovery_result="abandoned",
+        recovery_decided_at=_BASE_AT + timedelta(days=1),
+    )
+
+    outcomes = await repo.list_recovery_results(user_id)
+
+    assert outcomes == ["abandoned", "abandoned"]
+
+
+async def test_recovery_results_excludes_pending_and_orders_by_decided_at_desc(
+    real_db_session: AsyncSession,
+) -> None:
+    repo = RecoveryRepo(real_db_session)
+    user_id = await _seed_user(real_db_session)
+    action_item_id = await _seed_action_item(real_db_session, user_id=user_id)
+
+    exec1 = await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=action_item_id,
+        completion_status="failed",
+        plan_start_at=_BASE_AT,
+    )
+    exec2 = await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=action_item_id,
+        completion_status="failed",
+        plan_start_at=_BASE_AT + timedelta(days=1),
+    )
+    await _seed_execution(  # pending 대조군 — 이 실행엔 attempt 자체를 안 만든다
+        real_db_session,
+        user_id=user_id,
+        action_item_id=action_item_id,
+        completion_status="failed",
+        plan_start_at=_BASE_AT + timedelta(days=2),
+    )
+    await _seed_recovery_attempt(
+        real_db_session,
+        user_id=user_id,
+        execution_id=exec1,
+        recovery_result="completed",
+        recovery_decided_at=_BASE_AT,
+    )
+    await _seed_recovery_attempt(
+        real_db_session,
+        user_id=user_id,
+        execution_id=exec2,
+        recovery_result="abandoned",
+        recovery_decided_at=_BASE_AT + timedelta(days=1),
+    )
+
+    outcomes = await repo.list_recovery_results(user_id)
+
+    assert outcomes == ["abandoned", "completed"]
+
+
+async def test_recovery_results_wires_into_escalation_state_as_l1_at_the_threshold(
+    real_db_session: AsyncSession,
+) -> None:
+    repo = RecoveryRepo(real_db_session)
+    user_id = await _seed_user(real_db_session)
+    action_item_id = await _seed_action_item(real_db_session, user_id=user_id)
+    exec_id = await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=action_item_id,
+        completion_status="failed",
+        plan_start_at=_BASE_AT,
+    )
+    for _ in range(L1_RECOVERY_ABANDONED_THRESHOLD):
+        await _seed_recovery_attempt(
+            real_db_session,
+            user_id=user_id,
+            execution_id=exec_id,
+            recovery_result="abandoned",
+            recovery_decided_at=_BASE_AT,
+        )
+
+    outcomes = await repo.list_recovery_results(user_id)
+    state = compute_escalation_state(
+        same_card_outcomes_most_recent_first=[],
+        same_tag_outcomes_most_recent_first=[],
+        recovery_decisions_most_recent_first=[],
+        recovery_results_most_recent_first=outcomes,
+    )
+
+    assert state.level == "L1"
