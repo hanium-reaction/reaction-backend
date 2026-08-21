@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, cast
 from uuid import UUID
 
 from fastapi import Depends
@@ -32,6 +32,8 @@ from reaction_backend.repositories.execution_repo import reflectable_from
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from reaction_backend.orchestrator.escalation import ExecutionOutcome
+
 
 class RecoveryRepo:
     """ExecutionEvent 조회 + RecoveryAttempt 영속화 + 전략 카탈로그."""
@@ -53,6 +55,75 @@ class RecoveryRepo:
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def list_lineage_outcomes_for_tag(
+        self,
+        user_id: UUID,
+        action_item_id: UUID,
+        tag_code: str,
+        *,
+        limit: int = 20,
+    ) -> list[ExecutionOutcome]:
+        """L2 에스컬레이션(근거 대장 §5.2 "동일 (계보, tag_code)") 이력 — 시간 역순.
+
+        **"계보"의 정의**: `recovery-evidence-base.md` §5.16 의 `recovery_followthrough_rate`
+        (PARK) 계산 SQL이 이미 "같은 goal 계보"를 `a4.goal_id = orig_a.goal_id` 로 구현해
+        둔 것과 같은 뜻으로 쓴다 — 같은 `goal_id` 를 가진 action_item 전체. `goal_id` 가
+        없는 카드(습관/인박스/수동)는 "계보가 없어" 자기 자신 하나만(같은 SQL이 이 경우를
+        "항상 미완주"로 두는 것과 같은 이유 — goal 없이는 계보를 정의할 방법이 없다).
+
+        **tag_code 가 다른 `failed` 를 만나면**: 이 태그 관점에서는 "무관한 사건"이라
+        `partial_done` 과 같은 **동결**로 접어(카운트도 리셋도 안 함)
+        `orchestrator.escalation.compute_consecutive_failure_count` 로 그대로 흘려보낸다
+        — done/over_done 이 아닌 이상 "다른 태그로 실패했다"는 사실 자체가 "이 태그로는
+        아직 실패도 성공도 안 했다"는 뜻이기 때문이다.
+
+        회복으로 파생된 카드까지 재귀적으로 잇는 계보 그래프는(`orchestrator/escalation.py`
+        모듈 docstring이 이미 명시한 대로) 이번 스코프 밖이다 — goal_id 단위 근사.
+        """
+        action = await self._session.get(ActionItem, action_item_id)
+        if action is None or action.user_id != user_id:
+            return []
+
+        lineage_ids = (
+            select(ActionItem.id).where(
+                ActionItem.user_id == user_id, ActionItem.goal_id == action.goal_id
+            )
+            if action.goal_id is not None
+            else select(ActionItem.id).where(ActionItem.id == action_item_id)
+        )
+
+        tag_matched = (
+            select(ExecutionFailureTag.id)
+            .where(
+                ExecutionFailureTag.execution_id == ExecutionEvent.id,
+                ExecutionFailureTag.tag_code == tag_code,
+            )
+            .exists()
+        )
+        stmt = (
+            select(ExecutionEvent.completion_status, tag_matched)
+            .where(
+                ExecutionEvent.user_id == user_id,
+                ExecutionEvent.action_item_id.in_(lineage_ids),
+                ExecutionEvent.completion_status != "in_progress",
+            )
+            # `plan_start_at` — 언제 그 실행이 실제로 벌어졌는가(`created_at` 은 INSERT 시각일
+            # 뿐이고, 같은 트랜잭션 안에서 여러 행이 들어가면 `now()` 가 전부 같은 값을 줘
+            # 순서가 안정적이지 않다). `list_pending_reflection` 등 이 모듈 밖에서도 실행
+            # 시각 정렬은 이미 `plan_start_at` 기준(execution_repo.py) — 같은 관례.
+            .order_by(ExecutionEvent.plan_start_at.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).all()
+
+        outcomes: list[ExecutionOutcome] = []
+        for completion_status, matched in rows:
+            if completion_status == "failed" and not matched:
+                outcomes.append("partial_done")
+            else:
+                outcomes.append(cast("ExecutionOutcome", completion_status))
+        return outcomes
 
     async def list_active_strategies(self) -> list[RecoveryStrategyCatalog]:
         stmt = (

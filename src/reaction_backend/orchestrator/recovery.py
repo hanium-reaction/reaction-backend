@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from datetime import date, datetime
 
     from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
+    from reaction_backend.orchestrator.escalation import EscalationLevel
 
 MIN_CARDS = 2
 MAX_CARDS = 4
@@ -42,6 +43,9 @@ RECOVERY_NIGHT_CUTOFF_HOUR = 23
 PARK_DEFAULT_STRATEGY_TYPE = "PARK_DEFAULT"
 OVERWHELM_PARK_THRESHOLD = 4
 
+# L2 단서 전환(근거 대장 §5.2)의 강제 대상 — "ENVIRONMENT_SHIFT 선두 강제".
+ENVIRONMENT_SHIFT_STRATEGY_TYPE = "ENVIRONMENT_SHIFT"
+
 
 class _SafeFormatDict(dict[str, str]):
     """템플릿 변수 누락 시 빈 문자열 치환 — `{first_step}` 등."""
@@ -63,6 +67,7 @@ def select_strategies(
     min_cards: int = MIN_CARDS,
     max_cards: int = MAX_CARDS,
     overwhelm_level: int | None = None,
+    escalation_level: EscalationLevel | None = None,
 ) -> list[RecoveryStrategyCatalog]:
     """실패 태그 → 전략 카드 선택.
 
@@ -81,6 +86,14 @@ def select_strategies(
        점수거나 동점에서 더 낮은 `display_priority` 를 가지면 그쪽이 그대로 이긴다 —
        `overwhelm_level` 은 PARK 자리를 강탈하지 않고, 아무 매칭도 없을 때만 채운다.
        `overwhelm_level=None`(기본값, 호출부가 값을 안 넘길 때)이면 이 규칙은 완전히
+       비활성 — 기존 동작과 100% 동일하다.
+    6. **L2 단서 전환 강제** (근거 대장 §5.2): `escalation_level == "L2"` 면 활성
+       `ENVIRONMENT_SHIFT` 전략을 위 1~5 규칙의 결과와 **무관하게** 맨 앞으로 강제한다.
+       "동적 트리거"(규칙 5, 매칭이 없을 때만 후보로 끼워 넣음)보다 강한 개입이다 —
+       룰 매칭 점수가 더 높은 카드가 있어도 밀어낸다("선두 강제"). 같은 option_group
+       (`ENVIRONMENT_SHIFT` 는 DOWNSCOPE)의 기존 카드는 "동시 노출 1카드" 규칙에 따라
+       빠진다. 카탈로그에 `ENVIRONMENT_SHIFT` 가 없거나 비활성이면 이 규칙은 조용히
+       no-op — 카드 개수가 깨지지 않는다. `escalation_level=None`(기본값)이면 완전히
        비활성 — 기존 동작과 100% 동일하다.
     """
     active = [s for s in strategies if s.is_active]
@@ -117,7 +130,17 @@ def select_strategies(
             cards.append(s)
             used_groups.add(s.option_group)
 
-    return cards[:max_cards]
+    cards = cards[:max_cards]
+
+    if escalation_level == "L2":
+        environment_shift = next(
+            (s for s in active if s.strategy_type == ENVIRONMENT_SHIFT_STRATEGY_TYPE), None
+        )
+        if environment_shift is not None:
+            rest = [c for c in cards if c.option_group != environment_shift.option_group]
+            cards = [environment_shift, *rest][:max_cards]
+
+    return cards
 
 
 def first_matching_tag(failure_tags: list[str], strategy: RecoveryStrategyCatalog) -> str | None:

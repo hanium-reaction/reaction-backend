@@ -485,18 +485,58 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
       ([reaction-frontend#223](https://github.com/hanium-reaction/reaction-frontend/issues/223))
       회신 대기 중이고, L4 는 진입 조건(`overwhelm≥4`)의 신호 자체가 프로덕션에
       없다(`context_snapshots` 캡처 미완, #19-B-2).
-    - **`routes/recovery.py`/`select_strategies` 실배선은 안 했다** — L2 의
-      "ENVIRONMENT_SHIFT 선두 강제 + 문구 다듬기 중단"은 `overwhelm_level`/
-      `PARK_DEFAULT` 선례(#262)와 같은 방식으로 비교적 쉽게 얹을 수 있어 보이지만,
-      L1 의 "acknowledgment 활성화"는 v3 프롬프트의 기존 AVOIDANCE 전용 조건
-      (#272/#275)에 "에스컬레이션 레벨"이라는 새 template 변수를 더해야 해서 모든
-      버전이 같은 placeholder 계약을 지켜야 하는 기존 테스트
-      (`test_every_version_matches_code_variables`)상 v1/v2 도 같이 손대야 한다 —
-      L1/L2 를 한 번에 배선하면 이 비대칭이 섞여 리뷰하기 어려워지므로, **로직만
-      먼저 완성하고 배선은 별도 PR로 미뤘다.**
+    - **`routes/recovery.py`/`select_strategies` 실배선은 안 했다** — **→ 16번에서
+      L2 만 배선했다.** L1 의 "acknowledgment 활성화"는 여전히 미배선(사유는 그대로 —
+      v3 프롬프트에 새 template 변수가 필요해 v1/v2 placeholder 계약까지 건드려야 함).
     - **"동일 카드"/"동일 (계보,tag_code)" 이력 조회**(회복으로 생성된 파생 카드까지
       잇는 계보 그래프)는 구현 안 됨 — 호출부가 올바르게 필터링한 리스트를 넘긴다고
-      가정하는 순수 함수만 있다.
+      가정하는 순수 함수만 있다. **→ 16번에서 same_tag 쪽만 goal_id 근사로 배선.**
 
     신규 테스트 29건(카운터별 경계값·partial_done 동결, 레벨 판정 5분기·OR 조건·
     L2 우선순위, 통합 wrapper).
+16. ✅ **L2 배선(ENVIRONMENT_SHIFT 선두 강제 + 문구 다듬기 중단) — 완료.** 15번이 미룬
+    두 가지 중 L2 만 마저 얹었다(L1 은 그대로 미배선 — 사유 동일).
+
+    - **`orchestrator/recovery.py::select_strategies`** 에 `escalation_level` 인자
+      추가 — `escalation_level == "L2"` 면 활성 `ENVIRONMENT_SHIFT` 를 다른 규칙(태그
+      매칭 점수 포함)과 **무관하게** 맨 앞으로 강제하고, 같은 옵션그룹(DOWNSCOPE)의
+      기존 카드는 "동시 노출 1카드" 규칙대로 빠진다. `overwhelm_level`/`PARK_DEFAULT`
+      의 "매칭 없을 때만 채움"보다 강한 개입이라 별도 규칙(6번)으로 문서화.
+    - **"계보"를 처음으로 실제 정의했다** — `recovery-evidence-base.md` §5.16
+      `recovery_followthrough_rate`(PARK) SQL 이 이미 "같은 goal 계보"를
+      `a4.goal_id = orig_a.goal_id` 로 구현해 둔 것과 같은 뜻으로 재사용:
+      `RecoveryRepo.list_lineage_outcomes_for_tag()` 가 같은 `goal_id` 의 action_item
+      전체를 계보로 본다(`goal_id` 없으면 자기 자신뿐). **다른 태그의 `failed` 는
+      `partial_done` 과 같은 동결로 접는다** — done/over_done 이 아닌 한 "이 태그
+      로는 아직 실패도 성공도 안 했다"는 뜻이라는 판단(문서에 명시 안 된 부분이라
+      이번 PR 이 내린 해석). 정렬 기준은 `created_at`(같은 트랜잭션에서 `now()` 가
+      전부 같은 값을 줘 테스트가 불안정해짐)이 아니라 `plan_start_at` —
+      `execution_repo.list_pending_reflection` 등 이 레포 다른 곳의 관례와 동일.
+    - `routes/recovery.py::generate_recovery_proposals` 가 실행의 각 실패 태그에
+      대해 계보 이력을 조회 → `compute_escalation_state()` → L2 면 `select_strategies`
+      에 넘기고, **`aiClient.run()` personalize 호출 자체를 건너뛴다**("문구 다듬기
+      중단" — B5: 이 조건에서 문구만 바꾼 재제시는 효과가 가장 낮다는 근거를 그대로
+      따름. LLM 호출을 하고 결과를 버리는 게 아니라 애초에 호출하지 않는다).
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **L1 배선은 여전히 안 함** — 15번과 같은 이유(placeholder 계약).
+    - **`previous_if_clauses` 재사용 금지는 안 함** — §5.2 원문이 L2 조건에 같이
+      적은 요구지만, "문구 다듬기 중단"으로 LLM personalize 자체가 스킵되는 이
+      경로에서는(카탈로그 원본 템플릿만 노출) 애초에 새로 생성되는 문구가 없어
+      "재사용" 위험의 성격이 다르다 — 사용자가 이번에 요청한 범위("ENVIRONMENT_SHIFT
+      강제") 밖이라 별도로 미뤘다.
+    - **계보 = goal_id 는 근사다** — 회복으로 파생된 카드(`resulting_action_item_id`)
+      까지 재귀적으로 잇는 계보 그래프는 여전히 안 함(escalation.py 모듈 docstring이
+      원래 명시한 스코프 경계 그대로). 실 도그푸딩 데이터가 없어 이 근사가 실제로
+      맞는 판정을 내리는지 검증할 방법이 아직 없다 — 도그푸딩 시작되면 재검토 대상.
+    - **L1 카운터(연속 실패/abandoned streak)는 이번 배선에서 항상 빈 이력으로
+      넘긴다** — L2 판정(`same_tag_failure_count` 단독 조건)에는 영향이 없다는 것을
+      `determine_escalation_level` 의 분기 순서로 확인하고 의도적으로 최소화했다.
+
+    신규 테스트 16건 — 순수함수 5건(`select_strategies` 의 L2 강제·no-op·L0/L1
+    비활성 확인, `test_recovery_selection_coverage.py`), 리포지토리 9건(실
+    Postgres — 계보 확장, 동결, done 리셋, 정렬, in_progress 제외, limit, 미존재/
+    타 사용자 카드, escalation_state 배선 확인 — `test_recovery_repo_lineage.py`),
+    라우트 통합 2건(같은 그룹 정상 매칭을 실제로 갈아치우는지 + LLM 스텁이 한 번도
+    안 불렸는지, 경계 미만 비활성화 — `test_recovery.py`), 나머지는 기존 스위트
+    회귀 확인.

@@ -193,6 +193,86 @@ def test_generate_applies_llm_personalized_text_to_leading_card(
     assert body["aiSource"] == "llm"
 
 
+def test_generate_forces_environment_shift_lead_and_skips_llm_at_l2(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """근거 대장 §5.2 L2 — 동일 (계보, tag_code) 3회 연속 실패 → ENVIRONMENT_SHIFT 선두
+    강제 + "문구 다듬기 중단"(LLM personalize 호출 자체를 건너뜀).
+
+    같은 action_item 에 DISTRACTION 태그로 3회 연속 실패(가장 최근 건은 HARD_TO_START 도
+    같이 달림) 이력을 만든다. 태그 없이 보면 HARD_TO_START → NANO_STEP(display_priority
+    10)이 DISTRACTION → ENVIRONMENT_SHIFT(30)보다 같은 DOWNSCOPE 그룹에서 이긴다 — 그래서
+    이 케이스는 "L2 가 정상 매칭 1등을 실제로 갈아치우는지"를 검증한다. LLM 은 스텁으로
+    성공 응답을 주도록 해 두고, 그 스텁이 **한 번도 호출되지 않아야** "다듬기 중단"이
+    실제로 호출을 건너뛴 것이지 응답을 받고 버린 게 아님을 증명한다.
+    """
+    from reaction_backend.llm import aiClient
+
+    call_count = 0
+
+    async def stub_run(**kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        raise AssertionError("L2 에서는 aiClient.run 이 호출되면 안 된다")
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+    action = _seed_action(fake_action_item_repo, title="집중 안 되는 작업")
+    for i in range(2):
+        fake_recovery_repo.register_execution(
+            user_id=DEMO_USER_UUID,
+            action_item_id=action.id,
+            completion_status="failed",
+            failure_tags=["DISTRACTION"],
+            plan_start_at=datetime(2026, 6, 1, tzinfo=KST) + timedelta(days=i),
+        )
+    current = fake_recovery_repo.register_execution(
+        user_id=DEMO_USER_UUID,
+        action_item_id=action.id,
+        completion_status="failed",
+        failure_tags=["HARD_TO_START", "DISTRACTION"],
+        plan_start_at=datetime(2026, 6, 1, tzinfo=KST) + timedelta(days=2),
+    )
+
+    body = _generate(client, f"exec_{current.id}").json()
+
+    assert call_count == 0, "LLM 스텁이 호출됐다 — '문구 다듬기 중단'이 지켜지지 않았다"
+    top = body["cards"][0]
+    assert top["strategyType"] == "ENVIRONMENT_SHIFT"
+    assert "NANO_STEP" not in {c["strategyType"] for c in body["cards"]}
+    assert body["aiSource"] == "rule"
+
+
+def test_generate_does_not_escalate_one_below_l2_threshold(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """경계 — 동일 태그 2회 연속(3회 미만)은 아직 L2 가 아니다. 정상 매칭(NANO_STEP)이 이긴다."""
+    action = _seed_action(fake_action_item_repo, title="집중 안 되는 작업")
+    fake_recovery_repo.register_execution(
+        user_id=DEMO_USER_UUID,
+        action_item_id=action.id,
+        completion_status="failed",
+        failure_tags=["DISTRACTION"],
+        plan_start_at=datetime(2026, 6, 1, tzinfo=KST),
+    )
+    current = fake_recovery_repo.register_execution(
+        user_id=DEMO_USER_UUID,
+        action_item_id=action.id,
+        completion_status="failed",
+        failure_tags=["HARD_TO_START", "DISTRACTION"],
+        plan_start_at=datetime(2026, 6, 2, tzinfo=KST),
+    )
+
+    body = _generate(client, f"exec_{current.id}").json()
+
+    assert body["cards"][0]["strategyType"] == "NANO_STEP"
+
+
 def test_generate_no_tags_still_pads_to_min_cards(
     client: TestClient,
     fake_recovery_repo: FakeRecoveryRepo,

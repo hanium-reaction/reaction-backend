@@ -44,6 +44,7 @@ from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrateg
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.session import get_db
 from reaction_backend.llm import aiClient
+from reaction_backend.orchestrator.escalation import EscalationLevel, compute_escalation_state
 from reaction_backend.orchestrator.recovery import (
     first_matching_tag,
     recovery_target_date,
@@ -223,7 +224,28 @@ async def generate_recovery_proposals(
     # overwhelm_level 은 의도적으로 넘기지 않는다 — PARK_DEFAULT 동적 트리거(`select_strategies`
     # 의 `overwhelm_level` 인자)를 쓸 실 데이터 출처가 아직 없다. `context_snapshots` 캡처는
     # #19-B-2 유예 중(`context_snapshot.py` 모듈 docstring) — 그게 붙으면 여기서 채운다.
-    selected = select_strategies(failure_tags, strategies)
+    #
+    # escalation_level(L0~L2) 은 넘긴다 — `orchestrator/escalation.py` 의 카운터/레벨 판정은
+    # DB 이력만으로 이미 계산 가능하다(overwhelm_level 과 달리 새 캡처가 필요 없다). L1(축소→
+    # 분해, acknowledgment 활성화)은 여기서 판정만 하고 아직 안 쓴다 — v3 프롬프트에 새
+    # template 변수를 얹어야 해서(escalation.py 모듈 docstring 참고) 이번 스코프 밖이다.
+    # L2(단서 전환)만 실제로 select_strategies/개인화 스킵에 쓴다.
+    escalation_level: EscalationLevel | None = None
+    for tag in failure_tags:
+        tag_history = await repo.list_lineage_outcomes_for_tag(
+            user.id, execution.action_item_id, tag
+        )
+        state = compute_escalation_state(
+            same_card_outcomes_most_recent_first=[],
+            same_tag_outcomes_most_recent_first=tag_history,
+            recovery_decisions_most_recent_first=[],
+            recovery_results_most_recent_first=[],
+        )
+        if state.level == "L2":
+            escalation_level = "L2"
+            break
+
+    selected = select_strategies(failure_tags, strategies, escalation_level=escalation_level)
     if not selected:
         raise ApiError(
             ErrorCode.RECOVERY_NO_PROPOSAL,
@@ -243,44 +265,56 @@ async def generate_recovery_proposals(
     # LLM personalize — 룰이 고른 **선두 카드**의 if-then 문구를 이 사용자 맥락에 맞게 다듬는다.
     # 전략 선택은 룰이 이미 끝냈으므로, LLM 에 선두 전략(label/group/template)을 넘겨 "그 전략을
     # personalize"하게 한다(새 전략을 고르지 않음). 실패 시 카탈로그 템플릿 그대로 (PRD §9).
+    #
+    # L2 는 예외 — 근거 대장 §5.2 "문구 다듬기 중단": 개인화가 오히려 "이번엔 다를 거예요"
+    # 식 재설득으로 읽혀 역효과라는 게 L2 조건의 근거(B5)라 LLM 호출 자체를 건너뛴다.
     top = selected[0]
-    result = await aiClient.run(
-        module="recovery",
-        schema=RecoveryProposalLLM,
-        prompt_id=_PROMPT_ID,
-        fallback=lambda: RecoveryProposalLLM(
-            strategy_code=top.strategy_type,
-            if_clause="",
-            then_clause=texts[top.strategy_type],
-            rationale="",
-        ),
-        # 회복 personalize 는 템플릿 한 문장을 맥락에 맞게 다듬는 가벼운 작업이라 thinking 불필요.
-        # thinking 을 끄지 않으면 상위 모델(flash-latest)이 SDK 기본 추론으로 8s 를 넘겨 매번
-        # timeout→룰 폴백됐다(회복 카드가 항상 템플릿). thinking 0 으로 빠르게 + timeout 여유.
-        thinking_budget=0,
-        timeout=12.0,
-        variables={
-            "failure_type": ", ".join(failure_tags) if failure_tags else "UNKNOWN",
-            "confidence": "n/a",
-            "interruption_summary": "없음",
-            "context_summary": f"실행 카드: {action_title} / 결과: {execution.completion_status}",
-            "strategy_label": top.label_ko,
-            "strategy_group": top.option_group,
-            "base_template": texts[top.strategy_type],
-        },
-        user_id=user.id,
-        session=session,
-        tone_mode=user.tone_mode,
-    )
-    # 선두 카드에 personalize 적용. LLM 이 '선두 전략을 다듬어라'는 지시를 받으므로
-    # strategy_code 일치 여부로 게이트하지 않는다 — 과거엔 LLM 이 generic code("downscope")를
-    # 반환해 선택 전략키(NANO_STEP 등)와 항상 불일치 → Gemini 문구가 통째로 폐기되던 버그.
-    if not result.fell_back:
-        personalized = " ".join(
-            part for part in (result.value.if_clause, result.value.then_clause) if part
-        ).strip()
-        if personalized:
-            texts[top.strategy_type] = personalized
+    if escalation_level == "L2":
+        llm_fell_back = True
+        llm_prompt_version: str | None = None
+    else:
+        result = await aiClient.run(
+            module="recovery",
+            schema=RecoveryProposalLLM,
+            prompt_id=_PROMPT_ID,
+            fallback=lambda: RecoveryProposalLLM(
+                strategy_code=top.strategy_type,
+                if_clause="",
+                then_clause=texts[top.strategy_type],
+                rationale="",
+            ),
+            # 회복 personalize 는 템플릿 한 문장을 맥락에 맞게 다듬는 가벼운 작업이라 thinking
+            # 불필요. thinking 을 끄지 않으면 상위 모델(flash-latest)이 SDK 기본 추론으로 8s 를
+            # 넘겨 매번 timeout→룰 폴백됐다(회복 카드가 항상 템플릿). thinking 0 으로 빠르게 +
+            # timeout 여유.
+            thinking_budget=0,
+            timeout=12.0,
+            variables={
+                "failure_type": ", ".join(failure_tags) if failure_tags else "UNKNOWN",
+                "confidence": "n/a",
+                "interruption_summary": "없음",
+                "context_summary": (
+                    f"실행 카드: {action_title} / 결과: {execution.completion_status}"
+                ),
+                "strategy_label": top.label_ko,
+                "strategy_group": top.option_group,
+                "base_template": texts[top.strategy_type],
+            },
+            user_id=user.id,
+            session=session,
+            tone_mode=user.tone_mode,
+        )
+        llm_fell_back = result.fell_back
+        llm_prompt_version = result.prompt_version
+        # 선두 카드에 personalize 적용. LLM 이 '선두 전략을 다듬어라'는 지시를 받으므로
+        # strategy_code 일치 여부로 게이트하지 않는다 — 과거엔 LLM 이 generic code("downscope")를
+        # 반환해 선택 전략키(NANO_STEP 등)와 항상 불일치 → Gemini 문구가 통째로 폐기되던 버그.
+        if not result.fell_back:
+            personalized = " ".join(
+                part for part in (result.value.if_clause, result.value.then_clause) if part
+            ).strip()
+            if personalized:
+                texts[top.strategy_type] = personalized
 
     attempts = [
         await repo.create_attempt(
@@ -290,8 +324,8 @@ async def generate_recovery_proposals(
             strategy_type=s.strategy_type,
             suggested_action_text=texts[s.strategy_type],
             trigger_tag=first_matching_tag(failure_tags, s),
-            llm_fallback_used=result.fell_back,
-            prompt_version=result.prompt_version,
+            llm_fallback_used=llm_fell_back,
+            prompt_version=llm_prompt_version,
         )
         for s in selected
     ]
@@ -301,7 +335,7 @@ async def generate_recovery_proposals(
     return RecoveryProposalsResponse(
         execution_id=body.execution_id,
         cards=[_to_card(a, catalog.get(a.recovery_strategy_type)) for a in attempts],
-        ai_source=_ai_source(result.fell_back),
+        ai_source=_ai_source(llm_fell_back),
     )
 
 

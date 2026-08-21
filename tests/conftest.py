@@ -1130,6 +1130,29 @@ class FakeRecoveryRepo:
     async def list_failure_tag_codes(self, execution_id: UUID) -> list[str]:
         return list(self._failure_tags.get(execution_id, []))
 
+    async def list_lineage_outcomes_for_tag(
+        self, user_id: UUID, action_item_id: UUID, tag_code: str, *, limit: int = 20
+    ) -> list[str]:
+        """단순화 — fake 엔 `goal_id` 개념이 없어 "계보"를 action_item_id 자기 자신으로
+        근사한다(실 repo 는 같은 goal_id 전체 — `orchestrator/recovery.py` L2 배선 PR 참고).
+        실 goal 계보 동작은 `tests/test_recovery_repo_lineage.py`(실 Postgres)가 검증한다.
+        """
+        rows = [
+            e
+            for e in self._executions.values()
+            if e.user_id == user_id
+            and e.action_item_id == action_item_id
+            and e.completion_status != "in_progress"
+        ]
+        rows.sort(key=lambda e: e.plan_start_at, reverse=True)
+        outcomes: list[str] = []
+        for e in rows[:limit]:
+            if e.completion_status == "failed" and tag_code not in self._failure_tags.get(e.id, []):
+                outcomes.append("partial_done")
+            else:
+                outcomes.append(e.completion_status)
+        return outcomes
+
     async def list_active_strategies(self) -> list[RecoveryStrategyCatalog]:
         return sorted(
             (s for s in self._strategies if s.is_active),

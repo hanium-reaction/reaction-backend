@@ -317,3 +317,69 @@ def test_is_padding_helper_cannot_see_the_overwhelm_trigger() -> None:
     assert _is_padding(park_default, set()), (
         "이 assert 가 깨지면 _is_padding 이 이미 고쳐진 것 — 위 경고 주석을 지울 것"
     )
+
+
+# ── L2 단서 전환 강제 (escalation_level) ──────────────────────────────────
+#
+# 근거 대장 §5.2 "ENVIRONMENT_SHIFT 선두 강제" — overwhelm_level(규칙 5, 매칭 없을 때만
+# 채움)보다 강한 개입이다. 실 태그 매칭이 더 높은 점수를 가진 경우에도 밀어낸다.
+
+
+def test_environment_shift_not_forced_without_escalation_argument() -> None:
+    """`escalation_level` 을 아예 안 넘기면(기본값) 기존 점수 규칙 그대로 — NANO_STEP 이 이긴다."""
+    strategies = default_recovery_strategies()
+    cards = select_strategies(["HARD_TO_START"], strategies)
+    assert cards[0].strategy_type == "NANO_STEP"
+
+
+def test_environment_shift_forced_lead_even_when_a_higher_scoring_card_exists() -> None:
+    """`escalation_level="L2"` 면, 다른 태그가 더 높은 점수(실매칭)를 가져도 ENVIRONMENT_SHIFT
+    가 맨 앞으로 온다 — overwhelm_level 의 "매칭 없을 때만" 보다 강한 개입.
+
+    `HARD_TO_START` 는 NANO_STEP(같은 DOWNSCOPE 그룹, 실매칭)을 이미 1등으로 올린다
+    (`test_environment_shift_not_forced_without_escalation_argument`). L2 에서는 그 카드가
+    선두 자리에서 빠지고 ENVIRONMENT_SHIFT 로 교체된다.
+    """
+    strategies = default_recovery_strategies()
+    cards = select_strategies(["HARD_TO_START"], strategies, escalation_level="L2")
+
+    assert cards[0].strategy_type == "ENVIRONMENT_SHIFT"
+    assert "NANO_STEP" not in {c.strategy_type for c in cards}, (
+        "동시 노출 1카드 규칙 — 같은 DOWNSCOPE 그룹에 두 카드가 같이 뜨면 안 된다"
+    )
+
+
+def test_environment_shift_forced_lead_preserves_other_groups() -> None:
+    """DOWNSCOPE 슬롯만 교체되고, 다른 그룹 카드는 그대로 남는다(카드 개수 불변)."""
+    strategies = default_recovery_strategies()
+    without = select_strategies(["PRIORITY_SHIFT", "FATIGUE"], strategies)
+    forced = select_strategies(["PRIORITY_SHIFT", "FATIGUE"], strategies, escalation_level="L2")
+
+    assert len(forced) == len(without)
+    assert forced[0].strategy_type == "ENVIRONMENT_SHIFT"
+    other_groups_before = {
+        c.option_group: c.strategy_type for c in without if c.option_group != "DOWNSCOPE"
+    }
+    other_groups_after = {
+        c.option_group: c.strategy_type for c in forced if c.option_group != "DOWNSCOPE"
+    }
+    assert other_groups_before == other_groups_after
+
+
+def test_environment_shift_forcing_is_noop_when_strategy_missing_from_catalog() -> None:
+    """카탈로그에 `ENVIRONMENT_SHIFT` 가 없거나(비활성 포함) 조용히 no-op — 카드가 안 깨진다."""
+    strategies = [
+        s for s in default_recovery_strategies() if s.strategy_type != "ENVIRONMENT_SHIFT"
+    ]
+    with_l2 = select_strategies(["HARD_TO_START"], strategies, escalation_level="L2")
+    without_l2 = select_strategies(["HARD_TO_START"], strategies)
+
+    assert [c.strategy_type for c in with_l2] == [c.strategy_type for c in without_l2]
+
+
+def test_environment_shift_forcing_only_triggers_on_l2_not_l0_or_l1() -> None:
+    """`escalation_level` 이 L0/L1 이면 이 규칙은 비활성 — L2 전용이다."""
+    strategies = default_recovery_strategies()
+    for level in ("L0", "L1"):
+        cards = select_strategies(["HARD_TO_START"], strategies, escalation_level=level)
+        assert cards[0].strategy_type == "NANO_STEP", f"{level} 에서 강제가 발동했다"
