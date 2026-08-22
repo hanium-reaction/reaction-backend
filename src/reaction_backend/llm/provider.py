@@ -217,3 +217,126 @@ def _extract_usage(response: Any, model_name: str) -> ProviderResponse:
         tokens_out=visible_out + thoughts,
         model=str(resolved) if resolved else model_name,
     )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 검색 그라운딩 진입점 (#259 §4.2 ⑥)
+# ═══════════════════════════════════════════════════════════════════
+#
+# `generate_structured` 를 못 쓰는 이유 — **`response_schema` 를 붙이면 검색이 돌지
+# 않는다. 에러도 안 난다.** 조용히 그라운딩만 빠지고 JSON 은 멀쩡히 나온다(#259 §2,
+# 5/5 회 재현). 더 나쁜 건, 그 상태로 **존재하지 않는 교재를 물으면 5챕터 목차를 자신
+# 있게 지어낸다** — 출처 0, 에러 0. 그래서 schema 없는 별도 함수가 필요하고, 아래
+# `_SEARCH_ONLY_CONFIG_KEYS` 테스트로 schema 가 다시 섞여 들어오는 것을 막는다.
+
+
+@dataclass(frozen=True, slots=True)
+class GroundingSource:
+    """검색 그라운딩이 실제로 참조한 출처 1건.
+
+    사용자에게 **그대로 고지**할 값이다(#259 §4.2 ⑩). 출처를 숨기고 자료를 쓰면 다른
+    판·다른 강의를 가져왔을 때 사용자가 알아챌 방법이 없다.
+    """
+
+    title: str
+    uri: str
+
+
+@dataclass(slots=True)
+class GroundedResponse:
+    """`generate_grounded_text()` 결과 — 텍스트 + 그라운딩 증거."""
+
+    text: str
+    sources: tuple[GroundingSource, ...]
+    """`grounding_chunks` 에서 뽑은 출처. **비어 있으면 자료를 쓰면 안 된다** (§2)."""
+    search_queries: tuple[str, ...]
+    """모델이 실제로 던진 검색어. 사용자 고지·디버깅용."""
+    tokens_in: int
+    tokens_out: int
+    model: str
+
+
+def _search_tool() -> Any:
+    """`google_search` 툴 객체 — 늦은 import (SDK 직접 의존은 이 모듈에만)."""
+    from google.genai import types  # noqa: PLC0415
+
+    return types.Tool(google_search=types.GoogleSearch())
+
+
+async def generate_grounded_text(
+    *,
+    prompt_text: str,
+    timeout: float,
+    model: str | None = None,
+    thinking_budget: int | None = None,
+) -> GroundedResponse:
+    """Gemini 검색 그라운딩 1회 호출 → **텍스트 + 출처**.
+
+    `generate_structured` 와 나란한 자매 함수지만 **schema 를 절대 붙이지 않는다** (위
+    설명). 반환 타입도 다르다 — 이 호출의 산출물은 구조화된 객체가 아니라 "분해
+    프롬프트에 그대로 넣을 원문 텍스트" 다(#259 §4.2 ⑤ — 정형화 호출 불필요).
+
+    - timeout 은 `generate_structured` 와 같이 호출자(`tool_executor`)가
+      `asyncio.wait_for` 로 래핑한다. 실측 중앙값 8.5s (6.8~9.2) 라 8s 기본값으론 모자란다.
+    - 출처가 0 건이어도 **여기서는 에러를 내지 않는다.** 폐기 판단은 정책이라 게이트
+      (`tool_executor.run_grounded`)의 몫이다. 이 함수는 관측한 사실만 돌려준다.
+    """
+    client = _get_client()
+    model_name = model or get_settings().llm_model
+
+    config: dict[str, Any] = {"tools": [_search_tool()]}
+    tcfg = _thinking_config(model_name, thinking_budget)
+    if tcfg is not None:
+        config["thinking_config"] = tcfg
+
+    try:
+        response = await client.aio.models.generate_content(
+            model=model_name,
+            contents=prompt_text,
+            config=config,
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc).lower()
+        if "rate" in message or "quota" in message or "429" in message:
+            raise ProviderRateLimited(str(exc)) from exc
+        raise ProviderError(str(exc)) from exc
+
+    usage = _extract_usage(response, model_name)
+    sources, queries = _extract_grounding(response)
+    return GroundedResponse(
+        text=usage.raw_text,
+        sources=sources,
+        search_queries=queries,
+        tokens_in=usage.tokens_in,
+        tokens_out=usage.tokens_out,
+        model=usage.model,
+    )
+
+
+def _extract_grounding(response: Any) -> tuple[tuple[GroundingSource, ...], tuple[str, ...]]:
+    """`candidates[0].grounding_metadata` 에서 출처·검색어 추출.
+
+    metadata 자체가 없는 응답(모델이 검색을 아예 안 돌린 경우)은 **빈 튜플**이다 — 그게
+    곧 "그라운딩 안 됨" 신호이고, 게이트가 이 값으로 자료를 폐기한다.
+
+    `getattr` 로 방어적으로 파는 이유는 `_extract_text`/`_extract_usage` 와 같다: SDK 가
+    버전마다 이 트리의 모양을 조금씩 바꾼다. 여기서 AttributeError 가 나면 그라운딩이
+    됐는데도 0 건으로 읽혀 **자료가 조용히 버려진다**.
+    """
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        return (), ()
+    meta = getattr(candidates[0], "grounding_metadata", None)
+    if meta is None:
+        return (), ()
+
+    queries = tuple(str(q) for q in (getattr(meta, "web_search_queries", None) or []) if q)
+
+    sources: list[GroundingSource] = []
+    for chunk in getattr(meta, "grounding_chunks", None) or []:
+        web = getattr(chunk, "web", None)
+        uri = getattr(web, "uri", None) if web is not None else None
+        if not uri:
+            continue
+        sources.append(GroundingSource(title=str(getattr(web, "title", "") or ""), uri=str(uri)))
+    return tuple(sources), queries

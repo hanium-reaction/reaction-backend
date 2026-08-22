@@ -105,8 +105,23 @@ class Settings(BaseSettings):
     # 상위 모델로 올리면 계획·회복도 같이 올라가 비용이 조용히 는다.
     llm_model_planning: str = "gemini-3.5-flash-lite"
     llm_model_recovery: str = "gemini-3.5-flash-lite"
+    # 검색 그라운딩 전용 모델 (#259 §4.2 ⑧). 다른 모듈과 **따로** 고정한다.
+    #
+    # 여기서 모델을 가르는 기준은 품질이 아니라 **지연**이다. 실측(#259 §2): lite 는 중앙
+    # 8.5s(6.8~9.2) 에 출처 6~11 개, flash 는 23~80s. 그라운딩은 계획 생성 앞단의 별도
+    # 단계라(⑦) 사용자가 화면 앞에서 기다린다 — flash 의 80s 는 그냥 못 쓴다.
+    #
+    # `model_for_module("planning")` 을 재사용하지 않는 이유: 지금은 우연히 둘 다 lite 지만,
+    # 분해 품질 때문에 planning 을 상위 모델로 올리는 판단은 언제든 나올 수 있고 그때
+    # 그라운딩까지 따라 올라가면 **이 단계가 조용히 못 쓰게 된다.** 두 결정은 근거가 다르므로
+    # 값도 분리해 둔다.
+    llm_model_grounding: str = "gemini-3.5-flash-lite"
     # 단일 호출 timeout (초). ADR-0003 §1 동결값.
     llm_timeout_seconds: float = 8.0
+    # 그라운딩 호출 timeout (초). 동결된 8.0 은 **중앙값(8.5s)보다 짧아** 절반이 타임아웃난다.
+    # 상한(9.2s)에 여유를 얹어 20s. 계획 분해(45s, #179) 안에 인라인하지 않는 전제(⑦)라
+    # 이 지연은 이 단계 안에서만 산다.
+    llm_grounding_timeout_seconds: float = 20.0
     # 재시도 횟수 (지수 backoff). Tool Executor §1.
     llm_max_retries: int = 3
     # 계획(First Plan) 분해·검토 전용 — 인터뷰 턴은 지연 민감(#76)이라 thinking 0 을 유지하되,

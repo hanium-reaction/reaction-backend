@@ -50,24 +50,33 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from reaction_backend.config import get_settings
 from reaction_backend.llm.prompt_compose import compose_system_prompt
 from reaction_backend.llm.provider import (
+    GroundingSource as GroundingSource,
+)
+from reaction_backend.llm.provider import (
     ProviderError,
     ProviderRateLimited,
     ProviderResponse,
     ProviderUnavailable,
     ProviderValidationError,
+    generate_grounded_text,
     generate_structured,
 )
 from reaction_backend.prompts import registry as prompt_registry
 from reaction_backend.prompts.registry import PromptNotFound, PromptRenderError
 from reaction_backend.safety.banned_words import enforce_structured
+from reaction_backend.safety.banned_words import scan as banned_scan
 from reaction_backend.safety.llm_budget import (
     BudgetExceeded,
+    GroundingBudgetExceeded,
     LlmRunRecord,
     estimate_cost_cents,
     estimate_cost_micro_usd,
 )
 from reaction_backend.safety.llm_budget import (
     check as budget_check,
+)
+from reaction_backend.safety.llm_budget import (
+    check_grounding as grounding_check,
 )
 from reaction_backend.safety.llm_budget import (
     record as record_run,
@@ -98,6 +107,39 @@ class RunResult[T: BaseModel]:
     tokens_out: int = 0
     latency_ms: int = 0
     banned_hits: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class GroundedResult:
+    """`aiClient.run_grounded()` 결과 (#259 §4.2 ⑥).
+
+    `RunResult` 와 달리 **fallback 값을 담지 않는다.** 자료 조사의 실패는 "자료 없음" 이고,
+    그건 이미 시스템의 정상 경로다(분해 프롬프트가 `(없음)` 을 받는다). 실패했을 때 대신
+    끼워 넣을 그럴듯한 목차를 만드는 것이야말로 이 기능이 막으려는 바로 그 실패다.
+
+    그래서 호출자는 `text is None` 만 보면 된다 — None 이면 자료 없이 진행한다.
+    """
+
+    text: str | None
+    """쓸 수 있는 자료 원문. **None 이면 쓰면 안 된다** (사유는 `reason`)."""
+    sources: tuple[GroundingSource, ...]
+    """사용자에게 고지할 출처 (⑩). `text` 가 None 이어도 진단용으로 채워질 수 있다."""
+    search_queries: tuple[str, ...]
+    reason: str | None
+    """폐기 사유 코드 (ungrounded / empty / timeout / budget / grounding_budget /
+    unavailable / rate_limited / provider_error / no_prompt). 성공은 None."""
+    prompt_id: str
+    prompt_version: str
+    tokens_in: int = 0
+    tokens_out: int = 0
+    latency_ms: int = 0
+    grounding_requests: int = 0
+    banned_hits: tuple[str, ...] = ()
+    """자료 원문에서 **발견된** 금지어. 치환하지 않는다 — `run_grounded` 주석 참조."""
+
+    @property
+    def usable(self) -> bool:
+        return self.text is not None
 
 
 class LLMToolExecutor:
@@ -345,6 +387,335 @@ class LLMToolExecutor:
             tokens_out=provider_resp.tokens_out,
             latency_ms=latency_ms,
             banned_hits=hits,
+        )
+
+    # ───────────────────────────────────────────────────────────────
+    async def run_grounded(
+        self,
+        module: str,
+        prompt_id: str,
+        *,
+        variables: Mapping[str, str] | None = None,
+        user_id: uuid.UUID | None = None,
+        session: AsyncSession | None = None,
+        trace_id: str | None = None,
+        timeout: float | None = None,
+        log_payloads: bool = False,
+    ) -> GroundedResult:
+        """검색 그라운딩 진입점 (#259 §4.2 ⑥). `run()` 과 **별도**다.
+
+        `run()` 시그니처는 ADR-0003 에서 동결이고, 그라운딩은 반환 계약부터 다르다
+        (schema 인스턴스가 아니라 원문 텍스트 + 출처). 덮지 않고 옆에 낸다.
+
+        `run()` 과 다른 점 세 가지, 모두 의도적이다:
+
+        **1. 재시도하지 않는다.** `run()` 은 3회까지 재시도하지만 그라운딩은 **요청 건수로
+        과금**된다(초과분 $14/1,000건). 재시도는 조용히 비용을 3배로 만든다. 실패의 대가는
+        "자료 없음" 뿐이고 그건 이미 정상 경로라, 여기선 재시도가 사는 값보다 비싸다.
+
+        **2. 출처 0 건이면 텍스트를 버린다.** 이 가드가 기능 전체의 핵심이다 — 모델은
+        존재하지 않는 교재에 대해서도 **에러 없이, 자신 있게** 5챕터 목차를 만들어낸다
+        (#259 §2 실측). 출처 개수만이 "실제로 확인했는가" 의 신뢰할 만한 신호다.
+
+        **3. 금지어를 치환하지 않고 스캔만 한다.** `run()` 은 우리가 생성한 문장을 치환하지만
+        (DevBaseline §4.2), 여기 텍스트는 **인용한 외부 자료**다. 목차의 "실패 없는 영어" 를
+        "한 번 멈춤 없는 영어" 로 바꾸면 **존재하지 않는 챕터를 사실인 양 인용**하게 된다 —
+        이 기능이 막으려는 실패를 우리 손으로 만드는 셈이다. 그래서 발견 사실만
+        `banned_hits` 로 올리고, 사용자에게 보여줄 때의 처리는 표시 계층의 결정으로 남긴다.
+        사용자에게 실제로 나가는 **계획 문장**은 `run()` 경로가 그대로 필터링한다.
+
+        Parameters
+        ----------
+        module:
+            `llm_runs.module` enum. 자료 조사는 계획 앞단이므로 보통 `"planning"`.
+        prompt_id:
+            보통 `"planning/materials_search"`. 변수 `query` 는 **사용자가 확인·편집한
+            검색어**여야 한다 (#259 §4.1 ① 결정 — 목표 텍스트를 그대로 외부 검색에 보내지
+            않는다). 이 함수는 그 계약을 강제하지 못하니 호출부가 지켜야 한다.
+        timeout:
+            None 이면 `llm_grounding_timeout_seconds`(20s). 동결값 8.0 은 실측 중앙값
+            8.5s 보다 짧아 절반이 타임아웃난다.
+        """
+        settings = get_settings()
+        resolved_model = settings.llm_model_grounding
+        effective_timeout = (
+            timeout if timeout is not None else settings.llm_grounding_timeout_seconds
+        )
+        started = time.monotonic()
+
+        def _elapsed() -> int:
+            return int((time.monotonic() - started) * 1000)
+
+        # ── 1) 프롬프트 ─────────────────────────────────────────────
+        try:
+            prompt_text, tmpl = prompt_registry.render(prompt_id, dict(variables or {}))
+            resolved_prompt_id, prompt_version = tmpl.prompt_id, tmpl.version
+        except (PromptNotFound, PromptRenderError) as exc:
+            return await self._grounding_discard(
+                module=module,
+                prompt_id=prompt_id,
+                prompt_version="unknown",
+                reason="no_prompt",
+                error=str(exc),
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                latency_ms=_elapsed(),
+                model=resolved_model,
+            )
+
+        # ── 2) 예산 가드 — 토큰과 그라운딩 **둘 다** ────────────────
+        # 둘은 서로를 대신하지 못한다: 그라운딩 호출은 토큰을 거의 안 써서(실측 in 17)
+        # 토큰 가드를 언제나 통과한다. 토큰 가드만 걸면 이 경로엔 상한이 없는 것과 같다.
+        if session is not None:
+            try:
+                await budget_check(session, user_id=user_id)
+            except BudgetExceeded as exc:
+                return await self._grounding_discard(
+                    module=module,
+                    prompt_id=resolved_prompt_id,
+                    prompt_version=prompt_version,
+                    reason="budget",
+                    error=str(exc),
+                    user_id=user_id,
+                    session=session,
+                    trace_id=trace_id,
+                    latency_ms=_elapsed(),
+                    model=resolved_model,
+                )
+            try:
+                await grounding_check(session, user_id=user_id)
+            except GroundingBudgetExceeded as exc:
+                return await self._grounding_discard(
+                    module=module,
+                    prompt_id=resolved_prompt_id,
+                    prompt_version=prompt_version,
+                    reason="grounding_budget",
+                    error=str(exc),
+                    user_id=user_id,
+                    session=session,
+                    trace_id=trace_id,
+                    latency_ms=_elapsed(),
+                    model=resolved_model,
+                )
+
+        # ── 3) 단 한 번의 provider 호출 ─────────────────────────────
+        # 여기부터는 **요청이 나갔다고 본다.** 아래 어느 경로로 끝나든 grounding_requests=1
+        # 로 기록한다: 타임아웃이든 5xx 든 요청은 이미 Google 에 닿았을 수 있고, 청구 여부를
+        # 우리가 관측할 방법이 없다. 예산 가드에서 **과소 계수가 위험한 방향**이므로 보수적으로
+        # 센다. 과대 계수의 대가는 상한에 조금 일찍 닿는 것뿐이다.
+        try:
+            resp = await asyncio.wait_for(
+                generate_grounded_text(
+                    prompt_text=prompt_text,
+                    timeout=effective_timeout,
+                    model=resolved_model,
+                ),
+                timeout=effective_timeout,
+            )
+        except TimeoutError as exc:
+            return await self._grounding_discard(
+                module=module,
+                prompt_id=resolved_prompt_id,
+                prompt_version=prompt_version,
+                reason="timeout",
+                error=str(exc),
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                latency_ms=_elapsed(),
+                model=resolved_model,
+                grounding_requests=1,
+            )
+        except ProviderUnavailable as exc:
+            # key 누락·SDK 미설치 — 요청이 **나가지 않았다.** 여기만 0 건이다.
+            return await self._grounding_discard(
+                module=module,
+                prompt_id=resolved_prompt_id,
+                prompt_version=prompt_version,
+                reason="unavailable",
+                error=str(exc),
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                latency_ms=_elapsed(),
+                model=resolved_model,
+            )
+        except ProviderRateLimited as exc:
+            return await self._grounding_discard(
+                module=module,
+                prompt_id=resolved_prompt_id,
+                prompt_version=prompt_version,
+                reason="rate_limited",
+                error=str(exc),
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                latency_ms=_elapsed(),
+                model=resolved_model,
+                grounding_requests=1,
+            )
+        except ProviderError as exc:
+            return await self._grounding_discard(
+                module=module,
+                prompt_id=resolved_prompt_id,
+                prompt_version=prompt_version,
+                reason="provider_error",
+                error=str(exc),
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                latency_ms=_elapsed(),
+                model=resolved_model,
+                grounding_requests=1,
+            )
+
+        latency_ms = _elapsed()
+        text = resp.text.strip()
+
+        # ── 4) 그라운딩 증거 검사 — 이 가드가 기능의 핵심 ───────────
+        discard_reason = None if resp.sources else "ungrounded"
+        if discard_reason is None and not text:
+            discard_reason = "empty"
+
+        if discard_reason is not None:
+            return await self._grounding_discard(
+                module=module,
+                prompt_id=resolved_prompt_id,
+                prompt_version=prompt_version,
+                reason=discard_reason,
+                error=None,
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                latency_ms=latency_ms,
+                model=resp.model,
+                grounding_requests=1,
+                tokens_in=resp.tokens_in,
+                tokens_out=resp.tokens_out,
+                sources=resp.sources,
+                search_queries=resp.search_queries,
+                input_summary=prompt_text if log_payloads else None,
+            )
+
+        # ── 5) 금지어 스캔 (치환 아님 — docstring 3 참조) ───────────
+        banned_hits = banned_scan(text)
+
+        # ── 6) llm_runs INSERT ──────────────────────────────────────
+        if session is not None:
+            await record_run(
+                session,
+                LlmRunRecord(
+                    module=module,
+                    model=resp.model,
+                    prompt_id=resolved_prompt_id,
+                    prompt_version=prompt_version,
+                    tokens_in=resp.tokens_in,
+                    tokens_out=resp.tokens_out,
+                    latency_ms=latency_ms,
+                    success=True,
+                    fell_back=False,
+                    cost_cents=estimate_cost_cents(resp.model, resp.tokens_in, resp.tokens_out),
+                    cost_micro_usd=estimate_cost_micro_usd(
+                        resp.model, resp.tokens_in, resp.tokens_out
+                    ),
+                    user_id=user_id,
+                    trace_id=trace_id,
+                    grounding_requests=1,
+                    input_summary=(prompt_text if log_payloads else None),
+                    output_summary=(text if log_payloads else None),
+                ),
+            )
+
+        return GroundedResult(
+            text=text,
+            sources=resp.sources,
+            search_queries=resp.search_queries,
+            reason=None,
+            prompt_id=resolved_prompt_id,
+            prompt_version=prompt_version,
+            tokens_in=resp.tokens_in,
+            tokens_out=resp.tokens_out,
+            latency_ms=latency_ms,
+            grounding_requests=1,
+            banned_hits=banned_hits,
+        )
+
+    async def _grounding_discard(
+        self,
+        *,
+        module: str,
+        prompt_id: str,
+        prompt_version: str,
+        reason: str,
+        error: str | None,
+        user_id: uuid.UUID | None,
+        session: AsyncSession | None,
+        trace_id: str | None,
+        latency_ms: int,
+        model: str,
+        grounding_requests: int = 0,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+        sources: tuple[GroundingSource, ...] = (),
+        search_queries: tuple[str, ...] = (),
+        input_summary: str | None = None,
+    ) -> GroundedResult:
+        """자료를 버리고 `text=None` 으로 돌아온다 + `llm_runs` 에 남긴다.
+
+        `_fallback` 과 달리 대체 값을 만들지 않는다 — 자료 조사의 실패는 "자료 없음" 이다.
+        그래도 **행은 반드시 남긴다**: 폐기가 잦다는 사실(특히 `ungrounded`)이야말로
+        트리거 설계를 다시 봐야 한다는 신호이고, 기록이 없으면 그 신호도 없다.
+        """
+        _log.warning(
+            "llm_grounding_discarded",
+            extra={
+                "llm_module": module,
+                "prompt_id": prompt_id,
+                "prompt_version": prompt_version,
+                "reason": reason,
+                "error": error,
+                "sources": len(sources),
+                "user_id": str(user_id) if user_id else None,
+                "trace_id": trace_id,
+            },
+        )
+
+        if session is not None:
+            await record_run(
+                session,
+                LlmRunRecord(
+                    module=module,
+                    model=model,
+                    prompt_id=prompt_id,
+                    prompt_version=prompt_version,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    latency_ms=latency_ms,
+                    success=False,
+                    fell_back=True,
+                    cost_cents=estimate_cost_cents(model, tokens_in, tokens_out),
+                    cost_micro_usd=estimate_cost_micro_usd(model, tokens_in, tokens_out),
+                    user_id=user_id,
+                    trace_id=trace_id,
+                    error=error,
+                    reason=reason,
+                    grounding_requests=grounding_requests,
+                    input_summary=input_summary,
+                ),
+            )
+
+        return GroundedResult(
+            text=None,
+            sources=sources,
+            search_queries=search_queries,
+            reason=reason,
+            prompt_id=prompt_id,
+            prompt_version=prompt_version,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            latency_ms=latency_ms,
+            grounding_requests=grounding_requests,
         )
 
     # ───────────────────────────────────────────────────────────────
