@@ -78,6 +78,7 @@ class RunRow(NamedTuple):
     tokens_in: int
     tokens_out: int
     cost_micro_usd: int
+    grounding_requests: int
     success: bool
     fell_back: bool
     reason: str | None
@@ -92,6 +93,7 @@ async def _fetch_runs(session: AsyncSession) -> list[RunRow]:
         LlmRun.tokens_in,
         LlmRun.tokens_out,
         LlmRun.cost_micro_usd,
+        LlmRun.grounding_requests,
         LlmRun.success,
         LlmRun.fell_back,
         LlmRun.reason,
@@ -124,6 +126,7 @@ class Summary(NamedTuple):
     total_tokens_in: int
     total_tokens_out: int
     total_cost_micro_usd: int
+    total_grounding_requests: int
     fallback_reasons: Counter[str]
 
 
@@ -145,6 +148,7 @@ def _summarize(rows: list[RunRow]) -> Summary:
         total_tokens_in=sum(r.tokens_in for r in rows),
         total_tokens_out=sum(r.tokens_out for r in rows),
         total_cost_micro_usd=sum(r.cost_micro_usd for r in rows),
+        total_grounding_requests=sum(r.grounding_requests for r in rows),
         fallback_reasons=reasons,
     )
 
@@ -166,6 +170,14 @@ def _print_summary(label: str, s: Summary) -> None:
         f"(평균 in={avg_in:.0f} out={avg_out:.0f})"
     )
     print(f"  비용 합계 ${s.total_cost_micro_usd / 1_000_000:.4f}")
+    if s.total_grounding_requests:
+        # 그라운딩은 토큰과 **별도 과금**이라 위 비용 합계에 안 들어간다(#259 §3).
+        # 무료 5,000건/월, 초과분 $14/1,000건 — 건수를 따로 보여줘야 장부가 맞는다.
+        over_free_usd = s.total_grounding_requests * 14 / 1000
+        print(
+            f"  그라운딩 요청 {s.total_grounding_requests}건 "
+            f"(무료분 초과 시 ~${over_free_usd:.2f} — 위 비용 합계에 미포함)"
+        )
     if s.fallback_reasons:
         print("  fallback 원인:")
         for reason, n in sorted(s.fallback_reasons.items(), key=lambda kv: -kv[1]):

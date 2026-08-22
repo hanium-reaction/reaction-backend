@@ -11,6 +11,10 @@ Issue #5 §4.
    model, trace_id, fallback 사유 코드(reason), 그리고 (옵션) AES-GCM 암호화된 입출력
    요약을 함께 기록.
 
+3. `check_grounding()` — **검색 그라운딩 요청 건수** 예산 (#259 §3). 토큰 가드와 별개다:
+   그라운딩은 건수로 과금되는데 검색이 서버 쪽에서 일어나 입력 토큰이 17개로 잡혀,
+   토큰 계량기가 이 비용에 완전히 눈이 멀어 있다.
+
 KST 기준 일자(now_kst().date()) 로 day boundary 를 잡는다. — `now_kst()` 사용 강제.
 
 `llm_runs` 행은 INSERT only. UPDATE 금지 (DB 설계서 §5.28).
@@ -38,6 +42,19 @@ class BudgetExceeded(RuntimeError):
 
     def __init__(self, used: int, limit: int) -> None:
         super().__init__(f"daily LLM token budget exceeded: used={used}, limit={limit}")
+        self.used = used
+        self.limit = limit
+
+
+class GroundingBudgetExceeded(RuntimeError):
+    """일일 **검색 그라운딩 요청** 예산 초과 (#259 §3).
+
+    토큰 예산과 별개인 이유: 그라운딩은 토큰이 아니라 **요청 건수**로 과금되고, 검색이
+    서버 쪽에서 일어나 입력 토큰이 17개로 잡혀 토큰 계량기에 안 잡힌다.
+    """
+
+    def __init__(self, used: int, limit: int) -> None:
+        super().__init__(f"daily grounding request budget exceeded: used={used}, limit={limit}")
         self.used = used
         self.limit = limit
 
@@ -78,6 +95,8 @@ class LlmRunRecord:
     error: str | None = None
     reason: str | None = None
     """fallback 사유 코드 (`RunResult.reason` 그대로). success=True 호출은 None."""
+    grounding_requests: int = 0
+    """이 호출이 발생시킨 검색 그라운딩 요청 수 (#259 §3). 그라운딩을 안 쓰면 0."""
     input_summary: str | None = None
     output_summary: str | None = None
     extra: dict[str, str] = field(default_factory=dict)
@@ -140,6 +159,50 @@ async def _used_tokens_today(
     return int(value or 0)
 
 
+async def _used_grounding_today(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID | None,
+) -> int:
+    """KST 기준 오늘 0시부터의 누적 그라운딩 요청 수."""
+    start_of_day_kst = now_kst().replace(hour=0, minute=0, second=0, microsecond=0)
+    stmt = select(func.coalesce(func.sum(LlmRun.grounding_requests), 0)).where(
+        LlmRun.created_at >= start_of_day_kst
+    )
+    if user_id is not None:
+        stmt = stmt.where(LlmRun.user_id == user_id)
+    else:
+        stmt = stmt.where(LlmRun.user_id.is_(None))
+    result = await session.execute(stmt)
+    return int(result.scalar_one() or 0)
+
+
+async def check_grounding(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID | None,
+    projected_requests: int = 1,
+) -> BudgetStatus:
+    """검색 그라운딩 예산 가드. 한도 초과면 `GroundingBudgetExceeded` raise.
+
+    토큰 예산(`check`)과 **함께** 걸어야 한다 — 둘은 서로를 대신하지 못한다. 그라운딩
+    호출은 토큰을 거의 안 쓰므로 토큰 가드를 통과하고, 반대로 일반 호출은 이 가드를
+    항상 통과한다.
+
+    `projected_requests` 기본값이 1 인 이유: 호출 **전에** 검사하는데 그 시점엔 검색이 몇
+    건 돌지 모른다(실측 3~5건). 최소 1 건으로 보수적으로 잡고, 실제 건수는 `record()` 가
+    사후에 기록한다. 한도에 가까울수록 과소 예측이 되지만, 그 오차는 최대 한 호출분이다.
+    """
+    limit = get_settings().llm_daily_grounding_budget
+    if limit <= 0:
+        return BudgetStatus(used=0, limit=0, remaining=2**31 - 1)
+
+    used = await _used_grounding_today(session, user_id=user_id)
+    if used + max(projected_requests, 0) > limit:
+        raise GroundingBudgetExceeded(used=used, limit=limit)
+    return BudgetStatus(used=used, limit=limit, remaining=limit - used)
+
+
 async def check(
     session: AsyncSession,
     *,
@@ -185,6 +248,7 @@ async def record(
         latency_ms=rec.latency_ms,
         cost_cents=rec.cost_cents,
         cost_micro_usd=rec.cost_micro_usd,
+        grounding_requests=rec.grounding_requests,
         success=rec.success,
         fell_back=rec.fell_back,
         trace_id=rec.trace_id,
@@ -215,6 +279,7 @@ async def record(
             "latency_ms": rec.latency_ms,
             "cost_cents": rec.cost_cents,
             "cost_micro_usd": rec.cost_micro_usd,
+            "grounding_requests": rec.grounding_requests,
             "success": rec.success,
             "fell_back": rec.fell_back,
             "reason": rec.reason,

@@ -118,6 +118,16 @@ class LlmRun(Base):
     # 200자 trim 권장 — 실패 디버깅
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # 이 호출이 발생시킨 **검색 그라운딩 요청 수** (#259 §3). 0 이면 그라운딩을 안 쓴 호출.
+    #
+    # 왜 별도 컬럼인가: 그라운딩은 토큰과 **별도 과금**이고(무료 5,000건/월, 초과분
+    # $14/1,000건), 검색이 서버 쪽에서 일어나 **입력 토큰이 17개로 잡힌다**. 즉
+    # `tokens_in + tokens_out` 기반인 일일 토큰 예산이 이 비용에 완전히 눈이 멀어 있다 —
+    # 루프가 돌면 계량기는 0 인데 1,000건당 $14 가 나간다(#259 §3 실측).
+    grounding_requests: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+
     # fallback 사유 코드 (rate_limited/timeout/validation/budget/banned/unavailable/
     # no_prompt/provider_error — RunResult.reason 과 같은 값). success=True 면 NULL.
     # `error` 는 자유 텍스트라 원인별 집계가 안 된다(timeout 은 예외 메시지가 빈 문자열이라
