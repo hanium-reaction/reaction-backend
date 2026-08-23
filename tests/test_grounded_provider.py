@@ -28,6 +28,7 @@ from reaction_backend.llm import provider, tool_executor
 from reaction_backend.llm.provider import (
     GroundingSource,
     ProviderError,
+    ProviderRecitationBlocked,
     ProviderUnavailable,
     generate_grounded_text,
 )
@@ -424,7 +425,35 @@ async def test_missing_prompt_falls_through_without_spending(
     assert result.grounding_requests == 0
 
 
-async def test_materials_search_prompt_exists_and_takes_the_user_query() -> None:
+async def test_materials_search_prompt_is_short_enough_to_trigger_search() -> None:
+    """**길이가 기능이다.** 프롬프트가 길어지면 lite 가 검색을 아예 안 돈다.
+
+    라이브 실측(2026-08-23, `gemini-3.5-flash-lite`, 질의 2종 × 3회):
+
+        프롬프트                     입력토큰   검색 발생
+        검색 지시만                     52       3/6   (교재 0/3 — 강제 문구가 없으면 샌다)
+        검색 지시 + "반드시 검색하라"      91       6/6   ← 지금 이 프롬프트
+        + 범위·형식 블록                133       3/6   (교재 0/3)
+        + 저작권·출구 블록 전부       258~479       0/6   (전부 "확인되지 않음")
+
+    검색이 안 돌면 출처가 0 이라 `run_grounded` 가 자료를 폐기한다 — 즉 **프롬프트에 지시를
+    한 줄 더 보태는 것만으로 기능 전체가 조용히 죽는다.** 에러도 안 나고 테스트도 (가짜
+    응답을 쓰는 한) 전부 통과하므로, 길이 자체를 여기서 못 박는다.
+
+    지시를 더 넣고 싶으면 **먼저 라이브로 검색 발생률을 재고** 이 상한과 위 표를 같이 고칠 것.
+    """
+    from reaction_backend.prompts import registry
+
+    body = registry.get("planning/materials_search").body
+    assert len(body) <= 200, (
+        f"프롬프트가 {len(body)}자로 늘었다 — 133자 상당에서 이미 검색 발생률이 6/6 → 3/6 으로 "
+        "떨어졌다. 늘리려면 라이브 재측정이 먼저다."
+    )
+    # 이 한 줄이 52자 판(3/6)과 91자 판(6/6)을 가른다.
+    assert "반드시 검색" in body
+
+
+async def test_materials_search_prompt_takes_only_the_user_query() -> None:
     """프롬프트는 **사용자가 확인·편집한 검색어**만 받는다 (#259 §4.1 ① 결정).
 
     목표 슬롯을 그대로 질의로 만들면 사용자가 쓴 문장("이혼 준비", "병원 검사")이 외부
@@ -438,5 +467,84 @@ async def test_materials_search_prompt_exists_and_takes_the_user_query() -> None
     body = registry.get("planning/materials_search").body
     variables = sorted(set(re.findall(r"\{\{\s*(\w+)\s*\}\}", body)))
     assert variables == ["query"], f"검색어 외 변수가 늘었다: {variables}"
-    assert "지어내지 마라" in body
-    assert "확인되지 않음" in body
+
+
+async def test_text_is_joined_across_all_parts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """그라운딩 응답은 텍스트가 **여러 part 로 쪼개져** 오고 첫 part 가 빌 수 있다.
+
+    `parts[0].text` 만 읽던 이전 구현은 그때 "missing text payload" 로 죽었다 — 본문이
+    멀쩡히 있는데도. 라이브 검증에서 같은 질의 3회 중 1회 재현됐다(2026-08-23).
+    `generate_structured` 도 같은 함수를 쓰므로 구조화 호출에도 같은 간헐 실패가 있었다.
+    """
+
+    class _Part:
+        def __init__(self, text: str | None) -> None:
+            self.text = text
+
+    class _Content:
+        parts = [_Part(""), _Part("섹션 8. 자바 메모리 구조"), _Part(" 와 static")]
+
+    class _Cand:
+        content = _Content()
+        grounding_metadata = _FakeMeta(
+            [_FakeChunk(_FakeWeb("인프런", "https://inflearn.com/x"))], ["q"]
+        )
+        finish_reason = "STOP"
+
+    class _Split:
+        text = None
+        candidates = [_Cand()]
+        usage_metadata = _FakeUsage()
+        model_version = "gemini-3.5-flash-lite"
+
+    _patch_provider_client(monkeypatch, _Split())  # type: ignore[arg-type]
+    resp = await generate_grounded_text(prompt_text="q", timeout=20.0)
+    assert resp.text == "섹션 8. 자바 메모리 구조 와 static"
+
+
+async def test_missing_text_error_names_the_finish_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """텍스트가 정말 없으면 **왜 없는지**(MAX_TOKENS / SAFETY)를 에러에 실어야 한다.
+
+    이게 없으면 라이브에서 이 실패를 만났을 때 로그만 보고는 원인을 좁힐 수 없다.
+    """
+
+    class _Cand:
+        content = None
+        grounding_metadata = None
+        finish_reason = "MAX_TOKENS"
+
+    class _Empty:
+        text = None
+        candidates = [_Cand()]
+        usage_metadata = _FakeUsage()
+        model_version = "gemini-3.5-flash-lite"
+
+    _patch_provider_client(monkeypatch, _Empty())  # type: ignore[arg-type]
+    with pytest.raises(ProviderError, match="MAX_TOKENS"):
+        await generate_grounded_text(prompt_text="q", timeout=20.0)
+
+
+async def test_recitation_block_is_its_own_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """저작권 차단은 **일반 실패와 갈라야 한다** — 안내 문구도 재시도 가치도 다르다.
+
+    라이브 실측(2026-08-23): 상업 교재 목차(해커스 토익 RC)는 간헐적으로
+    `finish_reason=RECITATION` 으로 응답이 통째로 막힌다. 인프런 강의 커리큘럼은 4/4 통과.
+    "잠시 후 다시" 로 안내하면 사용자는 영영 안 되는 걸 계속 누르게 된다.
+    """
+
+    class _Cand:
+        content = None
+        grounding_metadata = None
+        finish_reason = "FinishReason.RECITATION"
+
+    class _Blocked:
+        text = None
+        candidates = [_Cand()]
+        usage_metadata = _FakeUsage()
+        model_version = "gemini-3.5-flash-lite"
+
+    _patch_provider_client(monkeypatch, _Blocked())  # type: ignore[arg-type]
+    with pytest.raises(ProviderRecitationBlocked):
+        await generate_grounded_text(prompt_text="q", timeout=20.0)

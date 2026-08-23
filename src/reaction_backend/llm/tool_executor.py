@@ -55,6 +55,7 @@ from reaction_backend.llm.provider import (
 from reaction_backend.llm.provider import (
     ProviderError,
     ProviderRateLimited,
+    ProviderRecitationBlocked,
     ProviderResponse,
     ProviderUnavailable,
     ProviderValidationError,
@@ -127,7 +128,10 @@ class GroundedResult:
     search_queries: tuple[str, ...]
     reason: str | None
     """폐기 사유 코드 (ungrounded / empty / timeout / budget / grounding_budget /
-    unavailable / rate_limited / provider_error / no_prompt). 성공은 None."""
+    unavailable / rate_limited / recitation / provider_error / no_prompt). 성공은 None.
+
+    `recitation` 은 Google 이 저작권으로 막은 것이라 **재시도가 무의미**하다 — 사용자에게는
+    "다시 시도" 가 아니라 "이 자료는 가져올 수 없다" 로 안내해야 한다."""
     prompt_id: str
     prompt_version: str
     tokens_in: int = 0
@@ -547,6 +551,21 @@ class LLMToolExecutor:
                 prompt_id=resolved_prompt_id,
                 prompt_version=prompt_version,
                 reason="rate_limited",
+                error=str(exc),
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                latency_ms=_elapsed(),
+                model=resolved_model,
+                grounding_requests=1,
+            )
+        except ProviderRecitationBlocked as exc:
+            # 저작권 차단 — 재시도해도 안 되고, 사용자 안내 문구가 다르다.
+            return await self._grounding_discard(
+                module=module,
+                prompt_id=resolved_prompt_id,
+                prompt_version=prompt_version,
+                reason="recitation",
                 error=str(exc),
                 user_id=user_id,
                 session=session,

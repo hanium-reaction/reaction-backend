@@ -43,6 +43,18 @@ class ProviderValidationError(ProviderError):
     """Structured Output 이 schema 검증을 통과하지 못함."""
 
 
+class ProviderRecitationBlocked(ProviderError):
+    """Google 이 **저작권 낭송**(`finish_reason=RECITATION`)으로 응답을 통째로 막았다.
+
+    라이브 실측(2026-08-23): 상업 교재 목차(해커스 토익 RC)를 그라운딩으로 물으면 간헐적으로
+    이걸로 막힌다. 인프런 강의 커리큘럼은 4/4 로 통과했다 — **강의는 되고 상업 출판물은
+    안 된다**는 경계가 우리 정책이 아니라 provider 쪽에서도 그어져 있다.
+
+    일반 실패와 갈라 두는 이유는 사용자 안내가 완전히 다르기 때문이다: "잠시 후 다시" 가
+    아니라 "이 자료는 저작권 때문에 가져올 수 없다" 이고, 재시도해도 소용없다.
+    """
+
+
 @dataclass(slots=True)
 class ProviderResponse:
     """raw provider 호출 결과 (구조화 검증 전)."""
@@ -177,20 +189,37 @@ async def generate_structured[T: BaseModel](
 
 
 def _extract_text(response: Any) -> str:
-    """`google-genai` 응답에서 텍스트 페이로드 추출. SDK 버전 차이 흡수."""
+    """`google-genai` 응답에서 텍스트 페이로드 추출. SDK 버전 차이 흡수.
+
+    **전 part 를 이어 붙인다.** 이전엔 `parts[0].text` 만 읽었는데, 그라운딩 응답은 텍스트가
+    여러 part 로 쪼개져 오고 **첫 part 가 비어 있을 수 있다**. 그때 `response.text` 도
+    None 이면 본문이 멀쩡히 있는데도 "missing text payload" 로 죽었다 — 라이브 검증에서
+    같은 질의 3회 중 1회 재현됐다(2026-08-23). `generate_structured` 도 이 함수를 쓰므로
+    구조화 호출에도 같은 간헐적 실패가 있었을 것이다.
+
+    끝까지 텍스트가 없으면 `finish_reason` 을 에러에 실어 준다. 이게 없으면 "왜 없는지"
+    (MAX_TOKENS 인지 SAFETY 인지)를 로그만 보고는 알 수 없다.
+    """
     text = getattr(response, "text", None)
     if isinstance(text, str) and text:
         return text
-    # 폴백: candidates[0].content.parts[0].text
+
     candidates = getattr(response, "candidates", None) or []
     if candidates:
         content = getattr(candidates[0], "content", None)
         parts = getattr(content, "parts", None) or []
-        if parts:
-            inner = getattr(parts[0], "text", None)
-            if isinstance(inner, str):
-                return inner
-    raise ProviderError("Gemini response missing text payload")
+        chunks = [
+            part_text
+            for part_text in (getattr(part, "text", None) for part in parts)
+            if isinstance(part_text, str) and part_text
+        ]
+        if chunks:
+            return "".join(chunks)
+
+    finish = getattr(candidates[0], "finish_reason", None) if candidates else None
+    if "RECITATION" in str(finish).upper():
+        raise ProviderRecitationBlocked(f"blocked by recitation filter (finish_reason={finish})")
+    raise ProviderError(f"Gemini response missing text payload (finish_reason={finish})")
 
 
 def _extract_usage(response: Any, model_name: str) -> ProviderResponse:
