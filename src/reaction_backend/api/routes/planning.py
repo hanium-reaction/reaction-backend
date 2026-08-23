@@ -44,7 +44,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from reaction_backend.api.deps import CurrentUser
 from reaction_backend.db.models.action_item import ACTION_CATEGORY_VALUES
 from reaction_backend.db.models.goal import Goal
-from reaction_backend.db.models.interview_session import InterviewSession
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.user import User
@@ -54,7 +53,7 @@ from reaction_backend.orchestrator import (
     first_plan_adapter,
     first_plan_milestones,
     inbox_resources,
-    interview_adapter,
+    interview_projection,
     mandala,
     mandala_adapter,
     replan,
@@ -86,7 +85,7 @@ from reaction_backend.repositories.user_repo import UserRepo, get_user_repo
 from reaction_backend.scheduler.weekly_review_precompute import run_weekly_review_for_user
 from reaction_backend.schemas.common import KST, now_kst, to_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
-from reaction_backend.schemas.interview import InterviewEndReason, InterviewOutcome, TimeRange
+from reaction_backend.schemas.interview import InterviewOutcome, TimeRange
 from reaction_backend.schemas.mandala import (
     MandalaApproveRequest,
     MandalaApproveResponse,
@@ -181,18 +180,9 @@ def _resolve_target_date(raw: str | None) -> str:
         ) from exc
 
 
-async def _project_session_outcome(row: InterviewSession, repo: InterviewRepo) -> InterviewOutcome:
-    """종료된 인터뷰 세션의 slot_answers 를 outcome 으로 결정적 투영 (LLM 0회)."""
-    slot_rows = await repo.list_slot_answers(row.id)
-    slot_answers = {r.slot_key: r.value for r in slot_rows if r.value is not None}
-    return interview_adapter.build_outcome(
-        session_id=str(row.id),
-        slot_answers=slot_answers,
-        ambiguity_final=(float(row.ambiguity_final) if row.ambiguity_final is not None else 0.0),
-        end_reason=cast(InterviewEndReason, row.end_reason or "completed"),
-        # 인터뷰 정규화가 LLM 이었는지 룰 fallback 이었는지 (세션에 영속된 플래그).
-        analysis_source="rule" if row.used_fallback else "llm",
-    )
+# 투영은 `orchestrator/interview_projection.py` 한 곳에만 둔다 — 자료 확정(#259)도 같은
+# outcome 을 봐야 하는데, 라우터마다 조립하면 end_reason·analysis_source 유도가 갈라진다.
+_project_session_outcome = interview_projection.project_session_outcome
 
 
 async def _resolve_outcome(
