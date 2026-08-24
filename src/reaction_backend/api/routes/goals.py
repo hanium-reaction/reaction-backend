@@ -390,8 +390,13 @@ async def get_mandala_tree(
     rows = await repo.list_nodes(goal.id, tree_kind="mandala")
     leaf_ids = [n.id for n in rows if n.depth == 2]
     actions = await mandala_adapter.fetch_actions_for_nodes(session, leaf_ids)
-    progress_map = mandala_adapter.compute_progress(rows, actions)
     habits_by_node = await mandala_adapter.fetch_habits_for_nodes(session, leaf_ids)
+    instances_by_habit = await mandala_adapter.fetch_current_week_habit_instances(
+        session, [h.id for h in habits_by_node.values()]
+    )
+    progress_map = mandala_adapter.compute_progress(
+        rows, actions, habits_by_node=habits_by_node, instances_by_habit=instances_by_habit
+    )
 
     root = next((n for n in rows if n.parent_node_id is None), None)
     nodes = []

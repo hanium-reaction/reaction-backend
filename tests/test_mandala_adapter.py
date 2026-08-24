@@ -12,6 +12,8 @@ from uuid import UUID, uuid4
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
+from reaction_backend.db.models.habit import Habit
+from reaction_backend.db.models.habit_instance import HabitInstance
 from reaction_backend.orchestrator import mandala_adapter
 from reaction_backend.orchestrator.interview_catalog import ULTIMATE_DOMAIN_OPTIONS
 from reaction_backend.schemas.common import now_kst
@@ -411,6 +413,107 @@ def test_compute_progress_root_averages_all_subgoals() -> None:
     # sub_full = 1/8, sub_empty = 0/8 → 평균 (1/8 + 0)/2
     assert root_progress == (1 / 8) / 2
     assert root_coverage == (1 / 8) / 2
+
+
+# ─────────────── compute_progress — 반복형 칸(ADR-0008 §1.2) ───────────────
+
+
+def _habit(*, habit_id: UUID | None = None) -> Habit:
+    h = Habit()
+    h.id = habit_id or uuid4()
+    return h
+
+
+def _instance(*, habit_id: UUID, done_count: int) -> HabitInstance:
+    i = HabitInstance()
+    i.id = uuid4()
+    i.habit_id = habit_id
+    i.done_count = done_count
+    return i
+
+
+def test_compute_progress_repeat_leaf_has_no_progress_or_coverage_of_its_own() -> None:
+    """반복형은 완료 개념이 없다 — completed_at 이 찍혀 있어도 leaf 자신은 null."""
+    leaf = _tree_node(depth=2, completed_at=now_kst())
+    habit = _habit()
+
+    progress, coverage = mandala_adapter.compute_progress(
+        [leaf], [], habits_by_node={leaf.id: habit}
+    )[leaf.id]
+
+    assert progress is None
+    assert coverage is None
+
+
+def test_compute_progress_subgoal_excludes_repeat_leaf_from_progress_numerator() -> None:
+    """프로젝트형 1개(완료) + 반복형 1개 — 반복형은 분자에서 아예 빠진다(0으로도 안 잡음)."""
+    subgoal = _tree_node(depth=1)
+    project_leaf = _tree_node(depth=2, parent_id=subgoal.id, completed_at=now_kst())
+    repeat_leaf = _tree_node(depth=2, parent_id=subgoal.id)
+    habit = _habit()
+
+    progress, coverage = mandala_adapter.compute_progress(
+        [subgoal, project_leaf, repeat_leaf],
+        [],
+        habits_by_node={repeat_leaf.id: habit},
+    )[subgoal.id]
+
+    assert progress == 1.0 / 8  # 반복형이 분모(8)엔 남지만 분자엔 안 낀다
+    assert coverage == 1 / 8  # 반복형이 이번 주 미착수라 coverage 도 안 낌
+
+
+def test_compute_progress_subgoal_progress_is_null_when_only_repeat_leaves() -> None:
+    """축의 leaf 가 전부 반복형이면 progress 는 0.0 이 아니라 null(판단 불가)."""
+    subgoal = _tree_node(depth=1)
+    leaf1 = _tree_node(depth=2, parent_id=subgoal.id)
+    leaf2 = _tree_node(depth=2, parent_id=subgoal.id)
+    habit1, habit2 = _habit(), _habit()
+
+    progress, coverage = mandala_adapter.compute_progress(
+        [subgoal, leaf1, leaf2],
+        [],
+        habits_by_node={leaf1.id: habit1, leaf2.id: habit2},
+    )[subgoal.id]
+
+    assert progress is None
+    assert coverage == 0.0  # 둘 다 이번 주 미착수
+
+
+def test_compute_progress_repeat_leaf_counts_toward_coverage_when_done_this_week() -> None:
+    subgoal = _tree_node(depth=1)
+    leaf = _tree_node(depth=2, parent_id=subgoal.id)
+    habit = _habit()
+    instance = _instance(habit_id=habit.id, done_count=1)
+
+    _, coverage = mandala_adapter.compute_progress(
+        [subgoal, leaf],
+        [],
+        habits_by_node={leaf.id: habit},
+        instances_by_habit={habit.id: instance},
+    )[subgoal.id]
+
+    assert coverage == 1 / 8
+
+
+def test_compute_progress_repeat_leaf_not_covered_without_this_week_instance() -> None:
+    """이번 주 instance 자체가 없으면(예: cron 지연) 미착수로 안전하게 판정."""
+    subgoal = _tree_node(depth=1)
+    leaf = _tree_node(depth=2, parent_id=subgoal.id)
+    habit = _habit()
+
+    _, coverage = mandala_adapter.compute_progress(
+        [subgoal, leaf], [], habits_by_node={leaf.id: habit}, instances_by_habit={}
+    )[subgoal.id]
+
+    assert coverage == 0.0
+
+
+def test_compute_progress_backward_compatible_without_habit_args() -> None:
+    """habits_by_node/instances_by_habit 생략 — 기존 호출부와 100% 동일 동작."""
+    leaf = _tree_node(depth=2, completed_at=now_kst())
+    progress, coverage = mandala_adapter.compute_progress([leaf], [])[leaf.id]
+    assert progress == 1.0
+    assert coverage is None
 
 
 # ───────────────────── 만다라 → 오늘/브리프 연결 (PR7) ─────────────────────

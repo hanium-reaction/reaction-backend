@@ -305,13 +305,19 @@ additive 로 추가됐다(만다라 렌더의 전제 — `orderIndex` 없이는 
 승인 전에는 `{"goalId": "...", "rootNodeId": null, "nodes": []}`.
 
 `habitId` 는 additive(ADR-0008 §1) — leaf 가 `POST /goals/mandala/nodes/{id}/habit` 으로
-반복형 전환됐으면 링크된 습관 id, 아니면 `null`(=프로젝트형, 기본값). ⚠️ 이 PR(A) 은 링크만
-만든다 — `progress`/`coverage` 롤업(`mandala_adapter.compute_progress`)은 아직 `habitId`
-를 모른다. 반복형 칸도 지금은 기존 규칙(`completedAt` 직접체크 → 카드 성공률 → 판정 불가)
-그대로 축 평균에 들어간다. "반복형은 분자에서 빼고 이번 주 1회 이상 수행으로 coverage 판정"
-(ADR-0008 §1.2)은 `habit_instances` 주간 카운트를 롤업에 끌어와야 하는 별도 변경이라
-후속 PR로 미룬다 — FE 는 `habitId != null` 인 칸의 `progress`/`coverage` 를 그 축 평균에
-넣지 않고 별도(§1.2 완료 전까지는 "굴린 칸" 등 자체 판단)로 다루는 편이 안전하다.
+반복형 전환됐으면 링크된 습관 id, 아니면 `null`(=프로젝트형, 기본값).
+
+**반복형 leaf 의 롤업(ADR-0008 §1.2)**: 완료 개념이 없으므로 그 leaf 자신의
+`progress`/`coverage` 는 항상 `null` (위 예시 4번째 노드). 대신 그 칸이 속한 축의 롤업에서:
+- `progress`(분자) — 반복형 칸은 아예 빠진다(0으로도 안 잡는다). 그 축에 **프로젝트형
+  leaf 가 하나도 없으면**(전부 반복형이거나 gaps) 축의 `progress` 는 `0.0` 이 아니라
+  `null`("판단 불가" — `_leaf_progress` 가 종결 카드 없을 때 `None` 을 내는 것과 같은 규약).
+- `coverage`(분모는 항상 고정 8, §7.8) — 반복형 칸은 **이번 주 그 습관을 1회 이상
+  했으면**(`GET /habit-instances` 의 `doneCount > 0`) 착수로 잡힌다. 프로젝트형 leaf 의
+  기존 판정(종결 카드 있음)과 합산된다.
+
+즉 8칸이 전부 반복형인 축은 `progress: null`, `coverage`는 이번 주 실제로 건드린 반복 칸
+비율로 나온다 — "0%"라는 오해를 주는 숫자가 나오지 않는다.
 
 ---
 

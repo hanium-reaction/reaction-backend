@@ -17,7 +17,7 @@ PR3 의 오염 차단 축(R1/W1/W2/W3, `1ee508b967ba`)이 이미 이 값을 전�
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,7 +26,9 @@ from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.db.models.habit import Habit
+from reaction_backend.db.models.habit_instance import HabitInstance
 from reaction_backend.orchestrator.interview_catalog import ULTIMATE_DOMAIN_OPTIONS
+from reaction_backend.repositories.habit_repo import current_week_start_kst
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.mandala import (
     MandalaCell,
@@ -378,6 +380,25 @@ async def fetch_habits_for_nodes(
     return {h.goal_node_id: h for h in result.scalars().all() if h.goal_node_id is not None}
 
 
+async def fetch_current_week_habit_instances(
+    session: AsyncSession, habit_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, HabitInstance]:
+    """반복형 칸에 링크된 습관의 **이번 주** 인스턴스 — coverage 판정 입력(ADR-0008 §1.2).
+
+    "이번 주 1회 이상(`done_count > 0`)"이 착수 판정 기준이다. 주 경계는
+    `habit_repo.current_week_start_kst()` 단일 소스(월요일 KST)를 그대로 쓴다 — 습관
+    등록·체크·조회가 전부 이 함수 하나를 쓰는 것과 같은 이유(어긋난 주에 행이 생기면 안 됨).
+    """
+    if not habit_ids:
+        return {}
+    stmt = select(HabitInstance).where(
+        HabitInstance.habit_id.in_(habit_ids),
+        HabitInstance.week_start == current_week_start_kst(),
+    )
+    result = await session.execute(stmt)
+    return {i.habit_id: i for i in result.scalars().all()}
+
+
 def _leaf_progress(node: GoalNode, actions: Sequence[ActionItem]) -> float | None:
     """leaf 1개의 실적 — 카드가 없어도 직접 완료 체크(`completed_at`)만으로 100%.
 
@@ -395,7 +416,10 @@ def _leaf_progress(node: GoalNode, actions: Sequence[ActionItem]) -> float | Non
 
 
 def compute_progress(
-    nodes: Sequence[GoalNode], actions: Sequence[ActionItem]
+    nodes: Sequence[GoalNode],
+    actions: Sequence[ActionItem],
+    habits_by_node: Mapping[uuid.UUID, Habit] | None = None,
+    instances_by_habit: Mapping[uuid.UUID, HabitInstance] | None = None,
 ) -> dict[uuid.UUID, tuple[float | None, float | None]]:
     """만다라 노드별 (progress, coverage) — leaf/subgoal/core 전부. LLM 무관·DB 쓰기 0.
 
@@ -409,7 +433,20 @@ def compute_progress(
     UPDATE 하는 쓰기 경로가 생기고, 오늘 체크인(`routes/today.py`)이 만다라 트리에 쓰기를
     하게 되며, 회복 경로의 "원본 status 불변" 원칙(AGENTS §2)과 뒤엉킨다. 매 조회 시
     파생하면 그 문제 자체가 없다.
+
+    **반복형 칸(ADR-0008 §1.2)** — `habits_by_node` 에 있는(=이 칸에 활성 습관이 링크된)
+    leaf 는 완료 개념이 없다: 자기 자신의 `progress` 는 항상 `null` 이고, 축의 `progress`
+    분자에서도 아예 빠진다(0으로도 안 잡는다 — "안 채웠다"가 아니라 "이 지표가 안 맞는
+    칸"이라서). 대신 `coverage`(착수 여부)는 "이번 주 습관을 1회 이상 했는가"
+    (`instances_by_habit` 의 `done_count > 0`)로 판정한다. 한 축의 leaf 가 전부 반복형이면
+    (프로젝트형이 하나도 없으면) 그 축의 `progress` 는 `0.0` 이 아니라 `null` —
+    `_leaf_progress` 가 종결 카드 없을 때 `None` 을 내는 것과 같은 "판단 불가" 규약이다.
+    두 인자를 생략하면(기본값 `None`→`{}`) 반복형 칸이 아예 없던 것처럼 동작해 기존 호출부는
+    무변경으로 안전하다.
     """
+    habits_by_node = habits_by_node or {}
+    instances_by_habit = instances_by_habit or {}
+
     actions_by_node: dict[uuid.UUID, list[ActionItem]] = {}
     for a in actions:
         if a.goal_node_id is not None:
@@ -421,7 +458,14 @@ def compute_progress(
 
     result: dict[uuid.UUID, tuple[float | None, float | None]] = {}
     leaf_progress: dict[uuid.UUID, float] = {}
+    repeat_started: dict[uuid.UUID, bool] = {}
     for leaf in leaves:
+        habit = habits_by_node.get(leaf.id)
+        if habit is not None:
+            instance = instances_by_habit.get(habit.id)
+            result[leaf.id] = (None, None)  # 반복형 — 완료 개념이 없다(§1)
+            repeat_started[leaf.id] = instance is not None and instance.done_count > 0
+            continue
         p = _leaf_progress(leaf, actions_by_node.get(leaf.id, []))
         result[leaf.id] = (p, None)  # leaf 는 coverage 개념이 없다(자기 자신이 최소 단위)
         if p is not None:
@@ -429,8 +473,18 @@ def compute_progress(
 
     for sg in subgoals:
         children = [n for n in leaves if n.parent_node_id == sg.id]
-        filled = [leaf_progress[n.id] for n in children if n.id in leaf_progress]
-        result[sg.id] = (sum(filled) / _RING_SIZE, len(filled) / _RING_SIZE)
+        project_children = [n for n in children if n.id not in habits_by_node]
+        repeat_children = [n for n in children if n.id in habits_by_node]
+        filled = [leaf_progress[n.id] for n in project_children if n.id in leaf_progress]
+        started = sum(1 for n in repeat_children if repeat_started.get(n.id, False))
+
+        if project_children:
+            sg_progress: float | None = sum(filled) / _RING_SIZE
+        elif repeat_children:
+            sg_progress = None  # 이 축엔 프로젝트형 leaf 가 하나도 없다 — 판단 불가
+        else:
+            sg_progress = 0.0
+        result[sg.id] = (sg_progress, (len(filled) + started) / _RING_SIZE)
 
     if cores:
         sub_progress = [result[sg.id][0] for sg in subgoals if sg.id in result]
