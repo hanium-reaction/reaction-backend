@@ -555,6 +555,12 @@ class FakeHabitRepo:
             return None
         return h
 
+    async def get_active_by_goal_node(self, user_id: UUID, goal_node_id: UUID) -> Habit | None:
+        for h in self._items.values():
+            if h.user_id == user_id and h.goal_node_id == goal_node_id and h.archived_at is None:
+                return h
+        return None
+
     async def create(
         self,
         user_id: UUID,
@@ -564,6 +570,7 @@ class FakeHabitRepo:
         minutes_per_session: int,
         time_preference: str,
         priority_level: int,
+        goal_node_id: UUID | None = None,
     ) -> Habit:
         h = Habit()
         h.id = uuid4()
@@ -575,6 +582,7 @@ class FakeHabitRepo:
         h.minutes_per_session = minutes_per_session
         h.time_preference = time_preference
         h.priority_level = priority_level
+        h.goal_node_id = goal_node_id
         h.archived_at = None
         h.consecutive_miss_weeks = 0
         h.last_penalty_evaluated_at = None

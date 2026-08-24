@@ -56,6 +56,9 @@ def _to_habit(habit: HabitModel) -> Habit:
         minutes_per_session=habit.minutes_per_session,
         time_preference=habit.time_preference,
         priority_level=habit.priority_level,
+        # 만다라 반복형 칸에서 만들어진 습관이면 그 칸 id — `node_` 접두는 goals.py 의
+        # _NODE_PREFIX 와 같은 값(ADR-0008 §1).
+        goal_node_id=f"node_{habit.goal_node_id}" if habit.goal_node_id is not None else None,
     )
 
 

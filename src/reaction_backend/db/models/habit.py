@@ -112,6 +112,16 @@ class Habit(Base, TimestampMixin, SoftDeleteMixin):
         nullable=True,
     )
 
+    # 만다라 반복형 칸 링크(ADR-0008 §1) — 있으면 그 칸은 계획을 만들지 않고 이 습관의
+    # 주간 횟수(habit_instances.done_count)로만 진척을 본다. 칸이 삭제돼도 습관 기록은
+    # 남아야 하므로 SET NULL(hard delete 금지, AGENTS §2). 칸 하나당 활성 습관 하나는
+    # 마이그레이션의 부분 유니크 인덱스(`uq_habits_goal_node_id_active`)가 강제한다.
+    goal_node_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("goal_nodes.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     # ── relationships ──
     user: Mapped[User] = relationship()
     instances: Mapped[list[HabitInstance]] = relationship(

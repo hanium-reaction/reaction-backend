@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
+from reaction_backend.db.models.habit import Habit
 from reaction_backend.orchestrator.interview_catalog import ULTIMATE_DOMAIN_OPTIONS
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.mandala import (
@@ -361,6 +362,20 @@ async def fetch_actions_for_nodes(
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def fetch_habits_for_nodes(
+    session: AsyncSession, node_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, Habit]:
+    """만다라 leaf 노드에 링크된 활성 습관(반복형 칸, ADR-0008 §1) — node_id → Habit.
+
+    칸 하나당 활성 습관은 최대 1개(DB 부분 유니크 인덱스가 강제) — dict 로 안전하게 접는다.
+    """
+    if not node_ids:
+        return {}
+    stmt = select(Habit).where(Habit.goal_node_id.in_(node_ids), Habit.archived_at.is_(None))
+    result = await session.execute(stmt)
+    return {h.goal_node_id: h for h in result.scalars().all() if h.goal_node_id is not None}
 
 
 def _leaf_progress(node: GoalNode, actions: Sequence[ActionItem]) -> float | None:

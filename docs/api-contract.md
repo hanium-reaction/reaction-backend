@@ -230,6 +230,8 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | GET | `/goals/{id}/mandala` | **만다라트 상시 뷰**(PR6, S31). `goal.isUltimate=true` 여야(아니면 404). 73노드(≤) + 진척도. **아직 승인된 만다라 트리가 없으면 `nodes=[]`·`rootNodeId=null`**(404 아님 — 위 `nodes` endpoint 와 같은 "정상, 그냥 비어 있음" 규약). `progress`/`coverage` 는 컬럼 캐시가 아니라 매 조회 시 파생(leaf 는 `completedAt` 직접체크 우선, 없으면 카드 성공률; 축은 leaf 8개 **고정 분모**로 나눠 "1칸 하고 100%" 착시 방지; 성공 정의는 주간 리포트 adherence 와 동일 상수 재사용) |
 | PATCH | `/goals/mandala/nodes/{nodeId}` | **셀 상세 편집**(PR6, S32). body `{ title?, whyText?, completed? }` — 준 필드만 갱신, 어떤 필드든 건드리면 `source="user"` 로 전환(AI/rule 점선 렌더가 실선으로 바뀜). `completed:true`→`completedAt=now`, `false`→`null`. 제목 길이는 노드 깊이별 상한(축 10자/셀 16자) 초과 시 422 `COMMON_VALIDATION_ERROR`. 응답은 `MandalaNode` — 이 endpoint 는 롤업(`progress`/`coverage`)을 다시 계산하지 않고 `null`(필요하면 `GET /mandala` 재호출) |
 | POST | `/goals/mandala/nodes/{nodeId}/promote` | **하위목표(축) 승격**(PR6, S32). body `{ goalTier }` — 그 축을 `Goal(status="proposed")` 로. **중앙(core)·셀(leaf)은 대상이 아니다**(depth≠1 이면 422). Focus≤3/Maintain≤5 초과 시 기존 422 `GOAL_TIER_LIMIT_EXCEEDED` 재사용. **멱등** — 이미 승격된 축을 다시 누르면(그 Goal 이 살아있으면) 새로 만들지 않고 그 행을 그대로 반환(201) |
+| POST | `/goals/mandala/nodes/{nodeId}/habit` | **반복형 전환**(U12, ADR-0008 §1). body `{ title?, category, frequencyPerWeek, minutesPerSession, timePreference, priorityLevel }` — 새 `Habit` 을 만들어 이 칸에 링크(`habits.goalNodeId`). "코딩테스트 1일 1문제"·"쓰레기 줍기" 처럼 끝이 없는 칸을 계획(action_item)으로 안 내려보내고 습관 인프라(`habit_instances.doneCount`)로만 주간 횟수를 추적하기 위함. **칸(leaf)만 대상**(depth≠2 면 422 `COMMON_VALIDATION_ERROR`). `title` 생략 시 칸 제목 그대로. **멱등** — 이미 링크된 활성 습관이 있으면 새로 안 만들고 그대로 반환(201). 응답은 `Habit`(§7) |
+| DELETE | `/goals/mandala/nodes/{nodeId}/habit` | **반복형 → 프로젝트형 되돌리기**(ADR-0008 §1). 링크된 습관을 soft delete. 칸 자체는 남는다. 링크가 없으면(이미 프로젝트형) 그냥 204(멱등, 에러 아님) |
 
 응답 ID 형식: `goal_<uuid>` (§1.8). category enum 9종 (`study`/`project`/`health`/`routine`/`schedule`/`career`/`relationship`/`self_dev`/`other`).
 
@@ -280,15 +282,19 @@ additive 로 추가됐다(만다라 렌더의 전제 — `orderIndex` 없이는 
     { "nodeId": "node_11111111-...", "parentId": null, "title": "메이저리그 8구단 드래프트 1순위",
       "depth": 0, "orderIndex": 0, "nodeType": "core", "isLeaf": false,
       "whyText": null, "source": "llm", "locked": false, "completedAt": null,
-      "promotedGoalId": null, "progress": 0.125, "coverage": 0.5 },
+      "promotedGoalId": null, "habitId": null, "progress": 0.125, "coverage": 0.5 },
     { "nodeId": "node_22222222-...", "parentId": "node_11111111-...", "title": "구위",
       "depth": 1, "orderIndex": 0, "nodeType": "subgoal", "isLeaf": false,
       "whyText": null, "source": "user", "locked": true, "completedAt": null,
-      "promotedGoalId": "goal_9c2d…", "progress": 1.0, "coverage": 0.125 },
+      "promotedGoalId": "goal_9c2d…", "habitId": null, "progress": 1.0, "coverage": 0.125 },
     { "nodeId": "node_33333333-...", "parentId": "node_22222222-...", "title": "주 3회 불펜피칭",
       "depth": 2, "orderIndex": 0, "nodeType": "leaf", "isLeaf": true,
       "whyText": null, "source": "llm", "locked": false, "completedAt": "2026-08-20T15:00:00+09:00",
-      "promotedGoalId": null, "progress": 1.0, "coverage": null }
+      "promotedGoalId": null, "habitId": null, "progress": 1.0, "coverage": null },
+    { "nodeId": "node_44444444-...", "parentId": "node_22222222-...", "title": "코딩테스트 1일1문제",
+      "depth": 2, "orderIndex": 1, "nodeType": "leaf", "isLeaf": true,
+      "whyText": null, "source": "user", "locked": false, "completedAt": null,
+      "promotedGoalId": null, "habitId": "habit_7a1e…", "progress": null, "coverage": null }
   ],
   "progress": 0.125,
   "coverage": 0.5
@@ -298,11 +304,25 @@ additive 로 추가됐다(만다라 렌더의 전제 — `orderIndex` 없이는 
 
 승인 전에는 `{"goalId": "...", "rootNodeId": null, "nodes": []}`.
 
+`habitId` 는 additive(ADR-0008 §1) — leaf 가 `POST /goals/mandala/nodes/{id}/habit` 으로
+반복형 전환됐으면 링크된 습관 id, 아니면 `null`(=프로젝트형, 기본값). ⚠️ 이 PR(A) 은 링크만
+만든다 — `progress`/`coverage` 롤업(`mandala_adapter.compute_progress`)은 아직 `habitId`
+를 모른다. 반복형 칸도 지금은 기존 규칙(`completedAt` 직접체크 → 카드 성공률 → 판정 불가)
+그대로 축 평균에 들어간다. "반복형은 분자에서 빼고 이번 주 1회 이상 수행으로 coverage 판정"
+(ADR-0008 §1.2)은 `habit_instances` 주간 카운트를 롤업에 끌어와야 하는 별도 변경이라
+후속 PR로 미룬다 — FE 는 `habitId != null` 인 칸의 `progress`/`coverage` 를 그 축 평균에
+넣지 않고 별도(§1.2 완료 전까지는 "굴린 칸" 등 자체 판단)로 다루는 편이 안전하다.
+
 ---
 
 ## 7. Habits (`/habits`, `/habit-instances`) — S27
 
 `POST /habits` 시 **이번 주 `habit_instances` 자동 생성** (cron 도입 전 임시; Issue #24 cron 후속). `frequencyPerWeek` 변경 시 `target_count` 동기화. `weekStart` 누락 시 이번 주 KST 월요일.
+
+응답 `Habit` 에 `goalNodeId`(additive, ADR-0008 §1) — 만다라 반복형 칸에서 만들어진 습관이면
+그 칸(leaf) id, 일반 습관이면 `null`. 이 습관 자체를 만들거나 지우는 경로는 여전히
+`§6 Goals`의 `POST`/`DELETE /goals/mandala/nodes/{nodeId}/habit` 뿐이다 — 여기 `/habits`
+CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 소유권 검증이 그쪽에 있다).
 
 | Method | Path | 설명 |
 | --- | --- | --- |

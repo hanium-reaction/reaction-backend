@@ -10,14 +10,14 @@
 from __future__ import annotations
 
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.schemas.common import now_kst
-from tests.conftest import DEMO_USER_UUID, FakeGoalRepo
+from tests.conftest import DEMO_USER_UUID, FakeGoalRepo, FakeHabitInstanceRepo, FakeHabitRepo
 
 
 def _goal(*, is_ultimate: bool = True, title: str = "궁극목표") -> Goal:
@@ -292,6 +292,138 @@ def test_promote_enforces_focus_tier_limit(
 
     assert resp.status_code == 422, resp.text
     assert resp.json()["code"] == "GOAL_TIER_LIMIT_EXCEEDED"
+
+
+# ── 반복형 칸 링크 (U12, ADR-0008 §1) ─────────────────────────────────────────
+
+_HABIT_LINK_BODY = {
+    "category": "self_dev",
+    "frequencyPerWeek": 5,
+    "minutesPerSession": 20,
+    "timePreference": "anytime",
+    "priorityLevel": 3,
+}
+
+
+def test_link_mandala_habit_creates_and_links_habit(
+    client: TestClient,
+    fake_goal_repo: FakeGoalRepo,
+    fake_habit_repo: FakeHabitRepo,
+    fake_habit_instance_repo: FakeHabitInstanceRepo,
+) -> None:
+    goal = _goal()
+    ids = _seed_full_tree(fake_goal_repo, goal)
+    leaf_id = ids["leaf3"].id
+
+    resp = client.post(f"/goals/mandala/nodes/node_{leaf_id}/habit", json=_HABIT_LINK_BODY)
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["title"] == "축3셀0"  # title 생략 → 칸 제목 그대로
+    assert body["goalNodeId"] == f"node_{leaf_id}"
+    assert body["frequencyPerWeek"] == 5
+    habit_id = body["habitId"][len("habit_") :]
+    assert fake_habit_repo._items[UUID(habit_id)].goal_node_id == leaf_id
+    # 등록 시점에 이번 주 instance 도 함께 생성(POST /habits 와 같은 규약).
+    assert any(i.habit_id == UUID(habit_id) for i in fake_habit_instance_repo._items.values())
+
+
+def test_link_mandala_habit_honors_custom_title(
+    client: TestClient, fake_goal_repo: FakeGoalRepo
+) -> None:
+    goal = _goal()
+    ids = _seed_full_tree(fake_goal_repo, goal)
+    leaf_id = ids["leaf3"].id
+
+    resp = client.post(
+        f"/goals/mandala/nodes/node_{leaf_id}/habit",
+        json={**_HABIT_LINK_BODY, "title": "쓰레기 줍기"},
+    )
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["title"] == "쓰레기 줍기"
+
+
+def test_link_mandala_habit_rejects_axis_and_core(
+    client: TestClient, fake_goal_repo: FakeGoalRepo
+) -> None:
+    goal = _goal()
+    ids = _seed_full_tree(fake_goal_repo, goal)
+
+    core_resp = client.post(
+        f"/goals/mandala/nodes/node_{ids['root'].id}/habit", json=_HABIT_LINK_BODY
+    )
+    axis_resp = client.post(
+        f"/goals/mandala/nodes/node_{ids['sub3'].id}/habit", json=_HABIT_LINK_BODY
+    )
+
+    assert core_resp.status_code == 422, core_resp.text
+    assert axis_resp.status_code == 422, axis_resp.text
+    assert core_resp.json()["code"] == "COMMON_VALIDATION_ERROR"
+
+
+def test_link_mandala_habit_is_idempotent(
+    client: TestClient, fake_goal_repo: FakeGoalRepo, fake_habit_repo: FakeHabitRepo
+) -> None:
+    """이미 이 칸에 링크된 활성 습관이 있으면 새로 안 만들고 그대로 반환(promote 와 같은 이유)."""
+    goal = _goal()
+    ids = _seed_full_tree(fake_goal_repo, goal)
+    leaf_id = ids["leaf3"].id
+
+    first = client.post(f"/goals/mandala/nodes/node_{leaf_id}/habit", json=_HABIT_LINK_BODY)
+    second = client.post(
+        f"/goals/mandala/nodes/node_{leaf_id}/habit",
+        json={**_HABIT_LINK_BODY, "frequencyPerWeek": 2},
+    )
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    assert first.json()["habitId"] == second.json()["habitId"]
+    # 두 번째 요청의 frequencyPerWeek(2) 는 무시됐다 — 기존 습관(5) 그대로.
+    assert second.json()["frequencyPerWeek"] == 5
+    linked = [h for h in fake_habit_repo._items.values() if h.goal_node_id == leaf_id]
+    assert len(linked) == 1
+
+
+def test_link_mandala_habit_unknown_node_returns_404(client: TestClient) -> None:
+    resp = client.post(f"/goals/mandala/nodes/node_{uuid4()}/habit", json=_HABIT_LINK_BODY)
+    assert resp.status_code == 404, resp.text
+
+
+def test_unlink_mandala_habit_soft_deletes_linked_habit(
+    client: TestClient, fake_goal_repo: FakeGoalRepo, fake_habit_repo: FakeHabitRepo
+) -> None:
+    goal = _goal()
+    ids = _seed_full_tree(fake_goal_repo, goal)
+    leaf_id = ids["leaf3"].id
+    link_resp = client.post(f"/goals/mandala/nodes/node_{leaf_id}/habit", json=_HABIT_LINK_BODY)
+    habit_id = UUID(link_resp.json()["habitId"][len("habit_") :])
+
+    resp = client.delete(f"/goals/mandala/nodes/node_{leaf_id}/habit")
+
+    assert resp.status_code == 204, resp.text
+    assert fake_habit_repo._items[habit_id].archived_at is not None
+    # 되돌린 뒤 다시 링크하면 새 습관이 만들어진다(soft-delete 된 습관은 활성이 아니므로).
+    relink = client.post(f"/goals/mandala/nodes/node_{leaf_id}/habit", json=_HABIT_LINK_BODY)
+    assert relink.status_code == 201, relink.text
+    assert relink.json()["habitId"] != f"habit_{habit_id}"
+
+
+def test_unlink_mandala_habit_noop_when_not_linked(
+    client: TestClient, fake_goal_repo: FakeGoalRepo
+) -> None:
+    """링크가 없으면(이미 프로젝트형) 에러가 아니라 그냥 204."""
+    goal = _goal()
+    ids = _seed_full_tree(fake_goal_repo, goal)
+
+    resp = client.delete(f"/goals/mandala/nodes/node_{ids['leaf3'].id}/habit")
+
+    assert resp.status_code == 204, resp.text
+
+
+def test_unlink_mandala_habit_unknown_node_returns_404(client: TestClient) -> None:
+    resp = client.delete(f"/goals/mandala/nodes/node_{uuid4()}/habit")
+    assert resp.status_code == 404, resp.text
 
 
 def test_list_goal_nodes_includes_additive_fields(

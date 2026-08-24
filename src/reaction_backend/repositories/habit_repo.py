@@ -62,6 +62,16 @@ class HabitRepo:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_active_by_goal_node(self, user_id: UUID, goal_node_id: UUID) -> Habit | None:
+        """이 만다라 칸에 이미 링크된 활성 습관(ADR-0008 §1) — 링크 endpoint 의 멱등 판정용."""
+        stmt = select(Habit).where(
+            Habit.goal_node_id == goal_node_id,
+            Habit.user_id == user_id,
+            Habit.archived_at.is_(None),
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def create(
         self,
         user_id: UUID,
@@ -71,6 +81,7 @@ class HabitRepo:
         minutes_per_session: int,
         time_preference: str,
         priority_level: int,
+        goal_node_id: UUID | None = None,
     ) -> Habit:
         habit = Habit(
             user_id=user_id,
@@ -81,6 +92,7 @@ class HabitRepo:
             minutes_per_session=minutes_per_session,
             time_preference=time_preference,
             priority_level=priority_level,
+            goal_node_id=goal_node_id,
         )
         self._session.add(habit)
         await self._session.flush()

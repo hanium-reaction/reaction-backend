@@ -24,6 +24,8 @@ class Habit(CamelModel):
     minutes_per_session: int
     time_preference: str
     priority_level: int
+    # 만다라 반복형 칸에서 만들어졌으면 그 노드 id, 아니면 null(ADR-0008 §1).
+    goal_node_id: str | None = None
 
 
 class HabitCreateRequest(CamelModel):

@@ -18,6 +18,7 @@ from pydantic import Field
 
 from reaction_backend.schemas.common import CamelModel, DraftMixin, KstDatetime
 from reaction_backend.schemas.goals import GoalNode, GoalTier
+from reaction_backend.schemas.habits import HabitCategory, TimePreference
 
 MandalaSource = Literal["llm", "rule", "user"]
 
@@ -193,6 +194,10 @@ class MandalaNode(GoalNode):
     locked: bool
     completed_at: KstDatetime | None
     promoted_goal_id: str | None
+    # 반복형 칸(ADR-0008 §1) — 링크된 활성 습관이 있으면 그 id, 없으면 null(=프로젝트형).
+    # U9/U10 응답처럼 롤업을 다시 계산하지 않는 자리에서도 항상 채운다 — 링크 API 자체가
+    # 반환하는 값이라 별도 조회가 필요 없다.
+    habit_id: str | None
     progress: float | None
     coverage: float | None
 
@@ -230,6 +235,22 @@ class MandalaPromoteRequest(CamelModel):
     goal_tier: GoalTier
 
 
+class MandalaHabitLinkRequest(CamelModel):
+    """POST /goals/mandala/nodes/{nodeId}/habit(U12) 요청 — 반복형 칸으로 전환(ADR-0008 §1).
+
+    "코딩테스트 1일 1문제"·"쓰레기 줍기" 처럼 끝이 없는 leaf 칸에 새 `Habit` 을 만들어
+    링크한다. 계획(action_item)을 만들지 않고 이후 주간 횟수(habit_instances.done_count)로만
+    추적한다. `title` 을 생략하면 칸 제목을 그대로 쓴다.
+    """
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    category: HabitCategory = "other"
+    frequency_per_week: int = Field(ge=1, le=7)
+    minutes_per_session: int = Field(ge=1)
+    time_preference: TimePreference = "anytime"
+    priority_level: int = Field(ge=1, le=5, default=3)
+
+
 __all__ = [
     "MandalaApproveRequest",
     "MandalaApproveResponse",
@@ -240,6 +261,7 @@ __all__ = [
     "MandalaDraftResponse",
     "MandalaGap",
     "MandalaGenerateRequest",
+    "MandalaHabitLinkRequest",
     "MandalaNode",
     "MandalaNodeUpdateRequest",
     "MandalaPromoteRequest",

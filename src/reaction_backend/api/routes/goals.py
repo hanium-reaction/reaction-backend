@@ -23,10 +23,20 @@ from reaction_backend.api.deps import CurrentUser
 from reaction_backend.db.models.goal import GOAL_CATEGORY_VALUES
 from reaction_backend.db.models.goal import Goal as GoalModel
 from reaction_backend.db.models.goal_node import GoalNode as GoalNodeModel
+from reaction_backend.db.models.habit import Habit as HabitModel
 from reaction_backend.db.session import get_db
 from reaction_backend.orchestrator import inbox_resources, mandala_adapter, ultimate_adapter
 from reaction_backend.orchestrator._common import user_agent_lock
 from reaction_backend.repositories.goal_repo import GoalRepo, get_goal_repo
+from reaction_backend.repositories.habit_instance_repo import (
+    HabitInstanceRepo,
+    get_habit_instance_repo,
+)
+from reaction_backend.repositories.habit_repo import (
+    HabitRepo,
+    current_week_start_kst,
+    get_habit_repo,
+)
 from reaction_backend.repositories.inbox_repo import InboxRepo, get_inbox_repo
 from reaction_backend.repositories.interview_repo import InterviewRepo, get_interview_repo
 from reaction_backend.schemas.common import now_kst
@@ -40,7 +50,9 @@ from reaction_backend.schemas.goals import (
     GoalsByTier,
     GoalUpdateRequest,
 )
+from reaction_backend.schemas.habits import Habit as HabitSchema
 from reaction_backend.schemas.mandala import (
+    MandalaHabitLinkRequest,
     MandalaNode,
     MandalaNodeUpdateRequest,
     MandalaPromoteRequest,
@@ -130,6 +142,8 @@ async def _enforce_tier_limit(repo: GoalRepo, user_id: UUID, tier: str) -> None:
 RepoDep = Annotated[GoalRepo, Depends(get_goal_repo)]
 InboxRepoDep = Annotated[InboxRepo, Depends(get_inbox_repo)]
 InterviewRepoDep = Annotated[InterviewRepo, Depends(get_interview_repo)]
+HabitRepoDep = Annotated[HabitRepo, Depends(get_habit_repo)]
+HabitInstanceRepoDep = Annotated[HabitInstanceRepo, Depends(get_habit_instance_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 _ULTIMATE_LOCK_AGENT = "ultimate"
 
@@ -289,6 +303,7 @@ async def list_goal_nodes(goal_id: str, user: CurrentUser, repo: RepoDep) -> Goa
 # ─────────────────────────────────────────────────────────────────────────────
 
 _NODE_PREFIX = "node_"
+_HABIT_PREFIX = "habit_"  # api/routes/habits.py 의 _HABIT_PREFIX 와 반드시 같은 값
 
 
 def _node_not_found() -> ApiError:
@@ -325,7 +340,11 @@ async def _load_mandala_node(repo: GoalRepo, user_id: UUID, node_id: str) -> Goa
 
 
 def _to_mandala_node(
-    n: GoalNodeModel, *, progress: float | None, coverage: float | None
+    n: GoalNodeModel,
+    *,
+    progress: float | None,
+    coverage: float | None,
+    habit_id: UUID | None,
 ) -> MandalaNode:
     return MandalaNode(
         node_id=f"{_NODE_PREFIX}{n.id}",
@@ -340,8 +359,22 @@ def _to_mandala_node(
         locked=n.locked,
         completed_at=n.completed_at,
         promoted_goal_id=f"{_ID_PREFIX}{n.promoted_goal_id}" if n.promoted_goal_id else None,
+        habit_id=f"{_HABIT_PREFIX}{habit_id}" if habit_id is not None else None,
         progress=progress,
         coverage=coverage,
+    )
+
+
+def _to_habit_schema(h: HabitModel) -> HabitSchema:
+    return HabitSchema(
+        habit_id=f"{_HABIT_PREFIX}{h.id}",
+        title=h.title,
+        category=h.category,
+        frequency_per_week=h.frequency_per_week,
+        minutes_per_session=h.minutes_per_session,
+        time_preference=h.time_preference,
+        priority_level=h.priority_level,
+        goal_node_id=f"{_NODE_PREFIX}{h.goal_node_id}" if h.goal_node_id is not None else None,
     )
 
 
@@ -358,12 +391,21 @@ async def get_mandala_tree(
     leaf_ids = [n.id for n in rows if n.depth == 2]
     actions = await mandala_adapter.fetch_actions_for_nodes(session, leaf_ids)
     progress_map = mandala_adapter.compute_progress(rows, actions)
+    habits_by_node = await mandala_adapter.fetch_habits_for_nodes(session, leaf_ids)
 
     root = next((n for n in rows if n.parent_node_id is None), None)
     nodes = []
     for n in rows:
         node_progress, node_coverage = progress_map.get(n.id, (None, None))
-        nodes.append(_to_mandala_node(n, progress=node_progress, coverage=node_coverage))
+        linked_habit = habits_by_node.get(n.id)
+        nodes.append(
+            _to_mandala_node(
+                n,
+                progress=node_progress,
+                coverage=node_coverage,
+                habit_id=linked_habit.id if linked_habit is not None else None,
+            )
+        )
     root_progress, root_coverage = progress_map.get(root.id, (0.0, 0.0)) if root else (0.0, 0.0)
     return MandalaTreeResponse(
         goal_id=goal_id,
@@ -381,6 +423,7 @@ async def update_mandala_node(
     body: MandalaNodeUpdateRequest,
     user: CurrentUser,
     repo: RepoDep,
+    habit_repo: HabitRepoDep,
     session: SessionDep,
 ) -> MandalaNode:
     """셀 상세 편집(U9) — 제목/이유/완료 토글. 준 필드만 갱신, 어떤 필드든 `source="user"` 로."""
@@ -407,7 +450,13 @@ async def update_mandala_node(
         node.source = "user"
     await session.commit()
     await session.refresh(node)
-    return _to_mandala_node(node, progress=None, coverage=None)
+    linked_habit = await habit_repo.get_active_by_goal_node(user.id, node.id)
+    return _to_mandala_node(
+        node,
+        progress=None,
+        coverage=None,
+        habit_id=linked_habit.id if linked_habit is not None else None,
+    )
 
 
 @router.post("/mandala/nodes/{node_id}/promote", status_code=status.HTTP_201_CREATED)
@@ -458,6 +507,81 @@ async def promote_mandala_node(
     await session.commit()
     await session.refresh(goal)
     return _to_schema(goal, promoted_from_axis=node.title)
+
+
+@router.post("/mandala/nodes/{node_id}/habit", status_code=status.HTTP_201_CREATED)
+async def link_mandala_habit(
+    node_id: str,
+    body: MandalaHabitLinkRequest,
+    user: CurrentUser,
+    repo: RepoDep,
+    habit_repo: HabitRepoDep,
+    instance_repo: HabitInstanceRepoDep,
+    session: SessionDep,
+) -> HabitSchema:
+    """셀(leaf) → 반복형 전환(U12, ADR-0008 §1). 새 `Habit` 을 만들어 이 칸에 링크한다.
+
+    "코딩테스트 1일 1문제"·"쓰레기 줍기" 처럼 끝이 없는 칸은 계획(action_item)으로 내려보내지
+    않고 이 링크로 주간 횟수(habit_instances.done_count)만 추적한다.
+
+    **칸(leaf, depth=2)만 대상이다** — 축·중앙은 8칸을 아우르는 단위라 반복 횟수 개념이 안
+    맞는다(depth≠2 면 422, `promote` 의 depth≠1 가드와 같은 자리). 이미 이 칸에 링크된 활성
+    습관이 있으면 새로 만들지 않고 그 습관을 그대로 반환한다(멱등 — `promote` 와 같은 이유,
+    두 번 눌러도 중복 습관이 쌓이면 안 된다).
+    """
+    node = await _load_mandala_node(repo, user.id, node_id)
+    if node.depth != 2:
+        raise ApiError(
+            ErrorCode.COMMON_VALIDATION_ERROR,
+            "칸(leaf)만 반복형으로 전환할 수 있어요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="nodeId",
+        )
+    existing = await habit_repo.get_active_by_goal_node(user.id, node.id)
+    if existing is not None:
+        return _to_habit_schema(existing)
+
+    habit = await habit_repo.create(
+        user_id=user.id,
+        title=body.title or node.title,
+        category=body.category,
+        frequency_per_week=body.frequency_per_week,
+        minutes_per_session=body.minutes_per_session,
+        time_preference=body.time_preference,
+        priority_level=body.priority_level,
+        goal_node_id=node.id,
+    )
+    # 등록 시점에 이번 주 instance 도 함께 — POST /habits 와 같은 이유(주 중간 등록이 다음
+    # 월요일까지 오늘 화면에 안 보이면 안 된다).
+    await instance_repo.create_or_get_for_week(
+        habit_id=habit.id,
+        week_start=current_week_start_kst(),
+        target_count=body.frequency_per_week,
+    )
+    await session.commit()
+    await session.refresh(habit)
+    return _to_habit_schema(habit)
+
+
+@router.delete("/mandala/nodes/{node_id}/habit", status_code=status.HTTP_204_NO_CONTENT)
+async def unlink_mandala_habit(
+    node_id: str,
+    user: CurrentUser,
+    repo: RepoDep,
+    habit_repo: HabitRepoDep,
+    session: SessionDep,
+) -> None:
+    """반복형 → 프로젝트형으로 되돌리기(ADR-0008 §1) — 링크된 습관을 soft delete.
+
+    칸(goal_node) 자체는 그대로 남는다. 링크가 없으면(이미 프로젝트형) 그냥 204 —
+    "이미 그 상태"를 에러로 보지 않는다.
+    """
+    node = await _load_mandala_node(repo, user.id, node_id)
+    habit = await habit_repo.get_active_by_goal_node(user.id, node.id)
+    if habit is not None:
+        await habit_repo.soft_delete(habit)
+        await session.commit()
+    return None
 
 
 @router.post("/{goal_id}/park")
