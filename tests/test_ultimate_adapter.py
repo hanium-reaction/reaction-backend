@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime, time
 from typing import Any
 from uuid import UUID
 
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.orchestrator import interview_catalog, ultimate_adapter
+from reaction_backend.schemas.common import KST, now_kst
 from reaction_backend.schemas.ultimate_goal import UltimateGoalOutcome
 from tests.conftest import DEMO_USER_UUID, FakeInterviewRepo
 
@@ -220,6 +222,27 @@ async def test_resolve_outcome_none_when_nothing_finished() -> None:
     assert result is None
 
 
+# ───────────────────── _deadline_from_horizon (ADR-0008 §2) ─────────────────
+
+
+def test_deadline_from_horizon_adds_years_to_today() -> None:
+    expected = now_kst().date().replace(year=now_kst().date().year + 5)
+    assert ultimate_adapter._deadline_from_horizon(5) == expected
+
+
+def test_deadline_from_horizon_none_when_no_horizon() -> None:
+    """ "기한 없음" 은 horizon_years=None 으로 넘어오고, 그대로 마감 없음이다."""
+    assert ultimate_adapter._deadline_from_horizon(None) is None
+
+
+def test_deadline_from_horizon_handles_leap_day(monkeypatch: Any) -> None:
+    """2/29 에 물어봤는데 N년 뒤가 평년이면 `date.replace` 가 ValueError — 2/28 로 보정."""
+    leap_today = datetime.combine(date(2028, 2, 29), time(), tzinfo=KST)  # 2028 은 윤년
+    monkeypatch.setattr(ultimate_adapter, "now_kst", lambda: leap_today)
+
+    assert ultimate_adapter._deadline_from_horizon(3) == date(2031, 2, 28)  # 2031 은 평년
+
+
 # ───────────────────── materialize_ultimate_goal (PR5) ─────────────────────
 
 
@@ -273,6 +296,33 @@ async def test_materialize_ultimate_goal_creates_new_row() -> None:
     assert goal.category == "other"
     assert goal.priority_level == 3  # refresh 없이도 응답에 바로 실을 수 있어야 한다
     assert session.added == [goal]  # 신규 생성만 add() 됨
+    # FULL_SLOT_ANSWERS 의 ultimate.horizon="5년"(ADR-0008 §2) — 프롬프트 문자열이 아니라
+    # 실제 Goal.deadline 이 된다.
+    assert goal.deadline == now_kst().date().replace(year=now_kst().date().year + 5)
+
+
+async def test_materialize_ultimate_goal_no_deadline_when_horizon_unbounded() -> None:
+    """ "기한 없음" 이면 Goal.deadline 도 그대로 None."""
+    slot_answers = {
+        **FULL_SLOT_ANSWERS,
+        "ultimate.horizon": {"type": "chip", "values": ["기한 없음"]},
+    }
+    outcome = ultimate_adapter.build_ultimate_outcome(
+        session_id="iv_no_horizon",
+        slot_answers=slot_answers,
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    session = _GoalSession()
+
+    goal = await ultimate_adapter.materialize_ultimate_goal(
+        session,  # type: ignore[arg-type]
+        user_id=DEMO_USER_UUID,
+        outcome=outcome,
+    )
+
+    assert goal.deadline is None
 
 
 async def test_materialize_ultimate_goal_reuses_existing_row() -> None:
@@ -284,6 +334,7 @@ async def test_materialize_ultimate_goal_reuses_existing_row() -> None:
     existing.is_ultimate = True
     existing.status = "active"
     existing.goal_tier = "parked"
+    existing.deadline = date(2020, 1, 1)  # 재인터뷰가 이 값을 갈아치우는지 확인용
     existing.archived_at = None
     session = _GoalSession(existing=existing)
 
@@ -294,4 +345,6 @@ async def test_materialize_ultimate_goal_reuses_existing_row() -> None:
     )
     assert goal is existing
     assert goal.title == "새 선언문"  # 갱신됨
+    # horizon 이 바뀌었을 수 있으니 재인터뷰 때마다 deadline 도 다시 계산한다(옛 값 안 남음).
+    assert goal.deadline == now_kst().date().replace(year=now_kst().date().year + 5)
     assert session.added == []  # 재사용(신규 add X)

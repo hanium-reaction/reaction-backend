@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
+from datetime import date
 from typing import Any, Literal, cast
 
 from sqlalchemy import select
@@ -191,6 +192,24 @@ async def resolve_outcome(
     )
 
 
+def _deadline_from_horizon(horizon_years: int | None) -> date | None:
+    """`ultimate.horizon`(3/5/7/10/10+ 년) → 실제 마감일(ADR-0008 §2).
+
+    지금까지 `horizon_years` 는 `mandala_adapter.context_from_ultimate` 의 프롬프트
+    문자열로만 쓰였다 — 실제 날짜가 된 적이 없어 계획 지평 계산(`_horizon_weeks`)이 만다라
+    유래 목표를 늘 "마감 없음"으로 봤다. "기한 없음"(`None`)이면 그대로 `None`.
+
+    2/29 + N년 뒤가 평년이면 `date.replace` 가 `ValueError` — 2/28 로 보정한다.
+    """
+    if horizon_years is None:
+        return None
+    today = now_kst().date()
+    try:
+        return today.replace(year=today.year + horizon_years)
+    except ValueError:
+        return today.replace(month=2, day=28, year=today.year + horizon_years)
+
+
 async def materialize_ultimate_goal(
     session: AsyncSession, *, user_id: uuid.UUID, outcome: UltimateGoalOutcome
 ) -> Goal:
@@ -217,6 +236,7 @@ async def materialize_ultimate_goal(
     if existing is not None:
         existing.title = outcome.statement
         existing.why_now = outcome.success_image
+        existing.deadline = _deadline_from_horizon(outcome.horizon_years)
         await session.flush()
         return existing
 
@@ -228,6 +248,7 @@ async def materialize_ultimate_goal(
     goal.status = "active"
     goal.is_ultimate = True
     goal.why_now = outcome.success_image
+    goal.deadline = _deadline_from_horizon(outcome.horizon_years)
     # DB server_default 를 믿지 않고 명시한다 — `schemas.goals.Goal.priority_level` 이
     # 필수(int, Optional 아님)라, refresh 없이 이 값을 바로 응답에 실어도 안전해야 한다.
     goal.priority_level = 3
