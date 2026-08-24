@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     String,
     text,
@@ -51,6 +52,17 @@ class Habit(Base, TimestampMixin, SoftDeleteMixin):
 
     __table_args__ = (
         CheckConstraint("frequency_per_week BETWEEN 1 AND 7", name="ck_habit_frequency_range"),
+        # 아래 인덱스는 마이그레이션 `9e9b9bd270af` 가 실제로 만든다 — 여기 선언은
+        # `alembic check`(모델 ↔ 마이그레이션 drift 검사)가 "모델에 없는 인덱스"로 오인해
+        # 제거 대상으로 잡는 걸 막기 위한 것(goal_node.py 의 같은 패턴 참고). `postgresql_where`
+        # 문자열은 그 마이그레이션 파일과 글자 단위로 맞춰야 한다.
+        Index("ix_habits_goal_node_id", "goal_node_id"),
+        Index(
+            "uq_habits_goal_node_id_active",
+            "goal_node_id",
+            unique=True,
+            postgresql_where=text("goal_node_id IS NOT NULL AND archived_at IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
