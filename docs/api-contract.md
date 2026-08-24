@@ -686,6 +686,19 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
   (`mandala_adapter.compute_weekly_stat`, 순수 함수) — `goal_nodes.progress` 컬럼을 안
   두는 것과 같은 이유. 마이그레이션 없음.
 
+다음 2주 제안 (ADR-0008 §8 "G"):
+- 응답에 `nextCycleProposals: NextCycleProposal[]`(빈 배열이 기본, 없으면 `[]`) —
+  `{ goalId, goalTitle, axisTitle? }`. `week_start` 와 무관하게 항상 **현재** 상태만 본다
+  (과거 주를 조회해도 이 카드는 지금 열어도 되는지를 말한다).
+- 대상은 승격된 만다라 축 목표 중 `status='active'`인 것. 판정: 그 목표의 **현재 활성**
+  계획 트리(`tree_kind='plan'`) leaf 에 매달린 action_item 중 (a) 남은(`planned`/
+  `in_progress`) 카드가 없고 (b) 종결(`done`/`partial_done`/`failed`/`over_done`) 카드가
+  하나 이상 있으면 제안. 카드 자체가 없으면(승인 직후 등) 제안하지 않는다
+  (`orchestrator/cycle_proposal.should_propose_next_cycle`).
+- **승인은 새 엔드포인트가 없다** — FE 는 기존 `POST /plans/generate`(바디 없이 호출하면
+  최근 완료 인터뷰를 자동 재투영) + `POST /plans/{id}/approve` 를 그대로 쓴다. 마감 없는
+  만다라 목표는 다시 2주로 캡된다(§8 "D").
+
 ---
 
 ## 14. Policy Snapshot (`/policy-snapshot`)

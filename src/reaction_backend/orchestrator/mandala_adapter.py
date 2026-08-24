@@ -665,6 +665,34 @@ async def fetch_promoted_goal_titles_for_user(
     return [g.title for g in result.scalars().all()]
 
 
+async def fetch_promoted_active_goals_for_user(
+    session: AsyncSession, user_id: uuid.UUID
+) -> list[Goal]:
+    """이 사용자가 만다라 축에서 승격해 **지금 실행 중인**(status='active') 목표들.
+
+    `fetch_promoted_goal_titles_for_user` 와 같은 판정(승격된 축 → Goal)이지만 이건
+    `status IN ('proposed','active')` 대신 `'active'` 만 통과시키고 `Goal.title` 이 아니라
+    행 자체를 돌려준다 — "다음 2주 열기" 제안(ADR-0008 §8 "G")은 실제로 계획을 승인해
+    실행 중인 목표에만 의미가 있다(`proposed` 는 아직 `/plans/generate` 조차 안 거쳐
+    action_item 이 없다). `.id` 로 `cycle_proposal.should_propose_next_cycle` 입력을 모은다.
+    """
+    stmt = (
+        select(Goal)
+        .join(GoalNode, GoalNode.promoted_goal_id == Goal.id)
+        .where(
+            GoalNode.tree_kind == "mandala",
+            GoalNode.depth == 1,
+            GoalNode.archived_at.is_(None),
+            Goal.user_id == user_id,
+            Goal.status == "active",
+            Goal.archived_at.is_(None),
+        )
+        .order_by(Goal.updated_at.desc())
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 async def find_active_axis_label(session: AsyncSession, user_id: uuid.UUID) -> str | None:
     """ "이번 주 굴리는 축" — 승격된 축 중 그 Goal 이 실제로 `active` 인 것의 제목.
 
@@ -702,6 +730,7 @@ __all__ = [
     "fetch_current_week_habit_instances",
     "fetch_habit_instances_for_week",
     "fetch_habits_for_nodes",
+    "fetch_promoted_active_goals_for_user",
     "fetch_promoted_axis_titles",
     "fetch_promoted_goal_titles_for_user",
     "find_active_axis_label",

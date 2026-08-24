@@ -316,6 +316,22 @@ def test_generate_weekly_review_includes_mandala_summary(
     assert resp.json()["mandala"]["completedThisWeek"] == 1
 
 
+# ────── GET /reviews/weekly — 다음 2주 제안 (ADR-0008 §8 "G") ──────
+#
+# `fetch_promoted_active_goals_for_user`/`fetch_action_items_for_leaf_nodes` 는 raw session
+# 을 쓰는데 `_FakeSession.execute()` 는 어떤 쿼리를 넣어도 항상 빈 결과다(HTTP 경계 한계,
+# `mandala.habits` 와 같은 이유 — `test_mandala_tree_route.py` 참고). 그래서 여기선 필드가
+# 항상 빈 배열로 안전하게 응답에 실리는지만 확인한다. 실제 판정 로직은
+# `test_cycle_proposal.py`(순수 함수) + `test_cycle_proposal_real_db.py`(실 DB, 과거 주기
+# 격리)가 이미 표로 검증했다.
+
+
+def test_get_weekly_next_cycle_proposals_field_present_and_empty(client: TestClient) -> None:
+    resp = _get(client, WEEK.isoformat())
+    assert resp.status_code == 200
+    assert resp.json()["nextCycleProposals"] == []
+
+
 # ───────────────────────── precompute cron ─────────────────────────
 
 

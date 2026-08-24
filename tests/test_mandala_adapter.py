@@ -731,3 +731,34 @@ async def test_find_active_axis_label_none_when_nothing_active() -> None:
     session = _NodeSession(nodes=[])
     label = await mandala_adapter.find_active_axis_label(session, GOAL_ID)  # type: ignore[arg-type]
     assert label is None
+
+
+# ───────────── fetch_promoted_active_goals_for_user (ADR-0008 §8 "G") ─────────────
+
+
+def _promoted_goal(*, title: str = "승격목표") -> Goal:
+    g = Goal()
+    g.id = uuid4()
+    g.title = title
+    return g
+
+
+async def test_fetch_promoted_active_goals_returns_seeded_rows() -> None:
+    goal = _promoted_goal(title="영어 회화")
+    session = _NodeSession(nodes=[goal])
+
+    goals = await mandala_adapter.fetch_promoted_active_goals_for_user(
+        session,  # type: ignore[arg-type]
+        uuid4(),
+    )
+
+    assert goals == [goal]
+
+
+async def test_fetch_promoted_active_goals_empty_when_none() -> None:
+    session = _NodeSession(nodes=[])
+    goals = await mandala_adapter.fetch_promoted_active_goals_for_user(
+        session,  # type: ignore[arg-type]
+        uuid4(),
+    )
+    assert goals == []

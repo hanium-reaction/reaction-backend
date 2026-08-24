@@ -385,3 +385,61 @@ async def test_fetch_promoted_goal_titles_excludes_non_promoted_goal(
     )
 
     assert titles == []
+
+
+# ── 7) fetch_promoted_active_goals_for_user — 다음 2주 제안 대상(ADR-0008 §8 "G") ──
+
+
+async def test_fetch_promoted_active_goals_includes_active_status(
+    real_db_session: AsyncSession,
+) -> None:
+    ultimate = await _seed_ultimate_goal(real_db_session)
+    promoted = await _promoted_goal(real_db_session, ultimate=ultimate, status="active")
+
+    goals = await mandala_adapter.fetch_promoted_active_goals_for_user(
+        real_db_session, ultimate.user_id
+    )
+
+    assert [g.id for g in goals] == [promoted.id]
+
+
+async def test_fetch_promoted_active_goals_excludes_proposed_status(
+    real_db_session: AsyncSession,
+) -> None:
+    """`fetch_promoted_goal_titles_for_user` 와 달리 'proposed' 는 대상이 아니다 — 아직
+    `/plans/generate` 조차 안 거쳐 action_item 이 없으니 판정 자체가 무의미하다."""
+    ultimate = await _seed_ultimate_goal(real_db_session)
+    await _promoted_goal(real_db_session, ultimate=ultimate, status="proposed")
+
+    goals = await mandala_adapter.fetch_promoted_active_goals_for_user(
+        real_db_session, ultimate.user_id
+    )
+
+    assert goals == []
+
+
+async def test_fetch_promoted_active_goals_excludes_archived_goal(
+    real_db_session: AsyncSession,
+) -> None:
+    ultimate = await _seed_ultimate_goal(real_db_session)
+    goal = await _promoted_goal(real_db_session, ultimate=ultimate, status="active")
+    goal.archived_at = goal.created_at
+    await real_db_session.flush()
+
+    goals = await mandala_adapter.fetch_promoted_active_goals_for_user(
+        real_db_session, ultimate.user_id
+    )
+
+    assert goals == []
+
+
+async def test_fetch_promoted_active_goals_scoped_to_user(real_db_session: AsyncSession) -> None:
+    mine = await _seed_ultimate_goal(real_db_session)
+    other = await _seed_ultimate_goal(real_db_session)
+    await _promoted_goal(real_db_session, ultimate=other, status="active")
+
+    goals = await mandala_adapter.fetch_promoted_active_goals_for_user(
+        real_db_session, mine.user_id
+    )
+
+    assert goals == []

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from datetime import date
+from uuid import UUID
 
 from pydantic import Field
 
@@ -46,6 +47,16 @@ class MandalaWeeklySummary(CamelModel):
     habits: list[MandalaHabitWeekStat] = Field(default_factory=list)
 
 
+class NextCycleProposal(CamelModel):
+    """다음 2주 열기 제안 1건 (ADR-0008 §8 "G") — 승인은 기존 `/plans/generate`(빈 바디)
+    + `/plans/{id}/approve` 를 그대로 쓴다. 이 카드는 새 엔드포인트를 만들지 않는다.
+    """
+
+    goal_id: UUID
+    goal_title: str
+    axis_title: str | None = None
+
+
 class WeeklyReviewResponse(CamelModel):
     """GET /reviews/weekly · generate 응답 — 룰 기반 주간 리뷰 카드 (S21)."""
 
@@ -67,6 +78,7 @@ class WeeklyReviewResponse(CamelModel):
     policy_update_candidates: list[dict[str, object]] = Field(default_factory=list)
 
     mandala: MandalaWeeklySummary | None = None
+    next_cycle_proposals: list[NextCycleProposal] = Field(default_factory=list)
 
     generated_at: KstDatetime
 
