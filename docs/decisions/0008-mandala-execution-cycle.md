@@ -230,7 +230,7 @@ nullable 이라 기존 행은 전부 NULL(= 만다라와 무관한 일반 습관
 |---|---|---|---|
 | **A** | `habits.goal_node_id` + 반복형 칸 ↔ 습관 링크 API. 만다라 칸 시트에서 "이건 반복" 선택 | 1건 | — |
 | **B** | 계획 인터뷰 `goals.heaviest` 가 승격된 만다라 축 목표를 동적 보기로 포함(§11 항목 6 "핵심 접합점" 마지막 이음매). 실행 트리는 여전히 `/plans/generate` 가 새로 만든다 | 0 | — |
-| **C** | `horizon_years` → `deadline` 확정 + 마일스톤 영속(ADR-0007 PR-2, `_archive_goal_nodes` 층 분리) | 0 | B |
+| **C** | `horizon_years` → `deadline` 확정 ✅ + 마일스톤 영속(ADR-0007 PR-2, `_archive_goal_nodes` 층 분리) ✅ | 0 | B |
 | **D** | 만다라 유래 goal 2주 rolling 창 + 커서 전진 | 0 | C |
 | **E** | 일요일 밤 리포트 — cron 시각 이동(잦은 폴 + idempotent), 만다라 지표 집계, `GET /reviews/weekly` 확장 | 0 | A·B |
 | **F** | 저녁 회고 알림 일요일 분기(문구·딥링크). 새 클래스 없음 | 0 | E |

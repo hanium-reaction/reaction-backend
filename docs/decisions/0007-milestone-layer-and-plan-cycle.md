@@ -220,18 +220,34 @@ UUID 로 확정한다. 이후 generate 는 제목이 아니라 `milestoneNodeId`
 
 한 PR = 한 가지(AGENTS §7). 전 구간 마이그레이션 0.
 
-| | 내용 | 위험 |
-|---|---|---|
-| 1 | 잘려나간 마일스톤 **고지** (§배경 ①) | 없음 — 구조 변경과 독립 |
-| 2 | 마일스톤 영속(`node_type='milestone'`) + `_archive_goal_nodes` 층 분리 + §11 프롬프트 | **높음** |
-| 3 | 진척 롤업(파생) = 주기 리뷰 | 낮음 |
-| 4 | 전환 제안 판정(§5) → 주간 리뷰 응답의 목표별 섹션 | 낮음 |
-| 5 | 다음 주기 Draft + 승인 (LLM 1회) | 중간 |
-| 6 | 마일스톤 재조정 HITL(§10) + 목표 완료(`status='completed'`) | 중간 |
+| | 내용 | 위험 | 상태 |
+|---|---|---|---|
+| 1 | 잘려나간 마일스톤 **고지** (§배경 ①) | 없음 — 구조 변경과 독립 | ✅ 완료 |
+| 2 | 마일스톤 영속(`node_type='milestone'`) + `_archive_goal_nodes` 층 분리 | **높음** | ✅ 완료(2026-08-24, ADR-0008 §8 "C") — §11 프롬프트는 아직(아래 참고) |
+| 3 | 진척 롤업(파생) = 주기 리뷰 | 낮음 | |
+| 4 | 전환 제안 판정(§5) → 주간 리뷰 응답의 목표별 섹션 | 낮음 | |
+| 5 | 다음 주기 Draft + 승인 (LLM 1회) | 중간 | |
+| 6 | 마일스톤 재조정 HITL(§10) + 목표 완료(`status='completed'`) | 중간 | |
 
 **2번이 이 설계의 관문이자 유일한 고위험 지점이다.** `_archive_goal_nodes` 가 막고 있던
 것은 "재승인 반복 시 트리 무한 누적"이라, 층을 쪼갤 때 그 방어가 유지되는지 실 DB
 테스트(`test_plan_supersede_sql.py` 계열)로 확인해야 한다.
+
+> **완료 메모(2026-08-24)**: 2번을 구현하며 이 문서가 열어두지 않았던 구조 결정을
+> 두 가지 내렸다.
+> 1. **마일스톤은 leaf 분해 트리와 부모-자식으로 얽지 않는다** — `parent_node_id=NULL`,
+>    `depth=1`(`subgoal`과 같은 깊이지만 `node_type` 으로 구분, `tree_kind` 로 만다라와
+>    나누는 것과 같은 원리). 매 주기 `_archive_goal_nodes` 가 교체하는 core/subgoal/leaf
+>    트리에 마일스톤이 걸려 있으면 그 트리가 archive 될 때 같이 끌려간다.
+> 2. **LLM 분해가 만든 branch 에서 역추적하지 않고, 사용자가 확인·편집한 원본
+>    `MilestoneDraft` 를 그대로 영속한다.** 분해는 세션 수 상한에 잘리거나 마일스톤을
+>    통째로 스킵할 수 있어(1번 PR 이 고지하는 바로 그 함정), LLM 출력에서 역산하면
+>    확정한 마일스톤 자체가 조용히 사라질 수 있다. `POST /plans/generate` 의 확정
+>    목록을 `plan_drafts.payload` 에 실어 승인 때 그대로 읽는다(`_persist_milestones_if_new`,
+>    한 번만 만들고 이미 있으면 조용히 무시).
+>
+> **§11(프롬프트에 총 가용 시간 싣기)은 이번에 안 했다** — 순수 LLM 프롬프트 튜닝이라
+> 영속화와 분리 가능하고, 이번 PR 은 고위험 지점(archive 층 분리) 하나에만 집중했다.
 
 ## 열어둔 것
 
@@ -245,7 +261,8 @@ UUID 로 확정한다. 이후 generate 는 제목이 아니라 `milestoneNodeId`
 ## 검증 (예정)
 
 - 마일스톤 truncation 고지 — 잘린 branch 가 `warnings` 에 실리는지 (PR-1)
-- 재승인 반복 시 마일스톤은 유지 · leaf 만 교체 · 트리 누적 없음 (실 DB, PR-2)
+- 재승인 반복 시 마일스톤은 유지 · leaf 만 교체 · 트리 누적 없음 (실 DB, PR-2) ✅
+  `tests/test_first_plan_milestones_real_db.py::test_reapproval_cycle_keeps_milestones_and_replaces_leaf_tree_only`
 - 진척 롤업이 보관된 leaf 까지 세는지 (PR-3)
 - 전환 제안 가드 3개 경계값 — 특히 "종결 세션 0건이면 제안 없음" (PR-4)
 - 라이브(실 LLM): 4주를 넘는 목표로 주기 2회 연속 — 마일스톤이 살아남고 커서가 전진하는지

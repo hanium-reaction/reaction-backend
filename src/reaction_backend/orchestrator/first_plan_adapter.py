@@ -1657,6 +1657,67 @@ async def supersede_previous_plan(
     return len(stale)
 
 
+async def _persist_milestones_if_new(
+    session: AsyncSession, *, goal_id: uuid.UUID, milestones: Sequence[MilestoneDraft]
+) -> list[GoalNode]:
+    """확정된 마일스톤(#milestones Stage B)을 `node_type='milestone'` 로 영속(ADR-0007 PR-2).
+
+    **한 번만 만든다.** 이미 이 goal 에 활성 마일스톤이 있으면(재승인·재계획) 손대지 않고
+    빈 리스트를 반환한다 — 매 승인마다 `_archive_goal_nodes` 로 통째로 갈아치우는
+    core/subgoal/leaf 층과 달리, 마일스톤은 "마감까지의 뼈대"라 주기를 넘어 살아남아야
+    한다(ADR-0007 §1). 두 번째 승인이 같은 목록을 다시 넣으려 하면(사용자가 재편집 없이
+    그냥 다시 승인) 조용히 무시 — 재편집(HITL 재조정)은 ADR-0007 PR-6, 이 함수의 범위
+    밖이다.
+
+    LLM 분해가 만든 branch 노드에서 역추적하지 않고 **사용자가 확인·편집한 원본
+    `MilestoneDraft` 를 그대로** 쓴다 — 분해는 세션 수 상한(`_MAX_LLM_SESSIONS`)에 잘리거나
+    마일스톤을 통째로 스킵할 수 있어(`missing_milestone_titles` 가 잡는 바로 그 함정),
+    LLM 출력에서 역산하면 사용자가 확정한 마일스톤 자체가 조용히 사라질 수 있다.
+
+    `parent_node_id=None` · `depth=1` — 매 주기 교체되는 core/subgoal/leaf 트리와
+    부모-자식으로 얽지 않는다(그 트리가 archive 될 때 같이 끌려가면 안 된다). subgoal 도
+    depth=1 이라 같은 depth 를 공유하지만 `node_type` 으로 구분된다(만다라가
+    `tree_kind` 로, 이건 `node_type` 으로 나누는 것과 같은 원리) — `GET /goals/{id}/nodes`
+    가 아직 이 둘을 섞어 반환한다는 뜻이라 FE 가 `nodeType` 으로 걸러야 한다.
+    leaf 가 어느 마일스톤에 속하는지 잇는 것(진척 롤업·주기 전환)은 이 함수의 범위 밖 —
+    ADR-0007 PR-3 이후.
+    """
+    if not milestones:
+        return []
+    existing_stmt = select(GoalNode).where(
+        GoalNode.goal_id == goal_id,
+        GoalNode.tree_kind == "plan",
+        GoalNode.node_type == "milestone",
+        GoalNode.archived_at.is_(None),
+    )
+    existing_rows = (await session.execute(existing_stmt)).scalars().all()
+    already_persisted = any(
+        n.goal_id == goal_id
+        and n.tree_kind == "plan"
+        and n.node_type == "milestone"
+        and n.archived_at is None
+        for n in existing_rows
+    )
+    if already_persisted:
+        return []
+    rows: list[GoalNode] = []
+    for i, m in enumerate(milestones):
+        n = GoalNode()
+        n.goal_id = goal_id
+        n.parent_node_id = None
+        n.title = m.title
+        n.node_type = "milestone"
+        n.depth = 1
+        n.order_index = i
+        n.is_leaf = False
+        n.tree_kind = "plan"
+        n.why_text = m.summary or None
+        session.add(n)
+        rows.append(n)
+    await session.flush()
+    return rows
+
+
 async def _archive_goal_nodes(session: AsyncSession, *, goal_id: uuid.UUID) -> int:
     """goal 의 기존 활성 **계획 분해** 트리를 보관 — 새 승인 트리가 '현재 트리'가 되게.
 
@@ -1669,19 +1730,31 @@ async def _archive_goal_nodes(session: AsyncSession, *, goal_id: uuid.UUID) -> i
     충돌(궁극목표와 계획 core_goals 제목이 겹침)이 성립하는 순간 만다라 73칸이 계획
     승인 한 번에 통째로 archived 된다. W3(`_mandala_owned_goal_ids`)가 그 충돌 자체를
     막지만, 이 필터는 그 방어가 뚫리거나 아직 적용되기 전 상태에서도 남는 두 번째 방어선.
+
+    `node_type != "milestone"` 도 뺀다(ADR-0007 PR-2) — 마일스톤은 주기를 넘어 살아남는
+    층이라, 매 승인이 갈아치우는 core/subgoal/leaf 와 같이 archive 되면 안 된다
+    (`_persist_milestones_if_new` 의 "한 번만 만든다"가 이 제외를 전제로 성립한다).
     """
     stmt = select(GoalNode).where(
         GoalNode.goal_id == goal_id,
         GoalNode.archived_at.is_(None),
         GoalNode.tree_kind == "plan",
+        GoalNode.node_type != "milestone",
     )
     rows = (await session.execute(stmt)).scalars().all()
     stale = [
-        n for n in rows if n.goal_id == goal_id and n.archived_at is None and n.tree_kind == "plan"
+        n
+        for n in rows
+        if n.goal_id == goal_id
+        and n.archived_at is None
+        and n.tree_kind == "plan"
+        and n.node_type != "milestone"
     ]
     archived_at = now_kst()
     for node in stale:
         node.archived_at = archived_at
+    if stale:
+        await session.flush()
     return len(stale)
 
 
@@ -1874,6 +1947,7 @@ async def _apply_once(
     action_items: Sequence[ActionItemDraft],
     blocks: Sequence[ScheduledBlockPreview],
     time_policies: Sequence[TimePolicyLike],
+    milestones: Sequence[MilestoneDraft] = (),
     on_success: Callable[[], Awaitable[None]] | None = None,
 ) -> FirstPlanSaveResult:
     """단일 가드 트랜잭션 1회 시도 — goals → goal_nodes → action_items → scheduled_blocks.
@@ -1926,8 +2000,12 @@ async def _apply_once(
         #      아무것도 지우지 않는다.
         await supersede_previous_plan(session, user_id=user_id, goal_id=heaviest.id)
         # 1.6) heaviest goal 의 기존 분해 트리 보관 — 노드도 카드/블록처럼 승인마다
-        #      새로 INSERT 되므로, 보관하지 않으면 같은 트리가 무한 누적된다.
+        #      새로 INSERT 되므로, 보관하지 않으면 같은 트리가 무한 누적된다. 마일스톤은
+        #      이 보관 대상에서 빠진다(ADR-0007 PR-2) — 아래에서 별도로, 없을 때만 만든다.
         await _archive_goal_nodes(session, goal_id=heaviest.id)
+        milestone_nodes = await _persist_milestones_if_new(
+            session, goal_id=heaviest.id, milestones=milestones
+        )
 
         # 2) goal_nodes — heaviest goal 트리. temp node_id → GoalNode (parent 는 relationship).
         depths = _node_depths(goal_nodes)
@@ -2011,7 +2089,7 @@ async def _apply_once(
 
     return FirstPlanSaveResult(
         goals=len(goal_rows),
-        goal_nodes=len(goal_nodes),
+        goal_nodes=len(goal_nodes) + len(milestone_nodes),
         action_items=len(action_by_node),
         scheduled_blocks=block_count,
     )
@@ -2027,6 +2105,7 @@ async def db_apply_first_plan(
     action_items: Sequence[ActionItemDraft],
     blocks: Sequence[ScheduledBlockPreview],
     time_policies: Sequence[TimePolicyLike],
+    milestones: Sequence[MilestoneDraft] = (),
     max_retries: int = MAX_SAVE_RETRIES,
     on_success: Callable[[], Awaitable[None]] | None = None,
 ) -> FirstPlanSaveResult:
@@ -2058,6 +2137,7 @@ async def db_apply_first_plan(
                 action_items=action_items,
                 blocks=blocks,
                 time_policies=time_policies,
+                milestones=milestones,
                 on_success=on_success,
             )
         except PolicyViolationError:

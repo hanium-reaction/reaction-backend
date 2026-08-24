@@ -174,6 +174,9 @@ class FirstPlanResponse(DraftMixin):
     warnings: list[str] = Field(default_factory=list)
     policy_violations: list[PolicyViolation] = Field(default_factory=list)
     generated_at: KstDatetime
+    # 승인 요청에 실어 보낸 확정 마일스톤을 그대로 되비춘다(additive) — 이걸 승인
+    # (approve_plan)이 읽어 node_type='milestone' 로 영속한다(ADR-0007 PR-2).
+    milestones: list[MilestoneDraft] = Field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

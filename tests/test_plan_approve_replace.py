@@ -22,6 +22,7 @@ from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.orchestrator.first_plan import _existing_busy_by_day
 from reaction_backend.orchestrator.first_plan_adapter import (
     _archive_goal_nodes,
+    _persist_milestones_if_new,
     db_apply_first_plan,
     supersede_previous_plan,
     superseded_card_ids,
@@ -39,6 +40,7 @@ from reaction_backend.schemas.interview import (
 from reaction_backend.schemas.planning import (
     ActionItemDraft,
     GoalNodeDraft,
+    MilestoneDraft,
     ScheduledBlockPreview,
 )
 
@@ -57,6 +59,9 @@ class _Result:
 
     def all(self) -> list[Any]:
         return list(self._rows)
+
+    def first(self) -> Any | None:
+        return self._rows[0] if self._rows else None
 
 
 class _EntitySession:
@@ -158,12 +163,12 @@ def _goal_row(title: str = "캡스톤", *, goal_id: UUID | None = None) -> Goal:
     return g
 
 
-def _node_row(goal_id: Any, *, tree_kind: str = "plan") -> GoalNode:
+def _node_row(goal_id: Any, *, tree_kind: str = "plan", node_type: str = "core") -> GoalNode:
     n = GoalNode()
     n.id = uuid4()
     n.goal_id = goal_id
     n.title = "이전 승인 트리 노드"
-    n.node_type = "core"
+    n.node_type = node_type
     n.depth = 0
     n.order_index = 0
     n.is_leaf = True
@@ -543,6 +548,155 @@ async def test_archive_goal_nodes_spares_mandala_tree() -> None:
     assert archived == 1
     assert plan_node.archived_at is not None  # 이전 계획 트리만 보관
     assert mandala_node.archived_at is None  # 만다라 트리는 불변
+
+
+# ─────────────── 마일스톤 영속 (ADR-0007 PR-2, _persist_milestones_if_new) ───────────────
+
+
+def _milestones(*titles: str) -> list[MilestoneDraft]:
+    return [MilestoneDraft(title=t, summary=f"{t} 요약") for t in titles]
+
+
+async def test_archive_goal_nodes_spares_milestone_nodes() -> None:
+    """`node_type='milestone'` 은 계획 트리 보관 대상에서 빠진다 — 주기를 넘어 살아남아야
+    하는 층이라 매 승인이 갈아치우는 core/subgoal/leaf 와 같이 archive 되면 안 된다."""
+    goal = _goal_row()
+    ephemeral_node = _node_row(goal.id, tree_kind="plan", node_type="core")
+    milestone_node = _node_row(goal.id, tree_kind="plan", node_type="milestone")
+    sess = _EntitySession(goals=[goal], nodes=[ephemeral_node, milestone_node])
+
+    archived = await _archive_goal_nodes(sess, goal_id=goal.id)  # type: ignore[arg-type]
+
+    assert archived == 1
+    assert ephemeral_node.archived_at is not None  # 매 주기 교체되는 층만 보관
+    assert milestone_node.archived_at is None  # 마일스톤은 불변
+
+
+async def test_persist_milestones_creates_nodes_when_none_exist() -> None:
+    goal = _goal_row()
+    sess = _EntitySession(goals=[goal])
+
+    rows = await _persist_milestones_if_new(
+        sess,  # type: ignore[arg-type]
+        goal_id=goal.id,
+        milestones=_milestones("기초 문법", "자료구조", "배포까지"),
+    )
+
+    assert [n.title for n in rows] == ["기초 문법", "자료구조", "배포까지"]
+    assert all(n.node_type == "milestone" for n in rows)
+    assert all(n.tree_kind == "plan" for n in rows)
+    assert all(n.depth == 1 and n.parent_node_id is None for n in rows)
+    assert [n.order_index for n in rows] == [0, 1, 2]
+    assert rows[0].why_text == "기초 문법 요약"
+    assert sess.added == rows
+
+
+async def test_persist_milestones_noop_when_list_empty() -> None:
+    """확정 마일스톤이 없으면(마일스톤 없이 진행) 아무것도 안 만든다."""
+    goal = _goal_row()
+    sess = _EntitySession(goals=[goal])
+
+    rows = await _persist_milestones_if_new(
+        sess,
+        goal_id=goal.id,
+        milestones=[],  # type: ignore[arg-type]
+    )
+
+    assert rows == []
+    assert sess.added == []
+
+
+async def test_persist_milestones_is_idempotent_when_already_persisted() -> None:
+    """이미 활성 마일스톤이 있으면(재승인) 새로 안 만들고 그대로 둔다 — 두 번째 승인이
+    같은 목록을 다시 보내도 중복 생성되지 않는다."""
+    goal = _goal_row()
+    existing_milestone = _node_row(goal.id, tree_kind="plan", node_type="milestone")
+    sess = _EntitySession(goals=[goal], nodes=[existing_milestone])
+
+    rows = await _persist_milestones_if_new(
+        sess,  # type: ignore[arg-type]
+        goal_id=goal.id,
+        milestones=_milestones("기초 문법", "자료구조"),
+    )
+
+    assert rows == []
+    assert sess.added == []
+    assert existing_milestone.title == "이전 승인 트리 노드"  # 손 안 댐
+
+
+async def test_persist_milestones_ignores_archived_milestones() -> None:
+    """보관된(archived) 마일스톤은 '있음'으로 안 친다 — 새로 만들 수 있어야 한다."""
+    goal = _goal_row()
+    archived_milestone = _node_row(goal.id, tree_kind="plan", node_type="milestone")
+    archived_milestone.archived_at = now_kst()
+    sess = _EntitySession(goals=[goal], nodes=[archived_milestone])
+
+    rows = await _persist_milestones_if_new(
+        sess,  # type: ignore[arg-type]
+        goal_id=goal.id,
+        milestones=_milestones("기초 문법"),
+    )
+
+    assert [n.title for n in rows] == ["기초 문법"]
+
+
+async def test_db_apply_first_plan_persists_milestones_alongside_new_tree() -> None:
+    """승인(approve) 경로 전체 — db_apply_first_plan 에 milestones 를 실으면 함께 영속된다."""
+    goal = _goal_row(goal_id=GOAL)
+    sess = _EntitySession(goals=[goal])
+    nodes, actions, blocks = _new_plan_parts()
+
+    result = await db_apply_first_plan(
+        sess,  # type: ignore[arg-type]
+        user_id=UID,
+        target_date=TARGET,
+        outcome=_outcome(),
+        goal_nodes=nodes,
+        action_items=actions,
+        blocks=blocks,
+        time_policies=[],
+        milestones=_milestones("기초 문법", "배포까지"),
+    )
+
+    milestone_nodes = [
+        n for n in sess.added if isinstance(n, GoalNode) and n.node_type == "milestone"
+    ]
+    assert [n.title for n in milestone_nodes] == ["기초 문법", "배포까지"]
+    # goal_nodes 카운트에 이번 4주 트리(1) + 마일스톤(2) 가 함께 잡힌다.
+    assert result.goal_nodes == 1 + 2
+
+
+async def test_db_apply_first_plan_reapproval_keeps_milestones_and_replaces_leaf_tree() -> None:
+    """재승인(같은 goal 을 다시 승인) — 마일스톤은 그대로, 이전 4주 트리만 교체된다.
+
+    "재승인"을 두 번째 `db_apply_first_plan` 호출로 흉내낸다 — DB 에 이미 있는 상태(마일스톤
+    + 이전 4주 트리)를 이 호출의 시드로 미리 넣어 둔다.
+    """
+    goal = _goal_row(goal_id=GOAL)  # outcome 의 '캡스톤' 과 제목이 같아 재사용된다
+    old_milestone = _node_row(goal.id, tree_kind="plan", node_type="milestone")
+    old_leaf_tree = _node_row(goal.id, tree_kind="plan", node_type="core")
+    sess = _EntitySession(goals=[goal], nodes=[old_milestone, old_leaf_tree])
+    nodes, actions, blocks = _new_plan_parts()
+
+    result = await db_apply_first_plan(
+        sess,  # type: ignore[arg-type]
+        user_id=UID,
+        target_date=TARGET,
+        outcome=_outcome(),
+        goal_nodes=nodes,
+        action_items=actions,
+        blocks=blocks,
+        time_policies=[],
+        milestones=_milestones("기초 문법", "배포까지"),  # 같은 목록을 다시 보냄
+    )
+
+    assert old_milestone.archived_at is None  # 마일스톤은 주기를 넘어 산다
+    assert old_leaf_tree.archived_at is not None  # 4주 트리는 매 승인 교체
+    new_milestone_nodes = [
+        n for n in sess.added if isinstance(n, GoalNode) and n.node_type == "milestone"
+    ]
+    assert new_milestone_nodes == []  # 중복 생성 없음
+    assert result.goal_nodes == 1  # 이번 승인이 새로 만든 건 4주 트리 1개뿐
 
 
 async def test_db_apply_finalize_runs_inside_guarded_transaction() -> None:

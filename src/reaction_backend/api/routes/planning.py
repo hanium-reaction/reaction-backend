@@ -107,6 +107,7 @@ from reaction_backend.schemas.planning import (
     FirstPlanGenerateRequest,
     FirstPlanResponse,
     GoalNodeDraft,
+    MilestoneDraft,
     MilestoneListResponse,
     PolicyViolation,
     ReplanBlockPreview,
@@ -246,6 +247,7 @@ def _build_payload(
     warnings: list[str],
     policy_violations: list[PolicyViolation],
     generated_at: datetime,
+    milestones: list[MilestoneDraft] | None = None,
 ) -> dict[str, Any]:
     return {
         "outcome": outcome.model_dump(mode="json"),
@@ -255,6 +257,10 @@ def _build_payload(
         "warnings": list(warnings),
         "policy_violations": [v.model_dump(mode="json") for v in policy_violations],
         "generated_at": generated_at.isoformat(),
+        # 사용자가 확인·편집해 확정한 마일스톤(#milestones Stage B) — 지금까지는 분해
+        # 프롬프트 힌트로만 쓰이고 버려졌다. 여기 실어 승인(approve_plan) 때 읽어
+        # node_type='milestone' 로 영속한다(ADR-0007 PR-2).
+        "milestones": [m.model_dump(mode="json") for m in (milestones or [])],
     }
 
 
@@ -275,6 +281,9 @@ def _draft_to_response(draft: PlanDraft) -> FirstPlanResponse:
             PolicyViolation.model_validate(v) for v in p.get("policy_violations", [])
         ],
         generated_at=datetime.fromisoformat(p["generated_at"]),
+        # .get 기본값 — 이 필드가 생기기 전에 저장된 Draft(72h TTL 이라도 무중단 배포 창에
+        # 걸릴 수 있다)를 역직렬화할 때 KeyError 로 죽지 않게.
+        milestones=[MilestoneDraft.model_validate(m) for m in p.get("milestones", [])],
     )
 
 
@@ -386,6 +395,7 @@ async def generate_plan(
             warnings=final["schedule_warnings"],
             policy_violations=gp.policy_violations if gp is not None else [],
             generated_at=now_kst(),
+            milestones=body.milestones,
         )
         draft = await draft_repo.create(
             user.id,
@@ -757,6 +767,7 @@ async def approve_plan(
             goal_nodes = [GoalNodeDraft.model_validate(n) for n in payload["goal_nodes"]]
             action_items = [ActionItemDraft.model_validate(a) for a in payload["action_items"]]
             blocks = [ScheduledBlockPreview.model_validate(b) for b in payload["blocks"]]
+            milestones = [MilestoneDraft.model_validate(m) for m in payload.get("milestones", [])]
             policies = first_plan_adapter.time_policies_from_outcome(outcome)
 
             async def _finalize(draft: PlanDraft = draft) -> None:
@@ -795,6 +806,7 @@ async def approve_plan(
                     action_items=action_items,
                     blocks=blocks,
                     time_policies=policies,
+                    milestones=milestones,
                     max_retries=1,  # 재시도는 이 라우터 루프가 lock 재획득과 함께 수행
                     on_success=_finalize,
                 )

@@ -518,6 +518,47 @@ def test_approve_persists_goal_tree(client: TestClient, monkeypatch: Any) -> Non
     assert j["activatedBlocks"] == 1
 
 
+def test_generate_echoes_confirmed_milestones_in_draft(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """generate 응답이 확정 마일스톤을 그대로 되비춘다 — approve 가 이걸 다시 읽어
+    영속한다(ADR-0007 PR-2)."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    body = _body(_outcome())
+    body["milestones"] = [
+        {"title": "기초 문법", "summary": "변수·조건문"},
+        {"title": "배포까지", "summary": ""},
+    ]
+
+    res = client.post("/plans/generate", json=body)
+
+    assert res.status_code == 200
+    milestones = res.json()["milestones"]
+    assert [m["title"] for m in milestones] == ["기초 문법", "배포까지"]
+
+
+def test_approve_persists_confirmed_milestones_as_nodes(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """generate(마일스톤 포함)→approve — 마일스톤이 activatedGoalNodes 에 함께 영속된다."""
+    action = ActionItemDraft(
+        node_id="n1", title="작업", estimated_minutes=30, category="study", first_step="시작"
+    )
+    monkeypatch.setattr(aiClient, "run", _stub(action_items=[action]))
+    body = _body(_outcome())
+    body["milestones"] = [
+        {"title": "기초 문법", "summary": ""},
+        {"title": "배포까지", "summary": ""},
+    ]
+    plan_id = client.post("/plans/generate", json=body).json()["planId"]
+
+    res = client.post(f"/plans/{plan_id}/approve")
+
+    assert res.status_code == 200
+    # 이번 4주 트리(1) + 마일스톤(2) = 3
+    assert res.json()["activatedGoalNodes"] == 3
+
+
 def _placeholder_outcome() -> InterviewOutcome:
     """goals.list 미입력 → core_goals 에 placeholder 1개 + unresolved_slots 기록 (#88)."""
     return InterviewOutcome(
