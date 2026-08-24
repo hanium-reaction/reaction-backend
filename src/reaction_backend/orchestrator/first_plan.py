@@ -84,6 +84,10 @@ class FirstPlanState(TypedDict):
     density: str
     # 사용자가 확정한 중간 목표(#milestones Stage B). 있으면 분해가 이걸 branch 로 고정.
     milestones: list[MilestoneDraft] | None
+    # 계획 지평 상한(주) — 기본 4주, 만다라 유래 목표(축 승격)는 2주(ADR-0008 §3).
+    # 호출자(routes/planning.py)가 이 goal 이 만다라에서 왔는지 판정해 넘긴다 — 이 그래프는
+    # DB 무관을 지키므로 여기서 직접 조회하지 않는다.
+    max_plan_weeks: int
 
     # VALIDATING
     missing_fields: list[str]
@@ -122,6 +126,7 @@ def initial_state(
     scope: Literal["week", "horizon"] = "horizon",
     density: str = "standard",
     milestones: list[MilestoneDraft] | None = None,
+    max_plan_weeks: int = first_plan_adapter.max_plan_weeks_for(is_mandala_derived=False),
 ) -> FirstPlanState:
     return FirstPlanState(
         user_id=user_id,
@@ -130,6 +135,7 @@ def initial_state(
         scope=scope,
         density=density,
         milestones=milestones,
+        max_plan_weeks=max_plan_weeks,
         missing_fields=[],
         tier_violation=None,
         materials_fetched=False,
@@ -296,6 +302,7 @@ async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> Firs
             density=state["density"],
             target_date=date.fromisoformat(state["target_date"]),
             fetched_materials=materials.text,
+            max_weeks=state["max_plan_weeks"],
         ),
     }
 
@@ -337,13 +344,21 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
         # 백스톱(#225). shape 이전에 빼야 세션 수 target 이 실제 실행 가능한 일로 채워진다.
         goal_plan, waiting_dropped = first_plan_adapter.drop_waiting_steps(goal_plan)
         goal_plan = first_plan_adapter.shape_action_plan(
-            state["outcome"], state["density"], goal_plan, target_date=target_day
+            state["outcome"],
+            state["density"],
+            goal_plan,
+            target_date=target_day,
+            max_weeks=state["max_plan_weeks"],
         )
         # 마감까지 못 미치면 회차 세션으로 보충 — 자르기만 하고 채우지 않아 두 달짜리 목표에
         # 일주일 계획만 나오던 문제(#coverage). 프롬프트로 1차 방어하되 순응에 걸지 않는다.
         before = len(goal_plan.action_items)
         goal_plan = first_plan_adapter.extend_action_plan_to_horizon(
-            state["outcome"], state["density"], goal_plan, target_date=target_day
+            state["outcome"],
+            state["density"],
+            goal_plan,
+            target_date=target_day,
+            max_weeks=state["max_plan_weeks"],
         )
         extended = len(goal_plan.action_items) - before
     return {
@@ -654,17 +669,18 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         warnings = [*warnings, waiting]
     # 회차 세션으로 마감까지 채웠으면 그 사실을 밝힌다 — 내용까지 지어낸 게 아님을 알 수 있게.
     extended = first_plan_adapter.coverage_extended_warning(
-        state.get("coverage_extended", 0), outcome.horizon
+        state.get("coverage_extended", 0), outcome.horizon, max_weeks=state["max_plan_weeks"]
     )
     if extended:
         warnings = [*warnings, extended]
-    # 계획이 마감까지 안 닿으면 **왜 그런지** 알린다. 8주 상한은 의도된 설계인데, 말해주지
-    # 않으면 마감 전에 끝난 계획을 사용자가 버그로 읽는다.
+    # 계획이 마감까지 안 닿으면 **왜 그런지** 알린다. 상한(만다라 유래면 2주, 아니면 4주)은
+    # 의도된 설계인데, 말해주지 않으면 마감 전에 끝난 계획을 사용자가 버그로 읽는다.
     last_planned_day = max((to_kst(b.interval.start).date() for b in placed), default=None)
     coverage = first_plan_adapter.horizon_coverage_notice(
         outcome,
         last_planned_day=last_planned_day,
         target_date=start_day,
+        max_weeks=state["max_plan_weeks"],
     )
     if coverage:
         warnings = [*warnings, coverage]

@@ -1172,6 +1172,99 @@ def test_horizon_coverage_notice_explains_why_plan_ends_early() -> None:
     )
 
 
+# ─────────── 만다라 유래 목표 2주 지평(ADR-0008 §3) — max_weeks 파라미터 ───────────
+
+
+def test_max_plan_weeks_for_mandala_vs_default() -> None:
+    assert first_plan_adapter.max_plan_weeks_for(is_mandala_derived=True) == 2
+    assert first_plan_adapter.max_plan_weeks_for(is_mandala_derived=False) == 4
+
+
+def test_horizon_session_target_respects_custom_max_weeks() -> None:
+    """max_weeks 를 안 넘기면 기존과 100% 동일(하위호환) — 넘기면 그 상한을 쓴다."""
+    outcome = _outcome_with(
+        "iv_mw",
+        **{
+            "goals.frequency": {"type": "chip", "values": ["매일"]},
+            "goals.deadlines": {"type": "text", "raw": "2026-09-30"},  # 9주 뒤
+        },
+    )
+    start = date(2026, 7, 28)
+
+    assert (
+        first_plan_adapter.horizon_session_target(outcome, "standard", target_date=start) == 28
+    )  # 기본 4주 캡 — 회귀 없음
+    assert (
+        first_plan_adapter.horizon_session_target(
+            outcome, "standard", target_date=start, max_weeks=2
+        )
+        == 14
+    )  # 매일 × 2주
+
+
+def test_context_from_outcome_prompt_vars_use_mandala_cap() -> None:
+    """만다라 유래 목표는 프롬프트에도 2주치로 계산된 숫자가 실린다 — LLM 이 4주치를
+
+    지어내지 않게(분해가 실제로 담을 양과 프롬프트가 말하는 양이 어긋나면 안 된다)."""
+    outcome = _outcome_with(
+        "iv_mw_ctx",
+        **{
+            "goals.frequency": {"type": "chip", "values": ["매일"]},
+            "goals.deadlines": {"type": "text", "raw": "2026-09-30"},
+        },
+    )
+    pv = first_plan_adapter.context_from_outcome(
+        outcome, target_date=date(2026, 7, 28), max_weeks=2
+    )["prompt_vars"]
+
+    assert pv["horizon_weeks"] == "2"
+    assert pv["total_sessions"] == "14"  # 7 × 2주 (상한 20 미만이라 그대로)
+    assert "2주" in pv["window_coverage"]
+
+
+def test_shape_and_extend_respect_mandala_cap() -> None:
+    """shape_action_plan(자르기)·extend_action_plan_to_horizon(보충) 둘 다 2주 기준으로 움직인다."""
+    outcome = _outcome_with(
+        "iv_mw_shape",
+        **{
+            "goals.frequency": {"type": "chip", "values": ["매일"]},
+            "goals.deadlines": {"type": "text", "raw": "2026-09-30"},
+        },
+    )
+    start = date(2026, 7, 28)
+
+    # LLM 이 20개를 냈어도 2주 캡(매일×2주=14)까지만 남긴다.
+    shaped = first_plan_adapter.shape_action_plan(
+        outcome, "standard", _decomposition(20), target_date=start, max_weeks=2
+    )
+    assert len(shaped.action_items) == 14
+
+    # LLM 이 5개만 냈으면 2주치(14)까지 보충한다 — 4주치(28)까지 채우면 안 된다.
+    extended = first_plan_adapter.extend_action_plan_to_horizon(
+        outcome, "standard", _decomposition(5), target_date=start, max_weeks=2
+    )
+    assert len(extended.action_items) == 14
+
+
+def test_horizon_coverage_notice_mentions_two_weeks_for_mandala_goal() -> None:
+    far = _outcome_with("iv_mw_cov", **{"goals.deadlines": {"type": "text", "raw": "2026-09-30"}})
+    start = date(2026, 7, 28)
+
+    capped = first_plan_adapter.horizon_coverage_notice(
+        far, last_planned_day=date(2026, 8, 10), target_date=start, max_weeks=2
+    )
+
+    assert capped is not None
+    assert "2주" in capped
+    assert "4주" not in capped
+
+
+def test_coverage_extended_warning_mentions_two_weeks_for_mandala_goal() -> None:
+    warning = first_plan_adapter.coverage_extended_warning(5, None, max_weeks=2)
+    assert warning is not None
+    assert "이번 계획 구간(2주)" in warning
+
+
 def test_materials_link_only_is_treated_as_no_content() -> None:
     """참고 자료가 **링크뿐**이면 '(없음)' 으로 내려 LLM 이 내용을 지어내지 못하게 한다.
 

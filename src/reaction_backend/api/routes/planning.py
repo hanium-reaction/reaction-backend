@@ -324,6 +324,20 @@ def _apply_edited_availability(outcome: InterviewOutcome, user: User) -> Intervi
     return outcome.model_copy(update={"availability": availability})
 
 
+async def _max_plan_weeks(session: AsyncSession, user_id: UUID, outcome: InterviewOutcome) -> int:
+    """이 계획의 heaviest 목표가 만다라 축에서 승격됐는지에 따라 계획 지평 상한을 정한다
+    (ADR-0008 §3). `first_plan_adapter`/`first_plan` 은 DB 무관을 지키므로 이 판정은
+    여기(라우터)에서 한다 — 만다라 축에서 왔으면 2주, 아니면 전역 기본(4주).
+    """
+    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), None)
+    if heaviest is None:
+        return first_plan_adapter.max_plan_weeks_for(is_mandala_derived=False)
+    promoted_titles = await mandala_adapter.fetch_promoted_goal_titles_for_user(session, user_id)
+    return first_plan_adapter.max_plan_weeks_for(
+        is_mandala_derived=heaviest.title in promoted_titles
+    )
+
+
 @router.post("/milestones")
 async def generate_milestones(
     body: FirstPlanGenerateRequest,
@@ -364,6 +378,7 @@ async def generate_plan(
     """
     outcome = _apply_edited_availability(await _resolve_outcome(body, user.id, repo), user)
     target_date = _resolve_target_date(body.target_date)
+    max_plan_weeks = await _max_plan_weeks(session, user.id, outcome)
 
     async with user_agent_lock(session, user.id, _LOCK_AGENT):
         config = _config(session, user.tone_mode)
@@ -374,6 +389,7 @@ async def generate_plan(
             scope=body.scope,
             density=body.density,
             milestones=body.milestones,
+            max_plan_weeks=max_plan_weeks,
         )
         # Validation Agent — LLM 분해 전에 Focus≤3 / Maintain≤5 게이트 (LLM 0회, 룰만).
         # 노드가 아니라 **순수 판정 함수**를 부른다: `validate_inputs` 는 #226 이후 참고

@@ -121,6 +121,21 @@ soft delete 하는 것이다.
 
 전환 판정은 ADR-0007 §5 의 가드 3개를 그대로 쓴다.
 
+> **완료 메모(2026-08-24)**: 구현하며 판정 대상을 정정했다. `_mandala_owned_goal_ids`
+> (만다라 트리를 **소유한** goal — 궁극목표 자신)는 W3 설계상 애초에 계획 생성 후보에서
+> **제외**되는 목표라, 이 기준으로는 절대 매치되지 않는다(궁극목표는 `/plans/generate`
+> 를 타지 않는다). 실제로 2주를 적용해야 하는 대상은 **만다라 축에서 승격된** goal —
+> `mandala_adapter.fetch_promoted_goal_titles_for_user`(ADR-0008 §8 "B" 에서 이미
+> 만든 함수)로 이 계획의 heaviest 제목이 승격 목록에 있는지 판정한다
+> (`routes/planning.py::_max_plan_weeks`). 캡 값 자체는
+> `first_plan_adapter.max_plan_weeks_for(is_mandala_derived=...)` 로 노출하고,
+> `_horizon_weeks`/`horizon_session_target`/`llm_session_target`/`context_from_outcome`/
+> `shape_action_plan`/`extend_action_plan_to_horizon`/`horizon_coverage_notice`/
+> `coverage_extended_warning` 전부에 `max_weeks` 파라미터(기본값 4주, 하위호환)를
+> 추가해 스케줄링 파이프라인 전체에 일관되게 흘려보냈다. `_schedule_end`(배치 종료일
+> 계산)는 손대지 않았다 — 실제 배치 창은 이미 세션 수(`density_end`)에서 파생되므로
+> 세션 수가 줄면 배치 창도 자연히 좁아진다.
+
 ---
 
 ## 4. 일요일 밤 리포트 — 새 알림 클래스를 만들지 않는다
@@ -231,7 +246,7 @@ nullable 이라 기존 행은 전부 NULL(= 만다라와 무관한 일반 습관
 | **A** | `habits.goal_node_id` + 반복형 칸 ↔ 습관 링크 API. 만다라 칸 시트에서 "이건 반복" 선택 | 1건 | — |
 | **B** | 계획 인터뷰 `goals.heaviest` 가 승격된 만다라 축 목표를 동적 보기로 포함(§11 항목 6 "핵심 접합점" 마지막 이음매). 실행 트리는 여전히 `/plans/generate` 가 새로 만든다 | 0 | — |
 | **C** | `horizon_years` → `deadline` 확정 ✅ + 마일스톤 영속(ADR-0007 PR-2, `_archive_goal_nodes` 층 분리) ✅ | 0 | B |
-| **D** | 만다라 유래 goal 2주 rolling 창 + 커서 전진 | 0 | C |
+| **D** | 만다라 유래 goal 2주 rolling 창 ✅(2026-08-24) — "커서 전진"은 재생성 시점이 항상 '지금'이라는 사실에서 자연히 나온다(자동 재생성 크론은 §8 "G" 범위) | 0 | C |
 | **E** | 일요일 밤 리포트 — cron 시각 이동(잦은 폴 + idempotent), 만다라 지표 집계, `GET /reviews/weekly` 확장 | 0 | A·B |
 | **F** | 저녁 회고 알림 일요일 분기(문구·딥링크). 새 클래스 없음 | 0 | E |
 | **G** | 다음 2주 Draft 제안 + 승인 (ADR-0007 PR-5) | 0 | D·E |

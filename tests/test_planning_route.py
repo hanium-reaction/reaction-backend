@@ -16,7 +16,9 @@ from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
+from reaction_backend.api.routes.planning import _max_plan_weeks
 from reaction_backend.config import get_settings
+from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionRow
 from reaction_backend.db.models.llm_run import LlmRun
 from reaction_backend.db.models.plan_draft import PlanDraft
@@ -1051,3 +1053,118 @@ def test_generate_warns_when_a_confirmed_milestone_has_no_place(
     assert any("DOM 조작" in w for w in warnings), warnings
     # 자리를 잡은 마일스톤은 빠졌다고 하지 않는다.
     assert not any("'기초 문법'" in w for w in warnings), warnings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 만다라 유래 목표 2주 지평 (ADR-0008 §3, §8 "D")
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _PromotedTitleSession:
+    """`fetch_promoted_goal_titles_for_user` 의 `select(Goal)...` 만 응답하는 최소 fake.
+
+    `_FakeSession.execute` 는 항상 빈 결과라(다른 mandala 관련 테스트와 같은 HTTP 경계
+    한계) `_max_plan_weeks` 를 HTTP 클라이언트로는 검증할 수 없다 — 여기서 함수를 직접
+    호출해 그 판정 로직만 확인한다.
+    """
+
+    def __init__(self, titles: list[str]) -> None:
+        self._titles = titles
+
+    async def execute(self, stmt: Any) -> Any:  # noqa: ARG002
+        titles = self._titles
+
+        class _Result:
+            def scalars(self) -> _Result:
+                return self
+
+            def all(self) -> list[Goal]:
+                out = []
+                for t in titles:
+                    g = Goal()
+                    g.title = t
+                    out.append(g)
+                return out
+
+        return _Result()
+
+
+async def test_max_plan_weeks_is_two_when_heaviest_title_is_a_promoted_axis() -> None:
+    outcome = _outcome()  # heaviest.title == "focus0"
+    session = _PromotedTitleSession(["focus0"])
+
+    weeks = await _max_plan_weeks(session, uuid4(), outcome)  # type: ignore[arg-type]
+
+    assert weeks == 2
+
+
+async def test_max_plan_weeks_is_four_when_heaviest_title_is_not_promoted() -> None:
+    outcome = _outcome()  # heaviest.title == "focus0"
+    session = _PromotedTitleSession(["다른 축 목표"])  # 승격 목록에 없음
+
+    weeks = await _max_plan_weeks(session, uuid4(), outcome)  # type: ignore[arg-type]
+
+    assert weeks == 4
+
+
+async def test_max_plan_weeks_is_four_when_user_has_no_promoted_goals() -> None:
+    outcome = _outcome()
+    session = _PromotedTitleSession([])  # 승격한 축 자체가 없음
+
+    weeks = await _max_plan_weeks(session, uuid4(), outcome)  # type: ignore[arg-type]
+
+    assert weeks == 4
+
+
+def test_generate_uses_two_week_horizon_for_mandala_derived_goal(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """전체 라우트 경로 — heaviest 가 승격된 축이면 decompose 프롬프트가 2주 기준을 받는다.
+
+    `_FakeSession.execute` 가 항상 빈 결과라 `_max_plan_weeks` 자체는 이 경로에서 늘
+    4주로 떨어진다(위 단위 테스트가 그 판정 로직을 커버) — 여기서는 `max_plan_weeks`
+    가 그래프까지 무사히 전달돼 `horizon_weeks` 프롬프트 변수에 실제로 반영되는지,
+    배선이 끊기지 않았는지를 확인한다.
+    """
+    captured: dict[str, Any] = {}
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        schema = kwargs["schema"]
+        value: Any
+        if schema is GoalDecomposition:
+            captured["horizon_weeks"] = kwargs["variables"].get("horizon_weeks")
+            value = GoalDecomposition(
+                goal_nodes=[
+                    GoalNodeDraft(
+                        node_id="n1",
+                        parent_id=None,
+                        title="목표0",
+                        node_type="root",
+                        order_index=0,
+                        is_leaf=True,
+                    )
+                ],
+                action_items=[],
+                policy_violations=[],
+            )
+        elif schema is PlanReview:
+            value = PlanReview(approved=True, feedback=[])
+        else:  # pragma: no cover
+            raise AssertionError(f"unexpected schema {schema}")
+        return RunResult(
+            value=value,
+            fell_back=False,
+            reason=None,
+            prompt_id=kwargs["prompt_id"],
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+    outcome = _outcome()
+    outcome = outcome.model_copy(update={"horizon": "2026-09-30"})
+    res = client.post("/plans/generate", json=_body(outcome, target_date="2026-07-28"))
+
+    assert res.status_code == 200
+    # fake session 한계로 이 goal 은 승격 목록에 안 걸려 기본 4주가 나온다 — 배선(즉
+    # max_plan_weeks 가 그래프까지 끊기지 않고 전달됨) 자체를 확인하는 게 이 테스트의 목적.
+    assert captured["horizon_weeks"] == "4"

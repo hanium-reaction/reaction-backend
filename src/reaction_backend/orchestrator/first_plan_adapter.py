@@ -363,6 +363,24 @@ def normalize_action_minutes(
 # 20세션 타임아웃). 계획 지평을 한 달로 묶으면 그 벽에서 멀어진다.
 _MAX_PLAN_WEEKS = 4
 
+# 만다라 유래 목표(축 승격, ADR-0008 §8 "B") 전용 상한 — ADR-0008 §3. 전역 4주는 그대로
+# 두고(기존 인터뷰 경로·문구·테스트가 전부 묶여 있어 전역 변경은 이 범위 밖 회귀를 부른다),
+# 이 목표들만 2주로 좁힌다. "2주마다 한 번"이 아니라 "매번 다시 생성할 때마다 target_date
+# 기준 앞으로 2주" — 커서 전진은 별도 크론 없이 재생성 시점이 항상 '지금'이라는 사실에서
+# 자연히 나온다(다음 주기 자동 제안은 §8 "G", 이 상수와는 독립).
+_MANDALA_MAX_PLAN_WEEKS = 2
+
+
+def max_plan_weeks_for(*, is_mandala_derived: bool) -> int:
+    """계획 지평 상한 — 만다라 유래 목표는 2주, 그 외 전역 기본 4주(ADR-0008 §3).
+
+    호출자(`routes/planning.py`)가 이 목표가 만다라 축에서 승격됐는지
+    (`mandala_adapter.fetch_promoted_goal_titles_for_user`) 판정해 넘긴다 — 이 모듈은
+    DB 무관을 지키므로 여기서 직접 조회하지 않는다.
+    """
+    return _MANDALA_MAX_PLAN_WEEKS if is_mandala_derived else _MAX_PLAN_WEEKS
+
+
 # 분해 LLM 한 번에 **요구할** 최대 세션 수. 계획 지평(_MAX_PLAN_WEEKS)과 별개다 —
 # 지평은 '얼마나 멀리 배치하는가', 이건 '한 호출에 몇 개를 지어내라고 시키는가'.
 #
@@ -378,45 +396,64 @@ _MAX_LLM_SESSIONS = 20
 
 
 def horizon_session_target(
-    outcome: InterviewOutcome, density: str, *, target_date: date | None = None
+    outcome: InterviewOutcome,
+    density: str,
+    *,
+    target_date: date | None = None,
+    max_weeks: int = _MAX_PLAN_WEEKS,
 ) -> int:
     """마감까지(계획 지평 안에서) 필요한 총 세션 수 — 배치·보충이 목표로 삼는 값."""
-    return target_sessions_per_week(outcome, density) * _horizon_weeks(target_date, outcome.horizon)
+    return target_sessions_per_week(outcome, density) * _horizon_weeks(
+        target_date, outcome.horizon, max_weeks=max_weeks
+    )
 
 
 def llm_session_target(
-    outcome: InterviewOutcome, density: str, *, target_date: date | None = None
+    outcome: InterviewOutcome,
+    density: str,
+    *,
+    target_date: date | None = None,
+    max_weeks: int = _MAX_PLAN_WEEKS,
 ) -> int:
     """분해 LLM 에 **요구할** 세션 수 — 지평 목표를 `_MAX_LLM_SESSIONS` 로 묶은 값."""
-    return min(horizon_session_target(outcome, density, target_date=target_date), _MAX_LLM_SESSIONS)
+    return min(
+        horizon_session_target(outcome, density, target_date=target_date, max_weeks=max_weeks),
+        _MAX_LLM_SESSIONS,
+    )
 
 
-def _horizon_weeks(target_date: date | None, horizon: str | None) -> int:
-    """target_date~마감(horizon)이 몇 주인지 (최소 1, 최대 _MAX_PLAN_WEEKS).
+def _horizon_weeks(
+    target_date: date | None, horizon: str | None, *, max_weeks: int = _MAX_PLAN_WEEKS
+) -> int:
+    """target_date~마감(horizon)이 몇 주인지 (최소 1, 최대 max_weeks).
 
-    **마감이 없으면 지평 전체(_MAX_PLAN_WEEKS)** 로 본다. '마감 없음' 은 *짧다* 가 아니라
+    **마감이 없으면 지평 전체(max_weeks)** 로 본다. '마감 없음' 은 *짧다* 가 아니라
     *끝이 없다* 는 뜻인데, 예전엔 1주를 돌려줘 정반대로 해석했다 — 습관형 목표('매일 운동',
     '주 3회 러닝')가 3세션 / 7일짜리 계획을 받고 끝났다(실측: 주 3회 습관 → 블록 3개).
     마감 있는 목표는 4주를 받는데 습관만 1주라, 사용자에게는 계획이 안 만들어진 것으로 보인다.
 
+    `max_weeks` 기본값은 전역 상한(`_MAX_PLAN_WEEKS`, 4주) — 만다라 유래 목표는 호출자가
+    `max_plan_weeks_for(is_mandala_derived=True)`(2주)를 넘긴다(ADR-0008 §3).
+
     `target_date` 자체가 없으면 계산할 기준이 없으므로 1주(하위호환) — 이 경로는 호출자가
     날짜를 안 넘긴 단위 테스트용이다.
 
-    **이미 지난 마감은 1주** (#231). '마감 없음'(4주)과 같이 취급하면 안 된다 — 마감 없음은
-    *끝이 없다* 지만 지난 마감은 *늦었다* 라, 한 달치를 새로 벌이는 게 아니라 따라잡을 만큼만
-    잡는 게 맞다. 예전에도 `max(days, 0)` 덕에 값은 1주였지만 그건 우연이라, 의도로 못 박는다.
+    **이미 지난 마감은 1주** (#231). '마감 없음'(max_weeks)과 같이 취급하면 안 된다 —
+    마감 없음은 *끝이 없다* 지만 지난 마감은 *늦었다* 라, 한 달치를 새로 벌이는 게 아니라
+    따라잡을 만큼만 잡는 게 맞다. 예전에도 `max(days, 0)` 덕에 값은 1주였지만 그건 우연이라,
+    의도로 못 박는다.
     """
     if target_date is None:
         return 1
     if not horizon:
-        return _MAX_PLAN_WEEKS
+        return max_weeks
     try:
         days = (date.fromisoformat(horizon) - target_date).days
     except ValueError:
         return 1
     if days < 0:
         return 1
-    return max(1, min(_MAX_PLAN_WEEKS, -(-days // 7)))
+    return max(1, min(max_weeks, -(-days // 7)))
 
 
 def is_overdue_deadline(horizon: str | None, start_day: date) -> bool:
@@ -439,6 +476,7 @@ def shape_action_plan(
     goal_plan: GoalDecomposition,
     *,
     target_date: date | None = None,
+    max_weeks: int = _MAX_PLAN_WEEKS,
 ) -> GoalDecomposition:
     """분해 결과를 목표별 세션 길이·주당 시간에 맞춰 결정적으로 다듬는다(#per-goal 준수 보장).
 
@@ -459,7 +497,9 @@ def shape_action_plan(
         heaviest.frequency_per_week and heaviest.frequency_per_week > 0
     )
     if has_rate:
-        max_sessions = horizon_session_target(outcome, density, target_date=target_date)
+        max_sessions = horizon_session_target(
+            outcome, density, target_date=target_date, max_weeks=max_weeks
+        )
         if len(items) > max_sessions:
             items = items[:max_sessions]
             nodes = _prune_to_leaves(nodes, {a.node_id for a in items})
@@ -598,6 +638,7 @@ def extend_action_plan_to_horizon(
     goal_plan: GoalDecomposition,
     *,
     target_date: date | None = None,
+    max_weeks: int = _MAX_PLAN_WEEKS,
 ) -> GoalDecomposition:
     """분해가 마감까지 못 미치면 **이어가는 회차 세션**으로 채운다.
 
@@ -627,7 +668,9 @@ def extend_action_plan_to_horizon(
     if any(v.reason == _VOLUME_BELOW_HORIZON for v in goal_plan.policy_violations):
         return goal_plan
 
-    target_total = horizon_session_target(outcome, density, target_date=target_date)
+    target_total = horizon_session_target(
+        outcome, density, target_date=target_date, max_weeks=max_weeks
+    )
     have = len(goal_plan.action_items)
     if have >= target_total * _COVERAGE_FLOOR_RATIO:
         return goal_plan
@@ -677,16 +720,21 @@ _HORIZON_COVERED_SLACK_DAYS = 3
 
 
 def horizon_coverage_notice(
-    outcome: InterviewOutcome, *, last_planned_day: date | None, target_date: date
+    outcome: InterviewOutcome,
+    *,
+    last_planned_day: date | None,
+    target_date: date,
+    max_weeks: int = _MAX_PLAN_WEEKS,
 ) -> str | None:
     """계획이 마감까지 닿지 않을 때 **왜 그런지** 알려주는 문구. 닿으면 None.
 
     이게 없으면 사용자는 마감이 9/30 인데 계획이 9/21 에서 끝난 걸 보고 **버그로 읽는다**.
-    한 번에 계획하는 기간에 상한(`_MAX_PLAN_WEEKS`)을 둔 건 의도된 설계이므로 — 먼 미래를
-    자리표시자로 채우는 대신 매주 재계획이 이어간다 — 그 의도를 말해줘야 한다.
+    한 번에 계획하는 기간에 상한(`max_weeks`)을 둔 건 의도된 설계이므로 — 먼 미래를
+    자리표시자로 채우는 대신 매주 재계획이 이어간다 — 그 의도를 말해줘야 한다. 만다라
+    유래 목표는 이 상한이 2주라(ADR-0008 §3) 문구도 그 숫자를 그대로 말한다.
 
     두 가지 이유를 구분한다:
-    1) 상한에 걸림(마감까지 8주 초과) — "이번엔 N주치까지, 나머지는 매주 이어서".
+    1) 상한에 걸림(마감까지 상한 초과) — "이번엔 N주치까지, 나머지는 매주 이어서".
     2) 목표 분량이 거기까지 — 유한한 목표라 마감 전에 할 일이 끝나는 정상 상황.
     """
     if not outcome.horizon or last_planned_day is None:
@@ -702,11 +750,11 @@ def horizon_coverage_notice(
     # 캡 판정은 올림(그 주 수만큼 '필요' 하므로), 사용자에게 보여줄 숫자는 반올림
     # (64일을 '약 10주' 라고 하면 과장이라 '약 9주' 로 읽히게).
     weeks_to_deadline = max(1, -(-days_to_deadline // 7))
-    if weeks_to_deadline > _MAX_PLAN_WEEKS:
+    if weeks_to_deadline > max_weeks:
         return (
             f"마감({outcome.horizon})까지는 약 {round(days_to_deadline / 7)}주인데, "
             "한 번에 세우는 계획은 "
-            f"{_MAX_PLAN_WEEKS}주까지만 잡아요. 그래서 이번 계획은 {last_planned_day} 까지고, "
+            f"{max_weeks}주까지만 잡아요. 그래서 이번 계획은 {last_planned_day} 까지고, "
             "그 뒤는 매주 재계획에서 진행 상황을 보고 이어서 채웁니다 — 빠뜨린 게 아니에요."
         )
     return (
@@ -740,15 +788,18 @@ def overdue_deadline_notice(
     )
 
 
-def coverage_extended_warning(added: int, horizon: str | None) -> str | None:
+def coverage_extended_warning(
+    added: int, horizon: str | None, *, max_weeks: int = _MAX_PLAN_WEEKS
+) -> str | None:
     """회차 세션으로 보충했음을 알리는 문구 — 내용까지 지어낸 게 아님을 분명히 한다.
 
     마감 없는 습관형도 보충 대상이라 horizon 이 없을 수 있다 — 그때 "마감까지" 라고 쓰면
-    없는 마감을 지어내는 셈이라, 계획 지평(4주) 기준으로 말한다.
+    없는 마감을 지어내는 셈이라, 계획 지평(`max_weeks`, 기본 4주 · 만다라 유래 목표는
+    2주) 기준으로 말한다.
     """
     if added <= 0:
         return None
-    until = f"{horizon}" if horizon else f"이번 계획 구간({_MAX_PLAN_WEEKS}주)"
+    until = f"{horizon}" if horizon else f"이번 계획 구간({max_weeks}주)"
     return (
         f"{until}까지 채우려고 '이어가기' 회차 {added}개를 덧붙였어요. "
         "회차의 구체적인 내용은 매주 재계획에서 그때 진행 상황에 맞춰 채워집니다 — "
@@ -963,6 +1014,7 @@ def context_from_outcome(
     density: str = "standard",
     target_date: date | None = None,
     fetched_materials: str | None = None,
+    max_weeks: int = _MAX_PLAN_WEEKS,
 ) -> dict[str, Any]:
     """InterviewOutcome → First Plan 컨텍스트 dict.
 
@@ -974,12 +1026,13 @@ def context_from_outcome(
     availability / preferences 원본 객체도 함께 실어 룰 스케줄러 어댑터가 재사용.
     `density` 는 생성 요청에서 온 계획 분량 프리셋 — '주당 세션 수' 하한으로 프롬프트에 전개.
     `target_date` 는 계획 시작일 — 마감까지 남은 주 수·총 세션 수를 계산해 프롬프트에 싣는다
-    (미지정이면 1주치로 본다).
+    (미지정이면 1주치로 본다). `max_weeks` 는 계획 지평 상한(기본 4주) — 만다라 유래
+    목표는 호출자가 2주를 넘긴다(`max_plan_weeks_for`, ADR-0008 §3).
     """
     goals = outcome.core_goals
     heaviest = next((g for g in goals if g.is_heaviest), goals[0])
     per_week = target_sessions_per_week(outcome, density)
-    horizon_weeks = _horizon_weeks(target_date, outcome.horizon)
+    horizon_weeks = _horizon_weeks(target_date, outcome.horizon, max_weeks=max_weeks)
     window_coverage = _window_coverage(target_date, outcome.horizon, horizon_weeks)
 
     # 시간 배치·일정 충돌은 룰 스케줄러(schedule_blocks)가 전담하므로 decompose 프롬프트에
@@ -1025,7 +1078,9 @@ def context_from_outcome(
         "window_coverage": window_coverage,
         # 한 호출에 요구하는 양은 _MAX_LLM_SESSIONS 로 묶는다. 넘기면 타임아웃 → 룰 폴백 →
         # 전 구간 자리표시자가 되기 때문. 초과분은 배치 단계에서 '이어가기' 회차로 채운다.
-        "total_sessions": str(llm_session_target(outcome, density, target_date=target_date)),
+        "total_sessions": str(
+            llm_session_target(outcome, density, target_date=target_date, max_weeks=max_weeks)
+        ),
     }
 
     return {
