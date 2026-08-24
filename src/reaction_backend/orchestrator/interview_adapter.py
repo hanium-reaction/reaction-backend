@@ -204,11 +204,19 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
 
     core_goals 는 min_length=1 계약이므로 비어 있으면 placeholder 1개를 둔다
     (unresolved_slots 에 'goals.list' 가 이미 기록되어 First Plan 이 보완 분기).
+
+    `heaviest` 가 `titles` 에 없을 수 있다 — `goals.heaviest` 의 chip 보기가
+    `goals.list` 응답뿐 아니라 승격된 만다라 축 목표도 함께 내려가기 때문이다
+    (`routes/interview.py::_question_options`, ADR-0008 §8 "B"). 여기서 합쳐 두지
+    않으면 사용자가 그 보기를 고른 순간 `is_heaviest` 가 어떤 후보에도 안 붙어
+    (title 매칭 실패) 마감·주당시간 등 heaviest 전용 필드가 통째로 유실된다.
     """
     titles = _text_items(slot_answers.get("goals.list"))
     heaviest = _first(_chip_values(slot_answers.get("goals.heaviest"))) or _first(
         _text_items(slot_answers.get("goals.heaviest"))
     )
+    if heaviest and heaviest not in titles:
+        titles = [*titles, heaviest]
     deadline = _text_raw(slot_answers.get("goals.deadlines"))  # date_picker → raw "YYYY-MM-DD"
     success_image = _text_raw(slot_answers.get("goals.success_image"))
     why_now = _text_raw(slot_answers.get("goals.why_now"))

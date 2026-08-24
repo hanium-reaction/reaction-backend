@@ -115,6 +115,28 @@ def test_build_outcome_projects_required_slots() -> None:
     assert outcome.unresolved_slots == []  # 필수 슬롯 모두 채움
 
 
+def test_build_outcome_backfills_heaviest_when_absent_from_typed_goals_list() -> None:
+    """goals.heaviest 가 goals.list 응답엔 없어도(만다라 승격 목표를 골랐을 때, ADR-0008
+    §8 "B" — `routes/interview.py::_question_options` 가 goals.list 밖 제목도 보기로
+    내려준다) is_heaviest 후보로 살아남는다. title 매칭 실패로 heaviest 전용 필드가
+    통째로 유실되면 마감·주당시간 같은 값이 조용히 사라진다."""
+    answers = {**SLOT_ANSWERS, "goals.heaviest": {"type": "text", "raw": "메이저리그 드래프트"}}
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_mandala",
+        slot_answers=answers,
+        ambiguity_final=0.0,
+        end_reason="completed",
+        analysis_source="llm",
+    )
+    titles = {g.title for g in outcome.core_goals}
+    assert "메이저리그 드래프트" in titles  # goals.list 엔 없던 제목인데도 후보에 포함됐다
+    assert {"캡스톤", "토익"} <= titles  # goals.list 에 있던 목표들은 그대로 유지(maintain)
+    heaviest = next(g for g in outcome.core_goals if g.is_heaviest)
+    assert heaviest.title == "메이저리그 드래프트"
+    assert heaviest.tentative_tier == "focus"
+    assert heaviest.deadline == "2026-06-20"  # heaviest 전용 필드도 여전히 승계됨
+
+
 def test_build_outcome_defaults_and_unresolved_when_empty() -> None:
     """early_finish/정체로 빈 슬롯 — 안전 default + unresolved_slots 기록, core_goals≥1 보장."""
     outcome = interview_adapter.build_outcome(

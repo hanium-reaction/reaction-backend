@@ -521,6 +521,41 @@ async def fetch_promoted_axis_titles(
     return {n.promoted_goal_id: n.title for n in rows if n.promoted_goal_id is not None}
 
 
+async def fetch_promoted_goal_titles_for_user(
+    session: AsyncSession, user_id: uuid.UUID
+) -> list[str]:
+    """이 사용자가 만다라 축에서 승격한 목표들의 제목(ADR-0008 §8 "B", "핵심 접합점").
+
+    계획 인터뷰(`routes/interview.py`)의 `goals.heaviest` 동적 보기 입력 — 승격만 해두고
+    `goals.list` 에 다시 타이핑하지 않은 축도 "가장 무거운 목표" 후보로 바로 고를 수 있게
+    한다(`docs/ultimate-goal-mandalart-strategy.md:71`). 셀을 ActionItem 에 직결하지 않는다는
+    결정(같은 문서 §11 항목 6)은 그대로 지킨다 — 여기서 만드는 건 인터뷰 질문의 "보기"일
+    뿐, 실행 트리·카드는 여전히 `/plans/generate` 가 LLM 분해로 새로 만든다.
+
+    `Goal.title`(축 자체의 `GoalNode.title` 이 아니라)을 돌려준다 — 승격 후 사용자가
+    `PATCH /goals/{id}` 로 제목을 고쳤을 수 있고, `materialize_goals` 의 재사용 매칭도
+    `Goal.title` 기준이라(§3.4 W3) 여기서 어긋나면 같은 목표가 중복 생성된다.
+
+    `status IN ('proposed', 'active')` — 승격 직후엔 항상 `'proposed'`(U10)라 이걸 빼면 막
+    승격한 축이 절대 안 보인다. `'archived'`(만료·재승격)는 제외.
+    """
+    stmt = (
+        select(Goal)
+        .join(GoalNode, GoalNode.promoted_goal_id == Goal.id)
+        .where(
+            GoalNode.tree_kind == "mandala",
+            GoalNode.depth == 1,
+            GoalNode.archived_at.is_(None),
+            Goal.user_id == user_id,
+            Goal.status.in_(("proposed", "active")),
+            Goal.archived_at.is_(None),
+        )
+        .order_by(Goal.updated_at.desc())
+    )
+    result = await session.execute(stmt)
+    return [g.title for g in result.scalars().all()]
+
+
 async def find_active_axis_label(session: AsyncSession, user_id: uuid.UUID) -> str | None:
     """ "이번 주 굴리는 축" — 승격된 축 중 그 Goal 이 실제로 `active` 인 것의 제목.
 
@@ -552,7 +587,10 @@ __all__ = [
     "compute_progress",
     "context_from_ultimate",
     "fetch_actions_for_nodes",
+    "fetch_current_week_habit_instances",
+    "fetch_habits_for_nodes",
     "fetch_promoted_axis_titles",
+    "fetch_promoted_goal_titles_for_user",
     "find_active_axis_label",
     "format_subgoals_list",
     "format_titles",

@@ -229,7 +229,7 @@ nullable 이라 기존 행은 전부 NULL(= 만다라와 무관한 일반 습관
 | PR | 내용 | 마이그레이션 | 선행 |
 |---|---|---|---|
 | **A** | `habits.goal_node_id` + 반복형 칸 ↔ 습관 링크 API. 만다라 칸 시트에서 "이건 반복" 선택 | 1건 | — |
-| **B** | 프로젝트형 칸 → 계획 연결. `action_items.goal_node_id` 에 **mandala leaf id** 기록 (지금은 plan 노드만 들어간다) | 0 | — |
+| **B** | 계획 인터뷰 `goals.heaviest` 가 승격된 만다라 축 목표를 동적 보기로 포함(§11 항목 6 "핵심 접합점" 마지막 이음매). 실행 트리는 여전히 `/plans/generate` 가 새로 만든다 | 0 | — |
 | **C** | `horizon_years` → `deadline` 확정 + 마일스톤 영속(ADR-0007 PR-2, `_archive_goal_nodes` 층 분리) | 0 | B |
 | **D** | 만다라 유래 goal 2주 rolling 창 + 커서 전진 | 0 | C |
 | **E** | 일요일 밤 리포트 — cron 시각 이동(잦은 폴 + idempotent), 만다라 지표 집계, `GET /reviews/weekly` 확장 | 0 | A·B |
@@ -239,6 +239,18 @@ nullable 이라 기존 행은 전부 NULL(= 만다라와 무관한 일반 습관
 
 **A·B 가 관문이다.** 이 둘 없이는 만다라 칸과 실행이 여전히 남남이라 리포트가 셀 것이
 `completed_at` 수동 체크밖에 없다.
+
+> **정정(2026-08-24)**: 최초 초안의 "B"는 `action_items.goal_node_id` 에 mandala leaf id 를
+> 직접 기록하는 안이었다. 이는 `docs/ultimate-goal-mandalart-strategy.md` §11 항목 6 —
+> "셀 → ActionItem 직결 ❌ 하지 않음. `action_items.target_date` 가 NOT NULL 이고 배치
+> 정책 가드가 전부 `/plans/generate` 안에 있다. 경로는 **셀 → 승격 Goal → 딥 인터뷰 →
+> `/plans/generate` → approve**" — 와 정면으로 충돌한다(만다라 leaf 는 날짜 개념이 없고,
+> 승격은 축 단위지 leaf 단위가 아니다). 실제로 비어 있던 건 그 문서가 이미 정한 경로의
+> 마지막 이음매 하나뿐이었다 — 계획 인터뷰의 `goals.heaviest` 가 승격된 축을 몰라서,
+> 사용자가 이미 승격해 둔 목표를 인터뷰에서 매번 다시 타이핑해야 했다
+> (`docs/ultimate-goal-mandalart-strategy.md:71` "핵심 접합점"). B 를 그 이음매를 잇는
+> 것으로 다시 정의한다 — 구현: `orchestrator/interview.py::_question_options`,
+> `mandala_adapter.fetch_promoted_goal_titles_for_user`.
 
 프론트는 별도 레포다 — 칸 종류 선택 UI, 반복 카운트 체크, 주간 리뷰 만다라 섹션, 2주 계획
 화면이 대응 PR 로 필요하다.

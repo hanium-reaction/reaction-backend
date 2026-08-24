@@ -281,3 +281,107 @@ async def test_plan_tree_rows_are_exempt_from_mandala_shape_check(
 
     stored = await real_db_session.get(GoalNode, node.id)
     assert stored is not None and stored.tree_kind == "plan"
+
+
+# ── 6) fetch_promoted_goal_titles_for_user — 계획 인터뷰 goals.heaviest 입력(ADR-0008 §8 "B") ──
+
+
+async def _promoted_goal(session: AsyncSession, *, ultimate: Goal, status: str) -> Goal:
+    """만다라 축에서 승격된 것처럼 Goal 을 시드 — `GoalNode.promoted_goal_id` 로 잇는다.
+
+    axis 노드의 `goal_id` 는 이 만다라 트리의 주인(ultimate)을, `promoted_goal_id` 는 새로
+    만든 학기 목표를 가리킨다 — `promote_mandala_node`(U10)와 같은 관계 방향.
+    """
+    promoted = Goal()
+    promoted.id = uuid.uuid4()
+    promoted.user_id = ultimate.user_id
+    promoted.title = "메이저리그 드래프트 1순위"
+    promoted.category = "other"
+    promoted.goal_tier = "focus"
+    promoted.status = status
+    promoted.is_ultimate = False
+    session.add(promoted)
+    await session.flush()
+    axis = _mandala_node(ultimate, depth=1, node_type="subgoal", title="구위", is_leaf=False)
+    axis.promoted_goal_id = promoted.id
+    session.add(axis)
+    await session.flush()
+    return promoted
+
+
+async def test_fetch_promoted_goal_titles_includes_proposed_status(
+    real_db_session: AsyncSession,
+) -> None:
+    """승격 직후엔 항상 'proposed'(U10) — 이 상태부터 보여야 갓 승격한 축이 안 사라진다."""
+    ultimate = await _seed_ultimate_goal(real_db_session)
+    promoted = await _promoted_goal(real_db_session, ultimate=ultimate, status="proposed")
+
+    titles = await mandala_adapter.fetch_promoted_goal_titles_for_user(
+        real_db_session, ultimate.user_id
+    )
+
+    assert titles == [promoted.title]
+
+
+async def test_fetch_promoted_goal_titles_includes_active_status(
+    real_db_session: AsyncSession,
+) -> None:
+    ultimate = await _seed_ultimate_goal(real_db_session)
+    promoted = await _promoted_goal(real_db_session, ultimate=ultimate, status="active")
+
+    titles = await mandala_adapter.fetch_promoted_goal_titles_for_user(
+        real_db_session, ultimate.user_id
+    )
+
+    assert titles == [promoted.title]
+
+
+async def test_fetch_promoted_goal_titles_excludes_archived_goal(
+    real_db_session: AsyncSession,
+) -> None:
+    ultimate = await _seed_ultimate_goal(real_db_session)
+    goal = await _promoted_goal(real_db_session, ultimate=ultimate, status="proposed")
+    goal.archived_at = goal.created_at  # 아무 non-null 값 — soft delete 흉내
+    await real_db_session.flush()
+
+    titles = await mandala_adapter.fetch_promoted_goal_titles_for_user(
+        real_db_session, ultimate.user_id
+    )
+
+    assert titles == []
+
+
+async def test_fetch_promoted_goal_titles_scoped_to_user(real_db_session: AsyncSession) -> None:
+    """다른 사용자가 승격한 목표는 절대 안 섞인다."""
+    mine = await _seed_ultimate_goal(real_db_session)
+    other = await _seed_ultimate_goal(real_db_session)
+    await _promoted_goal(real_db_session, ultimate=other, status="proposed")
+
+    titles = await mandala_adapter.fetch_promoted_goal_titles_for_user(
+        real_db_session, mine.user_id
+    )
+
+    assert titles == []
+
+
+async def test_fetch_promoted_goal_titles_excludes_non_promoted_goal(
+    real_db_session: AsyncSession,
+) -> None:
+    """일반(승격 아닌) Goal 은 goal_nodes 와 아예 연결이 없으니 후보에 안 낀다."""
+    ultimate = await _seed_ultimate_goal(real_db_session)
+    plain = Goal()
+    plain.id = uuid.uuid4()
+    plain.user_id = ultimate.user_id
+    plain.title = "그냥 목표"
+    plain.category = "other"
+    plain.goal_tier = "maintain"
+    plain.status = "active"
+    plain.is_ultimate = False
+    real_db_session.add(plain)
+    await real_db_session.flush()
+
+    titles = await mandala_adapter.fetch_promoted_goal_titles_for_user(
+        real_db_session, ultimate.user_id
+    )
+
+    assert titles == []

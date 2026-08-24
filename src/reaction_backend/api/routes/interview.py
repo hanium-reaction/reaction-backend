@@ -30,7 +30,7 @@ mock 스텁을 걷어내고 LangGraph 인터뷰 엔진(`orchestrator/interview*`
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
@@ -49,6 +49,7 @@ from reaction_backend.orchestrator import (
     interview,
     interview_adapter,
     interview_runner,
+    mandala_adapter,
     profile_memory,
     ultimate_adapter,
 )
@@ -192,24 +193,49 @@ def _remaining_required(
 
 
 def _question_options(
-    slot_key: str, slot_answers: Mapping[str, dict[str, Any] | None], *, kind: str = "plan"
+    slot_key: str,
+    slot_answers: Mapping[str, dict[str, Any] | None],
+    *,
+    kind: str = "plan",
+    mandala_goal_titles: Sequence[str] = (),
 ) -> list[str]:
-    """chip/select 보기. `goals.heaviest`(plan 전용)는 사용자가 나열한 goals.list 에서 동적 생성."""
+    """chip/select 보기. `goals.heaviest`(plan 전용)는 두 출처를 합쳐 동적 생성한다:
+    ① 사용자가 방금 나열한 `goals.list` 응답 ② 만다라 축에서 승격해 둔 목표
+    (`mandala_goal_titles`, ADR-0008 §8 "B") — 승격만 하고 `goals.list` 에 다시 타이핑
+    안 해도 이번 학기 목표로 바로 고를 수 있게 한다("접합점",
+    `docs/ultimate-goal-mandalart-strategy.md:71`). 승격 목표를 먼저 두고 겹치는 제목은
+    한 번만 남긴다.
+    """
     if slot_key == "goals.heaviest":
+        seen: set[str] = set()
+        options: list[str] = []
+        for title in mandala_goal_titles:
+            t = title.strip()
+            if t and t not in seen:
+                seen.add(t)
+                options.append(t)
         goals = slot_answers.get("goals.list")
+        typed: list[str] = []
         if isinstance(goals, dict) and goals.get("type") == "text":
             norm = goals.get("normalized")
             if isinstance(norm, list):
-                return [str(x) for x in norm if str(x).strip()]
-            raw = goals.get("raw")
-            if isinstance(raw, str) and raw.strip():
-                return [raw.strip()]
-        return []
+                typed = [str(x) for x in norm if str(x).strip()]
+            else:
+                raw = goals.get("raw")
+                if isinstance(raw, str) and raw.strip():
+                    typed = [raw.strip()]
+        for t in typed:
+            if t not in seen:
+                seen.add(t)
+                options.append(t)
+        return options
     slot = CATALOGS[kind].by_key.get(slot_key)
     return list(slot.options) if slot else []
 
 
-def _to_question(state: InterviewState) -> Question | None:
+def _to_question(
+    state: InterviewState, *, mandala_goal_titles: Sequence[str] = ()
+) -> Question | None:
     """엔진 질문(NextQuestionSchema) + 슬롯 카탈로그 → FE Question.
 
     보기(options)는 카탈로그 고정 진실 소스. `suggested_answers`(LLM 추천 답변 카드)는
@@ -221,7 +247,12 @@ def _to_question(state: InterviewState) -> Question | None:
         return None
     catalog = CATALOGS[state["kind"]]
     slot = catalog.by_key.get(slot_key)
-    options = _question_options(slot_key, state["slot_answers"], kind=state["kind"])
+    options = _question_options(
+        slot_key,
+        state["slot_answers"],
+        kind=state["kind"],
+        mandala_goal_titles=mandala_goal_titles,
+    )
     return Question(
         slot_key=slot_key,
         text=nq.question,
@@ -240,17 +271,34 @@ def _response(
     summary: Any = None,
     outcome: Any = None,
     ultimate_outcome: UltimateGoalOutcome | None = None,
+    mandala_goal_titles: Sequence[str] = (),
 ) -> InterviewSession:
     return InterviewSession(
         session_id=str(session_id),
         ambiguity_score=_remaining_required(state["slot_answers"], kind=kind),
         total_turns=state["total_turns"],
         end_reason=end_reason,
-        current_question=None if end_reason is not None else _to_question(state),
+        current_question=(
+            None
+            if end_reason is not None
+            else _to_question(state, mandala_goal_titles=mandala_goal_titles)
+        ),
         summary=summary,
         outcome=outcome,
         ultimate_outcome=ultimate_outcome,
     )
+
+
+async def _mandala_goal_titles_if_needed(
+    session: AsyncSession, user_id: UUID, slot_key: str | None, *, kind: str
+) -> list[str]:
+    """`slot_key` 가 `goals.heaviest` 인 plan 세션에서만 DB 를 친다(ADR-0008 §8 "B") —
+    다음 질문 조립(`next_slot_key`)과 방금 낸 답 채점(`body.slot_key`) 둘 다 이 조건이면
+    호출한다. 그 외 턴은 조회 자체를 안 해 매 턴 쿼리를 붙이지 않는다.
+    """
+    if kind != "plan" or slot_key != "goals.heaviest":
+        return []
+    return await mandala_adapter.fetch_promoted_goal_titles_for_user(session, user_id)
 
 
 def _ended_response(
@@ -422,7 +470,10 @@ async def start_session(
         )
         await _persist_turn(repo, row, result.state)
         await session.commit()
-        return _response(row.id, result.state, kind=kind)
+        titles = await _mandala_goal_titles_if_needed(
+            session, user.id, result.state.get("next_slot_key"), kind=kind
+        )
+        return _response(row.id, result.state, kind=kind, mandala_goal_titles=titles)
 
 
 @router.get("/slot-catalog")
@@ -491,6 +542,9 @@ async def submit_answer(
         slot_rows = await repo.list_slot_answers(row.id)
         state = _state_from_db(row, slot_rows)
         answered_slot = CATALOGS[row.kind].by_key.get(body.slot_key)
+        answer_titles = await _mandala_goal_titles_if_needed(
+            session, user.id, body.slot_key, kind=row.kind
+        )
         result = await interview_runner.submit_and_advance(
             state=state,
             slot_key=body.slot_key,
@@ -498,7 +552,12 @@ async def submit_answer(
             session=session,
             tone_mode=user.tone_mode,
             answer_type=answered_slot.answer_type if answered_slot else None,
-            options=_question_options(body.slot_key, state["slot_answers"], kind=row.kind),
+            options=_question_options(
+                body.slot_key,
+                state["slot_answers"],
+                kind=row.kind,
+                mandala_goal_titles=answer_titles,
+            ),
             slot_meta=_slot_meta(state["slot_answers"], kind=row.kind),
         )
         await _persist_turn(repo, row, result.state)
@@ -543,7 +602,10 @@ async def submit_answer(
             )
 
         await session.commit()
-        return _response(row.id, result.state, kind=row.kind)
+        next_titles = await _mandala_goal_titles_if_needed(
+            session, user.id, result.state.get("next_slot_key"), kind=row.kind
+        )
+        return _response(row.id, result.state, kind=row.kind, mandala_goal_titles=next_titles)
 
 
 @router.post("/sessions/{session_id}/next-question")
@@ -567,7 +629,10 @@ async def next_question(
         )
         await _persist_turn(repo, row, state)
         await session.commit()
-        return _response(row.id, state, kind=row.kind)
+        titles = await _mandala_goal_titles_if_needed(
+            session, user.id, state.get("next_slot_key"), kind=row.kind
+        )
+        return _response(row.id, state, kind=row.kind, mandala_goal_titles=titles)
 
 
 @router.post("/sessions/{session_id}/finish")
