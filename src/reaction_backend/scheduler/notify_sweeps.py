@@ -21,6 +21,8 @@
   않는다**. 22:55(quiet 전 마지막 폴)가 그날의 마지막 기회다 (ADR-0006 §7).
 - **회고할 카드가 있을 때만** — 빈 알림은 소음이고 주 3건 예산에서 진짜 기회를 밀어낸다
   (ADR-0006 §4). 창 경계는 회고 화면·만료 cron 과 동일한 `pending_reflection_since`.
+- **일요일은 문구·딥링크가 갈라진다** — 같은 클래스·같은 발송 조건에 주간 리포트를
+  "얹는다"(ADR-0008 §4, §8 "F"). 새 알림 클래스도, 새 발송 조건도 추가하지 않는다.
 
 pre_card 알림 (종일 5분 폴):
 - `[now+2분, now+7분)` 에 시작하는 `scheduled` 블록 — "카드 2분 전" (architecture.md §6).
@@ -77,7 +79,21 @@ class NotifySweepResult:
     failed: int
 
 
-def _evening_payload(pending_count: int) -> dict[str, Any]:
+def _evening_payload(pending_count: int, *, is_sunday: bool) -> dict[str, Any]:
+    """일요일엔 같은 회고 알림에 주간 리포트를 얹는다 (ADR-0008 §4, §8 "F").
+
+    새 알림 클래스를 만들지 않는다 — 발송 조건("회고할 카드가 있을 때만", 클래스 dedup,
+    주 ≤3건 예산)은 그대로고 **문구·딥링크만** 요일에 따라 갈라진다. 리포트 자체의 숫자는
+    여기서 계산하지 않는다 — 실제 내용은 `GET /reviews/weekly`(딥링크 도착지)가 보여주고,
+    push body 는 짧은 예고만 한다(사용자별 만다라 조회를 이 sweep 루프에 추가로 얹지 않음).
+    """
+    if is_sunday:
+        return {
+            "class": "evening_reflection",
+            "title": "오늘의 회고 + 이번 주 리포트",
+            "body": f"돌아볼 카드 {pending_count}장과 이번 주 만다라 리포트가 준비됐어요.",
+            "url": "/reviews/weekly",
+        }
     return {
         "class": "evening_reflection",
         "title": "오늘의 회고 시간이에요",
@@ -130,7 +146,7 @@ async def run_evening_reflection_notify_sweep(
             result = await push_gate.send_push(
                 setting=setting,
                 notification_class="evening_reflection",
-                payload=_evening_payload(len(pending)),
+                payload=_evening_payload(len(pending), is_sunday=now_kst_dt.weekday() == 6),
                 now=read_clock(),
                 send_repo=send_repo,
                 sender=sender,

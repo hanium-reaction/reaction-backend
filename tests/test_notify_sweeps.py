@@ -87,6 +87,7 @@ class _EveningHarness:
         evening: time = time(21, 0),
         subscribed: bool = True,
         pending: int = 1,
+        pending_relative_to: datetime = NOW,
     ) -> User:
         user = _user()
         self.user_repo.register(user)
@@ -95,7 +96,7 @@ class _EveningHarness:
             setting.push_subscription = None
         self.notif_repo._items[user.id] = setting
         for _ in range(pending):
-            e = _pending_execution(user.id, plan_start=NOW - timedelta(hours=3))
+            e = _pending_execution(user.id, plan_start=pending_relative_to - timedelta(hours=3))
             self.execution_repo._executions[e.id] = e
         return user
 
@@ -205,6 +206,48 @@ async def test_evening_setting_after_2255_is_clamped_to_last_poll() -> None:
 
     result = await h.run(now=datetime(2026, 7, 21, 22, 55, tzinfo=KST))
     assert result.sent == 2, "22:55 폴에서 클램프 발송돼야 한다 — 그날의 마지막 기회"
+
+
+async def test_evening_sunday_attaches_weekly_report_text_and_deeplink() -> None:
+    """일요일은 같은 클래스에 문구·딥링크만 갈라진다(ADR-0008 §8 "F") — 새 클래스 없음."""
+    h = _EveningHarness()
+    sunday = datetime(2026, 7, 26, 21, 2, tzinfo=KST)  # 2026-07-26 은 일요일
+    h.seed_user(pending=3, pending_relative_to=sunday)
+
+    result = await h.run(now=sunday)
+
+    assert result.sent == 1
+    payload = h.sender.calls[0][1]
+    assert payload["class"] == "evening_reflection"  # 새 클래스 아님
+    assert "3장" in payload["body"]
+    assert "리포트" in payload["title"] or "리포트" in payload["body"]
+    assert payload["url"] == "/reviews/weekly"
+
+
+async def test_evening_non_sunday_keeps_reflection_deeplink() -> None:
+    """평일은 기존 문구·딥링크 그대로(회귀 방지) — NOW(화요일) 로 고정 확인."""
+    h = _EveningHarness()
+    h.seed_user(pending=1)
+
+    result = await h.run()
+
+    assert result.sent == 1
+    payload = h.sender.calls[0][1]
+    assert payload["url"] == "/reflection"
+    assert "리포트" not in payload["title"]
+    assert "리포트" not in payload["body"]
+
+
+async def test_evening_sunday_still_gated_by_pending_cards() -> None:
+    """일요일이라고 발송 조건이 느슨해지지 않는다 — 회고할 카드 없으면 여전히 no-op."""
+    h = _EveningHarness()
+    h.seed_user(pending=0)
+    sunday = datetime(2026, 7, 26, 21, 2, tzinfo=KST)
+
+    result = await h.run(now=sunday)
+
+    assert result.sent == 0
+    assert h.sender.calls == []
 
 
 async def test_evening_isolates_one_user_failure(monkeypatch: pytest.MonkeyPatch) -> None:
