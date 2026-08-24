@@ -27,8 +27,10 @@ from reaction_backend.api.deps import CurrentUser
 from reaction_backend.db.models.habit import Habit
 from reaction_backend.db.models.period_summary import PeriodSummary
 from reaction_backend.db.session import get_db
+from reaction_backend.orchestrator import mandala_adapter
 from reaction_backend.orchestrator.habit_penalty import PenaltyEval, evaluate_penalty
 from reaction_backend.orchestrator.weekly_review import WeeklyKpi
+from reaction_backend.repositories.goal_repo import GoalRepo, get_goal_repo
 from reaction_backend.repositories.habit_instance_repo import (
     HabitInstanceRepo,
     get_habit_instance_repo,
@@ -51,6 +53,8 @@ from reaction_backend.schemas.reviews import (
     HabitPenaltyCandidate,
     HabitPenaltyListResponse,
     HabitWeekStat,
+    MandalaHabitWeekStat,
+    MandalaWeeklySummary,
     WeeklyGenerateRequest,
     WeeklyReviewResponse,
 )
@@ -58,6 +62,7 @@ from reaction_backend.schemas.reviews import (
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 
 ReviewRepoDep = Annotated[ReviewRepo, Depends(get_review_repo)]
+GoalRepoDep = Annotated[GoalRepo, Depends(get_goal_repo)]
 HabitRepoDep = Annotated[HabitRepo, Depends(get_habit_repo)]
 HabitInstRepoDep = Annotated[HabitInstanceRepo, Depends(get_habit_instance_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
@@ -81,7 +86,9 @@ def _parse_week_start(raw: str | None) -> date:
     return week_start_of(parsed)
 
 
-def _from_summary(summary: PeriodSummary) -> WeeklyReviewResponse:
+def _from_summary(
+    summary: PeriodSummary, *, mandala: MandalaWeeklySummary | None
+) -> WeeklyReviewResponse:
     """precomputed PeriodSummary → 응답 (Numeric→float)."""
     return WeeklyReviewResponse(
         week_start=summary.start_date,
@@ -98,11 +105,14 @@ def _from_summary(summary: PeriodSummary) -> WeeklyReviewResponse:
         drain_window=summary.drain_point_window,
         one_liner=summary.llm_one_liner,
         policy_update_candidates=summary.policy_update_candidates,
+        mandala=mandala,
         generated_at=summary.generated_at,
     )
 
 
-def _from_kpi(week_start: date, kpi: WeeklyKpi) -> WeeklyReviewResponse:
+def _from_kpi(
+    week_start: date, kpi: WeeklyKpi, *, mandala: MandalaWeeklySummary | None
+) -> WeeklyReviewResponse:
     """즉석 계산한 KPI → 응답 (영속화 전, generated_at=now)."""
     return WeeklyReviewResponse(
         week_start=week_start,
@@ -119,6 +129,7 @@ def _from_kpi(week_start: date, kpi: WeeklyKpi) -> WeeklyReviewResponse:
         drain_window=kpi.drain_point_window,
         one_liner=kpi.one_liner,
         policy_update_candidates=kpi.policy_update_candidates,
+        mandala=mandala,
         generated_at=now_kst(),
     )
 
@@ -128,19 +139,67 @@ def _f(value: object | None) -> float | None:
     return None if value is None else float(value)  # type: ignore[arg-type]
 
 
+async def _mandala_weekly_summary(
+    user_id: UUID, week_start: date, *, goal_repo: GoalRepo, session: AsyncSession
+) -> MandalaWeeklySummary | None:
+    """GET /reviews/weekly 의 '이번 주 만다라트' 절 — 궁극목표/승인된 트리 없으면 None(생략, ADR-0008 §8 "E").
+
+    `period_summaries` 에 저장하지 않고 매 호출 시 파생한다(`mandala_adapter.compute_progress`
+    가 `goal_nodes.progress` 컬럼을 안 두는 것과 같은 이유) — GET/POST 두 응답 경로가 이
+    함수 하나를 공유해 단일 소스를 유지한다.
+    """
+    ultimate = await goal_repo.get_ultimate(user_id)
+    if ultimate is None:
+        return None
+    nodes = await goal_repo.list_nodes(ultimate.id, tree_kind="mandala")
+    if not nodes:
+        return None
+    leaf_ids = [n.id for n in nodes if n.depth == 2]
+    habits_by_node = await mandala_adapter.fetch_habits_for_nodes(session, leaf_ids)
+    habit_ids = [h.id for h in habits_by_node.values()]
+    instances_by_habit = await mandala_adapter.fetch_habit_instances_for_week(
+        session, habit_ids, week_start
+    )
+    stat = mandala_adapter.compute_weekly_stat(
+        nodes,
+        week_start=week_start,
+        habits_by_node=habits_by_node,
+        instances_by_habit=instances_by_habit,
+    )
+    return MandalaWeeklySummary(
+        completed_this_week=stat.completed_this_week,
+        completed_total=stat.completed_total,
+        total_leaves=stat.total_leaves,
+        touched_this_week=stat.touched_this_week,
+        untouched_axis_titles=stat.untouched_axis_titles,
+        habits=[
+            MandalaHabitWeekStat(
+                axis_title=h.axis_title,
+                cell_title=h.cell_title,
+                done_count=h.done_count,
+                target_count=h.target_count,
+            )
+            for h in stat.habits
+        ],
+    )
+
+
 @router.get("/weekly")
 async def get_weekly_review(
     user: CurrentUser,
     repo: ReviewRepoDep,
+    goal_repo: GoalRepoDep,
+    session: SessionDep,
     week_start: Annotated[str | None, Query(alias="weekStart")] = None,
 ) -> WeeklyReviewResponse:
     """이번 주(또는 지정 주차) 리뷰. precomputed 우선, 없으면 즉석 계산(쓰기 없음)."""
     monday = _parse_week_start(week_start)
+    mandala = await _mandala_weekly_summary(user.id, monday, goal_repo=goal_repo, session=session)
     existing = await repo.get_weekly(user.id, monday)
     if existing is not None:
-        return _from_summary(existing)
+        return _from_summary(existing, mandala=mandala)
     kpi = await compute_weekly_review(user.id, monday, repo=repo)
-    return _from_kpi(monday, kpi)
+    return _from_kpi(monday, kpi, mandala=mandala)
 
 
 @router.post("/weekly/generate")
@@ -148,13 +207,15 @@ async def generate_weekly_review(
     body: WeeklyGenerateRequest,
     user: CurrentUser,
     repo: ReviewRepoDep,
+    goal_repo: GoalRepoDep,
     session: SessionDep,
 ) -> WeeklyReviewResponse:
     """주간 리뷰 강제 재생성 + 영속화 (디버그/관리자). 같은 주 덮어쓰기."""
     monday = _parse_week_start(body.week_start)
+    mandala = await _mandala_weekly_summary(user.id, monday, goal_repo=goal_repo, session=session)
     summary = await run_weekly_review_for_user(user.id, monday, now_kst(), repo=repo, force=True)
     await session.commit()
-    return _from_summary(summary)
+    return _from_summary(summary, mandala=mandala)
 
 
 # ───────────────────────── S22 Habit Penalty (#21-C) ─────────────────────────

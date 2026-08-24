@@ -91,6 +91,19 @@ class GoalRepo:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_ultimate(self, user_id: UUID) -> Goal | None:
+        """이 사용자의 궁극목표(`Goal.is_ultimate`, 사용자당 최대 1개) — 없으면 None.
+
+        `orchestrator/ultimate_adapter.py:materialize_ultimate_goal` 이 "같은 행" 판별에
+        쓰는 것과 같은 조건이다 — 주간 리포트(`GET /reviews/weekly`)가 만다라 절을 붙일 때
+        이 목표 아래 `tree_kind='mandala'` 트리를 찾는 시작점으로 재사용한다(ADR-0008 §8 "E").
+        """
+        stmt = select(Goal).where(
+            Goal.user_id == user_id, Goal.is_ultimate.is_(True), Goal.archived_at.is_(None)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def count_by_tier(self, user_id: UUID, tier: str) -> int:
         """tier 한도(Focus ≤3 / Maintain ≤5) 계산용 개수.
 

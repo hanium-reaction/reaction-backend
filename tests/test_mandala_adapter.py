@@ -6,6 +6,7 @@ LLM 호출 0회 — `shape_*`/`rule_*` 는 입력→출력이 결정적이라 �
 
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -16,7 +17,7 @@ from reaction_backend.db.models.habit import Habit
 from reaction_backend.db.models.habit_instance import HabitInstance
 from reaction_backend.orchestrator import mandala_adapter
 from reaction_backend.orchestrator.interview_catalog import ULTIMATE_DOMAIN_OPTIONS
-from reaction_backend.schemas.common import now_kst
+from reaction_backend.schemas.common import KST, now_kst
 from reaction_backend.schemas.mandala import (
     MandalaCell,
     MandalaCellItem,
@@ -336,12 +337,14 @@ def _tree_node(
     parent_id: UUID | None = None,
     depth: int,
     completed_at: Any = None,
+    title: str = "노드",
 ) -> GoalNode:
     n = GoalNode()
     n.id = node_id or uuid4()
     n.parent_node_id = parent_id
     n.depth = depth
     n.completed_at = completed_at
+    n.title = title
     return n
 
 
@@ -514,6 +517,171 @@ def test_compute_progress_backward_compatible_without_habit_args() -> None:
     progress, coverage = mandala_adapter.compute_progress([leaf], [])[leaf.id]
     assert progress == 1.0
     assert coverage is None
+
+
+# ───────────── compute_weekly_stat (ADR-0008 §8 "E", GET /reviews/weekly) ─────────────
+
+
+WEEK_START = date(2026, 6, 15)  # 월요일
+
+
+def _dt_in_week(day_offset: int) -> datetime:
+    return datetime.combine(
+        WEEK_START + timedelta(days=day_offset), datetime.min.time(), tzinfo=KST
+    )
+
+
+def test_compute_weekly_stat_counts_completion_within_week_only() -> None:
+    """이번 주에 완료 체크한 leaf 만 `completed_this_week` 에 잡히고, 지난주 완료도 누적엔 포함."""
+    subgoal = _tree_node(depth=1, title="축0")
+    this_week_leaf = _tree_node(
+        depth=2, parent_id=subgoal.id, completed_at=_dt_in_week(3), title="이번주완료"
+    )
+    last_week_leaf = _tree_node(
+        depth=2,
+        parent_id=subgoal.id,
+        completed_at=_dt_in_week(-1),  # 지난주 일요일
+        title="지난주완료",
+    )
+    incomplete_leaf = _tree_node(depth=2, parent_id=subgoal.id, title="미완료")
+
+    stat = mandala_adapter.compute_weekly_stat(
+        [subgoal, this_week_leaf, last_week_leaf, incomplete_leaf],
+        week_start=WEEK_START,
+        habits_by_node={},
+        instances_by_habit={},
+    )
+
+    assert stat.completed_this_week == 1
+    assert stat.completed_total == 2
+    assert stat.total_leaves == 3
+
+
+def test_compute_weekly_stat_completion_at_week_boundary_is_exclusive() -> None:
+    """`week_start + 7일`(다음 주 월요일 00:00)은 이번 주가 아니다 — week_window() 와 동일 경계."""
+    subgoal = _tree_node(depth=1, title="축0")
+    next_monday_leaf = _tree_node(
+        depth=2, parent_id=subgoal.id, completed_at=_dt_in_week(7), title="다음주월요일"
+    )
+
+    stat = mandala_adapter.compute_weekly_stat(
+        [subgoal, next_monday_leaf],
+        week_start=WEEK_START,
+        habits_by_node={},
+        instances_by_habit={},
+    )
+
+    assert stat.completed_this_week == 0
+    assert stat.completed_total == 1  # 누적엔 포함(전체 완료 여부는 주 무관)
+
+
+def test_compute_weekly_stat_touched_includes_completion_and_habit_checkin() -> None:
+    subgoal = _tree_node(depth=1, title="축0")
+    completed_leaf = _tree_node(
+        depth=2, parent_id=subgoal.id, completed_at=_dt_in_week(0), title="완료칸"
+    )
+    habit_leaf = _tree_node(depth=2, parent_id=subgoal.id, title="반복칸")
+    habit = _habit()
+    instance = _instance(habit_id=habit.id, done_count=2)
+
+    stat = mandala_adapter.compute_weekly_stat(
+        [subgoal, completed_leaf, habit_leaf],
+        week_start=WEEK_START,
+        habits_by_node={habit_leaf.id: habit},
+        instances_by_habit={habit.id: instance},
+    )
+
+    assert stat.touched_this_week == 2
+    assert stat.untouched_axis_titles == []
+
+
+def test_compute_weekly_stat_axis_untouched_when_nothing_happened() -> None:
+    """완료도 체크인도 없는 축 하나 + 활동 있는 축 하나 — 앞의 축만 손 못 댄 축."""
+    untouched_axis = _tree_node(depth=1, title="손못댄축")
+    untouched_leaf = _tree_node(depth=2, parent_id=untouched_axis.id, title="미완료칸")
+    touched_axis = _tree_node(depth=1, title="굴린축")
+    touched_leaf = _tree_node(
+        depth=2, parent_id=touched_axis.id, completed_at=_dt_in_week(0), title="완료칸"
+    )
+
+    stat = mandala_adapter.compute_weekly_stat(
+        [untouched_axis, untouched_leaf, touched_axis, touched_leaf],
+        week_start=WEEK_START,
+        habits_by_node={},
+        instances_by_habit={},
+    )
+
+    assert stat.untouched_axis_titles == ["손못댄축"]
+
+
+def test_compute_weekly_stat_habit_stats_report_axis_title_and_counts() -> None:
+    axis = _tree_node(depth=1, title="체력")
+    leaf = _tree_node(depth=2, parent_id=axis.id, title="코테 하루마다")
+    habit = _habit()
+    habit.target_count = 7
+    instance = _instance(habit_id=habit.id, done_count=5)
+
+    stat = mandala_adapter.compute_weekly_stat(
+        [axis, leaf],
+        week_start=WEEK_START,
+        habits_by_node={leaf.id: habit},
+        instances_by_habit={habit.id: instance},
+    )
+
+    assert len(stat.habits) == 1
+    h = stat.habits[0]
+    assert h.axis_title == "체력"
+    assert h.cell_title == "코테 하루마다"
+    assert h.done_count == 5
+    assert h.target_count == 7
+
+
+def test_compute_weekly_stat_habit_without_instance_counts_as_zero_and_untouched() -> None:
+    """이번 주 instance 자체가 없으면(cron 지연 등) 0회로 안전하게 판정 — compute_progress 와 동일 규약."""
+    axis = _tree_node(depth=1, title="축0")
+    leaf = _tree_node(depth=2, parent_id=axis.id, title="반복칸")
+    habit = _habit()
+
+    stat = mandala_adapter.compute_weekly_stat(
+        [axis, leaf], week_start=WEEK_START, habits_by_node={leaf.id: habit}, instances_by_habit={}
+    )
+
+    assert stat.habits[0].done_count == 0
+    assert stat.touched_this_week == 0
+    assert stat.untouched_axis_titles == ["축0"]
+
+
+def test_compute_weekly_stat_repeat_leaf_completed_at_ignored_for_completion_counts() -> None:
+    """반복형(habit 링크)인 leaf 는 completed_at 이 찍혀 있어도 완료 개념이 없다(compute_progress 와 동일)."""
+    axis = _tree_node(depth=1, title="축0")
+    leaf = _tree_node(
+        depth=2, parent_id=axis.id, completed_at=_dt_in_week(0), title="반복칸(오염된 completed_at)"
+    )
+    habit = _habit()
+
+    stat = mandala_adapter.compute_weekly_stat(
+        [axis, leaf], week_start=WEEK_START, habits_by_node={leaf.id: habit}, instances_by_habit={}
+    )
+
+    assert stat.completed_this_week == 0
+    assert stat.completed_total == 0
+    assert len(stat.habits) == 1  # completion 이 아니라 habit 통계로만 잡힌다
+
+
+def test_compute_weekly_stat_total_leaves_counts_both_project_and_repeat_types() -> None:
+    axis = _tree_node(depth=1, title="축0")
+    project_leaf = _tree_node(depth=2, parent_id=axis.id, title="프로젝트칸")
+    repeat_leaf = _tree_node(depth=2, parent_id=axis.id, title="반복칸")
+    habit = _habit()
+
+    stat = mandala_adapter.compute_weekly_stat(
+        [axis, project_leaf, repeat_leaf],
+        week_start=WEEK_START,
+        habits_by_node={repeat_leaf.id: habit},
+        instances_by_habit={},
+    )
+
+    assert stat.total_leaves == 2
 
 
 # ───────────────────── 만다라 → 오늘/브리프 연결 (PR7) ─────────────────────

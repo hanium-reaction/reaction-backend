@@ -22,6 +22,30 @@ class WeeklyGenerateRequest(CamelModel):
     week_start: str | None = Field(default=None, description="YYYY-MM-DD (해당 주 월요일)")
 
 
+class MandalaHabitWeekStat(CamelModel):
+    """만다라 반복형 칸 1개의 이번 주 체크인 현황."""
+
+    axis_title: str | None = None
+    cell_title: str
+    done_count: int
+    target_count: int
+
+
+class MandalaWeeklySummary(CamelModel):
+    """`GET /reviews/weekly` 의 '이번 주 만다라트' 절 (ADR-0008 §8 "E").
+
+    조회 시점에 파생한다(저장 안 함) — 궁극목표가 없거나 아직 승인된 만다라 트리가 없으면
+    응답 자체에서 생략된다(`null`).
+    """
+
+    completed_this_week: int
+    completed_total: int
+    total_leaves: int
+    touched_this_week: int
+    untouched_axis_titles: list[str] = Field(default_factory=list)
+    habits: list[MandalaHabitWeekStat] = Field(default_factory=list)
+
+
 class WeeklyReviewResponse(CamelModel):
     """GET /reviews/weekly · generate 응답 — 룰 기반 주간 리뷰 카드 (S21)."""
 
@@ -41,6 +65,8 @@ class WeeklyReviewResponse(CamelModel):
     drain_window: str | None = None
     one_liner: str | None = None
     policy_update_candidates: list[dict[str, object]] = Field(default_factory=list)
+
+    mandala: MandalaWeeklySummary | None = None
 
     generated_at: KstDatetime
 

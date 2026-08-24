@@ -247,7 +247,7 @@ nullable 이라 기존 행은 전부 NULL(= 만다라와 무관한 일반 습관
 | **B** | 계획 인터뷰 `goals.heaviest` 가 승격된 만다라 축 목표를 동적 보기로 포함(§11 항목 6 "핵심 접합점" 마지막 이음매). 실행 트리는 여전히 `/plans/generate` 가 새로 만든다 | 0 | — |
 | **C** | `horizon_years` → `deadline` 확정 ✅ + 마일스톤 영속(ADR-0007 PR-2, `_archive_goal_nodes` 층 분리) ✅ | 0 | B |
 | **D** | 만다라 유래 goal 2주 rolling 창 ✅(2026-08-24) — "커서 전진"은 재생성 시점이 항상 '지금'이라는 사실에서 자연히 나온다(자동 재생성 크론은 §8 "G" 범위) | 0 | C |
-| **E** | 일요일 밤 리포트 — cron 시각 이동(잦은 폴 + idempotent), 만다라 지표 집계, `GET /reviews/weekly` 확장 | 0 | A·B |
+| **E** | 일요일 밤 리포트 — cron 시각 이동(잦은 폴 + idempotent) ✅ + 만다라 지표 집계 ✅ + `GET /reviews/weekly` 확장 ✅(2026-08-24) | 0 | A·B |
 | **F** | 저녁 회고 알림 일요일 분기(문구·딥링크). 새 클래스 없음 | 0 | E |
 | **G** | 다음 2주 Draft 제안 + 승인 (ADR-0007 PR-5) | 0 | D·E |
 | **H** | 손 못 댄 축 축소 제안 (ADR-0007 PR-6 마일스톤 재조정 포함) | 0 | G |
@@ -266,6 +266,20 @@ nullable 이라 기존 행은 전부 NULL(= 만다라와 무관한 일반 습관
 > (`docs/ultimate-goal-mandalart-strategy.md:71` "핵심 접합점"). B 를 그 이음매를 잇는
 > 것으로 다시 정의한다 — 구현: `orchestrator/interview.py::_question_options`,
 > `mandala_adapter.fetch_promoted_goal_titles_for_user`.
+
+> **완료 메모(2026-08-24, "E")**: §4.2 mockup 의 "굴린 칸"/"손 못 댄 축"을 구현하며 "활동"의
+> 정의를 확정했다 — **완료 체크 또는 습관 체크인만** 센다. 셀은 ActionItem 에 직결되지
+> 않는다는 결정(§11 항목 6)이라 프로젝트형 칸의 "작업 중"을 신뢰성 있게 잡을 다른 신호가
+> 없고, `updated_at`(제목 오타 수정 등)을 쓰면 편집 자체가 "활동"으로 잡혀 지표가 흐려진다.
+> §7 이 예측한 "마이그레이션 0"은 그대로 맞았다 — `mandala_adapter.compute_weekly_stat`
+> (순수 함수)이 조회 시점에 파생하고 `period_summaries` 에는 안 쓴다. 대신 습관 인스턴스
+> 조회를 주 파라미터화했다(`fetch_habit_instances_for_week`, 기존
+> `fetch_current_week_habit_instances` 는 이를 감싸는 얇은 래퍼로 남긴다) — 주간 리뷰가
+> 과거 주(`?weekStart=`)도 조회하는데, "이번 주" 로 고정된 버전을 그대로 쓰면 조회 대상
+> 주와 다른(오늘 기준) 주의 습관 데이터가 섞인다. cron 은 일요일 18~23시 30분 폴로
+> 옮겼다(`habit_instances` 와 같은 이유) — `run_weekly_review_sweep` 자체도 일요일이
+> 아니면 사용자 조회 없이 즉시 no-op 이라, 트리거 설정이 드리프트해도 진행 중인 주를
+> 조기에 집계해 잠그지 않는다.
 
 프론트는 별도 레포다 — 칸 종류 선택 UI, 반복 카운트 체크, 주간 리뷰 만다라 섹션, 2주 계획
 화면이 대응 PR 로 필요하다.

@@ -177,11 +177,22 @@ def build_scheduler() -> AsyncIOScheduler:
         id="morning_brief",
         replace_existing=True,
     )
+    # 일요일 18~23시 30분 폴 — 예전엔 일요일 03:00 고정 1회였는데, `week_window()` 가 재는
+    # 주 경계는 [월 00:00, 다음 월 00:00) 라 03:00 실행 시점엔 그 주 일요일 활동의 대부분이
+    # 아직 안 일어난 상태였다(= "주간" 리포트인데 일요일 몫이 거의 빠짐, ADR-0008 §4.1).
+    # 18시 이후로 옮기면 그날 활동 대부분이 이미 반영된 채로 집계된다.
+    # 고정 1회 대신 폴로 바꾼 이유는 `habit_instances`(runtime.py:211-217)와 같다 — jobstore 가
+    # MemoryJobStore 라 이 시간대에 재기동하면 주 1회짜리 job 은 다음 기회 없이 그 주가
+    # 통째로 스킵된다. `run_weekly_review_sweep`(scheduler/sweeps.py) 이 일요일 아니면
+    # no-op 이라 폴 자체는 월~토에도 등록돼 있지만 매번 즉시 반환한다.
+    # misfire_grace_time 은 폴 간격(30분=1800초)보다 짧게 — evening_reflection_notify 와 같은
+    # 이유(APScheduler 기본 1초라 발화 시점이 조금만 밀려도 폴이 통째로 skip 된다).
     scheduler.add_job(
         _weekly_review_job,
-        CronTrigger(day_of_week="sun", hour=3, minute=0, timezone=KST),
+        CronTrigger(day_of_week="sun", hour="18-23", minute="*/30", timezone=KST),
         id="weekly_review",
         replace_existing=True,
+        misfire_grace_time=600,
     )
     scheduler.add_job(
         _interruption_job,

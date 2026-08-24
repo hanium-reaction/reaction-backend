@@ -638,7 +638,7 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
 
 | Method | Path | 설명 | 상태 |
 | --- | --- | --- | --- |
-| GET | `/reviews/weekly?weekStart=YYYY-MM-DD` | 이번 주 리뷰 (일요일 03:00 precomputed) | ✅ #21-A |
+| GET | `/reviews/weekly?weekStart=YYYY-MM-DD` | 이번 주 리뷰 (일요일 18~23시 precomputed) | ✅ #21-A |
 | POST | `/reviews/weekly/generate` | 수동 재생성 (디버그) | ✅ #21-A |
 | GET | `/reviews/habit-penalty` | 3주 미달 빈도 재설계 후보 (S22) | ✅ #21-C |
 | POST | `/reviews/habit-penalty/{habitId}/accept` | 3주 미달 페널티 수락 (Idempotency) | ✅ #21-C |
@@ -667,8 +667,24 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
   "회복 후 24h 내 완료" 정밀화는 #20-B(replan 완료) 데이터 확보 후.
 - `restartSuccessRate`·`repeatedFailureCount`(interruption·failure_tag 조인) / `policyUpdateCandidates`(P2)
   는 #21-A 에서 `null`/`[]`.
-- 일요일 03:00 KST precompute cron = `scheduler/weekly_review_precompute.py`(idempotent).
-  실제 시각 트리거는 #24 운영준비에서 등록 (morning_brief 와 동일).
+- 일요일 18~23시 30분 폴 KST precompute cron = `scheduler/weekly_review_precompute.py`
+  (idempotent). 예전엔 일요일 03:00 고정 1회였다 — `week_window()` 가 재는 주 경계
+  `[월 00:00, 다음 월 00:00)` 라 03:00 시점엔 그 주 일요일 활동 대부분이 아직 안 일어난
+  상태였다. 18시 이후로 옮겨 그날 활동 대부분을 반영한다(ADR-0008 §4.1). 고정 1회 대신
+  폴로 바꾼 이유는 `habit_instances` 와 같다 — jobstore 가 MemoryJobStore 라 그 시간대에
+  재기동하면 주 1회짜리 job 이 유실된다. `run_weekly_review_sweep` 은 일요일이 아니면
+  즉시 no-op.
+
+만다라 절 (ADR-0008 §8 "E"):
+- 응답에 `mandala: MandalaWeeklySummary | null` — 사용자에게 궁극목표(`Goal.is_ultimate`)가
+  없거나 아직 만다라를 승인 안 했으면(트리 없음) `null`(응답에서 생략된 것처럼 취급).
+- 필드: `completedThisWeek`/`completedTotal`/`totalLeaves`(끝낸 칸, 이번 주/누적/전체),
+  `touchedThisWeek`(이번 주에 손댄 칸 — 완료 체크 또는 습관 체크인), `untouchedAxisTitles`
+  (이번 주 아무 활동도 없던 축 제목 목록), `habits`(반복형 칸별 `axisTitle`/`cellTitle`/
+  `doneCount`/`targetCount`).
+- `period_summaries` 에 저장하지 않고 `GET`/`POST generate` 둘 다 조회 시점에 파생
+  (`mandala_adapter.compute_weekly_stat`, 순수 함수) — `goal_nodes.progress` 컬럼을 안
+  두는 것과 같은 이유. 마이그레이션 없음.
 
 ---
 

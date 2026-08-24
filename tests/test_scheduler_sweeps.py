@@ -67,16 +67,37 @@ async def test_morning_brief_sweep_active_only() -> None:
 
 @pytest.mark.asyncio
 async def test_weekly_review_sweep_active_only() -> None:
+    """NOW(2026-06-02) 는 화요일 — 굳이 일요일 fixture 를 새로 안 만들려면 아래 non-Sunday 테스트가
+    이미 화요일 no-op 을 검증하므로, 여기는 일요일로 맞춰서 실제 집계 경로를 확인한다."""
     user_repo = FakeUserRepo()
     _seed_users(user_repo, [_user(), _user(), _user(anonymized=True)])
+    review_repo = FakeReviewRepo()
+    sunday = datetime(2026, 6, 7, 20, 0, tzinfo=UTC)  # 2026-06-07 은 일요일
+
+    result = await sweeps.run_weekly_review_sweep(
+        sunday, user_repo=user_repo, review_repo=review_repo, session=_FakeSession()
+    )
+    assert result.total == 2
+    assert result.ok == 2
+    assert len(review_repo._summaries) == 2
+
+
+@pytest.mark.asyncio
+async def test_weekly_review_sweep_noop_on_non_sunday() -> None:
+    """일요일이 아니면 사용자 조회조차 없이 즉시 no-op — 진행 중인 주를 조기 집계해 잠그지 않는다.
+
+    NOW(2026-06-02) 는 화요일. 트리거를 일요일로 좁혀도(`scheduler/runtime.py`) 이 함수가 한
+    번 더 막는다 — 수동 호출·설정 드리프트 방어(ADR-0008 §8 "E").
+    """
+    user_repo = FakeUserRepo()
+    _seed_users(user_repo, [_user(), _user()])
     review_repo = FakeReviewRepo()
 
     result = await sweeps.run_weekly_review_sweep(
         NOW, user_repo=user_repo, review_repo=review_repo, session=_FakeSession()
     )
-    assert result.total == 2
-    assert result.ok == 2
-    assert len(review_repo._summaries) == 2
+    assert result == sweeps.SweepResult(total=0, ok=0, failed=0)
+    assert len(review_repo._summaries) == 0
 
 
 @pytest.mark.asyncio
@@ -169,6 +190,26 @@ def test_expire_proposed_goals_job_is_wired_to_the_right_function_and_time() -> 
     assert fields["hour"] == "4", f"만료 cron 시각이 04시가 아니다: {fields}"
     assert fields["minute"] == "0", f"만료 cron 분이 00분이 아니다: {fields}"
     assert str(job.trigger.timezone) == "Asia/Seoul"
+
+
+def test_weekly_review_job_is_wired_to_the_right_function_and_time() -> None:
+    """주간 리뷰가 **일요일 18~23시 30분 폴 KST** 로 precompute sweep 을 부른다 (ADR-0008 §8 "E").
+
+    회귀: job id 집합만 보는 위 테스트는 (a) 다른 함수를 꽂거나 (b) 시각을 바꿔도 통과한다 —
+    `expire_reflections` 에서 실증된 회귀 패턴과 동일. 예전 "일요일 03:00 고정 1회"에서
+    옮긴 이유(week_window 의 일요일 몫이 거의 안 잡힘)는 `runtime.py` 주석 참고.
+    """
+    from reaction_backend.scheduler import runtime
+
+    job = next(j for j in runtime.build_scheduler().get_jobs() if j.id == "weekly_review")
+
+    assert job.func is runtime._weekly_review_job
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["day_of_week"] == "sun", f"주간 리뷰 폴이 일요일 한정이 아니다: {fields}"
+    assert fields["hour"] == "18-23", f"주간 리뷰 폴 시간대가 18~23시가 아니다: {fields}"
+    assert fields["minute"] == "*/30", f"주간 리뷰가 30분 폴이 아니다: {fields}"
+    assert str(job.trigger.timezone) == "Asia/Seoul"
+    assert job.misfire_grace_time == 600
 
 
 def test_evening_notify_job_is_wired_to_the_right_function_and_time() -> None:

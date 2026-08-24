@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,7 +31,7 @@ from reaction_backend.db.models.habit import Habit
 from reaction_backend.db.models.habit_instance import HabitInstance
 from reaction_backend.orchestrator.interview_catalog import ULTIMATE_DOMAIN_OPTIONS
 from reaction_backend.repositories.habit_repo import current_week_start_kst
-from reaction_backend.schemas.common import now_kst
+from reaction_backend.schemas.common import now_kst, to_kst
 from reaction_backend.schemas.mandala import (
     MandalaCell,
     MandalaCellItem,
@@ -380,6 +382,24 @@ async def fetch_habits_for_nodes(
     return {h.goal_node_id: h for h in result.scalars().all() if h.goal_node_id is not None}
 
 
+async def fetch_habit_instances_for_week(
+    session: AsyncSession, habit_ids: Sequence[uuid.UUID], week_start: date
+) -> dict[uuid.UUID, HabitInstance]:
+    """반복형 칸에 링크된 습관의 **지정한 주** 인스턴스 — habit_id → HabitInstance.
+
+    `fetch_current_week_habit_instances` 와 쿼리는 같고 주만 파라미터화한 버전이다. 주간
+    리포트(`GET /reviews/weekly?weekStart=`, ADR-0008 §8 "E")는 과거 주도 조회하므로,
+    "이번 주" 로 고정된 버전을 쓰면 조회 대상 주와 다른(오늘 기준) 주의 습관 데이터가 섞인다.
+    """
+    if not habit_ids:
+        return {}
+    stmt = select(HabitInstance).where(
+        HabitInstance.habit_id.in_(habit_ids), HabitInstance.week_start == week_start
+    )
+    result = await session.execute(stmt)
+    return {i.habit_id: i for i in result.scalars().all()}
+
+
 async def fetch_current_week_habit_instances(
     session: AsyncSession, habit_ids: Sequence[uuid.UUID]
 ) -> dict[uuid.UUID, HabitInstance]:
@@ -389,14 +409,7 @@ async def fetch_current_week_habit_instances(
     `habit_repo.current_week_start_kst()` 단일 소스(월요일 KST)를 그대로 쓴다 — 습관
     등록·체크·조회가 전부 이 함수 하나를 쓰는 것과 같은 이유(어긋난 주에 행이 생기면 안 됨).
     """
-    if not habit_ids:
-        return {}
-    stmt = select(HabitInstance).where(
-        HabitInstance.habit_id.in_(habit_ids),
-        HabitInstance.week_start == current_week_start_kst(),
-    )
-    result = await session.execute(stmt)
-    return {i.habit_id: i for i in result.scalars().all()}
+    return await fetch_habit_instances_for_week(session, habit_ids, current_week_start_kst())
 
 
 def _leaf_progress(node: GoalNode, actions: Sequence[ActionItem]) -> float | None:
@@ -498,6 +511,102 @@ def compute_progress(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 주간 리포트용 스냅샷 (ADR-0008 §8 "E") — 조회 시점 파생, `period_summaries` 에 저장 안 함
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class MandalaHabitWeeklyStat:
+    """반복형 칸 1개의 이번 주 체크인 현황 — `GET /reviews/weekly` '반복 중' 절."""
+
+    axis_title: str | None
+    cell_title: str
+    done_count: int
+    target_count: int
+
+
+@dataclass(frozen=True)
+class MandalaWeeklyStat:
+    """이번 주 만다라트 스냅샷. `completed_total`/`total_leaves` 는 누적치라 주와 무관하다.
+
+    `goal_nodes.progress` 컬럼을 두지 않는 이유(`compute_progress` 참고)와 같은 이유로
+    이 스냅샷도 저장하지 않고 매 조회 시 파생한다.
+    """
+
+    completed_this_week: int
+    completed_total: int
+    total_leaves: int
+    touched_this_week: int
+    untouched_axis_titles: list[str] = field(default_factory=list)
+    habits: list[MandalaHabitWeeklyStat] = field(default_factory=list)
+
+
+def compute_weekly_stat(
+    nodes: Sequence[GoalNode],
+    *,
+    week_start: date,
+    habits_by_node: Mapping[uuid.UUID, Habit],
+    instances_by_habit: Mapping[uuid.UUID, HabitInstance],
+) -> MandalaWeeklyStat:
+    """만다라 leaf 를 "이번 주 끝낸 칸 / 굴린 칸 / 손 못 댄 축 / 반복 체크인"으로 집계.
+
+    "활동"(굴린 칸 · 손 못 댄 축 판정 입력)을 완료 체크·습관 체크인으로만 좁힌다 — 셀은
+    ActionItem 에 직결되지 않는다는 결정(§11 항목 6, `fetch_promoted_goal_titles_for_user`
+    docstring)이라 프로젝트형 칸의 "작업 중"을 신뢰성 있게 잡을 다른 신호가 없다.
+    `updated_at`(제목 오타 수정 등)을 쓰면 편집 자체가 "활동"으로 잡혀 지표가 흐려진다.
+
+    `week_start`/`habits_by_node`/`instances_by_habit` 는 전부 호출자가 미리 구해 넘긴다
+    (이 모듈의 다른 순수 함수와 같은 "DB 무관" 규약).
+    """
+    week_end = week_start + timedelta(days=7)  # exclusive — week_window() 와 동일 규약
+    subgoals_by_id = {n.id: n for n in nodes if n.depth == 1}
+    leaves = [n for n in nodes if n.depth == 2]
+
+    completed_this_week = 0
+    completed_total = 0
+    touched_leaf_ids: set[uuid.UUID] = set()
+    habit_stats: list[MandalaHabitWeeklyStat] = []
+
+    for leaf in leaves:
+        habit = habits_by_node.get(leaf.id)
+        if habit is not None:
+            instance = instances_by_habit.get(habit.id)
+            done = instance.done_count if instance is not None else 0
+            axis = subgoals_by_id.get(leaf.parent_node_id) if leaf.parent_node_id else None
+            habit_stats.append(
+                MandalaHabitWeeklyStat(
+                    axis_title=axis.title if axis is not None else None,
+                    cell_title=leaf.title,
+                    done_count=done,
+                    target_count=habit.target_count,
+                )
+            )
+            if done > 0:
+                touched_leaf_ids.add(leaf.id)
+            continue
+        if leaf.completed_at is not None:
+            completed_total += 1
+            if week_start <= to_kst(leaf.completed_at).date() < week_end:
+                completed_this_week += 1
+                touched_leaf_ids.add(leaf.id)
+
+    untouched_axis_titles = [
+        sg.title
+        for sg in subgoals_by_id.values()
+        if all(leaf.id not in touched_leaf_ids for leaf in leaves if leaf.parent_node_id == sg.id)
+    ]
+
+    return MandalaWeeklyStat(
+        completed_this_week=completed_this_week,
+        completed_total=completed_total,
+        total_leaves=len(leaves),
+        touched_this_week=len(touched_leaf_ids),
+        untouched_axis_titles=untouched_axis_titles,
+        habits=habit_stats,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 만다라 → 오늘/브리프 연결 (PR7) — "만다라는 만들고 끝나면 죽은 문서가 된다"
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -584,10 +693,14 @@ async def find_active_axis_label(session: AsyncSession, user_id: uuid.UUID) -> s
 
 
 __all__ = [
+    "MandalaHabitWeeklyStat",
+    "MandalaWeeklyStat",
     "compute_progress",
+    "compute_weekly_stat",
     "context_from_ultimate",
     "fetch_actions_for_nodes",
     "fetch_current_week_habit_instances",
+    "fetch_habit_instances_for_week",
     "fetch_habits_for_nodes",
     "fetch_promoted_axis_titles",
     "fetch_promoted_goal_titles_for_user",

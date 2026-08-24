@@ -450,6 +450,12 @@ class FakeGoalRepo:
             return None
         return g
 
+    async def get_ultimate(self, user_id: UUID) -> Goal | None:
+        for g in self._items.values():
+            if g.user_id == user_id and g.is_ultimate and g.archived_at is None:
+                return g
+        return None
+
     async def get_mandala_node(self, user_id: UUID, node_id: UUID) -> Any | None:
         """실 repo 와 동일 — goal 소유권 + `tree_kind='mandala'` + 미보관만 통과."""
         for goal_id, nodes in self._nodes.items():

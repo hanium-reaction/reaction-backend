@@ -78,7 +78,15 @@ async def run_weekly_review_sweep(
     review_repo: ReviewRepo,
     session: AsyncSession,
 ) -> SweepResult:
-    """일요일 03:00 — 활성 사용자별 주간 리뷰 precompute(idempotent)."""
+    """일요일 18~23시 30분 폴 — 활성 사용자별 주간 리뷰 precompute(idempotent).
+
+    일요일이 아니면 즉시 no-op(쿼리 없이 반환) — 이 함수가 계산하는 주(`week_start_of`
+    (오늘))는 아직 진행 중인 주라, 월~토에 돌면 그 주의 일부만 보고 `force=False` idempotent
+    skip 으로 영구히 잠긴 스냅샷을 만들게 된다. 트리거를 일요일로 좁혀도(`scheduler/
+    runtime.py`) 여기서 한 번 더 막는다 — 수동 호출·설정 드리프트에 대한 방어(ADR-0008 §8 "E").
+    """
+    if now_kst_dt.weekday() != 6:  # 월=0 ... 일=6(일요일)
+        return SweepResult(total=0, ok=0, failed=0)
     week_start = week_start_of(now_kst_dt.date())
     users = await user_repo.list_active()
     ok = failed = 0
