@@ -40,10 +40,15 @@ class FailureTagMaster(CamelModel):
 
 
 class FailureTagRequest(CamelModel):
-    """POST /reflection/failure-tags/{executionId} — 실패 사유 0~2개 + 메모."""
+    """POST /reflection/failure-tags/{executionId} — 실패 사유 0~2개 + 메모 + 정서 1문항.
+
+    `task_aversiveness`(#299, FE #222): 이 일이 얼마나 하기 싫었는지 1(전혀 안 싫음)~5(매우
+    싫음). 선택 사항 — 강제하면 회고 이탈이 늘 것으로 보고 FE 가 선택으로 뒀다.
+    """
 
     tag_codes: list[str] = Field(max_length=2)
     memo: str | None = Field(default=None, max_length=300)
+    task_aversiveness: int | None = Field(default=None, ge=1, le=5)
 
 
 class FailureTagResponse(CamelModel):
@@ -57,14 +62,16 @@ class FailureTagResponse(CamelModel):
 class ReflectionBatchItem(CamelModel):
     """POST /reflection/batch 항목 — 미체크 실행 1건의 최종 결과 + 선택적 실패 사유.
 
-    `failure_tags`/`memo` 는 `completion_status` 가 failed/partial_done 일 때만 유효
-    (그 외 값과 함께 오면 422). `memo` 는 서버가 at-rest 암호화한다.
+    `failure_tags`/`memo`/`task_aversiveness`(#299) 는 `completion_status` 가
+    failed/partial_done 일 때만 유효(그 외 값과 함께 오면 422). `memo` 는 서버가 at-rest
+    암호화한다. `task_aversiveness` 는 태그 선택 여부와 무관하게 독립적으로 유효하다.
     """
 
     execution_id: str
     completion_status: ExecutionCompletion  # done / partial_done / failed / over_done
     failure_tags: list[str] = Field(default_factory=list, max_length=2)
     memo: str | None = Field(default=None, max_length=300)
+    task_aversiveness: int | None = Field(default=None, ge=1, le=5)
 
 
 class ReflectionBatchRequest(CamelModel):

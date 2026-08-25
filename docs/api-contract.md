@@ -511,16 +511,23 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 | GET | `/reflection/pending` | 오늘+어제+그제 미체크 카드 (3일 누적). 창 기준은 **계획 시각과 실제 착수 시각 중 나중** — 지난 블록을 뒤늦게 [▶시작] 한 카드도 착수일 기준 3일간 노출된다(#20). 창을 벗어난 카드는 매일 04:00 KST `expire_reflections` cron(`SCHEDULER_ENABLED=true` 일 때만 구동)이 같은 기준식의 여집합으로 `system_failure_reason='reflection_skipped'` + soft delete 만료하므로 목록에 나타나지 않는다 | ✅ #83 |
 | POST | `/reflection/batch` | 미체크 카드 일괄 종결 (Idempotency-Key 필수). 트랜잭션 | ✅ #20 |
 | GET | `/reflection/failure-tags` | 13종 마스터 (`is_active=true`) | ✅ #19-B |
-| POST | `/reflection/failure-tags/{executionId}` | 0~2개 태깅 + `memoEncrypted` | ✅ #19-B |
+| POST | `/reflection/failure-tags/{executionId}` | 0~2개 태깅 + `memoEncrypted` + `taskAversiveness` | ✅ #19-B, #299 |
 
 `POST /reflection/batch` — S17 저녁 일괄 회고. 요청 `{ items: [{ executionId, completionStatus(4칩),
-failureTags?(0~2), memo? }] }` (빈 배열 no-op, 상한 50건). 각 항목을 `POST /today/check-ins` 와
+failureTags?(0~2), memo?, taskAversiveness? }] }` (빈 배열 no-op, 상한 50건). 각 항목을 `POST /today/check-ins` 와
 동일하게 종결(execution + 블록 finished + `action_item.status`)하고 failed/partial_done 항목엔
 실패 사유를 함께 기록한다. **전량 사전 검증 후 단일 트랜잭션 적용** — 하나라도 무효(없음
 404 `TODAY_EXECUTION_NOT_FOUND` · 이미 체크인 409 `TODAY_ALREADY_CHECKED_IN` · 중복 executionId 422
 `COMMON_VALIDATION_ERROR` · non-failure 에 태그 422 `REFLECT_NOT_FAILED` · 무효 태그 422 `REFLECT_INVALID_TAG`
-· 재태깅 409 `REFLECT_ALREADY_TAGGED`)면 **전체 롤백(부분 적용 없음)**. 응답
-`{ processedCount, taggedCount, needsFailureTags[] }`(사유 미기록 실패 항목의 executionId). `memo` 는 서버 at-rest 암호화.
+· non-failure 에 정서 문항 422 `REFLECT_NOT_FAILED` · 재태깅 409 `REFLECT_ALREADY_TAGGED`)면
+**전체 롤백(부분 적용 없음)**. 응답 `{ processedCount, taggedCount, needsFailureTags[] }`(사유
+미기록 실패 항목의 executionId). `memo` 는 서버 at-rest 암호화.
+
+**`taskAversiveness`(#299, FE #222)** — "이 일이 얼마나 하기 싫었나요" 1(전혀 안 싫음)~5(매우
+싫음), 선택 사항. `failureTags`/`memo` 와 독립적으로 유효(태그 없이 정서 문항만 보내도 됨)하되
+`completionStatus` 는 똑같이 failed/partial_done 이어야 한다(그 외엔 422 `REFLECT_NOT_FAILED`).
+저장 위치는 `execution_events.task_aversiveness` — `context_snapshots.overwhelm_level`("얼마나
+벅찼는지")과는 다른 축이다. 생략하면 NULL 유지(강제 아님).
 
 **일별 '하루 에너지'는 이 계약에 없다 — 설계에 없기 때문이다** (#141). S17 회고는 **실행 단위
 종결**만 다룬다. 이 문단이 없어서 "저장할 자리가 있는데 BE 가 안 만들었다"는 오해가 반복됐다:
@@ -570,9 +577,18 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
 - 룰 선택: `recovery_strategy_catalog.primary_trigger_tags` ↔ 실패 태그 매칭,
   그룹별 최고 1장, 최소 2장 패딩 (orchestrator/recovery.py).
 - `POST /recovery/decisions` 요청 `{ executionId, decision: accepted|edited|skipped,
-  acceptedAttemptId?, editedActionText?, decisionReason? }` — accepted 시 나머지 pending 은
-  rejected. DOWNSCOPE/CARRY_OVER 수락 → 새 ActionItem(source=`recovery_downscope`/
+  acceptedAttemptId?, editedActionText?, decisionReason?, reEngagementAnchorAt? }` — accepted 시
+  나머지 pending 은 rejected. DOWNSCOPE/CARRY_OVER 수락 → 새 ActionItem(source=`recovery_downscope`/
   `recovery_carryover`, `parent_action_item_id` 혈통) 생성. RESCHEDULE/PARK 는 생성 없음.
+- **`reEngagementAnchorAt`(#327, FE #221)** — PARK/CARRY_OVER 수락(accepted/edited)에만
+  유효. 시간대 포함 ISO 8601(예: `2026-09-01T09:00:00+09:00`) 이어야 한다(시간대 없으면 422
+  `COMMON_VALIDATION_ERROR`). 생략하면 서버가 `orchestrator.recovery.re_engagement_anchor_at`
+  로 전략별 기본값을 계산: **CARRY_OVER** = 다음날 09시, **PARK** = 다음 주 월요일 09시(오늘이
+  월요일이어도 다음 주로 민다). 그 외 그룹(DOWNSCOPE/RESCHEDULE)이나 `decision="skipped"` 에
+  값을 보내면 422 `COMMON_VALIDATION_ERROR` — 앵커 개념이 없는 결정에 조용히 버려지는 값을
+  만들지 않는다. 응답 `reEngagementAnchorAt` 는 확정된(명시값 또는 계산된 기본값) 시점을 항상
+  KST 로 반환하며, PARK/CARRY_OVER 가 아니면 `null`. 저장 위치는
+  `recovery_attempts.re_engagement_anchor_at`.
 - **`decision="edited"`(잠금 결정 [수락/수정/거절] 의 '수정')** — `acceptedAttemptId` +
   `editedActionText`(trim 후 1~300자) 필수. 부수효과는 accepted 와 **동일**(형제 rejected,
   새 ActionItem 생성, replan 대상)이고 **새 카드 title 만 사용자 문구**가 된다.

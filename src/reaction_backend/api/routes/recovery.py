@@ -397,20 +397,59 @@ def _validated_target(
     return target
 
 
+_RE_ENGAGEMENT_ANCHOR_GROUPS = ("PARK", "CARRY_OVER")
+
+
+def _resolve_re_engagement_anchor_override(
+    body: RecoveryDecisionRequest, target: RecoveryAttempt
+) -> datetime | None:
+    """명시 앵커 검증 (#327) — 부수효과 0, `_validated_target` 처럼 첫 대입보다 앞서 부른다.
+
+    반환값은 `_adopt()` 에 넘길 **override** 다. `None` 이면 `_adopt()` 가 이미 하던
+    `orchestrator.recovery.re_engagement_anchor_at()` 기본값 계산을 그대로 쓴다 — 그
+    계산도 PARK/CARRY_OVER 가 아닌 그룹에선 `None` 을 돌려주므로 결과가 같다.
+
+    PARK/CARRY_OVER 가 아닌 그룹에 값이 오면 422 — 조용히 버리면 사용자가 지정한 시점이
+    사라진 걸 못 알아챈다(`editedActionText` 그룹 불일치 검증과 같은 이유).
+    """
+    if body.re_engagement_anchor_at is None:
+        return None
+    if target.recovery_option_group not in _RE_ENGAGEMENT_ANCHOR_GROUPS:
+        raise ApiError(
+            ErrorCode.COMMON_VALIDATION_ERROR,
+            "재관여 시점은 PARK·CARRY_OVER 회복에만 지정할 수 있어요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="reEngagementAnchorAt",
+        )
+    if body.re_engagement_anchor_at.tzinfo is None:
+        raise ApiError(
+            ErrorCode.COMMON_VALIDATION_ERROR,
+            "reEngagementAnchorAt 는 시간대 정보를 포함해야 해요 (예: +09:00).",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="reEngagementAnchorAt",
+        )
+    return body.re_engagement_anchor_at
+
+
 def _adopt(
-    target: RecoveryAttempt, decision: str, decision_reason: str | None, decided_at: datetime
+    target: RecoveryAttempt,
+    decision: str,
+    decision_reason: str | None,
+    decided_at: datetime,
+    re_engagement_anchor_override: datetime | None = None,
 ) -> str:
     """채택 스탬프. `recovery_started_at` = 결정 시각 (average_recovery_minutes 의 기점).
 
     `re_engagement_anchor_at` 도 여기서 같이 찍는다 — PARK/CARRY_OVER 만 값이 채워지고
     (근거 대장 §3 S8), 나머지 그룹은 `orchestrator.recovery.re_engagement_anchor_at` 가
-    `None` 을 돌려줘 조용히 비활성이다.
+    `None` 을 돌려줘 조용히 비활성이다. `re_engagement_anchor_override` 가 있으면(#327,
+    FE 명시값) 그 계산 대신 그 값을 쓴다.
     """
     target.user_decision = decision
     target.recovery_decided_at = decided_at
     target.recovery_started_at = decided_at
     target.decision_reason = decision_reason
-    target.re_engagement_anchor_at = re_engagement_anchor_at(
+    target.re_engagement_anchor_at = re_engagement_anchor_override or re_engagement_anchor_at(
         target.recovery_option_group, decided_at
     )
     return f"{_ATTEMPT_PREFIX}{target.id}"
@@ -517,13 +556,27 @@ async def decide_recovery(
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="editedActionText",
         )
+    if body.decision not in ADOPTED_DECISION_VALUES and body.re_engagement_anchor_at is not None:
+        # skipped 엔 채택 대상(target)이 없어 앵커를 붙일 곳도 없다 — 같은 이유로 조용히
+        # 버리지 않는다.
+        raise ApiError(
+            ErrorCode.COMMON_VALIDATION_ERROR,
+            "재관여 시점은 수락(accepted/edited) 결정에만 지정할 수 있어요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="reEngagementAnchorAt",
+        )
 
+    re_engagement_anchor_result: datetime | None = None
     if body.decision in ADOPTED_DECISION_VALUES:
         # ⚠️ 검증이 **전부** 첫 대입보다 앞에 온다 — 그래서 422 가 나도 부분 변경이 없다.
         # 이 순서가 뒤집히면 "실패했는데 일부만 반영된" 상태가 커밋될 수 있다.
         target = _validated_target(body, pending, edited_text)
+        anchor_override = _resolve_re_engagement_anchor_override(body, target)
 
-        accepted_id = _adopt(target, body.decision, body.decision_reason, decided_at)
+        accepted_id = _adopt(
+            target, body.decision, body.decision_reason, decided_at, anchor_override
+        )
+        re_engagement_anchor_result = target.re_engagement_anchor_at
         rejected_ids = _reject_siblings(pending, target, decided_at)
 
         source = _GROUP_TO_SOURCE.get(target.recovery_option_group)
@@ -551,6 +604,7 @@ async def decide_recovery(
         rejected_attempt_ids=rejected_ids,
         skipped_attempt_ids=skipped_ids,
         resulting_action_item_id=resulting_action_id,
+        re_engagement_anchor_at=re_engagement_anchor_result,
     )
 
 

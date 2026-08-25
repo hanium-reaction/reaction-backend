@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Text, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Enum, ForeignKey, Integer, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -44,6 +44,12 @@ EXECUTION_COMPLETION_STATUS_VALUES = (
 
 class ExecutionEvent(Base, TimestampMixin):
     __tablename__ = "execution_events"
+
+    __table_args__ = (
+        CheckConstraint(
+            "task_aversiveness BETWEEN 1 AND 5", name="ck_execution_events_task_aversiveness_range"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -93,6 +99,11 @@ class ExecutionEvent(Base, TimestampMixin):
 
     # 1 (낮음) ~ 5 (높음)
     user_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # 이 일이 얼마나 하기 싫었는지 — 1(전혀 안 싫음)~5(매우 싫음), S18 실패 사유 시트 정서
+    # 1문항(#299, FE #222). `overwhelm_level`(context_snapshots, 얼마나 벅찼는지)과는 다른
+    # 축이다 — 실패/부분완료 실행에서만 채워진다(성공 시엔 시트 자체가 안 열림).
+    task_aversiveness: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # 자유 입력 (encrypted at-rest)
     user_feedback_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)

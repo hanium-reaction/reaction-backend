@@ -7,6 +7,26 @@
 
 ---
 
+## v1.74 — 2026-08-25 (`taskAversiveness`(#299) + `reEngagementAnchorAt`(#327) — FE 구현 완료분 저장·노출)
+
+**추가만(하위호환)** — endpoint 변경 없음.
+
+- `FailureTagRequest`/`ReflectionBatchItem` 에 `taskAversiveness`(1~5, 선택) 추가.
+  failed/partial_done 실행에만 유효(그 외엔 422 `REFLECT_NOT_FAILED`) — `failureTags`/`memo`
+  와 독립적으로 유효(태그 없이 정서 문항만 보내도 됨). 저장처
+  `execution_events.task_aversiveness`.
+- `RecoveryDecisionRequest` 에 `reEngagementAnchorAt`(선택, 시간대 포함 ISO 8601) 추가,
+  `RecoveryDecisionResponse` 에 같은 이름으로 확정값을 반환. PARK/CARRY_OVER 수락에만
+  유효 — 그 외 그룹/`skipped` 에 값을 보내면 422 `COMMON_VALIDATION_ERROR`. 생략 시 서버
+  기본값(CARRY_OVER=다음날 09시, PARK=다음 주 월요일 09시)을 계산해 채운다. 저장처는
+  `recovery_attempts.re_engagement_anchor_at`(#336 이 이미 컬럼과 기본값 계산 로직을
+  추가해 뒀다 — 이 버전은 그 기본값을 클라이언트가 명시로 덮어쓸 수 있게 하고, 확정된
+  값을 요청/응답 계약에 실제로 노출한다).
+- 마이그레이션 `6b149658b8ea` — `task_aversiveness` 컬럼(+ 범위 CHECK) 추가, nullable,
+  백필 없음.
+
+---
+
 ## v1.73 — 2026-08-25 (`POST /notifications/{notificationId}/opened` 신설 — 근거 대장 §6.1)
 
 **추가만(하위호환)** — 새 endpoint. 기존 응답 형태·발송 흐름 변경 없음.

@@ -572,6 +572,137 @@ def test_decision_accept_park_stamps_re_engagement_anchor(
     assert stored.re_engagement_anchor_at.weekday() == 0  # 다음 주 월요일
 
 
+def test_decision_response_echoes_default_re_engagement_anchor(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """서버 기본값으로 채워진 앵커가 응답(`reEngagementAnchorAt`)에도 그대로 실린다 (#327).
+
+    회귀: `_adopt()` 가 DB 에는 앵커를 찍지만, 라우트가 응답 스키마에 실어 보내지 않으면
+    FE 는 그 값을 확인할 방법이 없다(요청/응답 계약이 없던 원래 구현의 공백).
+    """
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AVOIDANCE"]
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    accepted = next(c for c in cards if c["optionGroup"] == "PARK")
+
+    resp = _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "accepted",
+            "acceptedAttemptId": accepted["attemptId"],
+        },
+    )
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["reEngagementAnchorAt"] is not None
+
+
+def test_decision_accepts_explicit_re_engagement_anchor_override(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """FE 가 명시 앵커를 보내면 서버 기본값 대신 그 값이 저장·반환된다 (#327, FE #221)."""
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AMBIGUITY", "PRIORITY_SHIFT"]
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    accepted = next(c for c in cards if c["optionGroup"] == "CARRY_OVER")
+
+    resp = _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "accepted",
+            "acceptedAttemptId": accepted["attemptId"],
+            "reEngagementAnchorAt": "2026-08-01T08:30:00+09:00",
+        },
+    )
+
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["reEngagementAnchorAt"] == "2026-08-01T08:30:00+09:00"
+    attempt_id = UUID(accepted["attemptId"].removeprefix("rec_"))
+    stored = fake_recovery_repo._attempts[attempt_id]
+    assert stored.re_engagement_anchor_at == datetime(2026, 8, 1, 8, 30, tzinfo=KST)
+
+
+def test_decision_downscope_rejects_re_engagement_anchor(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """DOWNSCOPE/RESCHEDULE 은 앵커 개념이 없다 — 값을 보내면 조용히 버리지 않고 422."""
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AMBIGUITY", "PRIORITY_SHIFT"]
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    accepted = next(c for c in cards if c["optionGroup"] == "DOWNSCOPE")
+
+    resp = _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "accepted",
+            "acceptedAttemptId": accepted["attemptId"],
+            "reEngagementAnchorAt": "2026-08-01T08:30:00+09:00",
+        },
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"
+
+
+def test_decision_skipped_rejects_re_engagement_anchor(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AMBIGUITY", "PRIORITY_SHIFT"]
+    )
+    _generate(client, exec_id)  # pending 카드가 있어야 skipped 도 유효한 결정이 된다.
+    resp = _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "skipped",
+            "reEngagementAnchorAt": "2026-08-01T08:30:00+09:00",
+        },
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"
+
+
+def test_decision_rejects_naive_re_engagement_anchor(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """시간대 없는 값 — reEngagementAnchorAt 는 +09:00 등 offset 이 있어야 한다."""
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AMBIGUITY", "PRIORITY_SHIFT"]
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    accepted = next(c for c in cards if c["optionGroup"] == "CARRY_OVER")
+
+    resp = _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "accepted",
+            "acceptedAttemptId": accepted["attemptId"],
+            "reEngagementAnchorAt": "2026-08-01T08:30:00",
+        },
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"
+
+
 def test_decision_accept_downscope_leaves_re_engagement_anchor_none(
     client: TestClient,
     fake_recovery_repo: FakeRecoveryRepo,

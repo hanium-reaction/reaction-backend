@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import date
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
@@ -294,6 +294,53 @@ def test_tag_failure_reasons_success(
     assert fake_execution_repo._last_memo_encrypted != "어디서 시작할지 몰랐다"
 
 
+def test_tag_failure_reasons_stores_task_aversiveness(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """정서 1문항(#299, FE #222) — 실행 행에 그대로 저장된다."""
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    _check_in(client, exec_id, "failed")
+    resp = client.post(
+        f"/reflection/failure-tags/{exec_id}",
+        json={"tagCodes": ["AMBIGUITY"], "taskAversiveness": 5},
+    )
+    assert resp.status_code == 201, resp.json()
+    stored = fake_execution_repo._executions[UUID(exec_id.removeprefix("exec_"))]
+    assert stored.task_aversiveness == 5
+
+
+def test_tag_failure_reasons_task_aversiveness_out_of_range(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    _check_in(client, exec_id, "failed")
+    resp = client.post(
+        f"/reflection/failure-tags/{exec_id}",
+        json={"tagCodes": ["AMBIGUITY"], "taskAversiveness": 6},
+    )
+    assert resp.status_code == 422
+
+
+def test_tag_failure_reasons_task_aversiveness_omitted_leaves_null(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """선택 사항 — 안 보내면 NULL 로 남는다(강제 아님)."""
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    _check_in(client, exec_id, "failed")
+    resp = client.post(f"/reflection/failure-tags/{exec_id}", json={"tagCodes": ["AMBIGUITY"]})
+    assert resp.status_code == 201, resp.json()
+    stored = fake_execution_repo._executions[UUID(exec_id.removeprefix("exec_"))]
+    assert stored.task_aversiveness is None
+
+
 def test_tag_rejects_more_than_two(
     client: TestClient,
     fake_action_item_repo: FakeActionItemRepo,
@@ -518,6 +565,34 @@ def test_reflection_batch_rejects_tags_on_non_failure(
     resp = _batch(
         client, [{"executionId": e, "completionStatus": "done", "failureTags": ["AMBIGUITY"]}]
     )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "REFLECT_NOT_FAILED"
+
+
+def test_reflection_batch_stores_task_aversiveness(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    a = _seed_action(fake_action_item_repo)
+    e = _start(client, f"action_{a.id}").json()["executionId"]
+    resp = _batch(
+        client,
+        [{"executionId": e, "completionStatus": "failed", "taskAversiveness": 4}],
+    )
+    assert resp.status_code == 200, resp.text
+    stored = fake_execution_repo._executions[UUID(e.removeprefix("exec_"))]
+    assert stored.task_aversiveness == 4
+
+
+def test_reflection_batch_rejects_task_aversiveness_on_non_failure(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """codes 없이 정서 문항만 왔어도 completionStatus 가 실패군이 아니면 422."""
+    a = _seed_action(fake_action_item_repo)
+    e = _start(client, f"action_{a.id}").json()["executionId"]
+    resp = _batch(client, [{"executionId": e, "completionStatus": "done", "taskAversiveness": 3}])
     assert resp.status_code == 422
     assert resp.json()["code"] == "REFLECT_NOT_FAILED"
 

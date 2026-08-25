@@ -6,7 +6,7 @@ UX 4 그룹 (DOWNSCOPE / RESCHEDULE / CARRY_OVER / PARK) 카드를 Draft Layer �
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import Field
@@ -92,6 +92,11 @@ class RecoveryDecisionRequest(CamelModel):
       AI 원문(`suggested_action_text`)은 보존한다 — "얼마나 고쳐 썼나"가 AI 품질 지표다.
       새 카드를 만들지 않는 그룹(RESCHEDULE/PARK)은 문구를 담을 곳이 없어 422.
     - `decision="skipped"` → 모든 pending 카드 skipped ("오늘은 쉬기").
+
+    `re_engagement_anchor_at`(#327, FE #221): PARK/CARRY_OVER 수락에만 유효(그 외 그룹에
+    보내면 422 — 조용히 버리면 사용자가 지정한 시점이 사라진 걸 못 알아챈다). 생략하면
+    서버가 전략별 기본값(`orchestrator.recovery.re_engagement_anchor_at`)을 계산한다.
+    시간대 정보(예: `+09:00`)를 포함한 ISO 8601 이어야 한다.
     """
 
     execution_id: str
@@ -99,6 +104,7 @@ class RecoveryDecisionRequest(CamelModel):
     accepted_attempt_id: str | None = None
     edited_action_text: str | None = Field(default=None, max_length=300)
     decision_reason: str | None = Field(default=None, max_length=200)
+    re_engagement_anchor_at: datetime | None = None
 
 
 class RecoveryDecisionResponse(CamelModel):
@@ -109,6 +115,8 @@ class RecoveryDecisionResponse(CamelModel):
     rejected_attempt_ids: list[str]
     skipped_attempt_ids: list[str]
     resulting_action_item_id: str | None
+    # PARK/CARRY_OVER 수락일 때만 값 있음(명시값 또는 서버 기본값 확정 결과) — #327.
+    re_engagement_anchor_at: KstDatetime | None = None
     is_draft: bool = False
 
 

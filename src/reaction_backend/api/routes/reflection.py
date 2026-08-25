@@ -179,6 +179,8 @@ async def tag_failure_reasons(
         tag_codes=codes,
         memo_encrypted=memo_encrypted,
     )
+    if body.task_aversiveness is not None:
+        execution.task_aversiveness = body.task_aversiveness
     await session.commit()
 
     return FailureTagResponse(
@@ -253,6 +255,14 @@ async def batch_reflect(
                     f"이미 실패 사유가 기록된 실행이 있어요: {item.execution_id}",
                     http_status=HTTPStatus.CONFLICT,
                 )
+        if item.task_aversiveness is not None and item.completion_status not in _TAGGABLE_STATUSES:
+            # codes 와 독립 — 태그 없이 정서 문항만 왔어도 완료 상태가 실패군이어야 한다.
+            raise ApiError(
+                ErrorCode.REFLECT_NOT_FAILED,
+                "실패/부분완료가 아닌 항목엔 정서 문항을 남길 수 없어요.",
+                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                field="taskAversiveness",
+            )
         resolved.append((execution, item, codes))
 
     # 2) 전량 적용 (단일 트랜잭션) — check-in 전이 재현 + 선택적 태깅.
@@ -262,6 +272,8 @@ async def batch_reflect(
     for execution, item, codes in resolved:
         execution.completion_status = item.completion_status
         execution.actual_end_at = ended_at
+        if item.task_aversiveness is not None:
+            execution.task_aversiveness = item.task_aversiveness
         if execution.actual_start_at is not None:
             delta = ended_at - execution.actual_start_at
             execution.actual_duration_minutes = max(int(delta.total_seconds() // 60), 0)
