@@ -172,9 +172,14 @@ class Settings(BaseSettings):
     column_encryption_key: str = ""
 
     # ── Auth (Issue #16) ──
-    # Google OAuth client (Google Cloud Console 발급). FE/BE가 같은 client_id를 공유.
+    # Google OAuth client (Google Cloud Console 발급). FE(웹)와 BE가 같은 client_id를 공유.
     # 비어있으면 /auth/google 호출 시 명확한 503 에러로 surface (auth_stub_mode=False 일 때).
     google_oauth_client_id: str = ""
+    # Android 네이티브 로그인(Credential Manager)이 보내는 id_token 의 aud — 웹과 다른
+    # OAuth Client(#322, FE #237 §3). 비어있으면 웹 client_id 하나만 허용(기존 동작 유지).
+    # 선행 작업: Google Cloud 콘솔에서 패키지명(com.hanium.reaction) + SHA-1 3종(개발/업로드/
+    # Play App Signing)으로 Android Client 등록 — 사람이 직접 해야 한다(FE #237 체크리스트).
+    google_oauth_android_client_id: str = ""
     # SPA + id_token 흐름에서는 BE가 사용하지 않음. server-side code flow 대비 자리만 둠.
     google_oauth_client_secret: str = ""
 

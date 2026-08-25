@@ -20,6 +20,7 @@
 | **Supabase prod 프로젝트 + `DATABASE_URL`** | supabase.com | Session pooler URL (ap-northeast-2). staging 과 **별도 프로젝트** 권장 |
 | **`GEMINI_API_KEY`** | Google AI Studio | 무료 티어로 시작, 6월 2주차 유료 전환 예정 |
 | **`GOOGLE_OAUTH_CLIENT_ID`** | Google Cloud Console | FE 와 동일 client. **승인된 JS 원본**에 Vercel·Render 도메인 추가 |
+| `GOOGLE_OAUTH_ANDROID_CLIENT_ID` (선택) | Google Cloud Console | Android 네이티브 로그인 전용 client(#322). 패키지명 `com.hanium.reaction` + SHA-1 3종(개발/업로드/Play App Signing) 등록 후 발급. 미설정 시 웹 client 만 허용 |
 | **`JWT_SECRET`** | 로컬 생성 | `python -c "import secrets; print(secrets.token_hex(32))"` |
 | **`COLUMN_ENCRYPTION_KEY`** | 로컬 생성 | `python -m reaction_backend.safety.encryption` (staging 과 **다른 키**, 분실 시 복호화 불가) |
 | **(FE) VAPID 키** | 로컬 생성 | #25 Web Push 용. `npx web-push generate-vapid-keys` |
