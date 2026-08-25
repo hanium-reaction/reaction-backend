@@ -961,10 +961,13 @@ def test_shift_to_recovery_day_leaves_future_same_day_slot_untouched() -> None:
     assert end_at == datetime(2026, 7, 29, 22, 5, tzinfo=KST)
 
 
-def test_shift_to_recovery_day_never_moves_to_another_day() -> None:
-    """어제 결정한 회복을 오늘 조회해도 블록 날짜는 안 바뀐다 — 카드 `target_date` 와 어긋나면 안 된다.
+def test_shift_to_recovery_day_still_corrects_when_queried_the_next_day() -> None:
+    """어제 결정한 회복을 오늘 조회해도 **여전히 보정된다** (#258 도그푸딩 결함 수정).
 
-    밤 가드는 통과하는 케이스라(09:00) `same_day` 가드를 지우는 뮤턴트를 이 테스트만 잡는다.
+    예전엔 여기서 `same_day` 가드가 걸려 보정을 포기했다(블록이 어제 14:00 과거에 그대로
+    남음) — 그 결과가 실제로 도그푸딩에서 나타났다(수락 2건 중 완주 0건). 이제는 "오늘
+    (조회 시점 기준) 안에 자리가 있는가"만 본다 — 09:00 조회면 밤 컷오프 전에 충분히
+    끝나므로 정상 보정된다.
     """
     plan_start = datetime(2026, 7, 29, 14, 0, tzinfo=KST)
     start_at, end_at = shift_to_recovery_day(
@@ -974,21 +977,59 @@ def test_shift_to_recovery_day_never_moves_to_another_day() -> None:
         estimated_minutes=5,
         now=datetime(2026, 7, 30, 9, 0, tzinfo=KST),  # 다음 날 조회
     )
-    assert start_at == plan_start
-    assert end_at == datetime(2026, 7, 29, 14, 5, tzinfo=KST)
+    assert start_at == datetime(2026, 7, 30, 9, 15, tzinfo=KST)
+    assert end_at == datetime(2026, 7, 30, 9, 20, tzinfo=KST)
 
 
-def test_shift_to_recovery_day_skips_correction_at_night() -> None:
-    """밤(23시 이후로 넘어가면)엔 보정하지 않는다 — `create_block` 이 정책 검사를 안 하기 때문."""
+def test_shift_to_recovery_day_rolls_to_next_morning_at_night() -> None:
+    """밤(23시 이후로 넘어가면) 그 날은 포기하고 **다음날 아침(07시)** 로 넘긴다.
+
+    예전엔 여기서 아예 보정을 포기해 블록이 과거(14:00)에 그대로 남았다(#258 도그푸딩
+    실측 — 21시 이후 결정이 전부 이 경로였다). `create_block` 이 정책 검사를 안 해도
+    "그 날 밤 안에 욱여넣기"는 여전히 안 하지만, 이제 다음날로는 넘긴다.
+    """
+    plan_start = datetime(2026, 7, 29, 14, 0, tzinfo=KST)
+    start_at, end_at = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 7, 29),
+        recovery_target_date=date(2026, 7, 29),
+        estimated_minutes=30,
+        now=datetime(2026, 7, 29, 22, 52, tzinfo=KST),  # earliest 23:05 → 오늘은 컷오프 밖
+    )
+    assert start_at == datetime(2026, 7, 30, 7, 0, tzinfo=KST)
+    assert end_at == datetime(2026, 7, 30, 7, 30, tzinfo=KST)
+
+
+def test_shift_to_recovery_day_pulls_forward_when_lead_crosses_midnight_into_quiet_tail() -> None:
+    """`+RECOVERY_MIN_LEAD_MINUTES` 가 자정을 넘겨 quiet hours 꼬리(00~07시)에 떨어지면,
+    다음날까지 안 밀고 **같은 날** 07시로 당긴다 — 하루를 통째로 더 미룰 이유가 없다.
+    """
+    plan_start = datetime(2026, 7, 29, 14, 0, tzinfo=KST)
+    now = datetime(2026, 7, 29, 23, 50, tzinfo=KST)
+    start_at, _ = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 7, 29),
+        recovery_target_date=date(2026, 7, 29),
+        estimated_minutes=5,
+        now=now,
+    )
+    # earliest = 23:50 + 10분 = 00:00(7/30) — quiet hours 꼬리. 07시로 당기되 날짜는 그대로.
+    assert start_at == datetime(2026, 7, 30, 7, 0, tzinfo=KST)
+    assert start_at - now >= timedelta(minutes=10)
+    assert start_at.minute % 15 == 0
+
+
+def test_shift_to_recovery_day_corrects_even_after_a_multi_day_gap() -> None:
+    """며칠 뒤에 뒤늦게 승인해도(1일보다 더 벌어져도) 여전히 '조회 시점 오늘'로 보정된다."""
     plan_start = datetime(2026, 7, 29, 14, 0, tzinfo=KST)
     start_at, _ = shift_to_recovery_day(
         plan_start,
         original_target_date=date(2026, 7, 29),
         recovery_target_date=date(2026, 7, 29),
-        estimated_minutes=30,
-        now=datetime(2026, 7, 29, 22, 52, tzinfo=KST),  # earliest 23:05 → 컷오프 밖
+        estimated_minutes=5,
+        now=datetime(2026, 8, 3, 10, 0, tzinfo=KST),  # 5일 뒤 조회
     )
-    assert start_at == plan_start, "밤 가드가 풀렸다"
+    assert start_at == datetime(2026, 8, 3, 10, 15, tzinfo=KST)
 
 
 def test_shift_to_recovery_day_allows_block_ending_exactly_at_cutoff() -> None:

@@ -604,3 +604,29 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
     pending 제외, L1 임계값 배선 2건 — `test_recovery_repo_lineage.py`), 라우트 통합
     2건(L1 에서 DOWNSCOPE_DEFAULT 배제되면서도 personalize 호출은 그대로 되는지 +
     경계 미만 비활성화 — `test_recovery.py`).
+18. ✅ **`shift_to_recovery_day` 과거 배치 결함 수정 — 완료.** 첫 도그푸딩 실측(#258 —
+    `recovery_attempts` 2건, 수락 1건, **완주 0건**)에서 원인을 추적해 발견·수정.
+
+    - **결함**: 예전엔 회복 블록 보정이 "같은 날 안일 것" **AND** "23시 전에 끝날 것"
+      **둘 다** 만족할 때만 걸렸다. 21시 이후 결정이나(밤 컷오프 위반) 뒤늦은 승인·재조회
+      (자정을 넘겨 원본 슬롯의 날짜와 어긋남)는 **둘 중 하나가 항상 깨져** 보정을 통째로
+      포기했다 — 블록이 원본 실패 시각(과거)에 그대로 남아 `pre_card` 스윕([now+2m,
+      now+7m))을 영영 못 만나고, 알림도 완주도 원리적으로 불가능했다. `inspect_recovery_
+      attempts.py`(도그푸딩 점검용, 이전 세션 이후 신설)로 실제 사례를 확인.
+    - **수정**: "같은 날" 가드를 없애고 — 대신 `now`(항상 최신 조회 시점) 기준으로 자리를
+      다시 찾는다. `+RECOVERY_MIN_LEAD_MINUTES` 가 자정을 넘겨 quiet hours 꼬리(00~07시)
+      에 떨어지면 같은 날 07시로, 23시 이후라 오늘 안에 자리가 없으면 **다음날** 07시로
+      민다(`RECOVERY_MORNING_START_HOUR` 신설 — `safety/push_gate.QUIET_END_HOUR` 미러,
+      `RECOVERY_NIGHT_CUTOFF_HOUR` 와 같은 관례). "며칠 뒤 뒤늦은 승인"도 이제 조회 시점
+      기준으로 정상 보정된다.
+    - **트레이드오프를 의도적으로 받아들였다**: 다음날로 넘어가는 경로는 회복 카드
+      `target_date`(호출부가 결정 시각 기준으로 이미 고정해 둔 값)와 실제 블록 날짜가
+      하루 어긋날 수 있다. 예전엔 이 어긋남을 피하려고 보정 자체를 포기했는데, 그 결과가
+      "영원히 완주 불가능한 블록"이었다 — 문서에도 실측으로도 확인된 더 나쁜 결과라,
+      하루 어긋난 표기 쪽을 택했다.
+
+    신규/갱신 테스트 — 기존 2건(`test_shift_to_recovery_day_never_moves_to_another_day`/
+    `test_shift_to_recovery_day_skips_correction_at_night`)의 기대값을 새 동작에 맞게
+    갱신하고 이름도 바꿨다(예전 이름이 "보정 안 함"을 의도된 동작으로 서술하고 있었다 —
+    이제는 그게 결함이었다는 게 확인됐으므로). 신규 3건: quiet hours 꼬리 당김, 다음날
+    07시로 밀린 블록도 리드·격자 불변식을 지키는지, 며칠 뒤 뒤늦은 승인도 보정되는지.
