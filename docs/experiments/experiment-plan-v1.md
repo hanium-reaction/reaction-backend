@@ -664,3 +664,30 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
     미존재/형식오류/타 사용자), 리포지토리 4건(실 Postgres — 명시 id 로 INSERT, FK 저장,
     사용자 스코프 조회, stamp_opened 최초 1회). 기존 `test_web_push_e2e.py` 4건도 새
     시그니처(`notification_id` 필수 인자)에 맞게 갱신.
+20. ✅ **S8 재관여 앵커 — `re_engagement_anchor_at` 백엔드 기본값 — 완료.** 근거 대장
+    §3 S8("PARK/CARRY_OVER 수락 시 필수") — FE #221(사용자가 직접 고르는 UI)과 무관하게
+    지금 넣을 수 있는 **서버 기본값**만 먼저 얹었다.
+
+    - `recovery_attempts.re_engagement_anchor_at`(nullable) 신설.
+    - `orchestrator/recovery.py::re_engagement_anchor_at(option_group, decided_at)` —
+      **PARK 는 새 카드를 안 만든다**(`_GROUP_TO_SOURCE` 밖)는 게 이 필드가 "필수"인
+      이유: 없으면 "보류"가 곧 "영영 안 돌아옴"이 된다. 카탈로그 템플릿이 이미 약속한
+      "다음 주 리뷰"(GOAL_RECHECK/PARK_DEFAULT 문구) 그대로 **다음 주(오늘이 월요일이어도
+      이번 주 아님) 월요일 09시**로 잡는다(C5 프레시 스타트 — 새 주가 랜드마크).
+      CARRY_OVER 는 내일 09시. DOWNSCOPE/RESCHEDULE 은 `None`(이미 접점이 있음).
+    - `routes/recovery.py::_adopt()` 에서 결정 스탬프와 같이 찍는다.
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **정밀 발송 시각은 아직 아니다** — 09시는 `NotificationSetting.morning_brief_time`
+      기본값과 가까운 고정값일 뿐, 사용자별 실제 설정을 반영하지 않는다(순수 함수라
+      repo 접근이 없다). 이 앵커를 실제로 **소비**해서 알림을 쏘는 로직(S9 T2)은 아직
+      없다 — 지금은 DB 에 값만 남는다.
+    - **API 응답에 노출 안 함** — A1(`opened_at`)과 같은 이유로, FE 가 볼 방법이
+      아직 없어도 백엔드 값만 먼저 준비해 둔다.
+    - **L3 재협상의 PARK 수락**(§5.2, 별도 3장 UI)도 이 필드를 필요로 하지만 L3 자체가
+      아직 미구현이라 그쪽 배선은 범위 밖.
+
+    신규 테스트 7건 — 순수함수 5건(DOWNSCOPE/RESCHEDULE None, CARRY_OVER 내일, PARK 다음 주
+    월요일, 월요일에 결정해도 오늘이 아니라 다음 주로 건너뜀, 결정 시각과 무관하게 시각은
+    고정 — `test_recovery.py`), 라우트 통합 2건(PARK 수락 시 앵커 스탬프 + 새 카드 없음
+    확인, DOWNSCOPE 수락은 앵커가 계속 None).

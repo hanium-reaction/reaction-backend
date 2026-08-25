@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from reaction_backend.orchestrator.recovery import (
     RECOVERY_NIGHT_CUTOFF_HOUR,
+    re_engagement_anchor_at,
     recovery_target_date,
     recovery_unit_minutes,
     render_template,
@@ -542,6 +543,60 @@ def test_decision_accept_downscope_creates_action_and_rejects_siblings(
     assert new_actions[0].parent_action_item_id == original.id
 
 
+def test_decision_accept_park_stamps_re_engagement_anchor(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """PARK 수락 — 새 카드는 없어도(§3 S8) `re_engagement_anchor_at` 은 반드시 찍힌다."""
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AVOIDANCE"]
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    accepted = next(c for c in cards if c["optionGroup"] == "PARK")
+
+    resp = _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "accepted",
+            "acceptedAttemptId": accepted["attemptId"],
+        },
+    )
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["resultingActionItemId"] is None  # PARK 은 새 카드를 안 만든다
+
+    attempt_id = UUID(accepted["attemptId"].removeprefix("rec_"))
+    stored = fake_recovery_repo._attempts[attempt_id]
+    assert stored.re_engagement_anchor_at is not None
+    assert stored.re_engagement_anchor_at.weekday() == 0  # 다음 주 월요일
+
+
+def test_decision_accept_downscope_leaves_re_engagement_anchor_none(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AMBIGUITY", "CONFLICT"]
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    accepted = next(c for c in cards if c["optionGroup"] == "DOWNSCOPE")
+
+    _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "accepted",
+            "acceptedAttemptId": accepted["attemptId"],
+        },
+    )
+
+    attempt_id = UUID(accepted["attemptId"].removeprefix("rec_"))
+    stored = fake_recovery_repo._attempts[attempt_id]
+    assert stored.re_engagement_anchor_at is None
+
+
 def test_decision_accept_reschedule_creates_no_action(
     client: TestClient,
     fake_recovery_repo: FakeRecoveryRepo,
@@ -899,6 +954,46 @@ def test_recovery_target_date_only_carry_over_moves_to_tomorrow() -> None:
     assert recovery_target_date(decided_on, "CARRY_OVER") == date(2026, 7, 30)
     for group in ("DOWNSCOPE", "RESCHEDULE", "PARK"):
         assert recovery_target_date(decided_on, group) == decided_on
+
+
+# ── re_engagement_anchor_at (근거 대장 §3 S8) ──────────────────────────────
+
+
+def test_re_engagement_anchor_none_for_downscope_and_reschedule() -> None:
+    """오늘 안에 끝나거나(DOWNSCOPE) 이미 재배치된(RESCHEDULE) 그룹은 새 접점이 불필요."""
+    decided_at = datetime(2026, 7, 29, 21, 3, tzinfo=KST)  # 수요일
+    for group in ("DOWNSCOPE", "RESCHEDULE"):
+        assert re_engagement_anchor_at(group, decided_at) is None
+
+
+def test_re_engagement_anchor_carry_over_is_tomorrow_at_anchor_hour() -> None:
+    decided_at = datetime(2026, 7, 29, 21, 3, tzinfo=KST)  # 수요일 21:03
+    anchor = re_engagement_anchor_at("CARRY_OVER", decided_at)
+    assert anchor == datetime(2026, 7, 30, 9, 0, tzinfo=KST)
+
+
+def test_re_engagement_anchor_park_is_next_week_monday() -> None:
+    """수요일에 결정하면 이번 주가 아니라 **다음 주** 월요일 (다음 주 리뷰 약속과 일치)."""
+    decided_at = datetime(2026, 7, 29, 21, 3, tzinfo=KST)  # 수요일 (2026-07-29)
+    anchor = re_engagement_anchor_at("PARK", decided_at)
+    assert anchor == datetime(2026, 8, 3, 9, 0, tzinfo=KST)  # 다음 주 월요일
+    assert anchor.weekday() == 0
+
+
+def test_re_engagement_anchor_park_on_monday_skips_to_next_week_not_today() -> None:
+    """오늘이 이미 월요일이어도 '오늘'이 아니라 **다음** 월요일 — '다음 주'라는 약속 그대로."""
+    monday = datetime(2026, 7, 27, 8, 0, tzinfo=KST)  # 2026-07-27 은 월요일
+    assert monday.weekday() == 0
+    anchor = re_engagement_anchor_at("PARK", monday)
+    assert anchor == datetime(2026, 8, 3, 9, 0, tzinfo=KST)
+
+
+def test_re_engagement_anchor_time_of_day_is_fixed_regardless_of_decision_time() -> None:
+    """결정이 몇 시였든 앵커의 시각은 항상 고정 시간대(아침) — 늦은 밤 결정도 예외 없다."""
+    late_night = datetime(2026, 7, 29, 23, 55, tzinfo=KST)
+    anchor = re_engagement_anchor_at("CARRY_OVER", late_night)
+    assert anchor is not None
+    assert (anchor.hour, anchor.minute) == (9, 0)
 
 
 def test_recovery_unit_minutes_floors_at_default() -> None:

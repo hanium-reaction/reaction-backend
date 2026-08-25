@@ -1270,6 +1270,7 @@ class FakeRecoveryRepo:
         a.recovery_duration_minutes = None
         a.recovery_result = "pending"
         a.resulting_action_item_id = None
+        a.re_engagement_anchor_at = None
         a.created_at = datetime.now(UTC)
         self._attempts[a.id] = a
         return a
