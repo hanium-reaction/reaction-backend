@@ -191,6 +191,7 @@ async def test_gate_and_real_transport_together(push_service: str) -> None:
     sent = await send_push(
         setting=setting,
         notification_class="evening_reflection",
+        notification_id=uuid4(),
         payload=PAYLOAD,
         now=NOW,
         send_repo=send_repo,  # type: ignore[arg-type]
@@ -203,6 +204,7 @@ async def test_gate_and_real_transport_together(push_service: str) -> None:
     deduped = await send_push(
         setting=setting,
         notification_class="evening_reflection",
+        notification_id=uuid4(),
         payload=PAYLOAD,
         now=NOW + timedelta(minutes=5),
         send_repo=send_repo,  # type: ignore[arg-type]
@@ -214,6 +216,7 @@ async def test_gate_and_real_transport_together(push_service: str) -> None:
     quiet = await send_push(
         setting=setting,
         notification_class="pre_card",
+        notification_id=uuid4(),
         payload=PAYLOAD,
         now=datetime(2026, 7, 22, 23, 30, tzinfo=KST),
         send_repo=send_repo,  # type: ignore[arg-type]
@@ -232,6 +235,7 @@ async def test_gone_clears_subscription_over_real_http(push_service: str) -> Non
     result = await send_push(
         setting=setting,
         notification_class="pre_card",
+        notification_id=uuid4(),
         payload=PAYLOAD,
         now=NOW,
         send_repo=FakeNotificationSendRepo(),  # type: ignore[arg-type]

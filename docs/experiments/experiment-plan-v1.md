@@ -630,3 +630,37 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
     갱신하고 이름도 바꿨다(예전 이름이 "보정 안 함"을 의도된 동작으로 서술하고 있었다 —
     이제는 그게 결함이었다는 게 확인됐으므로). 신규 3건: quiet hours 꼬리 당김, 다음날
     07시로 밀린 블록도 리드·격자 불변식을 지키는지, 며칠 뒤 뒤늦은 승인도 보정되는지.
+19. ✅ **`notification_sends` 확장 — `target_action_item_id` + `opened_at` — 완료.**
+    근거 대장 §6.1 "선행 조건" — S9 재알림 T1 억제 조건과 근접 효과 측정에 "먼저 필요"
+    하다고 명시한 두 컬럼(A1, 도그푸딩과 무관하게 지금 착수 가능한 항목으로 재우선순위화).
+
+    - **`target_action_item_id`**(FK → action_items, nullable) — pre_card 알림은 항상
+      그 블록의 카드로 채우고, evening_reflection 은 카드 하나가 아니라 대기 전체에 대한
+      것이라 항상 `None`. 이제 알림 sent_at 과 그 카드의 실행·회복 이력을 조인해 근접
+      효과를 볼 수 있다(FE 클릭 추적 없이도 가능한 최소 계측).
+    - **`opened_at`**(nullable, 최초 1회만 — `recovery_repo.stamp_first_viewed` 와 같은
+      관례) — 이건 채우려면 **id 를 발송 전에 미리 만들어야** 한다는 게 핵심 설계 결정:
+      `NotificationSend.id` 를 이제 `notify_sweeps.py` 가 `uuid4()` 로 미리 생성해 push
+      payload 의 `id` 필드(`notif_` 접두어)에 실어 보내고, `push_gate.send_push()`/
+      `NotificationSendRepo.record()` 가 그 값을 **그대로**(서버 재발급 없이) PK 로 쓴다.
+      그래야 나중에 FE 가 "이 알림 열었다"고 그 id 를 되돌려줄 때 같은 행을 찾을 수 있다
+      — 발송 **후**에 server_default 로 id 를 새로 만들던 예전 방식으로는 원리적으로
+      불가능했다.
+    - `POST /notifications/{notificationId}/opened` 신설(api-contract v1.73) — 204 멱등,
+      404 `NOTIF_NOT_FOUND`(형식 오류·미존재·타 사용자 소유를 한 코드로 묶어 존재 여부를
+      안 흘림).
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **이 endpoint 를 부르는 FE 콜백(push `notificationclick` 핸들러)은 없다** — 인프라만
+      미리 준비해 뒀다. 그래서 `opened_at` 은 FE 가 배선하기 전까지 항상 NULL 로 남는다
+      (`notification_send.py`/`notification_send_repo.py` 모듈 docstring에 명시).
+    - **근접 효과 분석 SQL/리포트 자체는 안 만들었다** — 이번 항목은 그 분석에 필요한
+      "재료"(컬럼 2개)만 준비한 것. `target_action_item_id` 로 실제 집계를 뽑는 건 데이터가
+      쌓인 뒤(=도그푸딩 지속)의 별도 작업.
+
+    신규 테스트 14건 — `push_gate` 3건(호출부가 준 id 를 그대로 쓰는지, target 있음/기본
+    None), `notify_sweeps` 2건(pre_card 는 target 이 그 카드 id, evening 은 None + payload
+    id 가 저장된 행의 PK 와 일치), `notifications` 라우트 5건(204+스탬프, 멱등, 404 3종 —
+    미존재/형식오류/타 사용자), 리포지토리 4건(실 Postgres — 명시 id 로 INSERT, FK 저장,
+    사용자 스코프 조회, stamp_opened 최초 1회). 기존 `test_web_push_e2e.py` 4건도 새
+    시그니처(`notification_id` 필수 인자)에 맞게 갱신.

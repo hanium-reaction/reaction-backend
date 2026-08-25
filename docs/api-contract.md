@@ -737,6 +737,7 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
 | GET | `/notifications/vapid-public-key` | FE `applicationServerKey` 용 공개키 |
 | POST | `/notifications/subscribe` | Web Push subscription 등록 (201, 갱신된 설정 반환) |
 | DELETE | `/notifications/subscribe` | 구독 해제 (204, 멱등 — 구독 없어도 204) |
+| POST | `/notifications/{notificationId}/opened` | 이 알림을 열었다고 표시 (204, 멱등) |
 
 `GET /notifications/vapid-public-key` → `{ "publicKey": string | null }`:
 
@@ -772,6 +773,14 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
   **일요일은 문구·딥링크만 갈라진다**(`title`/`body`/`url: /reviews/weekly`) — 같은 클래스에
   주간 만다라 리포트를 얹는다. 새 클래스·새 발송 조건 없음(ADR-0008 §4, §8 "F")
 - pre_card 는 opt-in(`preCardEnabled`) + 시작 2~7분 전 (2분 리드 + 5분 폴)
+
+`POST /notifications/{notificationId}/opened` — **⚠️ 아직 이 endpoint 를 부르는 FE 콜백이
+없다.** push `notificationclick` 이벤트 핸들러가 준비되면 그 알림의 push payload 에 실린
+`id` 필드(`notif_` 접두어 + PK, 예: `"notif_5f2a…"`)를 그대로 이 path 로 보내면 된다.
+- 204 — 멱등(재호출도 204, 최초 1회만 `openedAt` 내부 기록)
+- 404 `NOTIF_NOT_FOUND` — id 형식이 틀렸거나, 존재하지 않거나, **다른 사용자 소유**(id 를
+  안다고 다 열리지 않는다)
+- 근거: 근거 대장 §6.1 — S9 재알림 T1 억제 조건·근접 효과 측정의 선행 조건.
 
 ---
 

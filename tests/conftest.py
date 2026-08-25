@@ -61,6 +61,7 @@ from reaction_backend.repositories.habit_repo import get_habit_repo
 from reaction_backend.repositories.inbox_repo import get_inbox_repo
 from reaction_backend.repositories.interview_repo import get_interview_repo
 from reaction_backend.repositories.notification_repo import get_notification_repo
+from reaction_backend.repositories.notification_send_repo import get_notification_send_repo
 from reaction_backend.repositories.plan_draft_repo import get_plan_draft_repo
 from reaction_backend.repositories.policy_snapshot_repo import get_policy_snapshot_repo
 from reaction_backend.repositories.privacy_repo import get_privacy_repo
@@ -422,6 +423,11 @@ class FakeNotificationSendRepo:
     async def stamp_opened(self, notification: NotificationSend, opened_at: datetime) -> None:
         if notification.opened_at is None:
             notification.opened_at = opened_at
+
+
+@pytest.fixture
+def fake_notification_send_repo() -> FakeNotificationSendRepo:
+    return FakeNotificationSendRepo()
 
 
 class FakeWebPushSender:
@@ -2243,6 +2249,7 @@ def client(
     fake_time_policy_repo: FakeTimePolicyRepo,
     fake_fixed_schedule_repo: FakeFixedScheduleRepo,
     fake_notification_repo: FakeNotificationRepo,
+    fake_notification_send_repo: FakeNotificationSendRepo,
     fake_user_repo: FakeUserRepo,
     fake_goal_repo: FakeGoalRepo,
     fake_habit_repo: FakeHabitRepo,
@@ -2283,6 +2290,7 @@ def client(
     app.dependency_overrides[get_time_policy_repo] = lambda: fake_time_policy_repo
     app.dependency_overrides[get_fixed_schedule_repo] = lambda: fake_fixed_schedule_repo
     app.dependency_overrides[get_notification_repo] = lambda: fake_notification_repo
+    app.dependency_overrides[get_notification_send_repo] = lambda: fake_notification_send_repo
     app.dependency_overrides[get_user_repo] = lambda: fake_user_repo
     app.dependency_overrides[get_goal_repo] = lambda: fake_goal_repo
     app.dependency_overrides[get_habit_repo] = lambda: fake_habit_repo

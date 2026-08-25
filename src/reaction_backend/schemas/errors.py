@@ -66,6 +66,7 @@ class ErrorCode(StrEnum):
 
     # ── Notifications (NOTIF_) — #3-C ──
     NOTIF_TIME_RANGE = "NOTIF_TIME_RANGE"
+    NOTIF_NOT_FOUND = "NOTIF_NOT_FOUND"
 
     # ── Goals (GOAL_) — #3-D / #22 ──
     GOAL_NOT_FOUND = "GOAL_NOT_FOUND"
