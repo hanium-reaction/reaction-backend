@@ -63,6 +63,7 @@ from reaction_backend.repositories.scheduled_block_repo import (
     ScheduledBlockRepo,
     get_scheduled_block_repo,
 )
+from reaction_backend.safety import endpoint_rate_limit
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.recovery import (
@@ -220,6 +221,11 @@ async def generate_recovery_proposals(
             "이 실행의 회복 카드는 이미 결정됐어요.",
             http_status=HTTPStatus.CONFLICT,
         )
+
+    # 진짜 새로 생성하는 경로에서만 카운트한다(#325) — 위 두 멱등 분기(pending 재반환/이미
+    # 결정됨)는 LLM 도, 오케스트레이션도 새로 안 돈다. 여기서 걸면 새로고침 반복이 사용자
+    # 한도를 갉아먹지 않는다.
+    await endpoint_rate_limit.enforce(session, user_id=user.id, module="recovery")
 
     failure_tags = await repo.list_failure_tag_codes(execution.id)
     # overwhelm_level 은 의도적으로 넘기지 않는다 — PARK_DEFAULT 동적 트리거(`select_strategies`

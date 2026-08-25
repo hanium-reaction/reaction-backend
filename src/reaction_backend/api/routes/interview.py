@@ -60,6 +60,7 @@ from reaction_backend.orchestrator.interview_catalog import (
 )
 from reaction_backend.repositories.interview_repo import InterviewRepo, get_interview_repo
 from reaction_backend.repositories.profile_repo import ProfileRepo, get_profile_repo
+from reaction_backend.safety import endpoint_rate_limit
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.interview import (
     InterviewEndReason,
@@ -533,6 +534,7 @@ async def submit_answer(
     상태로 이후 로직을 돌린다(peek 결과는 kind 외 어떤 판단에도 쓰지 않는다 — 그렇지 않으면
     peek 과 lock 사이의 갱신을 놓치는 race 가 그대로 남는다).
     """
+    await endpoint_rate_limit.enforce(session, user_id=user.id, module="interview")
     peek = await _load(repo, user.id, session_id)
     async with user_agent_lock(session, user.id, _lock_agent(peek.kind)):
         row = await _load(repo, user.id, session_id)
@@ -617,6 +619,7 @@ async def next_question(
     동시성 lock(ADR-0005 §7.6): 동시 재개 진입으로 인한 state race 방지. kind 스코프 이유는
     `submit_answer` 와 동일(peek → lock → 재조회).
     """
+    await endpoint_rate_limit.enforce(session, user_id=user.id, module="interview")
     peek = await _load(repo, user.id, session_id)
     async with user_agent_lock(session, user.id, _lock_agent(peek.kind)):
         row = await _load(repo, user.id, session_id)

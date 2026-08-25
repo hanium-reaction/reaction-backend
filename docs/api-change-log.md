@@ -7,6 +7,24 @@
 
 ---
 
+## v1.77 — 2026-08-25 (LLM 비용/사용량 상한 — #325)
+
+**추가만(하위호환)** — 새 에러 코드 + 응답 헤더. 기존 성공 응답 스키마 변경 없음.
+
+- `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(429) 신설 — 비싼 엔드포인트(`/interview/sessions/{id}/answers`,
+  `/interview/sessions/{id}/next-question`, `/plans/generate`, `/plans/mandala/subgoals`,
+  `/plans/mandala/generate`, `/recovery/proposals/generate`)의 사용자별 일일 호출 횟수가
+  `LLM_ENDPOINT_DAILY_CALL_LIMIT` 을 넘으면 반환. `Retry-After` 헤더(초, 다음 KST 자정까지)
+  동봉. `/recovery/proposals/generate` 는 pending 카드 캐시 반환·이미 결정된 실행 409 같은
+  기존 short-circuit 뒤에 걸려, 새로고침 재호출은 상한을 안 먹는다.
+- 전역 일일 토큰 예산(`LLM_GLOBAL_DAILY_TOKEN_BUDGET`) 신설 — 전 사용자 합산 토큰이
+  한도를 넘으면 신규 LLM 호출(인터뷰/계획·만다라트/회복 전부)이 **조용히 룰 폴백**으로
+  전환(200 OK, `aiSource="rule"`). 기존 `isDraft`/`aiSource` 필드로 이미 FE 가 판별
+  가능해 새 신호 불필요(§1.10).
+- §1.4 에러 코드 prefix 표에 `RATE_LIMIT_*` 추가.
+
+---
+
 ## v1.76 — 2026-08-25 (신규 가입 초대코드 게이트 — #324, FE #237 §8)
 
 **추가만(하위호환)** — endpoint 변경 없음. `POST /auth/google` 요청에 선택 필드

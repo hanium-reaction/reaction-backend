@@ -31,8 +31,12 @@ _STATUS_TO_CODE: dict[int, ErrorCode] = {
 _LOC_PREFIXES = frozenset({"body", "query", "path", "header", "cookie"})
 
 
-def _error_json(http_status: int, error: ErrorResponse) -> JSONResponse:
-    return JSONResponse(status_code=http_status, content=error.model_dump(mode="json"))
+def _error_json(
+    http_status: int, error: ErrorResponse, *, headers: dict[str, str] | None = None
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=http_status, content=error.model_dump(mode="json"), headers=headers
+    )
 
 
 async def _handle_api_error(request: Request, exc: Exception) -> Response:
@@ -40,6 +44,7 @@ async def _handle_api_error(request: Request, exc: Exception) -> Response:
     return _error_json(
         err.http_status,
         ErrorResponse(code=err.code.value, message=err.message, field=err.field),
+        headers=err.headers,
     )
 
 
