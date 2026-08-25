@@ -691,10 +691,13 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
   `{ goalId, goalTitle, axisTitle? }`. `week_start` 와 무관하게 항상 **현재** 상태만 본다
   (과거 주를 조회해도 이 카드는 지금 열어도 되는지를 말한다).
 - 대상은 승격된 만다라 축 목표 중 `status='active'`인 것. 판정: 그 목표의 **현재 활성**
-  계획 트리(`tree_kind='plan'`) leaf 에 매달린 action_item 중 (a) 남은(`planned`/
-  `in_progress`) 카드가 없고 (b) 종결(`done`/`partial_done`/`failed`/`over_done`) 카드가
-  하나 이상 있으면 제안. 카드 자체가 없으면(승인 직후 등) 제안하지 않는다
-  (`orchestrator/cycle_proposal.should_propose_next_cycle`).
+  계획 트리(`tree_kind='plan'`) leaf 에 매달린 action_item 중 (a) **아직 날짜가 안 지난**
+  (`targetDate >= 오늘`) 미종결(`planned`/`in_progress`) 카드가 없고 (b) 종결(`done`/
+  `partial_done`/`failed`/`over_done`) 카드가 하나 이상 있으면 제안. 카드 자체가 없으면
+  (승인 직후 등) 제안하지 않는다 (`orchestrator/cycle_proposal.should_propose_next_cycle`).
+- **날짜가 지난 미종결 카드는 판정에서 빠진다** — '남은 일'이 아니라 '밀린 일'이라서.
+  이걸 세면, 한 번도 시작 안 한 `planned` 카드는 만료 cron(`in_progress` 실행만 대상)이
+  영영 못 쓸어내므로 밀린 카드 한 장 때문에 제안이 영구히 안 뜬다(2026-08-25 정정).
 - **승인은 새 엔드포인트가 없다** — FE 는 기존 `POST /plans/generate`(바디 없이 호출하면
   최근 완료 인터뷰를 자동 재투영) + `POST /plans/{id}/approve` 를 그대로 쓴다. 마감 없는
   만다라 목표는 다시 2주로 캡된다(§8 "D").
@@ -737,6 +740,7 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
 | GET | `/notifications/vapid-public-key` | FE `applicationServerKey` 용 공개키 |
 | POST | `/notifications/subscribe` | Web Push subscription 등록 (201, 갱신된 설정 반환) |
 | DELETE | `/notifications/subscribe` | 구독 해제 (204, 멱등 — 구독 없어도 204) |
+| POST | `/notifications/{notificationId}/opened` | 이 알림을 열었다고 표시 (204, 멱등) |
 
 `GET /notifications/vapid-public-key` → `{ "publicKey": string | null }`:
 
@@ -772,6 +776,14 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
   **일요일은 문구·딥링크만 갈라진다**(`title`/`body`/`url: /reviews/weekly`) — 같은 클래스에
   주간 만다라 리포트를 얹는다. 새 클래스·새 발송 조건 없음(ADR-0008 §4, §8 "F")
 - pre_card 는 opt-in(`preCardEnabled`) + 시작 2~7분 전 (2분 리드 + 5분 폴)
+
+`POST /notifications/{notificationId}/opened` — **⚠️ 아직 이 endpoint 를 부르는 FE 콜백이
+없다.** push `notificationclick` 이벤트 핸들러가 준비되면 그 알림의 push payload 에 실린
+`id` 필드(`notif_` 접두어 + PK, 예: `"notif_5f2a…"`)를 그대로 이 path 로 보내면 된다.
+- 204 — 멱등(재호출도 204, 최초 1회만 `openedAt` 내부 기록)
+- 404 `NOTIF_NOT_FOUND` — id 형식이 틀렸거나, 존재하지 않거나, **다른 사용자 소유**(id 를
+  안다고 다 열리지 않는다)
+- 근거: 근거 대장 §6.1 — S9 재알림 T1 억제 조건·근접 효과 측정의 선행 조건.
 
 ---
 

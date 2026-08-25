@@ -41,7 +41,9 @@ import logging
 from dataclasses import dataclass
 from datetime import time, timedelta
 from typing import TYPE_CHECKING, Any
+from uuid import UUID, uuid4
 
+from reaction_backend.db.models.notification_send import NOTIFICATION_ID_PREFIX
 from reaction_backend.safety import push_gate
 from reaction_backend.scheduler.expire_reflections import pending_reflection_since
 from reaction_backend.schemas.common import now_kst
@@ -79,22 +81,30 @@ class NotifySweepResult:
     failed: int
 
 
-def _evening_payload(pending_count: int, *, is_sunday: bool) -> dict[str, Any]:
+def _evening_payload(
+    notification_id: UUID, pending_count: int, *, is_sunday: bool
+) -> dict[str, Any]:
     """일요일엔 같은 회고 알림에 주간 리포트를 얹는다 (ADR-0008 §4, §8 "F").
 
     새 알림 클래스를 만들지 않는다 — 발송 조건("회고할 카드가 있을 때만", 클래스 dedup,
     주 ≤3건 예산)은 그대로고 **문구·딥링크만** 요일에 따라 갈라진다. 리포트 자체의 숫자는
     여기서 계산하지 않는다 — 실제 내용은 `GET /reviews/weekly`(딥링크 도착지)가 보여주고,
     push body 는 짧은 예고만 한다(사용자별 만다라 조회를 이 sweep 루프에 추가로 얹지 않음).
+
+    `id`(문자열) — 이 알림의 `notification_sends` PK 를 미리 실어 보낸다(근거 대장 §6.1).
+    FE 가 push `notificationclick` 에서 이 값을 그대로 되돌려주면 서버가 `opened_at` 을
+    채울 수 있다 — 아직 그 콜백 자체는 없다.
     """
     if is_sunday:
         return {
+            "id": f"{NOTIFICATION_ID_PREFIX}{notification_id}",
             "class": "evening_reflection",
             "title": "오늘의 회고 + 이번 주 리포트",
             "body": f"돌아볼 카드 {pending_count}장과 이번 주 만다라 리포트가 준비됐어요.",
             "url": "/reviews/weekly",
         }
     return {
+        "id": f"{NOTIFICATION_ID_PREFIX}{notification_id}",
         "class": "evening_reflection",
         "title": "오늘의 회고 시간이에요",
         "body": f"돌아볼 카드가 {pending_count}장 있어요.",
@@ -102,8 +112,9 @@ def _evening_payload(pending_count: int, *, is_sunday: bool) -> dict[str, Any]:
     }
 
 
-def _pre_card_payload(title: str, start_hhmm: str) -> dict[str, Any]:
+def _pre_card_payload(notification_id: UUID, title: str, start_hhmm: str) -> dict[str, Any]:
     return {
+        "id": f"{NOTIFICATION_ID_PREFIX}{notification_id}",
         "class": "pre_card",
         "title": "곧 시작할 카드가 있어요",
         "body": f"{start_hhmm} · {title}",
@@ -143,13 +154,19 @@ async def run_evening_reflection_notify_sweep(
             if not pending:
                 skipped += 1
                 continue
+            notification_id = uuid4()
             result = await push_gate.send_push(
                 setting=setting,
                 notification_class="evening_reflection",
-                payload=_evening_payload(len(pending), is_sunday=now_kst_dt.weekday() == 6),
+                notification_id=notification_id,
+                payload=_evening_payload(
+                    notification_id, len(pending), is_sunday=now_kst_dt.weekday() == 6
+                ),
                 now=read_clock(),
                 send_repo=send_repo,
                 sender=sender,
+                # 특정 카드 하나가 아니라 회고 대기 카드 전체에 대한 알림 — target 없음.
+                target_action_item_id=None,
             )
             sent += 1 if result.sent else 0
             skipped += 0 if result.sent else 1
@@ -195,13 +212,16 @@ async def run_pre_card_notify_sweep(
                 continue
             title = block.action_item.title
             start_hhmm = block.start_at.astimezone(now_kst_dt.tzinfo).strftime("%H:%M")
+            notification_id = uuid4()
             result = await push_gate.send_push(
                 setting=setting,
                 notification_class="pre_card",
-                payload=_pre_card_payload(title, start_hhmm),
+                notification_id=notification_id,
+                payload=_pre_card_payload(notification_id, title, start_hhmm),
                 now=read_clock(),
                 send_repo=send_repo,
                 sender=sender,
+                target_action_item_id=block.action_item_id,
             )
             sent += 1 if result.sent else 0
             skipped += 0 if result.sent else 1

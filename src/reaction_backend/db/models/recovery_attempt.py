@@ -158,6 +158,15 @@ class RecoveryAttempt(Base, TimestampMixin):
     # 카드가 API 응답으로 처음 나간 시각(노출의 근사치). 최초 1회만, 재호출로 덮어쓰지 않는다.
     first_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # 재관여를 다시 찌를 시각 — 근거 대장 §2.3(A3 이탈·재관여는 별개 역량, C5/C6 랜드마크가
+    # 개시를 촉발) + §3 S8("PARK/CARRY_OVER 수락 시 필수"). PARK 는 새 카드 자체를 안 만들어
+    # (RESCHEDULE 과 같이 `_GROUP_TO_SOURCE` 밖) 이 필드가 없으면 미래 접점이 통째로 사라진다.
+    # `orchestrator/recovery.py::re_engagement_anchor_at()` 가 채운다 — DOWNSCOPE/RESCHEDULE
+    # 은 항상 NULL(이미 오늘·기존 재배치 흐름으로 접점이 있다).
+    re_engagement_anchor_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # ── relationships ──
     user: Mapped[User] = relationship()
     execution_event: Mapped[ExecutionEvent] = relationship(back_populates="recovery_attempts")

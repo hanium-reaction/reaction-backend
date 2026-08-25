@@ -24,6 +24,12 @@ MAX_CARDS = 4
 
 # 회복 카드가 '내일'로 넘어가는 그룹 — CARRY_OVER 만 하루 뒤다 (UX 4 그룹 중 1).
 _CARRY_OVER_GROUP = "CARRY_OVER"
+_PARK_GROUP = "PARK"
+
+# 재관여 앵커의 기본 시각 — morning_brief 기본 발송 시각(`NotificationSetting`
+# 08:00)과 가까운 "아침" 시간대. 사용자별 실제 설정은 이 순수 함수가 알 수 없다
+# (repo 접근이 없다) — 실제 발송 시각 정밀화는 T2 배선(§6.2)의 몫으로 미룬다.
+RE_ENGAGEMENT_ANCHOR_HOUR = 9
 
 # 카탈로그에 전략이 없을 때(비활성 등) 회복 카드의 기본 소요 시간 — 최소 회복 단위.
 DEFAULT_RECOVERY_MINUTES = 5
@@ -179,6 +185,40 @@ def recovery_target_date(decided_on: date, option_group: str) -> date:
     해보기"라 같은 날, CARRY_OVER 는 그룹 이름 그대로 하루 뒤다.
     """
     return decided_on + timedelta(days=1) if option_group == _CARRY_OVER_GROUP else decided_on
+
+
+def re_engagement_anchor_at(option_group: str, decided_at: datetime) -> datetime | None:
+    """언제 다시 찌를까 — PARK/CARRY_OVER 수락 시에만 채운다 (근거 대장 §3 S8).
+
+    **PARK 는 새 카드를 안 만든다**(`_GROUP_TO_SOURCE` 에 없음 — DOWNSCOPE/CARRY_OVER 만
+    있음) — 이 앵커가 없으면 "보류"가 곧 "영영 안 돌아옴"이 된다. 카탈로그 템플릿이
+    이미 "다음 주 리뷰 때 다시 보는 건 어때요?"라고 약속하므로, 앵커도 그 약속 그대로
+    **다음 주(오늘이 월요일이어도 이번 주가 아니라 다음 주) 월요일** 아침으로 잡는다
+    (C5 프레시 스타트 — 새 주가 랜드마크).
+
+    CARRY_OVER 는 이미 `recovery_target_date()` 로 내일 카드를 만들지만, 그 카드의
+    실행 여부와 무관하게 "재관여를 다시 챙길 시점" 자체는 별도 필드로 명시적으로 남긴다
+    (A3 — 이탈과 재관여는 별개 역량이라 같은 필드로 묶지 않는다).
+
+    DOWNSCOPE/RESCHEDULE 은 오늘 안에 끝나거나 이미 재배치되어 새 접점이 필요 없다 —
+    `None`.
+    """
+    if option_group == _CARRY_OVER_GROUP:
+        anchor_date = decided_at.date() + timedelta(days=1)
+    elif option_group == _PARK_GROUP:
+        this_monday = decided_at.date() - timedelta(days=decided_at.weekday())
+        anchor_date = this_monday + timedelta(days=7)
+    else:
+        return None
+    return decided_at.replace(
+        year=anchor_date.year,
+        month=anchor_date.month,
+        day=anchor_date.day,
+        hour=RE_ENGAGEMENT_ANCHOR_HOUR,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
 
 
 def recovery_unit_minutes(min_recovery_unit_minutes: int | None) -> int:

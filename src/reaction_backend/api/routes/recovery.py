@@ -47,6 +47,7 @@ from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator.escalation import EscalationLevel, compute_escalation_state
 from reaction_backend.orchestrator.recovery import (
     first_matching_tag,
+    re_engagement_anchor_at,
     recovery_target_date,
     recovery_unit_minutes,
     render_template,
@@ -399,11 +400,19 @@ def _validated_target(
 def _adopt(
     target: RecoveryAttempt, decision: str, decision_reason: str | None, decided_at: datetime
 ) -> str:
-    """채택 스탬프. `recovery_started_at` = 결정 시각 (average_recovery_minutes 의 기점)."""
+    """채택 스탬프. `recovery_started_at` = 결정 시각 (average_recovery_minutes 의 기점).
+
+    `re_engagement_anchor_at` 도 여기서 같이 찍는다 — PARK/CARRY_OVER 만 값이 채워지고
+    (근거 대장 §3 S8), 나머지 그룹은 `orchestrator.recovery.re_engagement_anchor_at` 가
+    `None` 을 돌려줘 조용히 비활성이다.
+    """
     target.user_decision = decision
     target.recovery_decided_at = decided_at
     target.recovery_started_at = decided_at
     target.decision_reason = decision_reason
+    target.re_engagement_anchor_at = re_engagement_anchor_at(
+        target.recovery_option_group, decided_at
+    )
     return f"{_ATTEMPT_PREFIX}{target.id}"
 
 

@@ -1,0 +1,54 @@
+name: Report proximal execution rate (EC2, read-only)
+
+# 알림 후 60분 내 카드 실행률(proximal_execution_rate_60m) — 근거 대장 §7.2, D3.
+# notification_sends.target_action_item_id(#335)가 선행 조건이었고, 이제 채워진다.
+# deploy.yml 과 같은 self-hosted EC2 runner 에서 돌아 prod .env(RDS DATABASE_URL)를 쓴다.
+#
+# 안전:
+# - workflow_dispatch 전용 (push/PR 로는 절대 트리거되지 않음)
+# - 스크립트는 SELECT 뿐 — 쓰기 옵션 자체가 없다. 끝에 rollback().
+# - 판정 로직은 테스트로 고정됨 (tests/test_report_proximal_execution.py)
+#
+# ⚠️ 이 워크플로는 $APP_DIR(= deploy.yml 이 rsync 한 최신 main)에서 실행된다. 스크립트가
+# 머지·배포되기 전에 dispatch 하면 옛 코드가 조용히 돈다 — 아래 Verify 스텝이 커밋을 찍는다.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  # deploy 와 같은 앱 디렉터리를 쓰므로 배포와 겹치지 않게 직렬화.
+  group: deploy-ec2
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  report:
+    name: "report (read-only)"
+    runs-on: [self-hosted, ec2, reaction-backend]
+    timeout-minutes: 10
+
+    env:
+      APP_DIR: /home/ubuntu/reaction-backend
+
+    steps:
+      - name: Verify deployed commit
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          echo "APP_DIR HEAD: $(git rev-parse --short HEAD 2>/dev/null || echo '(git 아님)')"
+          test -f scripts/report_proximal_execution.py \
+            || { echo "::error::스크립트가 배포되지 않았다 — 머지·배포 후 다시 실행할 것"; exit 1; }
+
+      - name: Run report
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          ~/.local/bin/uv run --no-dev python -m scripts.report_proximal_execution \
+            | tee /tmp/report-proximal-execution.out
+
+      - name: Summary
+        if: always()
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          echo "### Report: proximal execution rate (60m, read-only)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 80 /tmp/report-proximal-execution.out >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

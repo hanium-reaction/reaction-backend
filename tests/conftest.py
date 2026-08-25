@@ -61,6 +61,7 @@ from reaction_backend.repositories.habit_repo import get_habit_repo
 from reaction_backend.repositories.inbox_repo import get_inbox_repo
 from reaction_backend.repositories.interview_repo import get_interview_repo
 from reaction_backend.repositories.notification_repo import get_notification_repo
+from reaction_backend.repositories.notification_send_repo import get_notification_send_repo
 from reaction_backend.repositories.plan_draft_repo import get_plan_draft_repo
 from reaction_backend.repositories.policy_snapshot_repo import get_policy_snapshot_repo
 from reaction_backend.repositories.privacy_repo import get_privacy_repo
@@ -395,16 +396,38 @@ class FakeNotificationSendRepo:
         )
 
     async def record(
-        self, *, user_id: UUID, notification_class: str, sent_at: datetime
+        self,
+        *,
+        id: UUID,  # noqa: A002 — 실 repo 시그니처 유지
+        user_id: UUID,
+        notification_class: str,
+        sent_at: datetime,
+        target_action_item_id: UUID | None = None,
     ) -> NotificationSend:
         self.ops.append("record")
         row = NotificationSend()
-        row.id = uuid4()
+        row.id = id
         row.user_id = user_id
         row.notification_class = notification_class
         row.sent_at = sent_at
+        row.target_action_item_id = target_action_item_id
+        row.opened_at = None
         self._sends.append(row)
         return row
+
+    async def get_by_id(self, notification_id: UUID, user_id: UUID) -> NotificationSend | None:
+        return next(
+            (s for s in self._sends if s.id == notification_id and s.user_id == user_id), None
+        )
+
+    async def stamp_opened(self, notification: NotificationSend, opened_at: datetime) -> None:
+        if notification.opened_at is None:
+            notification.opened_at = opened_at
+
+
+@pytest.fixture
+def fake_notification_send_repo() -> FakeNotificationSendRepo:
+    return FakeNotificationSendRepo()
 
 
 class FakeWebPushSender:
@@ -1247,6 +1270,7 @@ class FakeRecoveryRepo:
         a.recovery_duration_minutes = None
         a.recovery_result = "pending"
         a.resulting_action_item_id = None
+        a.re_engagement_anchor_at = None
         a.created_at = datetime.now(UTC)
         self._attempts[a.id] = a
         return a
@@ -2226,6 +2250,7 @@ def client(
     fake_time_policy_repo: FakeTimePolicyRepo,
     fake_fixed_schedule_repo: FakeFixedScheduleRepo,
     fake_notification_repo: FakeNotificationRepo,
+    fake_notification_send_repo: FakeNotificationSendRepo,
     fake_user_repo: FakeUserRepo,
     fake_goal_repo: FakeGoalRepo,
     fake_habit_repo: FakeHabitRepo,
@@ -2266,6 +2291,7 @@ def client(
     app.dependency_overrides[get_time_policy_repo] = lambda: fake_time_policy_repo
     app.dependency_overrides[get_fixed_schedule_repo] = lambda: fake_fixed_schedule_repo
     app.dependency_overrides[get_notification_repo] = lambda: fake_notification_repo
+    app.dependency_overrides[get_notification_send_repo] = lambda: fake_notification_send_repo
     app.dependency_overrides[get_user_repo] = lambda: fake_user_repo
     app.dependency_overrides[get_goal_repo] = lambda: fake_goal_repo
     app.dependency_overrides[get_habit_repo] = lambda: fake_habit_repo

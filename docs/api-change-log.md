@@ -7,6 +7,23 @@
 
 ---
 
+## v1.73 — 2026-08-25 (`POST /notifications/{notificationId}/opened` 신설 — 근거 대장 §6.1)
+
+**추가만(하위호환)** — 새 endpoint. 기존 응답 형태·발송 흐름 변경 없음.
+
+- 알림을 열었다고 서버에 알리는 endpoint. `notificationId` 는 push payload 의 `id` 필드
+  (`notif_` 접두어 + 발송 이력 PK)를 그대로 쓴다 — 서버가 발송 **전에** 미리 만들어
+  payload 에 실어 보내는 값이라, 나중에 FE 가 그대로 되돌려주면 어느 이력 행인지 찾을 수
+  있다.
+- 204(멱등, 최초 1회만 내부 `openedAt` 기록) / 404 `NOTIF_NOT_FOUND`(id 형식 오류·미존재·
+  타 사용자 소유 — 셋 다 같은 코드로 묶어 존재 여부를 흘리지 않는다).
+- **⚠️ 아직 이 endpoint 를 부르는 FE 콜백이 없다** — push `notificationclick` 핸들러가
+  준비되면 그때 배선한다. 백엔드 인프라(발송 이력에 `target_action_item_id`/`opened_at`
+  컬럼, id 를 발송 전에 미리 생성해 payload 에 싣는 흐름)만 먼저 준비해 둔 것 — S9
+  재알림 T1 억제 조건과 근접 효과 측정의 선행 조건이라 근거 대장 §6.1 이 명시했다.
+
+---
+
 ## v1.72 — 2026-08-25 (`PATCH /goals/{id}` 에 `category` 추가 — #326, FE #216 차단 해소)
 
 **추가만(하위호환)** — endpoint 변경 없음. `GoalUpdateRequest` 에 선택 필드 `category` 가

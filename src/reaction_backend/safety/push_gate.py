@@ -30,6 +30,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, Literal
+from uuid import UUID
 
 from reaction_backend.db.models.notification_send import NOTIFICATION_CLASSES
 from reaction_backend.schemas.common import KST
@@ -85,15 +86,22 @@ async def send_push(
     *,
     setting: NotificationSetting,
     notification_class: str,
+    notification_id: UUID,
     payload: dict[str, Any],
     now: datetime,
     send_repo: NotificationSendRepo,
     sender: WebPushSender,
+    target_action_item_id: UUID | None = None,
 ) -> PushResult:
     """정책 검사 → 발송 → 성공 시 이력 기록. commit 은 호출자(sweep) 책임.
 
     `setting` 행 자체를 받는 이유: 구독 소멸(`gone`) 시 여기서 구독을 정리해야
     다음 폴마다 죽은 endpoint 에 재시도하는 낭비가 없다.
+
+    `notification_id` 는 여기서 새로 만들지 않는다 — **호출자가 `payload` 를 만들기 전에
+    이미 생성해 그 안에 실어 보낸 값과 같아야 한다**(근거 대장 §6.1, `notification_send.py`
+    모듈 docstring). 그래야 나중에 FE 가 "이 알림을 열었다"고 되돌려줄 id 로 이 발송
+    이력 행을 찾을 수 있다.
     """
     if notification_class not in NOTIFICATION_CLASSES:
         raise ValueError(f"허용되지 않은 알림 클래스: {notification_class!r}")
@@ -122,7 +130,13 @@ async def send_push(
 
     outcome = await sender.send(subscription, payload)
     if outcome == "ok":
-        await send_repo.record(user_id=user_id, notification_class=notification_class, sent_at=now)
+        await send_repo.record(
+            id=notification_id,
+            user_id=user_id,
+            notification_class=notification_class,
+            sent_at=now,
+            target_action_item_id=target_action_item_id,
+        )
         _log.info("push sent: class=%s user=%s", notification_class, user_id)
         return PushResult(sent=True, reason="sent")
     if outcome == "gone":
