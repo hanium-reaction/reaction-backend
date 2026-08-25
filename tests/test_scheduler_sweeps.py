@@ -152,6 +152,7 @@ def test_build_scheduler_registers_expected_jobs() -> None:
         "expire_proposed_goals",
         "evening_reflection_notify",
         "pre_card_notify",
+        "morning_brief_notify",
         "habit_instances",
     }
 
@@ -250,4 +251,22 @@ def test_pre_card_notify_job_is_wired_to_the_right_function_and_time() -> None:
     assert fields["minute"] == "*/5", f"pre_card 가 5분 폴이 아니다: {fields}"
     assert str(job.trigger.timezone) == "Asia/Seoul"
     # pre_card 는 창이 이동해 skip 폴을 다음 폴이 회수하지 못한다 — grace 가 필수.
+    assert job.misfire_grace_time == 60
+
+
+def test_morning_brief_notify_job_is_wired_to_the_right_function_and_time() -> None:
+    """T2 재관여 알림이 **06~10시 5분 폴 KST** 로 알림 sweep 을 부른다 (근거 대장 §6.2).
+
+    5분 폴인 이유는 evening_reflection_notify 와 같다 — 사용자별 `morning_brief_time`
+    (06~10시, 분 단위)을 존중하려면 고정 시각 1회로는 안 된다.
+    """
+    from reaction_backend.scheduler import runtime
+
+    job = next(j for j in runtime.build_scheduler().get_jobs() if j.id == "morning_brief_notify")
+
+    assert job.func is runtime._morning_brief_notify_job
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"] == "6-10", f"morning_brief 알림 폴 시간대가 06~10시가 아니다: {fields}"
+    assert fields["minute"] == "*/5", f"morning_brief 알림이 5분 폴이 아니다: {fields}"
+    assert str(job.trigger.timezone) == "Asia/Seoul"
     assert job.misfire_grace_time == 60

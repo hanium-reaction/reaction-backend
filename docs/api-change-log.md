@@ -7,6 +7,23 @@
 
 ---
 
+## v1.75 — 2026-08-25 (`morning_brief` 첫 push 발송 신설 — 근거 대장 §6.2 T2)
+
+**추가만(하위호환)** — 새 endpoint 없음. §15 발송 가드 문면에 조건 1개 추가.
+
+- `morning_brief` 클래스는 지금까지 `daily_briefs` 인앱 행만 만들고 **push 는 한 번도
+  보낸 적이 없었다** — 이번이 그 클래스의 첫 실제 발송 경로다. 새 클래스를 만들지 않고
+  기존 3클래스 잠금(AGENTS.md §1) 안에서 슬롯을 재사용한다.
+- 발송 조건은 **재관여뿐** — 오늘이 채택된 PARK/CARRY_OVER 회복의
+  `recovery_attempts.re_engagement_anchor_at` 날짜인 사용자에게만 간다. 매일 아침 전체
+  발송이 아니다. 여러 건이 겹치면 하나로 묶어 보낸다(클래스 dedup 이 하루 1건).
+- `morningTime` 06:00~06:59 설정은 07:00 으로 클램프 — 없으면 quiet hours([23:00,07:00))
+  가 그 사용자의 모든 폴을 영구히 막는다(evening 의 22:55 클램프와 대칭인 반대쪽 버그).
+- 발송 이력의 `targetActionItemId` 는 CARRY_OVER 면 새로 만들어진 카드, PARK 면
+  없음(새 카드를 안 만드는 그룹이라 §6.1 근접 실행 측정 대상이 아니다).
+
+---
+
 ## v1.74 — 2026-08-25 (`AgendaCard.missedCheckIn` 추가 — 근거 대장 §6.2 T1, FE #224)
 
 **추가만(하위호환)** — endpoint 변경 없음. `GET /today/agenda` 응답의 각 카드에 선택

@@ -9,6 +9,7 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 | 매일 06:00 | `daily_brief_precompute` — 헤드라인 + Big Rock 생성 (LLM 1회) | `daily_briefs` row |
 | 19~23시 5분 폴 | `evening_reflection_notify` — 사용자별 설정 시각 이후 회고 알림 (pending 있을 때만, 게이트 enforce) | (외부) Web Push + `notification_sends` row |
 | 종일 5분 폴 | `pre_card_notify` — 2~7분 뒤 시작 블록 사전 알림 (opt-in, 게이트 enforce) | (외부) Web Push + `notification_sends` row |
+| 06~10시 5분 폴 | `morning_brief_notify` — 오늘이 anchor 인 PARK/CARRY_OVER 재관여 대상에게만(T2, 근거 대장 §6.2), `morning_brief` 클래스 재사용 | (외부) Web Push + `notification_sends` row |
 | 매주 일요일 03:00 | `weekly_review_precompute` — KPI + insight 생성 (LLM 1회) | `period_summaries` row |
 | 매일 00:05 | `habit_instances` — 이번 주 habit_instances 행 생성 (월요일에만 실제 생성, 그 외 no-op) | `habit_instances` rows |
 | 6시간마다 | `interruption_resolver` — `resumed_after_interrupt IS NULL AND created_at < now()-6h` → `false` | `interruption_events` UPDATE |
@@ -34,6 +35,7 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 | `run_abandon_stale_recoveries(session, *, now, repo)` | `expire_reflections.py` | #20 | ✅ job 로직 (회고 창 밖 미완주 회복 포기, idempotent). 만료 cron 과 **경계값도 기준식도 같은 소스** — `pending_reflection_since(today)` + `execution_repo.reflectable_from()`. 두 쪽이 다른 컬럼을 재면 아직 회고 가능한 회복이 포기로 확정돼 `average_recovery_minutes` 가 사라진다 |
 | `run_evening_reflection_notify_sweep(now, *, user_repo, notif_repo, execution_repo, send_repo, sender, session)` | `notify_sweeps.py` | #20 | ✅ 사용자별 `evening_reflection_time` 이후 첫 폴에서 발송 (pending 있을 때만 — 창 경계는 위와 동일 소스). 발송 판단은 전부 `safety/push_gate.py` (주 ≤3건·23~07 금지·클래스 하루 1건) |
 | `run_pre_card_notify_sweep(now, *, execution_repo, notif_repo, send_repo, sender, session)` | `notify_sweeps.py` | #20 | ✅ `[now+2m, now+7m)` 시작 `scheduled` 블록 → opt-in 사용자에게 사전 알림. 동일 게이트 경유 |
+| `run_morning_brief_notify_sweep(now, *, user_repo, notif_repo, recovery_repo, action_repo, send_repo, sender, session)` | `notify_sweeps.py` | 회복 재설계 S9(T2) | ✅ 오늘이 `re_engagement_anchor_at` 인 채택 PARK/CARRY_OVER 사용자에게만 발송 — 새 클래스 없이 `morning_brief` 재사용(근거 대장 §6.2). 대상 없으면 그날은 skip(빈 알림 금지). 동일 게이트 경유 |
 | `run_habit_instances_sweep(week_start, *, user_repo, habit_repo, instance_repo, session)` | `habit_instances.py` | #22 | ✅ 활성 사용자 × 활성 습관의 그 주 인스턴스 생성, idempotent(`(habit_id, week_start)` UNIQUE + get-or-create). `week_start` 는 호출자 주입 — 런타임 job 이 `GET /today/agenda` 와 **같은 함수** `habit_repo.current_week_start_kst()` 를 쓴다(생성/조회 주 경계 단일 소스). `target_count` 는 `habit.target_count`(S22 `apply_penalty` 가 쓰는 자리) |
 | `run_expire_stale_proposed_goals(session, *, now, repo)` | `expire_proposed_goals.py` | #178 | ✅ job 로직 (TTL 14일 지난 proposed 목표 보관, idempotent). 경계 `proposed_goal_stale_before(now)` 는 프리뷰 스크립트(`scripts/preview_expire_proposed_goals.py`)도 재사용하는 단일 소스. 사용자 알림 없음(ADR-0005 §7.8 선례 — 알림 4번째 클래스는 AGENTS §1 잠금이라 §8 대상) |
 
@@ -43,11 +45,12 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 | --- | --- |
 | `sweeps.py` | **전체 활성 사용자 순회 wrapper** — `run_morning_brief_sweep` / `run_weekly_review_sweep`. per-user job 을 `user_repo.list_active()` 전체에 실행(개별 try/except 격리, 사용자 톤 반영). |
 | `habit_instances.py` | **전체 활성 사용자 × 활성 습관 순회** — `run_habit_instances_sweep`. `notify_sweeps` 와 같은 트랜잭션 규약(사용자 단위 commit + except rollback). |
-| `runtime.py` | **APScheduler(AsyncIOScheduler) 등록** — `build_scheduler()` 가 9 job 을 KST cron 으로 add_job. job wrapper 가 1회용 세션·repo 를 만들어 sweep/전역 job 호출. |
+| `runtime.py` | **APScheduler(AsyncIOScheduler) 등록** — `build_scheduler()` 가 10 job 을 KST cron 으로 add_job. job wrapper 가 1회용 세션·repo 를 만들어 sweep/전역 job 호출. |
 
 등록 시각: morning_brief=매일 06:00 · weekly_review=일요일 03:00 · interruption_resolver=6h ·
 expire_drafts=6h · expire_reflections=매일 04:00 · expire_proposed_goals=매일 04:00 ·
-evening_reflection_notify=19~23시 */5분 · pre_card_notify=종일 */5분 · habit_instances=매일 00:05.
+evening_reflection_notify=19~23시 */5분 · pre_card_notify=종일 */5분 ·
+morning_brief_notify=06~10시 */5분 · habit_instances=매일 00:05.
 
 > **`habit_instances` 가 "매주 월요일"이 아니라 "매일"인 이유**: 주 1회 job 은 놓치면 다음
 > 기회가 일주일 뒤다. jobstore 가 MemoryJobStore 라 재기동 시 `next_run_time` 을 now 기준으로

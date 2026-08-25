@@ -71,7 +71,7 @@ from reaction_backend.repositories.review_repo import get_review_repo
 from reaction_backend.repositories.scheduled_block_repo import get_scheduled_block_repo
 from reaction_backend.repositories.time_policy_repo import get_time_policy_repo
 from reaction_backend.repositories.user_repo import GoogleProfile, get_user_repo
-from reaction_backend.schemas.common import now_kst
+from reaction_backend.schemas.common import KST, now_kst
 
 DEMO_USER_UUID = UUID("11111111-1111-4111-8111-111111111111")
 
@@ -1228,6 +1228,17 @@ class FakeRecoveryRepo:
             a
             for a in self._attempts.values()
             if a.user_id == user_id and a.execution_id == execution_id
+        ]
+
+    async def list_due_re_engagement(
+        self, user_id: UUID, target_date: date
+    ) -> list[RecoveryAttempt]:
+        return [
+            a
+            for a in self._attempts.values()
+            if a.user_id == user_id
+            and a.re_engagement_anchor_at is not None
+            and a.re_engagement_anchor_at.astimezone(KST).date() == target_date
         ]
 
     async def get_strategy(self, strategy_type: str) -> RecoveryStrategyCatalog | None:

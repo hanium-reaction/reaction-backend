@@ -786,6 +786,10 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
   **일요일은 문구·딥링크만 갈라진다**(`title`/`body`/`url: /reviews/weekly`) — 같은 클래스에
   주간 만다라 리포트를 얹는다. 새 클래스·새 발송 조건 없음(ADR-0008 §4, §8 "F")
 - pre_card 는 opt-in(`preCardEnabled`) + 시작 2~7분 전 (2분 리드 + 5분 폴)
+- morning_brief 는 **재관여 대상이 있을 때만** — 오늘이 채택된 PARK/CARRY_OVER 회복의
+  재관여 앵커 날짜인 사용자에게, `morning_brief` 클래스를 재사용해 발송한다(새 클래스
+  아님, 근거 대장 §6.2 T2). 대상 없으면 그날은 발송 없음. `morningTime` 이 06:00~06:59
+  면 07:00 으로 클램프해 발송(quiet hours 끝나는 시각 — evening 의 22:55 클램프와 대칭)
 
 `POST /notifications/{notificationId}/opened` — **⚠️ 아직 이 endpoint 를 부르는 FE 콜백이
 없다.** push `notificationclick` 이벤트 핸들러가 준비되면 그 알림의 push payload 에 실린
