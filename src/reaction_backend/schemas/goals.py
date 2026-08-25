@@ -51,9 +51,15 @@ class GoalCreateRequest(CamelModel):
 
 
 class GoalUpdateRequest(CamelModel):
-    """PATCH /goals/{id} 요청 — 제목·마감·우선순위·tier 변경."""
+    """PATCH /goals/{id} 요청 — 제목·마감·우선순위·tier·category 변경.
+
+    `category` 는 `GoalCreateRequest.category` 와 같은 허용값·정규화 규칙을 쓴다(#326,
+    FE #216 차단 해소). 생략하면 기존 category 유지 — 재인터뷰 제안 트리거는 FE 가 저장
+    성공 후 실제로 값이 달라졌을 때만 띄운다(자동 재계획·강제 이동 없음).
+    """
 
     title: str | None = None
+    category: str | None = None
     deadline: str | None = None
     priority_level: int | None = Field(default=None, ge=1, le=5)
     goal_tier: GoalTier | None = None

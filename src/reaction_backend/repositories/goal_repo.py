@@ -153,12 +153,15 @@ class GoalRepo:
         goal: Goal,
         *,
         title: str | None = None,
+        category: str | None = None,
         deadline: date | None = None,
         priority_level: int | None = None,
         goal_tier: str | None = None,
     ) -> Goal:
         if title is not None:
             goal.title = title
+        if category is not None:
+            goal.category = category
         if deadline is not None:
             goal.deadline = deadline
         if priority_level is not None:

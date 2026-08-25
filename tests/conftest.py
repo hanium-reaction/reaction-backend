@@ -395,16 +395,33 @@ class FakeNotificationSendRepo:
         )
 
     async def record(
-        self, *, user_id: UUID, notification_class: str, sent_at: datetime
+        self,
+        *,
+        id: UUID,  # noqa: A002 — 실 repo 시그니처 유지
+        user_id: UUID,
+        notification_class: str,
+        sent_at: datetime,
+        target_action_item_id: UUID | None = None,
     ) -> NotificationSend:
         self.ops.append("record")
         row = NotificationSend()
-        row.id = uuid4()
+        row.id = id
         row.user_id = user_id
         row.notification_class = notification_class
         row.sent_at = sent_at
+        row.target_action_item_id = target_action_item_id
+        row.opened_at = None
         self._sends.append(row)
         return row
+
+    async def get_by_id(self, notification_id: UUID, user_id: UUID) -> NotificationSend | None:
+        return next(
+            (s for s in self._sends if s.id == notification_id and s.user_id == user_id), None
+        )
+
+    async def stamp_opened(self, notification: NotificationSend, opened_at: datetime) -> None:
+        if notification.opened_at is None:
+            notification.opened_at = opened_at
 
 
 class FakeWebPushSender:
@@ -512,12 +529,15 @@ class FakeGoalRepo:
         goal: Goal,
         *,
         title: str | None = None,
+        category: str | None = None,
         deadline: date | None = None,
         priority_level: int | None = None,
         goal_tier: str | None = None,
     ) -> Goal:
         if title is not None:
             goal.title = title
+        if category is not None:
+            goal.category = category
         if deadline is not None:
             goal.deadline = deadline
         if priority_level is not None:

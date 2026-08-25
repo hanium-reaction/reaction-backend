@@ -7,6 +7,21 @@
 
 ---
 
+## v1.72 — 2026-08-25 (`PATCH /goals/{id}` 에 `category` 추가 — #326, FE #216 차단 해소)
+
+**추가만(하위호환)** — endpoint 변경 없음. `GoalUpdateRequest` 에 선택 필드 `category` 가
+추가된다. 생략하면 기존 동작과 완전히 동일(title/deadline/priorityLevel/goalTier 만 보내는
+기존 클라이언트는 영향 없음).
+
+- `category` 를 보내면 `POST /goals` 와 같은 허용값·정규화 규칙으로 검증 후 저장.
+- 무효 값은 기존 오류 포맷 그대로 422 `COMMON_VALIDATION_ERROR` (`field: "category"`).
+- 응답 `ApiGoal.category` 는 변경된 값을 반환한다.
+- 기존 계획/분해 트리·통계는 category 변경으로 소급 갱신되지 않는다 — 다음 재계획부터
+  새 category 가 반영된다. 재인터뷰 제안 여부는 FE 가 저장 성공 후 실제 값 변화를 보고
+  판단한다(서버가 자동 트리거하지 않음).
+
+---
+
 ## v1.71 — 2026-08-23 (확정 중간 목표가 계획에서 빠지면 알린다 — ADR-0007 §배경 ①)
 
 **추가만(하위호환)** — endpoint·스키마 변경 없음. `POST /plans/generate` 응답의

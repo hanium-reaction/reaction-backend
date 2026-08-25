@@ -240,18 +240,21 @@ async def update_goal(
     repo: RepoDep,
     session: SessionDep,
 ) -> Goal:
-    """목표 부분 수정. tier 변경 시 한도 재검사."""
+    """목표 부분 수정. tier 변경 시 한도 재검사, category 변경 시 값 검증(#326)."""
     goal = await repo.get_by_id(user.id, _parse_goal_id(goal_id))
     if goal is None:
         raise _not_found()
 
     if body.goal_tier is not None and body.goal_tier != goal.goal_tier:
         await _enforce_tier_limit(repo, user.id, body.goal_tier)
+    if body.category is not None:
+        _validate_category(body.category)
 
     deadline = _parse_deadline(body.deadline) if body.deadline is not None else None
     updated = await repo.update(
         goal,
         title=body.title,
+        category=body.category,
         deadline=deadline,
         priority_level=body.priority_level,
         goal_tier=body.goal_tier,
