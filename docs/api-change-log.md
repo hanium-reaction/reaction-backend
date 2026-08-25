@@ -7,6 +7,26 @@
 
 ---
 
+## v1.76 — 2026-08-25 (`RecoveryCard.obstacle/copingClause/acknowledgment` 추가 — acknowledgment/v3 승격, AVOIDANCE 전용)
+
+**추가만(하위호환)** — endpoint 변경 없음. `POST /recovery/proposals/generate` 응답의
+각 카드에 선택 필드 3개가 늘어난다.
+
+- `RecoveryCard.obstacle`/`copingClause`/`acknowledgment`(모두 `string | null`) — 실패
+  태그에 `AVOIDANCE` 가 있을 때만 personalize 가 v3 프롬프트(`if_then_proposal@v3`)로
+  라우팅되고, 그 배치의 **선두 카드에만** 값이 실린다. 그 외 카드(형제/비-AVOIDANCE
+  배치/룰 폴백)는 셋 다 `null`.
+- `acknowledgment` 는 v3 안에서도 다시 조건부다 — v3 프롬프트 자체가 AVOIDANCE 일
+  때만 채우므로(다른 조건은 카운터 인프라 미비로 이번 스코프 밖), `obstacle`/
+  `copingClause` 는 있는데 `acknowledgment` 만 `null` 인 카드는 없다(둘 다 같은 조건).
+- 프로덕션 프롬프트 고정 상수가 `_PROMPT_ID` 단일에서 `_PROMPT_ID_V2`/`_PROMPT_ID_V3`
+  둘로 갈렸다 — AVOIDANCE 가 아니면 여전히 v2, 입력 변수 계약은 v2/v3 완전히 동일.
+- ⚠️ L1-1 오프라인 A/B(v3 vs v1 승률 1.000)가 근거지만 judge–human κ=0.482 로 보조
+  지표 강등(#278)됐고 실 도그푸딩 검증도 없다 — 노출 범위를 AVOIDANCE 태그로 좁혀
+  리스크를 제한했다. 문제가 생기면 `_PROMPT_ID_V3` 라우팅만 되돌리면 된다.
+
+---
+
 ## v1.75 — 2026-08-25 (`morning_brief` 첫 push 발송 신설 — 근거 대장 §6.2 T2)
 
 **추가만(하위호환)** — 새 endpoint 없음. §15 발송 가드 문면에 조건 1개 추가.

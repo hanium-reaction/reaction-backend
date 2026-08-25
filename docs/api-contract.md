@@ -571,7 +571,12 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   `failed`/`partial_done` 인 실행만 허용 (422 `RECOVERY_NOT_ELIGIBLE`).
   pending 카드가 있으면 그대로 반환 (재호출 안전). 응답은 Draft Layer
   (`isDraft=true`, `aiSource=llm|rule`) + `cards[]` (attemptId/optionGroup/strategyType/
-  labelKo/suggestedActionText/minRecoveryUnitMinutes/allowRestMode/triggerTag).
+  labelKo/suggestedActionText/minRecoveryUnitMinutes/allowRestMode/triggerTag/
+  obstacle/copingClause/acknowledgment).
+- `obstacle`/`copingClause`/`acknowledgment`(모두 nullable) — 실패 태그에 `AVOIDANCE`
+  가 있을 때만 personalize 가 v3 프롬프트로 라우팅되고, 그 배치의 **선두 카드에만** 값이
+  실린다. 그 외 카드(형제·비-AVOIDANCE 배치·룰 폴백)는 셋 다 null. `acknowledgment` 는
+  v3 안에서도 조건부라 obstacle/copingClause 만 있고 이건 null 인 경우가 있다.
   **이미 결정된 실행(pending 0건 + 결정 이력 있음)은 `RECOVERY_ALREADY_DECIDED`(409)** —
   회복 카드 세트는 실행 1건당 1세트다. 재생성을 허용하면 `/recovery/decisions` 의 409 가
   무력화돼 같은 실패에 회복 ActionItem 이 여러 개 생기고, replan 은 `created_at` 오름차순의

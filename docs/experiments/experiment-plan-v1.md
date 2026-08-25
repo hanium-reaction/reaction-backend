@@ -804,3 +804,46 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
     — 정확한 날짜 매치, 전날·다음날 제외, 자정 경계, 타 사용자·anchor NULL 제외), 런타임
     cron 고정 1건(`test_scheduler_sweeps.py` — 06~10시 5분 폴·grace 60초 고정, id 집합
     테스트도 함께 갱신).
+24. ✅ **acknowledgment/v3 승격 — AVOIDANCE 전용 — 완료.** §11 항목 21(S8)이 "L1-1 로
+    검증되기 전까지 승격하지 않는다"고 명시적으로 미룬 결정. 사용자에게 (a) v3 전체
+    승격 vs (b) v2 스키마에 필드만 추가 — 둘 중 하나를 고르라고 물었는데, 조사 중
+    (b)는 과거(#272)에 실제로 시도했다가 깨진 전례(스키마가 새어 들어가 v1/v2 호출에도
+    Gemini 가 요청 안 한 필드를 채움)가 코드에 이미 남아있는 걸 확인해 실질적으로
+    유효한 선택지가 아니었다 — 재확인 후 **(a) v3 배선, 단 AVOIDANCE 태그로 노출 범위를
+    좁힌다**로 결정.
+
+    - **`api/routes/recovery.py`** — `_PROMPT_ID` 단일 상수를 `_PROMPT_ID_V2`/
+      `_PROMPT_ID_V3` 로 분리, `_V3_TRIGGER_TAG = "AVOIDANCE"`. `generate_recovery_
+      proposals`(L2 가 아닌 분기)가 실패 태그에 AVOIDANCE 가 있으면 `schema=
+      RecoveryProposalLLMv3`/`prompt_id=_PROMPT_ID_V3` 로, 없으면 기존 그대로 v2 로
+      라우팅한다 — **v2/v3 는 입력 변수 계약이 완전히 같아서**(둘 다 7변수) 새 변수
+      주입 없이 스키마·prompt_id 만 갈린다(§11 항목 22 W2 의 "변수 주입 미착수" 메모는
+      overwhelm/연속실패 등 카운터 기반 조건을 염두에 둔 것이었는데, 실제 v3 프롬프트는
+      그 두 조건을 아예 안 쓰고 AVOIDANCE 하나만 기존 `failure_type` 변수로 판정하도록
+      쓰여 있어 그 우려가 실제로는 발생하지 않았다 — 코드를 다시 읽고 확인).
+    - **`recovery_attempts`** 에 `obstacle`/`coping_clause`/`acknowledgment`(모두
+      nullable Text) 신설 — v3 personalize 결과를 저장할 곳이 아예 없었다. **배치의
+      선두 카드에만** 싣는다 — 형제 카드는 카탈로그 템플릿 그대로라 코핑 플랜을 붙이면
+      `suggested_action_text` 와 내용이 어긋나는 실제 버그가 되기 때문(메타데이터인
+      `llm_fallback_used`/`prompt_version` 과 달리 이건 사용자에게 보이는 콘텐츠라 배치
+      전체에 균일 적용하면 안 됨).
+    - `schemas/recovery.py::RecoveryCard` 에 세 필드 추가(api-contract v1.76).
+    - `tests/prompts/test_recovery_prompts.py` 의 프로덕션 고정 테스트 3종을 v2/v3
+      파라미터화하고, "v3 는 아직 승격 안 됨"을 전제하던 마지막 테스트를 "v3 는 v2
+      **대신이 아니라 나란히** AVOIDANCE 조건부로 고정돼 있다"로 재작성 — 전제가
+      뒤집힌 테스트를 그대로 두면 그린인 채로 거짓을 주장하게 된다.
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **overwhelm≥4/연속실패≥2 조건은 여전히 없다** — 카운터 인프라 미비(§11 항목 22와
+      같은 사유). v3 프롬프트 자체도 이 두 조건을 요청하지 않는다.
+    - **acknowledgment 의 실제 효과(재관여·완주율 개선 여부)는 안 잰다** — 이번은
+      배선뿐. 실 도그푸딩 데이터가 쌓인 뒤 온라인 지표(§7.1)로 봐야 한다.
+    - **되돌리기 쉽게만 해뒀다** — `_PROMPT_ID_V3` 라우팅 조건(`_V3_TRIGGER_TAG`)
+      하나만 지우면 전부 v2 로 복귀. 별도 feature flag 인프라는 만들지 않았다(AGENTS.md
+      §2 "feature flag 로 하위호환 셈 X"와 같은 정신 — 이미 있는 조건 분기로 충분).
+
+    신규/갱신 테스트 — `test_recovery.py` 2건(AVOIDANCE → v3 라우팅 + 선두 카드만 코핑
+    플랜, 비-AVOIDANCE → v2 유지 + 전 카드 null), `test_recovery_repo_coping_plan_sql.py`
+    신설 2건(실 Postgres — 세 컬럼 왕복, v2 배치는 전부 NULL), `test_recovery_prompts.py`
+    프로덕션 고정 테스트 3종 파라미터화(v2/v3 각각, 총 6 케이스) + 마지막 테스트 전제
+    갱신.

@@ -1260,6 +1260,9 @@ class FakeRecoveryRepo:
         trigger_tag: str | None,
         llm_fallback_used: bool,
         prompt_version: str | None = None,
+        obstacle: str | None = None,
+        coping_clause: str | None = None,
+        acknowledgment: str | None = None,
     ) -> RecoveryAttempt:
         a = RecoveryAttempt()
         a.id = uuid4()
@@ -1271,6 +1274,9 @@ class FakeRecoveryRepo:
         a.trigger_tag = trigger_tag
         a.llm_fallback_used = llm_fallback_used
         a.prompt_version = prompt_version
+        a.obstacle = obstacle
+        a.coping_clause = coping_clause
+        a.acknowledgment = acknowledgment
         a.assigned_arm = None
         a.first_viewed_at = None
         a.user_decision = "pending"

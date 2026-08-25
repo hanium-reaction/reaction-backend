@@ -249,6 +249,9 @@ class RecoveryRepo:
         trigger_tag: str | None,
         llm_fallback_used: bool,
         prompt_version: str | None = None,
+        obstacle: str | None = None,
+        coping_clause: str | None = None,
+        acknowledgment: str | None = None,
     ) -> RecoveryAttempt:
         attempt = RecoveryAttempt(
             user_id=user_id,
@@ -259,6 +262,9 @@ class RecoveryRepo:
             trigger_tag=trigger_tag,
             llm_fallback_used=llm_fallback_used,
             prompt_version=prompt_version,
+            obstacle=obstacle,
+            coping_clause=coping_clause,
+            acknowledgment=acknowledgment,
         )
         self._session.add(attempt)
         await self._session.flush()
