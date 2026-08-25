@@ -502,6 +502,16 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 - `AgendaCard.cancellable` (파생 필드, DB 컬럼 아님) — 위 3조건의 판정 결과. **판정 규칙은 서버에만 있다**(`domain/action_cancel.py`): FE 는 `status`·`source` 만 받아 '실행 이력 없음' 을 계산할 수 없고, 규칙을 복제하면 바뀔 때 조용히 어긋난다
 - 지표 영향 없음 — 취소 가능한 카드는 정의상 실행 이력이 없어 주간 KPI(`execution_events` join)에 애초에 들어간 적이 없다
 
+**T1 미체크 배지 (근거 대장 §6.2, reaction-frontend#224)**:
+- `AgendaCard.missedCheckIn` (파생 필드, DB 컬럼 아님) — 이 카드의 (취소 안 된) 블록 중
+  `blockStatus='scheduled'`(아직 [▶ 시작] 전) 이고 `startAt` + 20분이 지난 것이 있으면
+  `true`. **push 아님** — 잠금 3규칙이 push 클래스를 3종으로 고정해 새 클래스를 못
+  만든다. FE 가 이 필드로 인앱 배지를 그린다(표시 빈도·소멸 조건은 FE 책임)
+- 판정 규칙은 서버에만 있다(`domain/missed_check_in.py`) — `cancellable` 과 같은 원칙
+- ⚠️ **최근 앱 세션·무응답 누적에 따른 억제는 아직 없다** — 그 신호(근거 대장 §6.2)는
+  `app_sessions` 테이블 없이는 계산 불가능해 이번 범위 밖. 카드가 미체크 조건을
+  만족하면 항상 `true` 다
+
 ---
 
 ## 11. Reflection (`/reflection`) — S17, S18

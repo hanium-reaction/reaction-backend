@@ -7,6 +7,20 @@
 
 ---
 
+## v1.74 — 2026-08-25 (`AgendaCard.missedCheckIn` 추가 — 근거 대장 §6.2 T1, FE #224)
+
+**추가만(하위호환)** — endpoint 변경 없음. `GET /today/agenda` 응답의 각 카드에 선택
+필드가 하나 늘어난다.
+
+- `AgendaCard.missedCheckIn`(boolean) — 이 카드의 (취소 안 된) 블록 중 아직 [▶ 시작]
+  전(`scheduled`)이고 계획 시작 시각으로부터 20분이 지난 것이 있으면 `true`.
+- **push 아님** — 인앱 배지용 신호다(`cancellable` 과 같은 "판정은 서버, 표현은 FE"
+  원칙). 배지를 몇 번 보여줄지·언제 지울지는 FE 책임.
+- ⚠️ **최근 앱 세션·무응답 누적에 따른 억제는 아직 없다** — 그 신호는 `app_sessions`
+  테이블 없이는 계산 불가능해 이번 범위 밖. 미체크 조건만 만족하면 항상 `true`.
+
+---
+
 ## v1.73 — 2026-08-25 (`POST /notifications/{notificationId}/opened` 신설 — 근거 대장 §6.1)
 
 **추가만(하위호환)** — 새 endpoint. 기존 응답 형태·발송 흐름 변경 없음.

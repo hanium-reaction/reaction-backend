@@ -1403,6 +1403,17 @@ class FakeExecutionRepo:
         ]
         return min(candidates, key=lambda b: b.start_at) if candidates else None
 
+    async def list_active_blocks_for_actions(
+        self, user_id: UUID, action_item_ids: Sequence[UUID]
+    ) -> list[tuple[UUID, str, datetime]]:
+        """T1 미체크 배지 재료 (실 repo 미러 — 근거 대장 §6.2)."""
+        wanted = set(action_item_ids)
+        return [
+            (b.action_item_id, b.block_status, b.start_at)
+            for b in self._blocks.values()
+            if b.user_id == user_id and b.action_item_id in wanted and b.block_status != "cancelled"
+        ]
+
     async def create_adhoc_block(
         self, *, user_id: UUID, action_item: ActionItem, start_at: datetime
     ) -> ScheduledBlock:

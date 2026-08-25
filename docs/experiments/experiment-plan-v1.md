@@ -724,3 +724,39 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
     다른 클래스·target 없는 행·요청 밖 action_item 을 실제로 걸러내는지 —
     `test_report_proximal_execution_sql.py`). 기존 followthrough 리포트 테스트에도
     앵커 우선순위(신규 앵커 우선, 없으면 결정 시각 폴백) 2건 추가.
+22. ✅ **S9 T1 미체크 배지 — `AgendaCard.missedCheckIn` — 완료(T1 만, T2 는 스코프 밖).**
+    근거 대장 §6.2 3접점 중 T1(블록 후 미체크, +20분, **push 아닌 인앱 배지**)만
+    구현했다. T2(다음날 morning_brief 슬롯)는 착수 전 조사에서 `morning_brief` 가
+    지금 push 를 **전혀 안 보내고 있다**(daily_briefs 인앱 행만 생성)는 게 드러나
+    "슬롯 하나 추가"가 아니라 push 발송 경로 자체를 새로 만드는 별도 규모의 작업임을
+    확인 — 사용자 확인 후 이번 라운드에서 제외.
+
+    - **`domain/missed_check_in.py`** 신설(`action_cancel.py`(#214)와 같은 순수 함수
+      원칙) — `is_missed_check_in(block_status, start_at, now)`: 블록이 `scheduled`
+      (아직 [▶ 시작] 전)이고 `start_at + 20분` 이 지났는가. push 로 못 하는 이유는
+      잠금 3규칙이 알림 클래스를 3종(`morning_brief`/`pre_card`/`evening_reflection`)
+      으로 고정해 새 클래스를 못 만들기 때문 — §6.2 원문이 이미 "인앱으로 우회"라고
+      명시.
+    - **`ExecutionRepo.list_active_blocks_for_actions()`** 신설 — 오늘 어젠다 카드들의
+      취소 안 된 블록을 한 번에 조회(N+1 방지, `action_ids_with_history` 와 같은 배치
+      원칙). 판정 자체는 안 한다 — 사실만 반환하고 판단은 domain 함수가.
+    - **`GET /today/agenda`** 응답에 `AgendaCard.missedCheckIn`(파생 필드) 추가
+      (api-contract v1.74) — `cancellable` 과 나란히, "판정은 서버 하나, 표현은 FE"
+      원칙을 그대로 따른다.
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **최근 앱 세션·무응답 누적 억제 없음** — 근거 대장이 스스로 "계산 불가능,
+      `app_sessions` 테이블이 선행 조건"이라고 명시한 부분. 지금은 미체크 조건만
+      만족하면 항상 `true` — 과다 노출 방지는 전적으로 FE(배지 노출 빈도)의 몫.
+    - **T2(다음날 morning_brief 슬롯)는 미착수** — `morning_brief` push 발송 경로
+      자체가 없어 이건 회복 재설계보다 큰 별도 인프라 작업. 사용자 확인으로 이번
+      범위에서 제외.
+    - **인박스 연동은 안 함** — §6.2 는 "인앱 배지/인박스"라고 둘 다 언급하지만, 이번엔
+      `AgendaCard` 파생 필드(배지 쪽)만 구현하고 `inbox_items` 에 항목을 만드는 경로는
+      손대지 않았다.
+
+    신규 테스트 15건 — 순수함수 7건(경계·시작/종료/취소 상태 무시·과거·미래 —
+    `test_missed_check_in.py`), 리포지토리 SQL 고정 4건(user/action_item 스코프,
+    cancelled 제외, 컬럼 선택, 빈 입력 무쿼리 — `test_execution_repo_missed_blocks_sql.py`),
+    라우트 통합 4건(경계 초과 플래그, 경계 안 비플래그, 시작된 블록 무시, 블록 없는
+    카드 무시 — `test_today.py`).
