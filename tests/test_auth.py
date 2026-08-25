@@ -1,20 +1,47 @@
-"""Auth — Google OAuth + JWT 세션 실구현 (Issue #16).
+"""Auth — Google OAuth + JWT 세션 실구현 (Issue #16) + 가입 게이트 (#324).
 
 `auth_client` fixture: repo/session 만 override, 인증은 실제 JWT 흐름.
 stub 모드에서 verifier 가 고정 demo 클레임 반환 → FakeUserRepo 가 user 생성.
+
+신규 가입(email 이 처음 보이는 로그인)은 이제 유효한 초대코드가 있어야 한다 — 그래서
+"stub" id_token 을 재사용하는 기존 테스트들도 대부분 `_login` 헬퍼로 코드를 미리 심고
+호출한다. 기존 사용자 로그인(같은 email 두 번째 이후)은 게이트를 아예 안 거치므로
+코드 없이도 통과한다(`test_google_login_existing_user_*` 가 그 계약을 고정한다).
 """
 
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import DEMO_USER_UUID, FakeUserRepo, issue_helper_token
+from reaction_backend.config import get_settings
+from tests.conftest import DEMO_USER_UUID, FakeInviteCodeRepo, FakeUserRepo, issue_helper_token
 
 
-def test_google_login_creates_new_user(auth_client: TestClient) -> None:
-    resp = auth_client.post("/auth/google", json={"idToken": "stub-id-token"})
-    assert resp.status_code == 200
-    body = resp.json()
+def _login(
+    client: TestClient,
+    invite_repo: FakeInviteCodeRepo,
+    id_token: str = "stub",
+    *,
+    invite_code: str = "TESTCODE",
+) -> Any:
+    """게이트를 통과하는 로그인 — 신규 가입 대상 email 이면 코드를 미리 심어 둔다.
+
+    기존 사용자 재로그인(같은 id_token 재호출 등)에도 코드를 같이 보내지만, 그 경로는
+    게이트 자체를 안 타므로 무해하다(라우터가 email 존재를 먼저 확인).
+    """
+    invite_repo.seed(invite_code)
+    resp = client.post("/auth/google", json={"idToken": id_token, "inviteCode": invite_code})
+    assert resp.status_code == 200, resp.json()
+    return resp.json()
+
+
+def test_google_login_creates_new_user(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    body = _login(auth_client, fake_invite_code_repo, "stub-id-token")
     assert body["accessToken"]
     assert body["refreshToken"]
     # stub 모드 verifier 의 고정 클레임
@@ -31,21 +58,26 @@ def test_google_login_rejects_empty_id_token(auth_client: TestClient) -> None:
 
 
 def test_google_login_reuses_existing_user(
-    auth_client: TestClient, fake_user_repo: FakeUserRepo
+    auth_client: TestClient,
+    fake_user_repo: FakeUserRepo,
+    fake_invite_code_repo: FakeInviteCodeRepo,
 ) -> None:
     """같은 email 로 두 번 로그인 — 동일 user_id, onboarding_state 보존."""
-    first = auth_client.post("/auth/google", json={"idToken": "stub"}).json()
+    first = _login(auth_client, fake_invite_code_repo, "stub")
     second = auth_client.post("/auth/google", json={"idToken": "stub"}).json()
     assert first["user"]["userId"] == second["user"]["userId"]
     assert len(fake_user_repo._by_email) == 1
 
 
 def test_stub_device_token_creates_isolated_users(
-    auth_client: TestClient, fake_user_repo: FakeUserRepo
+    auth_client: TestClient,
+    fake_user_repo: FakeUserRepo,
+    fake_invite_code_repo: FakeInviteCodeRepo,
 ) -> None:
-    """`demo:<id>` — 브라우저별 격리 데모 계정 (테스터 충돌 방지)."""
-    a = auth_client.post("/auth/google", json={"idToken": "demo:tester-one"}).json()
-    b = auth_client.post("/auth/google", json={"idToken": "demo:tester-two"}).json()
+    """`demo:<id>` — 브라우저별 격리 데모 계정 (테스터 충돌 방지). 서로 다른 email 이라
+    각자 자기 코드를 소비한다."""
+    a = _login(auth_client, fake_invite_code_repo, "demo:tester-one", invite_code="CODE-ONE")
+    b = _login(auth_client, fake_invite_code_repo, "demo:tester-two", invite_code="CODE-TWO")
     again = auth_client.post("/auth/google", json={"idToken": "demo:tester-one"}).json()
 
     assert a["user"]["email"] == "demo+tester-one@reaction.local"
@@ -55,18 +87,23 @@ def test_stub_device_token_creates_isolated_users(
     assert len(fake_user_repo._by_email) == 2
 
 
-def test_stub_plain_token_keeps_fixed_demo_account(auth_client: TestClient) -> None:
+def test_stub_plain_token_keeps_fixed_demo_account(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
     """`demo:` 접두사가 아니면 종전대로 고정 demo 계정 — 시드 시나리오 계정 유지."""
-    res = auth_client.post("/auth/google", json={"idToken": "anything-else"}).json()
+    res = _login(auth_client, fake_invite_code_repo, "anything-else")
     assert res["user"]["email"] == "demo@reaction.local"
 
-    # 접두사만 있고 id 가 비면(정규화 후 빈 slug) 고정 계정으로 fallback
+    # 접두사만 있고 id 가 비면(정규화 후 빈 slug) 고정 계정으로 fallback — 같은 email 이라
+    # 이미 위에서 가입한 기존 사용자 재로그인이 된다(코드 불필요).
     edge = auth_client.post("/auth/google", json={"idToken": "demo:!!!"}).json()
     assert edge["user"]["email"] == "demo@reaction.local"
 
 
-def test_refresh_returns_new_access(auth_client: TestClient) -> None:
-    login = auth_client.post("/auth/google", json={"idToken": "stub"}).json()
+def test_refresh_returns_new_access(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    login = _login(auth_client, fake_invite_code_repo)
     resp = auth_client.post(
         "/auth/refresh",
         json={"refreshToken": login["refreshToken"]},
@@ -88,9 +125,11 @@ def test_refresh_with_expired_token(auth_client: TestClient) -> None:
     assert resp.json()["code"] == "AUTH_TOKEN_EXPIRED"
 
 
-def test_refresh_with_access_token_rejected(auth_client: TestClient) -> None:
+def test_refresh_with_access_token_rejected(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
     """access 토큰을 refresh 자리에 보내면 type mismatch → INVALID_TOKEN."""
-    login = auth_client.post("/auth/google", json={"idToken": "stub"}).json()
+    login = _login(auth_client, fake_invite_code_repo)
     resp = auth_client.post(
         "/auth/refresh",
         json={"refreshToken": login["accessToken"]},
@@ -99,8 +138,10 @@ def test_refresh_with_access_token_rejected(auth_client: TestClient) -> None:
     assert resp.json()["code"] == "AUTH_INVALID_TOKEN"
 
 
-def test_logout_revokes_refresh(auth_client: TestClient) -> None:
-    login = auth_client.post("/auth/google", json={"idToken": "stub"}).json()
+def test_logout_revokes_refresh(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    login = _login(auth_client, fake_invite_code_repo)
     refresh = login["refreshToken"]
 
     logout_resp = auth_client.post("/auth/logout", json={"refreshToken": refresh})
@@ -117,8 +158,10 @@ def test_logout_idempotent_with_invalid_token(auth_client: TestClient) -> None:
     assert resp.status_code == 204
 
 
-def test_me_returns_profile_with_valid_token(auth_client: TestClient) -> None:
-    login = auth_client.post("/auth/google", json={"idToken": "stub"}).json()
+def test_me_returns_profile_with_valid_token(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    login = _login(auth_client, fake_invite_code_repo)
     access = login["accessToken"]
     resp = auth_client.get("/auth/me", headers={"Authorization": f"Bearer {access}"})
     assert resp.status_code == 200
@@ -146,10 +189,121 @@ def test_me_with_expired_token_returns_401_expired(auth_client: TestClient) -> N
     assert resp.json()["code"] == "AUTH_TOKEN_EXPIRED"
 
 
-def test_me_with_refresh_token_rejected(auth_client: TestClient) -> None:
+def test_me_with_refresh_token_rejected(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
     """refresh 토큰을 access 자리에 보내면 type mismatch → INVALID_TOKEN."""
-    login = auth_client.post("/auth/google", json={"idToken": "stub"}).json()
+    login = _login(auth_client, fake_invite_code_repo)
     refresh = login["refreshToken"]
     resp = auth_client.get("/auth/me", headers={"Authorization": f"Bearer {refresh}"})
     assert resp.status_code == 401
     assert resp.json()["code"] == "AUTH_INVALID_TOKEN"
+
+
+# ───────────────────────── 가입 게이트 (#324, FE #237 §8) ─────────────────────────
+
+
+def test_new_signup_requires_invite_code(auth_client: TestClient) -> None:
+    resp = auth_client.post("/auth/google", json={"idToken": "stub"})
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "AUTH_INVALID_INVITE_CODE"
+
+
+def test_new_signup_rejects_unknown_invite_code(auth_client: TestClient) -> None:
+    resp = auth_client.post("/auth/google", json={"idToken": "stub", "inviteCode": "NO-SUCH-CODE"})
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "AUTH_INVALID_INVITE_CODE"
+
+
+def test_new_signup_rejects_already_used_invite_code(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    fake_invite_code_repo.seed("USED-CODE", used=True)
+    resp = auth_client.post("/auth/google", json={"idToken": "stub", "inviteCode": "USED-CODE"})
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "AUTH_INVITE_CODE_ALREADY_USED"
+
+
+def test_new_signup_invite_code_is_case_and_whitespace_insensitive(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    fake_invite_code_repo.seed("REACTION-REVIEWER")
+    resp = auth_client.post(
+        "/auth/google", json={"idToken": "stub", "inviteCode": " reaction-reviewer "}
+    )
+    assert resp.status_code == 200, resp.json()
+
+
+def test_new_signup_marks_invite_code_used_by_new_user(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    body = _login(auth_client, fake_invite_code_repo, invite_code="ONETIME")
+    row = fake_invite_code_repo._by_code["ONETIME"]
+    assert row.used_at is not None
+    assert f"user_{row.used_by_user_id}" == body["user"]["userId"]
+
+    # 같은 코드로 다른 신규 email 재시도 — 이미 소진됐으니 409.
+    again = auth_client.post(
+        "/auth/google", json={"idToken": "demo:someone-else", "inviteCode": "ONETIME"}
+    )
+    assert again.status_code == 409
+    assert again.json()["code"] == "AUTH_INVITE_CODE_ALREADY_USED"
+
+
+def test_existing_user_login_ignores_missing_invite_code(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    """완료 조건 — 기존 사용자 로그인은 게이트 영향을 전혀 받지 않는다."""
+    _login(auth_client, fake_invite_code_repo)  # 최초 가입(코드 필요)
+    second = auth_client.post("/auth/google", json={"idToken": "stub"})  # 코드 없이 재로그인
+    assert second.status_code == 200
+
+
+def test_existing_user_login_unaffected_by_signups_disabled(
+    auth_client: TestClient,
+    fake_invite_code_repo: FakeInviteCodeRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _login(auth_client, fake_invite_code_repo)  # 가입은 게이트가 열려 있을 때 먼저 끝낸다
+    monkeypatch.setenv("SIGNUPS_ENABLED", "false")
+    get_settings.cache_clear()
+    resp = auth_client.post("/auth/google", json={"idToken": "stub"})
+    assert resp.status_code == 200
+    get_settings.cache_clear()
+
+
+def test_new_signup_blocked_when_signups_disabled(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SIGNUPS_ENABLED", "false")
+    get_settings.cache_clear()
+    resp = auth_client.post("/auth/google", json={"idToken": "stub", "inviteCode": "IRRELEVANT"})
+    get_settings.cache_clear()
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "AUTH_SIGNUPS_DISABLED"
+
+
+def test_new_signup_blocked_at_capacity(
+    auth_client: TestClient,
+    fake_invite_code_repo: FakeInviteCodeRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SIGNUP_CAPACITY", "0")
+    get_settings.cache_clear()
+    resp = auth_client.post("/auth/google", json={"idToken": "stub", "inviteCode": "IRRELEVANT"})
+    get_settings.cache_clear()
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "AUTH_SIGNUP_CAPACITY_REACHED"
+
+
+def test_existing_user_login_unaffected_by_capacity(
+    auth_client: TestClient,
+    fake_invite_code_repo: FakeInviteCodeRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _login(auth_client, fake_invite_code_repo)  # capacity 가 넉넉할 때 먼저 가입
+    monkeypatch.setenv("SIGNUP_CAPACITY", "0")
+    get_settings.cache_clear()
+    resp = auth_client.post("/auth/google", json={"idToken": "stub"})
+    get_settings.cache_clear()
+    assert resp.status_code == 200

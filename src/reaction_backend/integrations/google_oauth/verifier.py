@@ -1,6 +1,10 @@
 """Google id_token 검증 — Issue #16.
 
 - staging/prod: `google-auth` 가 id_token 의 서명 + `iss` + `aud` + `exp` 를 한 번에 검증.
+  `iss` 는 라이브러리(`verify_oauth2_token`)가 `accounts.google.com` /
+  `https://accounts.google.com` 둘 다 이미 허용한다 — 이 모듈이 따로 검사하지 않는다.
+  `aud` 는 웹·Android 두 OAuth Client 를 모두 허용한다(#322) — `verify_oauth2_token` 의
+  `audience` 인자가 `str | list[str]` 를 받으므로 설정된 client_id 들을 리스트로 넘긴다.
 - local: `AUTH_STUB_MODE=true` 시 Google 호출 우회하고 demo 클레임 반환.
   - 기본: 고정 demo 계정 (시드 시나리오 계정과 매칭).
   - `id_token="demo:<id>"`: 브라우저별 격리 데모 계정 — staging 데모에서 테스터
@@ -78,12 +82,18 @@ def verify_google_id_token(token: str) -> GoogleClaims:
             "Set it, or enable AUTH_STUB_MODE for local development."
         )
 
+    # 웹 client_id 는 항상 허용, Android client_id 는 설정된 경우에만 추가(#322) —
+    # 미설정 시 기존 동작(웹 하나만 허용)과 완전히 동일하다.
+    audiences = [cfg.google_oauth_client_id]
+    if cfg.google_oauth_android_client_id:
+        audiences.append(cfg.google_oauth_android_client_id)
+
     try:
         # google-auth 함수가 py.typed 미배포 — mypy strict 에서 no-untyped-call 발생.
         info: dict[str, Any] = g_id_token.verify_oauth2_token(  # type: ignore[no-untyped-call]
             token,
             g_requests.Request(),
-            audience=cfg.google_oauth_client_id,
+            audience=audiences,
         )
     except ValueError as e:
         raise ApiError(

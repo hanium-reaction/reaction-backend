@@ -18,6 +18,7 @@ from reaction_backend.config import get_settings
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator import materials_resolver
 from reaction_backend.orchestrator.first_plan_adapter import context_from_outcome
+from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.interview import InterviewOutcome
 from reaction_backend.schemas.planning import MilestoneDraft, MilestonePlan
 
@@ -64,9 +65,15 @@ async def generate_milestones(
         outcome.core_goals[0] if outcome.core_goals else None,
     )
     materials = await materials_resolver.resolve(heaviest.materials_note if heaviest else None)
-    prompt_vars = context_from_outcome(outcome, density=density, fetched_materials=materials.text)[
-        "prompt_vars"
-    ]
+    # `target_date` 를 넘기지 않으면 마감까지 남은 기간을 계산할 기준이 없어
+    # `total_capacity`(ADR-0007 §11)가 "마감 없음" 으로 읽힌다 — 마일스톤 크기를 재는
+    # 프롬프트에 그건 치명적이라, 계획 시작일 기본값(오늘 KST)을 명시적으로 넘긴다.
+    prompt_vars = context_from_outcome(
+        outcome,
+        density=density,
+        target_date=now_kst().date(),
+        fetched_materials=materials.text,
+    )["prompt_vars"]
     result = await aiClient.run(
         module="planning",
         schema=MilestonePlan,

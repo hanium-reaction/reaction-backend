@@ -7,7 +7,7 @@
 
 ---
 
-## v1.74 — 2026-08-25 (`GET /reviews/weekly` 에 `topFailureContexts` 추가 — #301, 근거 A5)
+## v1.80 — 2026-08-25 (`GET /reviews/weekly` 에 `topFailureContexts` 추가 — #301, 근거 A5)
 
 **추가만(하위호환)** — endpoint 변경 없음. `WeeklyReviewResponse` 에 `topFailureContexts`
 필드가 추가된다. 실패 태그가 없으면 빈 배열이라 기존 클라이언트는 영향 없음.
@@ -24,6 +24,111 @@
   검증됨)에서 파생 — `failure_reason_tags` 조인을 더하고 API 계약에 없는 `modalHourKst`
   는 뺐다.
 
+---
+
+## v1.79 — 2026-08-25 (문서 소급 — 계약에 없던 endpoint 4개를 적는다)
+
+**동작 변경 없음.** 이미 배포돼 도는 endpoint 4개가 `api-contract.md` §8 표에 **빠져 있었다**
+(AGENTS §3 "새 endpoint 추가 시 같은 PR 로 계약 갱신" 미이행분 소급):
+
+| endpoint | 언제 들어왔나 |
+|---|---|
+| `POST /plans/milestones` | #milestones Stage A |
+| `POST /plans/materials/search-query` | v1.69 (#259 §5) |
+| `POST /plans/materials/search` | v1.69 |
+| `POST /plans/materials/confirm` | v1.69 |
+
+v1.69 는 자료 검색 3단계의 **설계 근거**를 적었지만 계약 표에는 넣지 않아, endpoint 목록만
+보는 클라이언트에게는 존재하지 않는 것과 같았다.
+
+계획 생성의 **권장 순서**도 함께 명시한다 — 자료 확정 → 마일스톤 확인 → `generate` →
+`approve`. 자료·마일스톤은 건너뛸 수 있지만(둘 다 없으면 현행 자동 분해), **자료는
+`milestones` 전에** 확정돼야 뼈대에 반영된다.
+
+---
+
+## v1.78 — 2026-08-25 (`RecoveryCard.obstacle/copingClause/acknowledgment` 추가 — acknowledgment/v3 승격, AVOIDANCE 전용)
+
+**추가만(하위호환)** — endpoint 변경 없음. `POST /recovery/proposals/generate` 응답의
+각 카드에 선택 필드 3개가 늘어난다.
+
+- `RecoveryCard.obstacle`/`copingClause`/`acknowledgment`(모두 `string | null`) — 실패
+  태그에 `AVOIDANCE` 가 있을 때만 personalize 가 v3 프롬프트(`if_then_proposal@v3`)로
+  라우팅되고, 그 배치의 **선두 카드에만** 값이 실린다. 그 외 카드(형제/비-AVOIDANCE
+  배치/룰 폴백)는 셋 다 `null`.
+- `acknowledgment` 는 v3 안에서도 다시 조건부다 — v3 프롬프트 자체가 AVOIDANCE 일
+  때만 채우므로(다른 조건은 카운터 인프라 미비로 이번 스코프 밖), `obstacle`/
+  `copingClause` 는 있는데 `acknowledgment` 만 `null` 인 카드는 없다(둘 다 같은 조건).
+- 프로덕션 프롬프트 고정 상수가 `_PROMPT_ID` 단일에서 `_PROMPT_ID_V2`/`_PROMPT_ID_V3`
+  둘로 갈렸다 — AVOIDANCE 가 아니면 여전히 v2, 입력 변수 계약은 v2/v3 완전히 동일.
+- ⚠️ L1-1 오프라인 A/B(v3 vs v1 승률 1.000)가 근거지만 judge–human κ=0.482 로 보조
+  지표 강등(#278)됐고 실 도그푸딩 검증도 없다 — 노출 범위를 AVOIDANCE 태그로 좁혀
+  리스크를 제한했다. 문제가 생기면 `_PROMPT_ID_V3` 라우팅만 되돌리면 된다.
+
+---
+
+## v1.77 — 2026-08-25 (LLM 비용/사용량 상한 — #325)
+
+**추가만(하위호환)** — 새 에러 코드 + 응답 헤더. 기존 성공 응답 스키마 변경 없음.
+
+- `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(429) 신설 — 비싼 엔드포인트(`/interview/sessions/{id}/answers`,
+  `/interview/sessions/{id}/next-question`, `/plans/generate`, `/plans/mandala/subgoals`,
+  `/plans/mandala/generate`, `/recovery/proposals/generate`)의 사용자별 일일 호출 횟수가
+  `LLM_ENDPOINT_DAILY_CALL_LIMIT` 을 넘으면 반환. `Retry-After` 헤더(초, 다음 KST 자정까지)
+  동봉. `/recovery/proposals/generate` 는 pending 카드 캐시 반환·이미 결정된 실행 409 같은
+  기존 short-circuit 뒤에 걸려, 새로고침 재호출은 상한을 안 먹는다.
+- 전역 일일 토큰 예산(`LLM_GLOBAL_DAILY_TOKEN_BUDGET`) 신설 — 전 사용자 합산 토큰이
+  한도를 넘으면 신규 LLM 호출(인터뷰/계획·만다라트/회복 전부)이 **조용히 룰 폴백**으로
+  전환(200 OK, `aiSource="rule"`). 기존 `isDraft`/`aiSource` 필드로 이미 FE 가 판별
+  가능해 새 신호 불필요(§1.10).
+- §1.4 에러 코드 prefix 표에 `RATE_LIMIT_*` 추가.
+
+---
+
+## v1.76 — 2026-08-25 (신규 가입 초대코드 게이트 — #324, FE #237 §8)
+
+**추가만(하위호환)** — endpoint 변경 없음. `POST /auth/google` 요청에 선택 필드
+`inviteCode` 가 추가된다.
+
+- **기존 사용자 로그인은 완전히 영향받지 않는다** — 게이트는 신규 가입(새 email)에만 적용.
+- 신규 가입 3중 검사(순서대로): `SIGNUPS_ENABLED` 긴급 스위치 → `SIGNUP_CAPACITY`(기본
+  30) 인원 상한 → 초대코드 유효성.
+- 새 에러 코드 4개: `AUTH_SIGNUPS_DISABLED`(403) · `AUTH_SIGNUP_CAPACITY_REACHED`(403) ·
+  `AUTH_INVALID_INVITE_CODE`(422) · `AUTH_INVITE_CODE_ALREADY_USED`(409).
+- 마이그레이션 `e9fb35d3f448` — `invite_codes` 테이블 신설(코드/발급메모/소진시각/소진자).
+- 운영: `scripts/manage_invite_codes.py` 로 발급·현황 조회. `SIGNUPS_ENABLED` 는
+  `toggle-signups.yml` 워크플로로 재배포 없이 토글.
+
+---
+
+## v1.75 — 2026-08-25 (`morning_brief` 첫 push 발송 신설 — 근거 대장 §6.2 T2)
+
+**추가만(하위호환)** — 새 endpoint 없음. §15 발송 가드 문면에 조건 1개 추가.
+
+- `morning_brief` 클래스는 지금까지 `daily_briefs` 인앱 행만 만들고 **push 는 한 번도
+  보낸 적이 없었다** — 이번이 그 클래스의 첫 실제 발송 경로다. 새 클래스를 만들지 않고
+  기존 3클래스 잠금(AGENTS.md §1) 안에서 슬롯을 재사용한다.
+- 발송 조건은 **재관여뿐** — 오늘이 채택된 PARK/CARRY_OVER 회복의
+  `recovery_attempts.re_engagement_anchor_at` 날짜인 사용자에게만 간다. 매일 아침 전체
+  발송이 아니다. 여러 건이 겹치면 하나로 묶어 보낸다(클래스 dedup 이 하루 1건).
+- `morningTime` 06:00~06:59 설정은 07:00 으로 클램프 — 없으면 quiet hours([23:00,07:00))
+  가 그 사용자의 모든 폴을 영구히 막는다(evening 의 22:55 클램프와 대칭인 반대쪽 버그).
+- 발송 이력의 `targetActionItemId` 는 CARRY_OVER 면 새로 만들어진 카드, PARK 면
+  없음(새 카드를 안 만드는 그룹이라 §6.1 근접 실행 측정 대상이 아니다).
+
+---
+
+## v1.74 — 2026-08-25 (`AgendaCard.missedCheckIn` 추가 — 근거 대장 §6.2 T1, FE #224)
+
+**추가만(하위호환)** — endpoint 변경 없음. `GET /today/agenda` 응답의 각 카드에 선택
+필드가 하나 늘어난다.
+
+- `AgendaCard.missedCheckIn`(boolean) — 이 카드의 (취소 안 된) 블록 중 아직 [▶ 시작]
+  전(`scheduled`)이고 계획 시작 시각으로부터 20분이 지난 것이 있으면 `true`.
+- **push 아님** — 인앱 배지용 신호다(`cancellable` 과 같은 "판정은 서버, 표현은 FE"
+  원칙). 배지를 몇 번 보여줄지·언제 지울지는 FE 책임.
+- ⚠️ **최근 앱 세션·무응답 누적에 따른 억제는 아직 없다** — 그 신호는 `app_sessions`
+  테이블 없이는 계산 불가능해 이번 범위 밖. 미체크 조건만 만족하면 항상 `true`.
 ---
 
 ## v1.73 — 2026-08-25 (`POST /notifications/{notificationId}/opened` 신설 — 근거 대장 §6.1)

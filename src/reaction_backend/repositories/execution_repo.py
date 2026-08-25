@@ -97,6 +97,32 @@ class ExecutionRepo:
         result = await self._session.execute(stmt)
         return set(result.scalars().all())
 
+    async def list_active_blocks_for_actions(
+        self, user_id: UUID, action_item_ids: Sequence[UUID]
+    ) -> list[tuple[UUID, str, datetime]]:
+        """이 카드들에 걸린, 취소되지 않은 블록의 (action_item_id, block_status, start_at).
+
+        T1 미체크 배지(근거 대장 §6.2, `domain.missed_check_in`)의 재료 — 판정 자체는
+        여기서 하지 않는다(`action_cancel` 과 같은 원칙: repo 는 사실만 반환하고,
+        "지금 미체크인가"라는 판단은 순수 domain 함수가 한다).
+
+        카드마다 부르면 N+1 이므로 **한 번에** 묻는다. 빈 목록이면 쿼리하지 않는다.
+        """
+        if not action_item_ids:
+            return []
+        stmt = select(
+            ScheduledBlock.action_item_id, ScheduledBlock.block_status, ScheduledBlock.start_at
+        ).where(
+            ScheduledBlock.user_id == user_id,
+            ScheduledBlock.action_item_id.in_(action_item_ids),
+            ScheduledBlock.block_status != "cancelled",
+        )
+        result = await self._session.execute(stmt)
+        return [
+            (action_item_id, block_status, start_at)
+            for action_item_id, block_status, start_at in result
+        ]
+
     async def find_open_block(self, user_id: UUID, action_item_id: UUID) -> ScheduledBlock | None:
         """이 카드의 미종결(scheduled/started) 블록 — 가장 이른 것."""
         stmt = (

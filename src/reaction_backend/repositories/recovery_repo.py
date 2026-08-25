@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Annotated, cast
 from uuid import UUID
 
@@ -28,6 +29,7 @@ from reaction_backend.db.session import get_db
 
 # 회고 창의 단일 기준식 — `abandon_stale` 이 만료 cron 과 **같은 식**을 써야 한다(#20).
 from reaction_backend.repositories.execution_repo import reflectable_from
+from reaction_backend.schemas.common import KST
 
 # `expire_undecided` 가 자동 종결한 카드의 표식 — 사용자가 직접 쓴 거절 사유(`decision_reason`)
 # 와 섞이지 않게 접두어를 둔다. FE 는 이 값을 화면에 표시하지 않는다(RecoveryCard 응답에
@@ -35,8 +37,6 @@ from reaction_backend.repositories.execution_repo import reflectable_from
 _UNDECIDED_EXPIRY_REASON = "system: 회고 창 밖 — 결정 없이 자동 정리"
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from reaction_backend.orchestrator.escalation import ExecutionOutcome, RecoveryResultOutcome
 
 
@@ -204,6 +204,26 @@ class RecoveryRepo:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_due_re_engagement(
+        self, user_id: UUID, target_date: date
+    ) -> list[RecoveryAttempt]:
+        """오늘이 `re_engagement_anchor_at` 날짜인 채택 PARK/CARRY_OVER — T2 알림 대상.
+
+        `_adopt()`(routes/recovery.py) 가 채택(accepted/edited) 시에만 anchor 를 채우므로
+        `IS NOT NULL` 만으로 이미 "채택된 PARK/CARRY_OVER" 로 좁혀진다 — 별도 decision
+        필터가 필요 없다. KST 달력일 경계로 잰다 — 발송 게이트의 class_dedup 과 같은 기준
+        (근거 대장 §6.2 T2).
+        """
+        start = datetime.combine(target_date, time.min, tzinfo=KST)
+        end = start + timedelta(days=1)
+        stmt = select(RecoveryAttempt).where(
+            RecoveryAttempt.user_id == user_id,
+            RecoveryAttempt.re_engagement_anchor_at >= start,
+            RecoveryAttempt.re_engagement_anchor_at < end,
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get_strategy(self, strategy_type: str) -> RecoveryStrategyCatalog | None:
         """활성 전략 1건. 카탈로그 전체를 긁어 파이썬에서 찾던 것을 대체한다.
 
@@ -229,6 +249,9 @@ class RecoveryRepo:
         trigger_tag: str | None,
         llm_fallback_used: bool,
         prompt_version: str | None = None,
+        obstacle: str | None = None,
+        coping_clause: str | None = None,
+        acknowledgment: str | None = None,
     ) -> RecoveryAttempt:
         attempt = RecoveryAttempt(
             user_id=user_id,
@@ -239,6 +262,9 @@ class RecoveryRepo:
             trigger_tag=trigger_tag,
             llm_fallback_used=llm_fallback_used,
             prompt_version=prompt_version,
+            obstacle=obstacle,
+            coping_clause=coping_clause,
+            acknowledgment=acknowledgment,
         )
         self._session.add(attempt)
         await self._session.flush()

@@ -13,8 +13,15 @@ from fastapi.testclient import TestClient
 
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.daily_brief import DailyBrief
+from reaction_backend.db.models.scheduled_block import ScheduledBlock
+from reaction_backend.domain.missed_check_in import MISSED_CHECK_IN_DELAY
 from reaction_backend.schemas.common import now_kst
-from tests.conftest import DEMO_USER_UUID, FakeActionItemRepo, FakeDailyBriefRepo
+from tests.conftest import (
+    DEMO_USER_UUID,
+    FakeActionItemRepo,
+    FakeDailyBriefRepo,
+    FakeExecutionRepo,
+)
 
 _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
@@ -57,6 +64,25 @@ def _make_brief(big_rock_id=None) -> DailyBrief:  # noqa: ANN001
     return b
 
 
+def _seed_block(
+    repo: FakeExecutionRepo,
+    action_item_id,  # noqa: ANN001
+    *,
+    start_at: datetime,
+    status: str = "scheduled",
+) -> ScheduledBlock:
+    b = ScheduledBlock()
+    b.id = uuid4()
+    b.user_id = DEMO_USER_UUID
+    b.action_item_id = action_item_id
+    b.start_at = start_at
+    b.end_at = start_at + timedelta(minutes=30)
+    b.block_status = status
+    b.source = "ai_plan"
+    repo._blocks[b.id] = b
+    return b
+
+
 # ───── agenda ─────
 
 
@@ -82,6 +108,75 @@ def test_agenda_with_cards(client: TestClient, fake_action_item_repo: FakeAction
     assert cards[0]["title"] == "캡스톤 설계"
     assert cards[0]["actionId"].startswith("action_")
     assert cards[0]["whyNow"] == "마감이 다가와요"
+
+
+# ── missedCheckIn (근거 대장 §6.2 T1, reaction-frontend#224) ──────────────
+
+
+def test_agenda_flags_missed_check_in_past_the_delay(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    card = _make_action(title="놓친 카드")
+    fake_action_item_repo.seed(card)
+    _seed_block(
+        fake_execution_repo,
+        card.id,
+        start_at=now_kst() - MISSED_CHECK_IN_DELAY - timedelta(minutes=1),
+        status="scheduled",
+    )
+
+    body = client.get("/today/agenda").json()
+
+    assert body["cards"][0]["missedCheckIn"] is True
+
+
+def test_agenda_does_not_flag_card_still_within_the_delay(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    card = _make_action(title="방금 지난 카드")
+    fake_action_item_repo.seed(card)
+    _seed_block(
+        fake_execution_repo, card.id, start_at=now_kst() - timedelta(minutes=5), status="scheduled"
+    )
+
+    body = client.get("/today/agenda").json()
+
+    assert body["cards"][0]["missedCheckIn"] is False
+
+
+def test_agenda_does_not_flag_started_block_even_if_overdue(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """[▶ 시작] 을 이미 눌렀다 — 아무리 시간이 지나도 미체크가 아니다."""
+    card = _make_action(title="이미 시작한 카드")
+    fake_action_item_repo.seed(card)
+    _seed_block(
+        fake_execution_repo,
+        card.id,
+        start_at=now_kst() - timedelta(hours=2),
+        status="started",
+    )
+
+    body = client.get("/today/agenda").json()
+
+    assert body["cards"][0]["missedCheckIn"] is False
+
+
+def test_agenda_card_without_any_block_is_not_missed(
+    client: TestClient, fake_action_item_repo: FakeActionItemRepo
+) -> None:
+    """블록이 아예 없는 카드(아직 배치 전)는 판정 대상이 아니다."""
+    fake_action_item_repo.seed(_make_action(title="블록 없는 카드"))
+
+    body = client.get("/today/agenda").json()
+
+    assert body["cards"][0]["missedCheckIn"] is False
 
 
 def test_agenda_with_brief(

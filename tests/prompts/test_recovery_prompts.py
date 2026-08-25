@@ -14,9 +14,10 @@
 
 ⚠️ 위 검사만으로는 부족하다 — "구조적으로 호환되는가"와 "지금 프로덕션에 태울 만한가"는
 다른 질문이다(문구 품질·톤은 L1-1 오프라인 A/B 로 검증되지 전까지 알 수 없다). 그래서
-`api/routes/recovery.py::_PROMPT_ID` 가 **명시 버전**(`@vN`)으로 프로덕션이 실제로 쓰는
-버전을 못박는다 — registry 의 "버전 생략 시 latest" 규칙과 별개로, 새 버전이 디렉터리에
-있어도 이 상수를 올리기 전까진 프로덕션은 그대로다. 그 고정이 유지되는지도 여기서 같이 본다.
+`api/routes/recovery.py::_PROMPT_ID_V2`/`_PROMPT_ID_V3` 가 **명시 버전**(`@vN`)으로
+프로덕션이 실제로 쓰는 두 버전을 못박는다 — registry 의 "버전 생략 시 latest" 규칙과
+별개로, 새 버전이 디렉터리에 있어도 이 상수들을 올리기 전까진 프로덕션은 그대로다. 그
+고정이 유지되는지, 그리고 v3 가 AVOIDANCE 태그로만 좁혀 라우팅되는지도 여기서 같이 본다.
 """
 
 from __future__ import annotations
@@ -25,7 +26,11 @@ import re
 
 import pytest
 
-from reaction_backend.api.routes.recovery import _PROMPT_ID
+from reaction_backend.api.routes.recovery import (
+    _PROMPT_ID_V2,
+    _PROMPT_ID_V3,
+    _V3_TRIGGER_TAG,
+)
 from reaction_backend.prompts import registry
 from reaction_backend.prompts.registry import PromptRenderError, PromptTemplate
 
@@ -145,34 +150,37 @@ def test_few_shot_examples_are_banned_word_free(prompt_id: str) -> None:
 # ── 프로덕션 버전 고정 — 새 파일을 떨어뜨리는 것만으로 프로덕션이 갈아타지 않는다 ──
 
 
-def test_production_prompt_id_pins_an_explicit_version() -> None:
-    """`_PROMPT_ID` 가 `@vN` 을 명시한다 — 생략하면 registry 가 latest 로 자동 승격한다.
+@pytest.mark.parametrize("prompt_id", [_PROMPT_ID_V2, _PROMPT_ID_V3])
+def test_production_prompt_id_pins_an_explicit_version(prompt_id: str) -> None:
+    """`_PROMPT_ID_V2`/`_PROMPT_ID_V3` 가 각각 `@vN` 을 명시한다.
 
-    이 상수가 다시 버전 없는 `"recovery/if_then_proposal"` 로 되돌아가면, 디렉터리에
-    실험용 버전(v3 등) 파일을 추가하는 순간 승격 절차 없이 프로덕션이 자동으로 갈아탄다.
+    둘 중 하나라도 버전 없는 `"recovery/if_then_proposal"` 로 되돌아가면, 디렉터리에
+    더 새 버전 파일을 추가하는 순간 승격 절차 없이 프로덕션이 자동으로 갈아탄다.
     """
-    assert "@v" in _PROMPT_ID, (
-        f"{_PROMPT_ID!r} 에 버전이 없다 — registry 가 latest 로 해석해 새 버전 파일을 "
+    assert "@v" in prompt_id, (
+        f"{prompt_id!r} 에 버전이 없다 — registry 가 latest 로 해석해 새 버전 파일을 "
         "디렉터리에 두기만 해도 프로덕션이 자동 전환된다."
     )
 
 
-def test_production_prompt_id_resolves() -> None:
-    """고정된 버전이 실제로 존재한다 — 파일을 지우거나 이름을 바꾸면 여기서 먼저 죽는다."""
-    resolved = registry.get(_PROMPT_ID)
-    assert resolved.full_id == _PROMPT_ID
+@pytest.mark.parametrize("prompt_id", [_PROMPT_ID_V2, _PROMPT_ID_V3])
+def test_production_prompt_id_resolves(prompt_id: str) -> None:
+    """고정된 두 버전이 실제로 존재한다 — 파일을 지우거나 이름을 바꾸면 여기서 먼저 죽는다."""
+    resolved = registry.get(prompt_id)
+    assert resolved.full_id == prompt_id
     assert resolved.body.strip()
 
 
-def test_production_prompt_id_matches_code_variables() -> None:
-    """고정된 버전이 route 의 변수 계약을 지킨다 — latest 가 앞서가도 이 버전은 안 흔들린다."""
-    resolved = registry.get(_PROMPT_ID)
+@pytest.mark.parametrize("prompt_id", [_PROMPT_ID_V2, _PROMPT_ID_V3])
+def test_production_prompt_id_matches_code_variables(prompt_id: str) -> None:
+    """고정된 두 버전이 route 의 변수 계약을 지킨다 — latest 가 앞서가도 이 버전들은 안 흔들린다."""
+    resolved = registry.get(prompt_id)
     assert _placeholders(resolved.body) == CODE_VARS["recovery/if_then_proposal"], (
         f"{resolved.full_id}(프로덕션 고정 버전) 의 placeholder 가 route 변수와 다르다."
     )
 
 
-# ── v3 (L1-1 오프라인 평가용, 근거 대장 §4 S1/S5) ──
+# ── v3 (AVOIDANCE 전용 조건부 라우팅 — acknowledgment/v3 승격, 근거 대장 §4 S1/S5) ──
 
 
 def test_v3_output_schema_includes_coping_and_acknowledgment_fields() -> None:
@@ -199,10 +207,16 @@ def test_v3_acknowledgment_is_gated_on_avoidance_tag() -> None:
     assert "빈 문자열" in body
 
 
-def test_v3_does_not_repeat_v2_prompt_id_pin() -> None:
-    """v3 를 추가해도 프로덕션 고정(`_PROMPT_ID`)은 v2 그대로다.
+def test_v3_is_pinned_alongside_v2_not_instead_of_it() -> None:
+    """v3 승격은 **AVOIDANCE 태그 조건부**다 — v2 고정을 지우고 갈아탄 게 아니다.
 
-    L1-1 오프라인 평가가 v3 승률을 검증하기 전까지는 승격하지 않는다(발견 ②의 재발 방지).
+    L1-1 오프라인 평가(승률 1.000)가 근거지만 judge–human κ=0.482 로 보조 지표
+    강등(#278)됐고 실 도그푸딩 검증도 없다 — 그래서 무조건 승격 대신 노출 범위를
+    AVOIDANCE 태그로 좁혔다(발견 ②의 재발 방지 정신은 유지: 두 상수 다 명시 버전
+    고정이라 latest 자동 승격에 노출되지 않는다).
     """
-    assert _PROMPT_ID == "recovery/if_then_proposal@v2"
-    assert registry.get(_PROMPT_ID).version == "2"
+    assert _PROMPT_ID_V2 == "recovery/if_then_proposal@v2"
+    assert _PROMPT_ID_V3 == "recovery/if_then_proposal@v3"
+    assert registry.get(_PROMPT_ID_V2).version == "2"
+    assert registry.get(_PROMPT_ID_V3).version == "3"
+    assert _V3_TRIGGER_TAG == "AVOIDANCE"

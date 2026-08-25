@@ -15,7 +15,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.user import User
@@ -55,6 +55,17 @@ class UserRepo:
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def count_signed_up(self) -> int:
+        """가입 인원 상한(#324) 판정용 — onboarding 진행도와 무관하게 **가입한 전체**를 센다.
+
+        `list_active()`(ACTIVE 만)와 달리 온보딩 중인 사용자도 "이미 자리를 차지한
+        가입자"로 센다 — 자리 30개는 온보딩 완료 여부가 아니라 계정 존재 여부로
+        소진된다. soft-delete(`archived_at`) 된 사용자는 빼서 나간 자리를 되돌려준다.
+        """
+        stmt = select(func.count()).select_from(User).where(User.archived_at.is_(None))
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one())
 
     async def upsert_from_google(self, profile: GoogleProfile) -> User:
         """email 기준 upsert.

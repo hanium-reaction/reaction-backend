@@ -60,6 +60,7 @@
 | `INBOX_*` | Life Inbox |
 | `FIXED_SCHEDULE_*` | 고정 일정 |
 | `LLM_*` | LLM 호출 (timeout, fallback used 등) |
+| `RATE_LIMIT_*` | 비싼 엔드포인트 사용량 상한 (§1.10, #325) |
 | `AGENT_*` | Agent 동시성 (advisory lock 미획득 등, ADR-0005 §7.6) |
 | `IDEMPOTENCY_*` | 멱등 키 충돌 |
 | `COMMON_*` | 공통 (검증 실패·미구현·내부 오류) |
@@ -103,16 +104,46 @@ body 해시가 같아 mismatch 409 로도 안 걸러지고, 다른 사용자의 
 - 응답 도메인 객체 필드는 **camelCase** (`goalId`, `ambiguityScore`, `weekStart` …)
 - `ErrorResponse`(§1.3) · `HealthResponse`(§17) 등 공통 메타 응답은 정의된 필드명을 그대로 사용 (`server_time` 등)
 
+### 1.10 LLM 비용/사용량 상한 (#325)
+
+두 축이 서로 다른 문제를 막는다 — 헷갈리지 말 것:
+
+- **전역 일일 토큰 예산**(`LLM_GLOBAL_DAILY_TOKEN_BUDGET`) — 전 사용자 합산 토큰이 한도를
+  넘으면, 그 시점부터 신규 LLM 호출은 **조용히 룰 기반 폴백으로 전환**된다(200 OK,
+  `aiSource="rule"`). 인터뷰·계획·만다라트·회복 **전부** 이 동작 — 명시적 에러를 내지
+  않는다. 이미 모든 Draft 응답에 `isDraft`+`aiSource` 가 실려 있어(Draft Layer) FE 가
+  "이번 결과는 AI 가 아니라 룰로 나왔다"를 판별할 수 있으므로 별도 신호가 불필요하다.
+- **엔드포인트별 사용자 일일 호출 횟수 상한**(`LLM_ENDPOINT_DAILY_CALL_LIMIT`, 대상:
+  인터뷰/계획·만다라트/회복) — 이건 폴백으로 대신하지 않는다. 한 사용자가 같은 기능을
+  하루에 너무 많이 눌러 반복 재생성하는 상황을 막는 것이라, 요청 자체를 **429
+  `RATE_LIMIT_DAILY_CALLS_EXCEEDED`** 로 명시 거절한다. 응답에 `Retry-After`
+  헤더(초, 다음 KST 자정까지 남은 시간)를 싣는다 — FE 는 이 값으로 "언제 다시 가능한지"
+  안내한다. 두 한도 모두 0 이면 무제한.
+
 ---
 
 ## 2. Auth (`/auth`)
 
 | Method | Path | 설명 |
 | --- | --- | --- |
-| POST | `/auth/google` | Google id_token → 자체 JWT (access+refresh) 발급 |
+| POST | `/auth/google` | Google id_token → 자체 JWT (access+refresh) 발급. **신규 가입만** 가입 게이트(#324) 대상 |
 | POST | `/auth/refresh` | refresh → 새 access |
 | POST | `/auth/logout` | refresh 무효화 |
 | GET | `/auth/me` | 현재 사용자 (`onboarding_state` 포함) |
+
+**가입 게이트(#324, FE #237 §8)** — `POST /auth/google` 요청에 선택 필드 `inviteCode` 가
+추가된다. **기존 사용자 로그인(요청의 email 이 이미 `users` 에 있음)은 이 게이트를 전혀
+거치지 않는다** — `inviteCode` 를 생략하거나 무효값을 보내도 영향 없다. 신규 가입(새
+email)에만 순서대로 3중 검사가 적용된다:
+
+1. `SIGNUPS_ENABLED=false`(긴급 차단, 재배포 없이 토글) → 403 `AUTH_SIGNUPS_DISABLED`.
+2. 누적 가입 인원이 `SIGNUP_CAPACITY`(기본 30)에 도달 → 403 `AUTH_SIGNUP_CAPACITY_REACHED`.
+3. `inviteCode` 미제공/무효 → 422 `AUTH_INVALID_INVITE_CODE`. 이미 소진된 코드 →
+   409 `AUTH_INVITE_CODE_ALREADY_USED`.
+
+코드는 대소문자·앞뒤 공백 무관하게 정규화해 비교한다. 유효한 코드는 그 가입에서 **1회만**
+소비되며(재사용 불가), `scripts/manage_invite_codes.py` 로 운영자가 미리 발급한다(admin
+API 없음 — 이 레포의 다른 운영 작업과 같은 CLI 스크립트 관례).
 
 ---
 
@@ -197,6 +228,8 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 - 궁극목표 인터뷰(S29, 필수 9슬롯: `ultimate.statement`·`domain`·`horizon`·`measure`·`success_image`·`identity`·`current_position`·`pillars_hint`·`constraints`, 선택 3슬롯: `values`·`assets`·`role_model`)는 계획 인터뷰와 **양방향 이월**된다: 계획 인터뷰의 `identity.*`/`recovery.*` 등은 궁극목표 인터뷰 시작 시드로, 궁극목표 인터뷰의 `ultimate.*` 전량은 계획 인터뷰 시작 시드로 회수된다 — 단 `goals.list` 같은 **다른 슬롯을 자동으로 채우지는 않는다**(그 목표는 사용자가 직접 고른다).
 - 궁극목표 세션 완료는 계획 목표 영속 경로(`materialize_goals`/`supersede_proposed_goals`)를 타지 않는다 — 직전 계획 인터뷰의 잠정 목표가 지워지지 않는다.
 - 구현 상태(#6, #6-B): 엔진+영속화 배선 + 단일 활성 세션(restart-wins, kind 별) + 동시성 lock(kind 별) + 궁극목표 인터뷰(kind="ultimate") 완료. **후속**: 재조립 시 transient 상태(stall_count·used_fallback) 영속. `POST /goals/ultimate`(U1, `UltimateGoalOutcome` → `Goal` 영속)는 `goal_nodes.tree_kind` 도입(§6 후속 PR)과 함께 배선된다.
+- `answers`/`next-question`(LLM 호출) 은 사용자별 일일 호출 상한 대상 — 초과 시 429
+  `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(§1.10, #325).
 
 ---
 
@@ -345,6 +378,10 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 
 | Method | Path | 설명 |
 | --- | --- | --- |
+| POST | `/plans/milestones` | **Stage A** — 목표를 **중간 목표(마일스톤) 3~5개**로 나눈 초안. 입력은 `generate` 와 동일(`interviewSessionId` 또는 `outcome` 인라인, 빈 본문이면 최근 '정상 종료' 인터뷰로 자동 복구 + `density`). LLM 1콜 + 룰 폴백(준비·진행·마무리 3단계)이라 가볍고 **lock 없음 · DB 쓰기 0**. 응답 `MilestoneListResponse` — `{ milestones: [{title, summary}], aiSource }`. 사용자가 이 목록을 **확인·편집(추가/삭제/재배열)** 한 뒤 `generate` 의 `milestones` 로 실어 보내면, 분해가 그 목록을 branch 로 고정하고 각 안에서만 세션을 만든다(제목·순서 유지). 보내지 않으면 현행대로 자동 전체 분해(하위호환). **이 단계는 DB 에 쓰지 않는다** — 확정한 목록이 실제로 저장되는 시점은 `{planId}/approve` 다(ADR-0007 PR-2). 참고 자료가 링크뿐이면 `generate` 와 **같은 방식으로 열어서** 뼈대에 반영한다(#226) — 뼈대를 정하는 게 이 단계라, 여기서 자료가 빠지면 Stage B 는 일반론 위에 묶인다 |
+| POST | `/plans/materials/search-query` | **자료 검색 ①** — 목표에서 검색어를 제안한다. **외부 호출 0회 · LLM 0회 · 과금 0** (규칙으로 만든 문자열이라 `isDraft` 대상 아님). 응답 `{ suggestedQuery, goalTitle, notice }` — `notice` 는 "이 검색어가 그대로 웹 검색에 나간다"는 고지(#259 §4.1 ① 프라이버시). 사용자가 고치기 전까지 **아무것도 나가지 않는다** |
+| POST | `/plans/materials/search` | **자료 검색 ②** — 사용자가 확인·편집한 `query`(2~200자) **그것만** 외부로 보낸다. 서버가 목표 슬롯을 몰래 덧붙이지 않는다. 그라운딩 1건 과금(일일 예산 `LLM_DAILY_GROUNDING_BUDGET`, 기본 5). 응답 `MaterialsSearchResponse` — **`isDraft=true`, 아무 데도 저장하지 않는다**(③ 확정 전까지). `status` 5종은 **사용자가 다음에 할 행동이 각각 달라서** 나눈다: `found`(본문 + `sources[]` + 모델이 실제 던진 `searchQueries[]`) / `not_found`(검색어를 고쳐 재시도) / `blocked_copyright`(**재시도해도 영영 안 된다** — 직접 붙여넣기로 안내) / `quota_exceeded`(내일 다시) / `unavailable`(일시 장애). `remainingToday` 는 오늘 남은 횟수(무제한이면 `null`) |
+| POST | `/plans/materials/confirm` | **자료 검색 ③ (HITL 게이트)** — "이 자료 맞아요". `text`(1~20,000자)를 **사용자가 고친 그대로** 받아 `goals.materials` 슬롯에 기록한다. 명시 승인이므로 Draft 아님. **여기서부터는 붙여넣기와 구분되지 않는다** — 다음 계획 생성이 기존 경로로 집어가고(`build_outcome` → `materialsNote` → `materials_for_prompt` 울타리 → 분해), 검색 전용 저장소도 분해 쪽 분기도 없다(#259 ⑪). 응답 `{ goalTitle, savedChars, notice }` |
 | POST | `/plans/generate` | First Plan orchestrator(LangGraph) 실행. 입력: `outcome`(InterviewOutcome 인라인) 또는 `interviewSessionId`(+`targetDate` 선택). **빈 본문이면 최근 '정상 종료' 인터뷰(abandoned 제외)로 자동 복구** — FE 가 sessionId 를 잃어도 생성 가능(완료 인터뷰가 없으면 422). `scope`(선택, 기본 `"horizon"`): `"horizon"`=마감까지 전 구간, **단 한 번에 세우는 계획은 최대 4주(≈한 달)** — 마감이 그보다 멀면 4주까지만 배치하고 그 사실을 `warnings` 로 알린다(먼 미래를 자리표시자로 채우는 대신 주간 재계획이 이어받는다) / `"week"`=`targetDate` 가 속한 **달력 주(월~일)** 만. **heaviest 목표가 만다라 축에서 승격된 목표(`POST /goals/mandala/nodes/{id}/promote`)면 이 상한이 4주가 아니라 2주다**(ADR-0008 §3) — `warnings`의 "N주까지만" 문구도 2주로 나온다. 매번 생성할 때마다 `targetDate` 기준 새로 계산되므로 재생성이 곧 "앞으로 2주" rolling 창이다(별도 자동 재생성 크론은 아직 없음). `density`(선택, 기본 `"standard"`): 계획 **분량** 프리셋 — `"light"`≈주당 3세션 / `"standard"`≈5 / `"intense"`≈8. **단 목표별 슬롯이 우선한다**: `goals.frequency`(주 N회)가 있으면 그 값이 주당 세션 수가 되고 density 는 무시되며, `goals.weekly_time`(주당 시간)만 있으면 density 는 가감 배율(0.7/1.0/1.3)로 작동한다. 둘 다 없을 때만 프리셋 그대로다. 어느 scope 든 이미 승인된 `scheduled_blocks` + **고정 일정(`fixed_schedules`, 수업·알바) + DB `time_policies`(온보딩 후 수정 포함)** 를 모두 busy 로 피해 배치(비파괴). Focus≤3/Maintain≤5 초과 시 422 `GOAL_TIER_LIMIT_EXCEEDED`. Draft 를 `plan_drafts`(72h)에 저장하고 실제 `planId` 반환. 응답 `isDraft=true`. `warnings[]` 에는 배치 실패 외에 **계획 분량 안내**가 실릴 수 있다 — 주당 시간에 못 미칠 때, **참고 자료를 링크로만 줬는데 그 링크를 열지 못했을 때**(#226 — 열었으면 본문이 분해에 실리고 이 안내는 나가지 않는다. 못 열었으면 사유를 담아 알린다: 로그인 필요·페이지 없음·형식 미지원 등), 마감까지 채우려고 회차를 덧붙였을 때, 계획이 마감 전에 끝날 때, **목표를 여러 개 말했는데 계획은 가장 무거운 것 하나만 다뤘을 때**, **`milestones` 로 확정한 중간 목표가 이번 계획 트리에 자리를 못 잡았을 때**(v1.71 — 세션 수 상한에 잘렸거나 분해가 그 branch 를 안 만든 경우. 트리에 branch 로 남아 있고 세션만 없는 건 정상이라 알리지 않는다 — 그건 `구간 커버리지` 안내가 담당). ⚠️ **한 계획은 heaviest 목표 하나만 분해·배치한다** — 나머지 목표는 세션·블록이 생기지 않는다(승인 시 목표 자체는 전부 저장된다). 한 번에 하나씩 굴리는 의도된 설계이고, 그 사실을 `warnings` 로 알린다 (#32/#62/#187) |
 | GET | `/plans/{planId}` | 저장된 **First Plan** Draft 미리보기 재구성(LLM 0회). 없으면 404 `PLAN_DRAFT_NOT_FOUND` (#62). **재계획 Draft(kind=replan)를 넣어도 404** — payload 모양이 달라(goal_nodes 없음) 여기서 재구성하지 않는다. 승인 endpoint 의 같은 가드와 대칭 (#117) |
 | POST | `/plans/{planId}/discard` | 계획 초안 **폐기** — "이 계획 말고 다시 인터뷰할래" 경로. 초안은 비영속(계획 블록은 승인 전 DB 에 들어가지 않는다)이라 상태 전이만 일어난다: `plan_drafts.status` 를 만료와 같은 종착 상태(`expired`)로 보낸다. **204 No Content**, 본문 없음. **멱등** — 이미 폐기·만료된 초안에 다시 호출해도 204. 이미 승인된 초안은 409 `PLAN_ALREADY_APPROVED`(승인은 되돌리는 동작이 아니다). 없는 초안·타 사용자 초안은 404 `PLAN_DRAFT_NOT_FOUND`(존재 여부를 흘리지 않으려 403 이 아닌 404). `Idempotency-Key` 불필요 |
@@ -353,7 +390,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 | POST | `/plans/{planId}/ai-edit` | 자연어 수정 (S16, P1) — diff 반환만, apply는 별도 |
 | POST | `/plans/{planId}/ai-edit/apply` | diff 적용 (사용자 승인 후) |
 | GET | `/plans/weekly?weekStart=YYYY-MM-DD` | 주간 그리드 (S14) — cancelled 블록(계획 교체로 취소 등)은 제외 ✅ #21-B |
-| POST | `/plans/replan` | **주간 forward 재계획** (S21 후속). 먼저 직전 완료 주의 주간 리포트를 작성(그 회복 수락분이 백로그로 상류 반영)하고, **다음 주 월요일(`windowStart`)부터 마감까지** 남은 작업을 다시 배치. 대상 = 다음 주 이후 **미착수(`scheduled`) 블록**의 액션(actionId dedup) + **활성 블록 없는 `planned` 백로그**(수락한 회복 포함). 과거·시작/완료·`user_edit` 블록은 불변(실패 원본은 미래 블록이 없어 자동 제외). busy = 확정(시작/완료·`user_edit`) 블록 + DB `time_policies` + **고정 일정(`fixed_schedules`, #112 정합)**. 각 새 블록에 '교체할 옛 미래 블록' `replacesBlockId`(없으면 백로그라 `null`)를 실어 승인이 재조정하게 한다. `horizon` = 미래 블록·backlog `targetDate` 의 최댓값; 마감 신호가 없으면 **최소 다음 주(월~일)** 로 분산(하루 붕괴 방지), 먼 미래는 1년으로 상한. **후보 분량은 액션의 전체 live 블록 기준**: 형제 세션이 하나라도 `started`/`finished` 이거나 카드에 `user_edit` 블록이 있으면 그 액션은 **통째 보존**(후보 제외, 승인 가드와 동일 규칙), 교체되지 않고 살아남는 **미래** 블록의 분(分)은 `estimatedMinutes` 에서 차감 — 주 경계를 걸친 분할 세션이 이중 배치되지 않게. Draft 를 `plan_drafts` 에 저장, `isDraft=true`. **만료(`expiresAt`)는 기본 72h 이되 자기 `windowStart` 00:00 KST 를 넘지 않는다** — 창이 시작된 뒤 승인해 과거 블록이 생기는 것 방지(늦은 승인은 410 `PLAN_DRAFT_EXPIRED`). 동시성 lock 미획득 409 `AGENT_CONCURRENT_ACCESS` (#117) |
+| POST | `/plans/replan` | **주간 forward 재계획** (S21 후속). 먼저 직전 완료 주의 주간 리포트를 작성(그 회복 수락분이 백로그로 상류 반영)하고, **다음 주 월요일(`windowStart`)부터 마감까지** 남은 작업을 다시 배치. 대상 = 다음 주 이후 **미착수(`scheduled`) 블록**의 액션(actionId dedup) + **활성 블록 없는 `planned` 백로그**(수락한 회복 포함) + **밀린 일**(시작 시각이 이미 지났는데 한 번도 착수 안 된 `scheduled` 블록의 액션). 시작/완료·`user_edit` 블록은 불변(실패 원본은 미래 블록이 없어 자동 제외). ⚠️ **밀린 일 회수는 2026-08-25 에 추가됐다** — 그전에는 계획만 세우고 그냥 안 한 카드가 `list_scheduled_between`(미래만)·`list_planned_without_block`(비-cancelled 블록 보유)·만료 cron(`execution_events` 기준이라 [▶시작] 안 한 카드는 영원히 안 걸림) **셋 다에서 빠져** 재계획 후보에서 통째로 누락됐다. 가장 흔한 실패 모드가 정확히 이 경우다. busy = 확정(시작/완료·`user_edit`) 블록 + DB `time_policies` + **고정 일정(`fixed_schedules`, #112 정합)**. 각 새 블록에 '교체할 옛 미래 블록' `replacesBlockId`(없으면 백로그라 `null`)를 실어 승인이 재조정하게 한다. `horizon` = 미래 블록·backlog `targetDate` 의 최댓값; 마감 신호가 없으면 **최소 다음 주(월~일)** 로 분산(하루 붕괴 방지), 먼 미래는 1년으로 상한. **후보 분량은 액션의 전체 live 블록 기준**: 형제 세션이 하나라도 `started`/`finished` 이거나 카드에 `user_edit` 블록이 있으면 그 액션은 **통째 보존**(후보 제외, 승인 가드와 동일 규칙), 교체되지 않고 살아남는 **미래** 블록의 분(分)은 `estimatedMinutes` 에서 차감 — 주 경계를 걸친 분할 세션이 이중 배치되지 않게. Draft 를 `plan_drafts` 에 저장, `isDraft=true`. **만료(`expiresAt`)는 기본 72h 이되 자기 `windowStart` 00:00 KST 를 넘지 않는다** — 창이 시작된 뒤 승인해 과거 블록이 생기는 것 방지(늦은 승인은 410 `PLAN_DRAFT_EXPIRED`). 동시성 lock 미획득 409 `AGENT_CONCURRENT_ACCESS` (#117) |
 | POST | `/plans/replan/{planId}/approve` | 재계획 Draft 승인 → **action 단위 재조정**으로 미래 블록 교체(blanket-cancel 없음). #115 스케줄러가 긴 액션을 여러 세션 블록으로 쪼개므로, payload 의 **`oldBlocks`(액션당 옛 블록 전부)** 를 권위로 액션마다 재조정: 옛 블록 중 하나라도 `started`/`finished` → 액션 **전체 보존**(skip) / **옛 블록 중 하나라도 `source='user_edit'`(생성 후 사용자가 직접 옮김) → 액션 전체 보존**(skip, 쓰기 시점 재확인 — 생성 시점 필터만으로는 HITL 검토 창 사이 편집을 놓쳐 사용자 배치를 파괴한다) / 활성(`scheduled`) 옛 블록이 하나도 없음(그새 전부 취소·삭제) → 중복 방지 skip / 그 외 → 활성 옛 블록 **전부 취소** + 새 세션 블록 **전부 생성** / 백로그(옛 블록 없음)인데 그새 활성 블록 생김 → 생성 skip / action 이 그새 아카이브(#113) → skip. Draft 로드·검사~쓰기를 `user_agent_lock`(xact-scoped) 안 **단일 commit** 으로 원자화(동시 더블 승인 봉합, #113 패턴). 만료 410 `PLAN_DRAFT_EXPIRED`. 응답 `isDraft=false` + `{cancelledBlocks, createdBlocks, skippedBlocks}` (#117) |
 | POST | `/plans/mandala/subgoals` | **만다라트 Stage A**(PR5, S30). body `{ goalId }`(`goal.isUltimate=true` 여야, 아니면 404 `GOAL_NOT_FOUND`). 궁극목표 → 하위목표(축) 8개 후보(LLM 1콜, lock 없음, DB 쓰기 0). 응답 `MandalaSubgoalsResponse`(Draft Layer) — `subgoals[8]` 은 사용자가 인터뷰에서 직접 말한 축(`pillarsHint`)이면 `locked=true`·`source="user"`, LLM 생성이면 `source="llm"`, 모자라 도메인 축 카탈로그로 채워지면 `source="rule"` |
 | POST | `/plans/mandala/generate` | **Stage B**(S30). body `{ goalId, subgoals[8] }` — Stage A 를 사용자가 로컬에서 확인·편집한 8축 그대로(구조 편집은 여기까지, 이후 축 개수·순서 고정). 축마다 실행 셀 최대 8개(LLM 1콜, lock 있음, `plan_drafts`(kind="mandala") 1행·72h). 응답 `MandalaDraftResponse` — `cells[≤64]` + 못 채운 칸은 `gaps[]`(억지 패딩 없음, `goal_decompose` 와 동일 원칙) |
@@ -362,7 +399,9 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 | POST | `/plans/mandala/{planId}/approve` | 승인(LLM 0콜, 단일 트랜잭션). body `{ centerWhyText?, subgoals[8], cells[] }` — 셀 편집(HITL 최하위 층)은 여기서 처음 서버에 닿는다(승인 전엔 서버 호출 0). `goal_nodes` 최대 73행(`tree_kind="mandala"`) 영속, 같은 목표의 기존 활성 만다라 트리는 보관 후 교체(재승인 누적 방지). 응답 `{ planId, isDraft:false, goalId, rootNodeId, activated, skipped, activatedAt }`. 멱등 — 이미 승인된 draft 재호출 시 재영속화 없이 같은 결과 반환. 만료 410 `PLAN_DRAFT_EXPIRED` |
 | POST | `/plans/{planId}/discard` | (재사용) 만다라 draft 폐기도 이 기존 endpoint 그대로 — 204, kind 무관 |
 
-> `generate`·`/plans/{planId}`·`approve`·`weekly`·블록 편집·`replan`(+`replan/{id}/approve`)·만다라트(`mandala/subgoals`~`mandala/{id}/approve`)는 구현 완료. `ai-edit`/`ai-edit/apply` 만 미구현(P1, 라우트 없음).
+> `milestones`·자료 검색 3단계(`materials/search-query`~`materials/confirm`)·`generate`·`/plans/{planId}`·`approve`·`weekly`·블록 편집·`replan`(+`replan/{id}/approve`)·만다라트(`mandala/subgoals`~`mandala/{id}/approve`)는 구현 완료. `ai-edit`/`ai-edit/apply` 만 미구현(P1, 라우트 없음).
+
+> **계획 생성 흐름(권장 순서)**: 인터뷰 종료 → (선택) `materials/search-query`→`search`→`confirm` 로 참고 자료 확정 → `milestones` 로 뼈대 확인·편집 → `generate` 에 그 목록을 실어 보냄 → `{planId}/approve`. 자료·마일스톤 단계는 **건너뛸 수 있고**(둘 다 없으면 현행 자동 분해) 순서만 지키면 된다 — 자료가 뼈대에 반영되려면 `milestones` **전에** 확정돼 있어야 한다. 한 번에 세우는 계획은 최대 4주이고 그 너머는 마일스톤이 들고 있다 — 층 분리의 근거와 주기 전환 설계는 [ADR-0007](decisions/0007-milestone-layer-and-plan-cycle.md).
 
 응답 예 `POST /plans/generate` (#32, `FirstPlanResponse` — Draft Layer):
 ```json
@@ -450,6 +489,8 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
   `PLAN_INVALID_TIME`, 블록 없음 404 `PLAN_BLOCK_NOT_FOUND`. 적용 시 `source='user_edit'`.
 - 정책 판정은 순수 함수 `orchestrator/plan_edit.py`. `no_touch`/`break_min`/freebusy·fixed_schedule
   충돌은 후속. DB 마이그레이션 없음.
+- `generate`/`mandala/subgoals`/`mandala/generate`(LLM 호출) 은 사용자별 일일 호출
+  상한 대상(module="planning" 공유) — 초과 시 429 `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(§1.10, #325).
 
 ---
 
@@ -501,6 +542,16 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 - 되돌리기(restore)는 **없다** — 자료의 걸음에서 다시 담으면 복구된다. FE 는 취소 직후 5초 스낵바를 띄우고 **그 뒤에** 이 API 를 호출한다(되돌리면 요청 자체를 안 보냄)
 - `AgendaCard.cancellable` (파생 필드, DB 컬럼 아님) — 위 3조건의 판정 결과. **판정 규칙은 서버에만 있다**(`domain/action_cancel.py`): FE 는 `status`·`source` 만 받아 '실행 이력 없음' 을 계산할 수 없고, 규칙을 복제하면 바뀔 때 조용히 어긋난다
 - 지표 영향 없음 — 취소 가능한 카드는 정의상 실행 이력이 없어 주간 KPI(`execution_events` join)에 애초에 들어간 적이 없다
+
+**T1 미체크 배지 (근거 대장 §6.2, reaction-frontend#224)**:
+- `AgendaCard.missedCheckIn` (파생 필드, DB 컬럼 아님) — 이 카드의 (취소 안 된) 블록 중
+  `blockStatus='scheduled'`(아직 [▶ 시작] 전) 이고 `startAt` + 20분이 지난 것이 있으면
+  `true`. **push 아님** — 잠금 3규칙이 push 클래스를 3종으로 고정해 새 클래스를 못
+  만든다. FE 가 이 필드로 인앱 배지를 그린다(표시 빈도·소멸 조건은 FE 책임)
+- 판정 규칙은 서버에만 있다(`domain/missed_check_in.py`) — `cancellable` 과 같은 원칙
+- ⚠️ **최근 앱 세션·무응답 누적에 따른 억제는 아직 없다** — 그 신호(근거 대장 §6.2)는
+  `app_sessions` 테이블 없이는 계산 불가능해 이번 범위 밖. 카드가 미체크 조건을
+  만족하면 항상 `true` 다
 
 ---
 
@@ -561,7 +612,12 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   `failed`/`partial_done` 인 실행만 허용 (422 `RECOVERY_NOT_ELIGIBLE`).
   pending 카드가 있으면 그대로 반환 (재호출 안전). 응답은 Draft Layer
   (`isDraft=true`, `aiSource=llm|rule`) + `cards[]` (attemptId/optionGroup/strategyType/
-  labelKo/suggestedActionText/minRecoveryUnitMinutes/allowRestMode/triggerTag).
+  labelKo/suggestedActionText/minRecoveryUnitMinutes/allowRestMode/triggerTag/
+  obstacle/copingClause/acknowledgment).
+- `obstacle`/`copingClause`/`acknowledgment`(모두 nullable) — 실패 태그에 `AVOIDANCE`
+  가 있을 때만 personalize 가 v3 프롬프트로 라우팅되고, 그 배치의 **선두 카드에만** 값이
+  실린다. 그 외 카드(형제·비-AVOIDANCE 배치·룰 폴백)는 셋 다 null. `acknowledgment` 는
+  v3 안에서도 조건부라 obstacle/copingClause 만 있고 이건 null 인 경우가 있다.
   **이미 결정된 실행(pending 0건 + 결정 이력 있음)은 `RECOVERY_ALREADY_DECIDED`(409)** —
   회복 카드 세트는 실행 1건당 1세트다. 재생성을 허용하면 `/recovery/decisions` 의 409 가
   무력화돼 같은 실패에 회복 ActionItem 이 여러 개 생기고, replan 은 `created_at` 오름차순의
@@ -585,7 +641,11 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   **함께** 회복으로 센다.
 - 에러: `RECOVERY_EXECUTION_NOT_FOUND`(404) / `RECOVERY_NOT_ELIGIBLE`(422) /
   `RECOVERY_NO_PROPOSAL`(422) / `RECOVERY_ATTEMPT_NOT_FOUND`(404) /
-  `RECOVERY_ALREADY_DECIDED`(409) / `RECOVERY_EDIT_NOT_SUPPORTED`(422).
+  `RECOVERY_ALREADY_DECIDED`(409) / `RECOVERY_EDIT_NOT_SUPPORTED`(422) /
+  `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(429, §1.10, #325).
+- `generate` 의 일일 호출 상한(§1.10)은 **신규 카드 생성**에만 적용된다 — pending 카드가
+  있어 캐시를 그대로 반환하는 재호출(새로고침)은 오케스트레이션이 안 일어나므로 상한에
+  안 걸린다(가드가 그 두 short-circuit 뒤, 실제 LLM/룰 생성 직전에 있다).
 
 #20-B 구현 메모 (replan S20):
 - `GET /replan/{executionId}` — 수락한 회복의 일정 변화 프리뷰. 응답 Draft Layer
@@ -784,6 +844,10 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
   **일요일은 문구·딥링크만 갈라진다**(`title`/`body`/`url: /reviews/weekly`) — 같은 클래스에
   주간 만다라 리포트를 얹는다. 새 클래스·새 발송 조건 없음(ADR-0008 §4, §8 "F")
 - pre_card 는 opt-in(`preCardEnabled`) + 시작 2~7분 전 (2분 리드 + 5분 폴)
+- morning_brief 는 **재관여 대상이 있을 때만** — 오늘이 채택된 PARK/CARRY_OVER 회복의
+  재관여 앵커 날짜인 사용자에게, `morning_brief` 클래스를 재사용해 발송한다(새 클래스
+  아님, 근거 대장 §6.2 T2). 대상 없으면 그날은 발송 없음. `morningTime` 이 06:00~06:59
+  면 07:00 으로 클램프해 발송(quiet hours 끝나는 시각 — evening 의 22:55 클램프와 대칭)
 
 `POST /notifications/{notificationId}/opened` — **⚠️ 아직 이 endpoint 를 부르는 FE 콜백이
 없다.** push `notificationclick` 이벤트 핸들러가 준비되면 그 알림의 push payload 에 실린

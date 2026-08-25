@@ -3,6 +3,7 @@
 입력 목표:
 - 제목: {{goal_title}}
 - 카테고리: {{category}}
+- 사용자: {{identity}}
 - why_now: {{why_now}}
 - 현재 수준(지금까지 진행): {{current_level}}
 - 완료 기준(성공 이미지): {{success_image}}
@@ -88,6 +89,8 @@
   **예외**: 신청서 제출·서류 발급·예약 같은 **짧은 처리성 작업**은 억지로 {{session_length}}
   으로 부풀리지 말고 실제 예상 시간(15~30분)으로 잡아라 — 예상 시간이 부풀면 주간 용량
   계산이 같이 틀어진다.
+- 사용자 맥락({{identity}})은 **단계의 난이도·표현을 맞추는 데만** 참고한다. 분량은 위
+  '총 세션 수' 가 정한다 — "학기 중이니 적게" 처럼 네가 임의로 줄이거나 늘리지 마라.
 - action_item 은 SMART (Specific, Measurable, Actionable). "공부하기" 금지.
 - category 는 반드시 다음 중 하나: study | project | health | routine | schedule | career |
   relationship | self_dev | other. 목표 주제로 분류가 명확하면(예: 코딩테스트·토익 → study)
