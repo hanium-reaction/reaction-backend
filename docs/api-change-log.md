@@ -7,6 +7,25 @@
 
 ---
 
+## v1.72 — 2026-08-25 (`GET /reviews/weekly` 에 `topFailureContexts` 추가 — #301, 근거 A5)
+
+**추가만(하위호환)** — endpoint 변경 없음. `WeeklyReviewResponse` 에 `topFailureContexts`
+필드가 추가된다. 실패 태그가 없으면 빈 배열이라 기존 클라이언트는 영향 없음.
+
+- 최근 28일(조회 대상 주 일요일 기준 역산) 실패/부분완료 실행의 실패 사유 상위 **최대 3개**:
+  `{ tagCode, labelKo, count, share }`.
+- `labelKo` 는 `failure_reason_tags` 마스터에서 조인 — `/reflection/failure-tags` 라벨과
+  이중 관리하지 않는다.
+- `share` 는 0~1 비율, **LIMIT 이전(태그 전체)을 분모**로 한다 — 반환된 3건의 share 합이
+  1.0 이 아닐 수 있다(태그가 4개 이상인 주).
+- `mandala`/`nextCycleProposals` 처럼 `period_summaries` 에 저장하지 않고 조회 시점에
+  파생한다(precomputed cron 대상 아님).
+- SQL 은 근거 대장 §7.3 SQL#4(`tests/test_recovery_evidence_sql.py` 로 원문 그대로 실 DB
+  검증됨)에서 파생 — `failure_reason_tags` 조인을 더하고 API 계약에 없는 `modalHourKst`
+  는 뺐다.
+
+---
+
 ## v1.71 — 2026-08-23 (확정 중간 목표가 계획에서 빠지면 알린다 — ADR-0007 §배경 ①)
 
 **추가만(하위호환)** — endpoint·스키마 변경 없음. `POST /plans/generate` 응답의

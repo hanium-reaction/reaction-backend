@@ -69,6 +69,20 @@ class StaleAxisProposal(CamelModel):
     axis_title: str
 
 
+class TopFailureContext(CamelModel):
+    """실패 사유 상위 3개(BCT 2.3 Self-monitoring, 근거 A5) — #301.
+
+    `labelKo` 는 `/reflection/failure-tags` 와 같은 마스터(`failure_reason_tags`)에서 온다
+    (이중 관리 방지). `share` 는 0~1 비율이고, LIMIT 이전(태그 전체)을 분모로 하므로 반환된
+    3건의 share 합이 1.0 이 아닐 수 있다(태그가 4개 이상인 주).
+    """
+
+    tag_code: str
+    label_ko: str
+    count: int
+    share: float
+
+
 class WeeklyReviewResponse(CamelModel):
     """GET /reviews/weekly · generate 응답 — 룰 기반 주간 리뷰 카드 (S21)."""
 
@@ -88,6 +102,9 @@ class WeeklyReviewResponse(CamelModel):
     drain_window: str | None = None
     one_liner: str | None = None
     policy_update_candidates: list[dict[str, object]] = Field(default_factory=list)
+    # 최근 28일 실패 사유 상위 3개(#301) — mandala/proposals 처럼 저장 안 하고 조회 시점에
+    # 파생한다. 없으면(실패 0건) 빈 배열 — FE 는 빈 배열이면 섹션을 렌더하지 않는다.
+    top_failure_contexts: list[TopFailureContext] = Field(default_factory=list)
 
     mandala: MandalaWeeklySummary | None = None
     next_cycle_proposals: list[NextCycleProposal] = Field(default_factory=list)

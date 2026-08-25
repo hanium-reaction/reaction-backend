@@ -13,12 +13,21 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from reaction_backend.db.models.action_item import ActionItem
+from reaction_backend.db.models.execution_event import ExecutionEvent
+from reaction_backend.db.models.execution_failure_tag import ExecutionFailureTag
 from reaction_backend.db.models.recovery_attempt import ADOPTED_DECISION_VALUES
+from reaction_backend.db.models.scheduled_block import ScheduledBlock
+from reaction_backend.db.models.user import User
 from reaction_backend.schemas.common import KST
+from tests.conftest import DB_AVAILABLE
 
 START = datetime(2026, 7, 13, tzinfo=KST)
 END = START + timedelta(days=7)
@@ -99,3 +108,111 @@ def test_adopted_values_cover_every_decision_that_creates_a_card() -> None:
 
     not_adopted = {"pending", "rejected", "skipped"}
     assert set(USER_DECISION_VALUES) == set(ADOPTED_DECISION_VALUES) | not_adopted
+
+
+# ═══════════ get_top_failure_contexts — 실 Postgres (#301, SQL#4 파생) ═══════════
+#
+# 위 테스트들과 달리 여기는 `_RecordingSession` 이 아니라 실 DB 를 쓴다 — LIMIT/윈도우
+# 함수의 상호작용(반환된 3건의 share 합이 1.0 이 아님)과 `failure_reason_tags` 조인이
+# 실제로 맞물리는지는 SQL 문자열만 봐서는 알 수 없어서다. `tests/test_recovery_evidence_
+# sql.py` 가 검증한 근거 대장 SQL#4 원문 자체는 건드리지 않는다(그 파일의 핀 의미는
+# "문서의 SQL 을 한 글자도 안 고친다") — 여기서는 label_ko 조인이 추가된 **프로덕션
+# 버전**(`review_repo._TOP_FAILURE_CONTEXTS_SQL`)을 별도로 검증한다.
+
+
+async def _seed_user_real(session: AsyncSession) -> UUID:
+    user_id = uuid4()
+    session.add(
+        User(id=user_id, email=f"{user_id}@test.local", name="top_failure_contexts 테스트 유저")
+    )
+    await session.flush()
+    return user_id
+
+
+async def _seed_tagged_failure_real(
+    session: AsyncSession, *, user_id: UUID, tag_code: str, day: date, hour: int
+) -> None:
+    plan_start_at = datetime(day.year, day.month, day.day, hour, 0, tzinfo=KST)
+    action_item_id = uuid4()
+    session.add(
+        ActionItem(
+            id=action_item_id,
+            user_id=user_id,
+            title="top_failure_contexts 테스트 카드",
+            target_date=plan_start_at.date(),
+        )
+    )
+    await session.flush()
+
+    block_id = uuid4()
+    session.add(
+        ScheduledBlock(
+            id=block_id,
+            user_id=user_id,
+            action_item_id=action_item_id,
+            start_at=plan_start_at,
+            end_at=plan_start_at + timedelta(minutes=30),
+        )
+    )
+    await session.flush()
+
+    execution_id = uuid4()
+    session.add(
+        ExecutionEvent(
+            id=execution_id,
+            action_item_id=action_item_id,
+            scheduled_block_id=block_id,
+            user_id=user_id,
+            plan_start_at=plan_start_at,
+            plan_end_at=plan_start_at + timedelta(minutes=30),
+            completion_status="failed",
+        )
+    )
+    await session.flush()
+
+    session.add(ExecutionFailureTag(id=uuid4(), execution_id=execution_id, tag_code=tag_code))
+    await session.flush()
+
+
+@pytest.mark.skipif(not DB_AVAILABLE, reason="DATABASE_URL not set")
+async def test_get_top_failure_contexts_joins_label_ko_and_respects_limit(
+    real_db_session: AsyncSession,
+) -> None:
+    """실 마스터 데이터(`failure_reason_tags`, 마이그레이션 시드)로 label_ko 조인을 확인하고,
+
+    LIMIT 3 뒤에도 share 분모가 태그 전체(여기선 2개)를 유지하는지 본다.
+    """
+
+    from reaction_backend.repositories.review_repo import ReviewRepo
+
+    user_id = await _seed_user_real(real_db_session)
+    for hour in (9, 9, 14):
+        await _seed_tagged_failure_real(
+            real_db_session, user_id=user_id, tag_code="AMBIGUITY", day=date(2026, 8, 1), hour=hour
+        )
+    await _seed_tagged_failure_real(
+        real_db_session, user_id=user_id, tag_code="FATIGUE", day=date(2026, 8, 1), hour=10
+    )
+
+    repo = ReviewRepo(real_db_session)
+    rows = await repo.get_top_failure_contexts(user_id, date(2026, 8, 1), date(2026, 8, 1))
+
+    assert [r.tag_code for r in rows] == ["AMBIGUITY", "FATIGUE"]
+    assert [r.count for r in rows] == [3, 1]
+    # label_ko 가 하드코딩이 아니라 마스터 테이블에서 실제로 조인돼 왔는지 — 빈 문자열이면
+    # 조인이 죽어 있다는 뜻(빈 문자열은 SQL 이 안 잡아내는 실패라 값 자체를 확인해야 한다).
+    assert all(r.label_ko for r in rows)
+    assert sum(r.share for r in rows) == pytest.approx(1.0)
+
+
+@pytest.mark.skipif(not DB_AVAILABLE, reason="DATABASE_URL not set")
+async def test_get_top_failure_contexts_empty_when_no_failures(
+    real_db_session: AsyncSession,
+) -> None:
+
+    from reaction_backend.repositories.review_repo import ReviewRepo
+
+    user_id = await _seed_user_real(real_db_session)
+    repo = ReviewRepo(real_db_session)
+    rows = await repo.get_top_failure_contexts(user_id, date(2026, 8, 1), date(2026, 8, 1))
+    assert rows == []

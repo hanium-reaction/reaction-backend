@@ -644,7 +644,15 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
 | POST | `/reviews/habit-penalty/{habitId}/accept` | 3주 미달 페널티 수락 (Idempotency) | ✅ #21-C |
 
 핵심 필드: `adherenceRate`, `consistencyDays`, `resilienceRate`, `categorySuccessRate`,
-`peakWindow`, `drainWindow`, `policyUpdateCandidates`
+`peakWindow`, `drainWindow`, `policyUpdateCandidates`, `topFailureContexts`(#301)
+
+`topFailureContexts`(#301, 근거 A5, BCT 2.3 Self-monitoring): 최근 28일(조회 대상 주
+일요일 기준 역산) 실패/부분완료 실행의 실패 사유 상위 **최대 3개** —
+`{ tagCode, labelKo, count, share }`. `labelKo` 는 `/reflection/failure-tags` 와 같은
+마스터(`failure_reason_tags`)에서 조인해 온다(이중 관리 없음). `share` 는 0~1 비율이고
+**LIMIT 이전(그 기간의 태그 전체)을 분모**로 하므로, 태그가 4개 이상인 주는 반환된 3건의
+share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 빈 배열 — `mandala`/
+`nextCycleProposals` 처럼 `period_summaries` 에 저장하지 않고 매 요청마다 파생한다.
 
 #21-C Habit Penalty 메모 (S22 — 비난 아닌 빈도 재설계):
 - 감지: 직전 완료 주 기준 **최근 3주 연속** `done_count < target_count*0.5`. 순수 함수

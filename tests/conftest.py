@@ -66,7 +66,7 @@ from reaction_backend.repositories.policy_snapshot_repo import get_policy_snapsh
 from reaction_backend.repositories.privacy_repo import get_privacy_repo
 from reaction_backend.repositories.profile_repo import get_profile_repo
 from reaction_backend.repositories.recovery_repo import get_recovery_repo
-from reaction_backend.repositories.review_repo import get_review_repo
+from reaction_backend.repositories.review_repo import TopFailureContext, get_review_repo
 from reaction_backend.repositories.scheduled_block_repo import get_scheduled_block_repo
 from reaction_backend.repositories.time_policy_repo import get_time_policy_repo
 from reaction_backend.repositories.user_repo import GoogleProfile, get_user_repo
@@ -1578,6 +1578,7 @@ class FakeReviewRepo:
         self._summaries: dict[tuple[UUID, date], PeriodSummary] = {}
         self._exec_stats: list[ExecutionStat] = []
         self._recovery_stats: list[RecoveryStat] = []
+        self._top_failure_contexts: list[TopFailureContext] = []
 
     # ── 테스트 보조 seed ──
     def seed_execution(self, stat: ExecutionStat) -> None:
@@ -1585,6 +1586,9 @@ class FakeReviewRepo:
 
     def seed_recovery(self, stat: RecoveryStat) -> None:
         self._recovery_stats.append(stat)
+
+    def seed_top_failure_context(self, ctx: TopFailureContext) -> None:
+        self._top_failure_contexts.append(ctx)
 
     # ── ReviewRepo 인터페이스 ──
     async def get_weekly(self, user_id: UUID, week_start: date) -> PeriodSummary | None:
@@ -1599,6 +1603,11 @@ class FakeReviewRepo:
         self, user_id: UUID, start_dt: datetime, end_dt: datetime
     ) -> list[RecoveryStat]:
         return list(self._recovery_stats)
+
+    async def get_top_failure_contexts(
+        self, user_id: UUID, d0: date, d1: date
+    ) -> list[TopFailureContext]:
+        return list(self._top_failure_contexts)
 
     async def upsert_weekly(
         self,
