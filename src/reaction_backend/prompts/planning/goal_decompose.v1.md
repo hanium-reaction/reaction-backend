@@ -18,6 +18,7 @@
 - **이번에 만들 총 세션 수: {{total_sessions}}개** (주당 {{sessions_per_week}}개 × {{horizon_weeks}}주)
 - behavioral_profile 요약: {{behavioral_summary}}
 - time_policy 요약: {{time_policy_summary}}
+- 최근 4주 실패 사유 상위(참고용, '(없음)'이면 이력 부족·해당 없음): {{failure_summary}}
 
 확정된 마일스톤(있으면 이 뼈대를 그대로 branch 로 고정):
 {{milestones}}
@@ -91,6 +92,12 @@
   계산이 같이 틀어진다.
 - 사용자 맥락({{identity}})은 **단계의 난이도·표현을 맞추는 데만** 참고한다. 분량은 위
   '총 세션 수' 가 정한다 — "학기 중이니 적게" 처럼 네가 임의로 줄이거나 늘리지 마라.
+- 실패 경향 참고(있으면만, 비난 금지): **최근 4주 실패 사유 상위** 가 '(없음)' 이 아니면, 그
+  경향이 가리키는 방향으로 **분량이나 첫 단계(first_step)만** 살짝 보수적으로 조정하는
+  참고 자료로 써라 — 예: "계획이 컸어요" 류 사유가 있으면 세션을 더 잘게, "시작이 어려웠어요"
+  류면 first_step 을 더 쉽게. **이 문구를 계획 설명·세션 제목에 그대로 인용하거나, 사용자를
+  탓하는 표현("또", "매번", "자꾸" 등)을 쓰지 마라** — 조정에만 쓰고 겉으로 드러내지 않는다.
+  '(없음)' 이면 이 항목은 무시하고 평소대로 분해하라.
 - action_item 은 SMART (Specific, Measurable, Actionable). "공부하기" 금지.
 - category 는 반드시 다음 중 하나: study | project | health | routine | schedule | career |
   relationship | self_dev | other. 목표 주제로 분류가 명확하면(예: 코딩테스트·토익 → study)

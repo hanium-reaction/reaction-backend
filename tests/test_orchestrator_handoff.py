@@ -866,6 +866,95 @@ def test_window_coverage_tells_partial_vs_full_window() -> None:
     assert "마감이 없다" in vars_none["window_coverage"]
 
 
+def test_failure_summary_is_none_sentinel_when_empty_or_below_sample_gate() -> None:
+    """실패 이력이 없거나 1회뿐이면 '(없음)' — 우연 1회를 패턴으로 프롬프트에 안 싣는다 (#345).
+
+    `TopFailureContext` 는 count 내림차순으로 오므로 `[0]` 이 최다 사유다.
+    """
+    from reaction_backend.repositories.review_repo import TopFailureContext
+
+    assert first_plan_adapter._failure_summary(None) == "(없음)"
+    assert first_plan_adapter._failure_summary([]) == "(없음)"
+    single = [TopFailureContext(tag_code="TIME_SHORTAGE", label_ko="시간 부족", count=1, share=1.0)]
+    assert first_plan_adapter._failure_summary(single) == "(없음)"
+
+
+def test_failure_summary_formats_top_reasons_above_sample_gate() -> None:
+    """표본이 충분하면 '라벨(N회)' 를 콤마로 나열 — 최대 3개, 원문(SQL#4)이 낸 순서 그대로."""
+    from reaction_backend.repositories.review_repo import TopFailureContext
+
+    contexts = [
+        TopFailureContext(tag_code="TIME_SHORTAGE", label_ko="시간 부족", count=5, share=0.5),
+        TopFailureContext(tag_code="AVOIDANCE", label_ko="시작이 어려움", count=3, share=0.3),
+    ]
+    assert first_plan_adapter._failure_summary(contexts) == "시간 부족(5회), 시작이 어려움(3회)"
+
+    # 최다 사유가 게이트를 넘으면 나머지가 1회뿐이어도 함께 싣는다 — 게이트는 '최다' 기준.
+    with_singleton_tail = [
+        *contexts,
+        TopFailureContext(tag_code="X", label_ko="기타", count=1, share=0.1),
+    ]
+    assert "기타(1회)" in first_plan_adapter._failure_summary(with_singleton_tail)
+
+
+def test_context_from_outcome_wires_failure_contexts_into_prompt_vars() -> None:
+    """`validate_inputs` 가 채워 넘기는 `failure_contexts` 가 프롬프트 변수로 그대로 나간다."""
+    from reaction_backend.repositories.review_repo import TopFailureContext
+
+    outcome = _outcome_with("iv_failure_wiring")
+    contexts = [TopFailureContext(tag_code="OVERRUN", label_ko="계획이 컸음", count=4, share=0.8)]
+    vars_with = first_plan_adapter.context_from_outcome(outcome, failure_contexts=contexts)[
+        "prompt_vars"
+    ]
+    assert vars_with["failure_summary"] == "계획이 컸음(4회)"
+
+    # 안 넘기면(기존 호출부·룰 폴백 경로) '(없음)' — 회귀 없이 기존 동작 유지.
+    vars_without = first_plan_adapter.context_from_outcome(outcome)["prompt_vars"]
+    assert vars_without["failure_summary"] == "(없음)"
+
+
+async def test_validating_loads_failure_summary_from_review_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VALIDATING 노드가 `ReviewRepo.get_top_failure_contexts` 를 불러 프롬프트에 싣는다 (#345 2단계).
+
+    `_db_time_policies`/`_fixed_schedules` 와 같은 관례 — session 은 `config["configurable"]`
+    에서 오고, 없으면(단위 테스트/시스템) 조용히 빈 리스트로 '(없음)' 유지.
+    """
+    from types import SimpleNamespace
+
+    from tests.conftest import _FakeResult, _FakeSession
+
+    class _RoutingSession(_FakeSession):
+        async def execute(self, stmt: Any, params: Any = None) -> _FakeResult:  # noqa: ARG002
+            return _FakeResult(
+                [
+                    SimpleNamespace(tag_code="TIME_SHORTAGE", label_ko="시간 부족", n=6, share=0.6),
+                    SimpleNamespace(tag_code="AVOIDANCE", label_ko="시작이 어려움", n=2, share=0.2),
+                ]
+            )
+
+    outcome = _outcome_with("iv_failure_db")
+    cfg: Any = {"configurable": {"session": _RoutingSession()}}
+    state = first_plan.initial_state(user_id=uuid4(), outcome=outcome, target_date="2026-06-01")
+    state = await first_plan.validate_inputs(state, cfg)
+
+    assert (
+        state["planning_context"]["prompt_vars"]["failure_summary"]
+        == "시간 부족(6회), 시작이 어려움(2회)"
+    )
+
+
+async def test_validating_defaults_failure_summary_without_a_session() -> None:
+    """session 없으면(system 트리거 등) DB 를 아예 안 건드리고 '(없음)' — 예외 없이 조용히."""
+    outcome = _outcome_with("iv_failure_no_session")
+    cfg: Any = {"configurable": {}}
+    state = first_plan.initial_state(user_id=uuid4(), outcome=outcome, target_date="2026-06-01")
+    state = await first_plan.validate_inputs(state, cfg)
+
+    assert state["planning_context"]["prompt_vars"]["failure_summary"] == "(없음)"
+
+
 def test_shape_action_plan_drops_branches_left_without_leaves() -> None:
     """절단으로 leaf 가 **전부** 사라진 branch 는 함께 버린다 — 빈 껍데기 섹션 방지.
 

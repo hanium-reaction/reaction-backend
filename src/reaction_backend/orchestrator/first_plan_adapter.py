@@ -45,6 +45,7 @@ from reaction_backend.orchestrator.goal_structuring import (
 )
 from reaction_backend.orchestrator.interview_adapter import is_placeholder_goal
 from reaction_backend.orchestrator.plan_scheduler import PlanAction, PlanWindow
+from reaction_backend.repositories.review_repo import TopFailureContext
 from reaction_backend.schemas.common import KST, now_kst, to_kst
 from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome, TimeRange
 from reaction_backend.schemas.planning import (
@@ -1014,13 +1015,15 @@ def context_from_outcome(
     density: str = "standard",
     target_date: date | None = None,
     fetched_materials: str | None = None,
+    failure_contexts: Sequence[TopFailureContext] | None = None,
     max_weeks: int = _MAX_PLAN_WEEKS,
 ) -> dict[str, Any]:
     """InterviewOutcome → First Plan 컨텍스트 dict.
 
     `fetched_materials` 는 링크를 열어 가져온 자료 본문(#226) — I/O 는 호출자
     (`first_plan.validate_inputs`)가 하고 여기는 값만 받는다. 이 파일의 "순수 함수" 계약을
-    지키기 위해서다.
+    지키기 위해서다. `failure_contexts` 도 같은 계약 — `ReviewRepo.get_top_failure_contexts`
+    조회는 호출자가 하고, 여기서는 `_failure_summary` 로 문자열화만 한다(#345 2단계).
 
     LLM 프롬프트 변수는 모두 문자열로 평탄화한다(`prompts.registry` 의 {{var}} 치환 계약).
     availability / preferences 원본 객체도 함께 실어 룰 스케줄러 어댑터가 재사용.
@@ -1072,6 +1075,7 @@ def context_from_outcome(
         "materials": materials_for_prompt(heaviest.materials_note, fetched=fetched_materials),
         "behavioral_summary": _behavioral_summary(outcome),
         "time_policy_summary": _time_policy_summary(outcome),
+        "failure_summary": _failure_summary(failure_contexts),
         "sessions_per_week": str(per_week),
         # 마감까지 남은 기간과 총 세션 수를 **미리 계산해서** 넘긴다. 예전엔 마감 날짜만 주고
         # "남은 주 수에 비례해 만들라" 고 시켰는데, 프롬프트에 **오늘 날짜가 없어** LLM 이 그
@@ -1176,6 +1180,29 @@ def _window_coverage(target_date: date | None, horizon: str | None, horizon_week
             "재계획이 이어받는다."
         )
     return f"이번 구간({horizon_weeks}주)이 마감까지 전부를 덮는다."
+
+
+# 상위 몇 개 실패 사유까지 프롬프트에 실을지 — `ReviewRepo.get_top_failure_contexts` 가
+# 이미 LIMIT 3 으로 준다(SQL#4 원문). 여기서 한 번 더 자르는 건 방어적 상한일 뿐.
+_MAX_FAILURE_CONTEXTS_IN_PROMPT = 3
+# 최소 표본 — 최다 사유가 이 미만이면 우연 1회를 패턴으로 오독할 수 있어 프롬프트에
+# 안 싣는다 (#345 리스크 메모 "표본 부족").
+_MIN_FAILURE_SAMPLE = 2
+
+
+def _failure_summary(contexts: Sequence[TopFailureContext] | None) -> str:
+    """최근 28일 실패 사유 상위 → decompose 프롬프트 변수(`{{failure_summary}}`, #345 2단계).
+
+    `ReviewRepo.get_top_failure_contexts`(#301, 근거 A5) 를 그대로 재사용한다 — 새 집계를
+    만들지 않는다. SQL 이 count 내림차순으로 이미 정렬해 주므로 `contexts[0]` 이 최다 사유다.
+
+    표본이 `_MIN_FAILURE_SAMPLE` 미만이거나 실패 이력이 아예 없으면(신규·완주형 사용자)
+    '(없음)' 으로 내린다 — 프롬프트 규칙이 이 센티넬이면 조정을 건너뛰게 짜여 있다.
+    """
+    if not contexts or contexts[0].count < _MIN_FAILURE_SAMPLE:
+        return "(없음)"
+    top = contexts[:_MAX_FAILURE_CONTEXTS_IN_PROMPT]
+    return ", ".join(f"{c.label_ko}({c.count}회)" for c in top)
 
 
 def _behavioral_summary(outcome: InterviewOutcome) -> str:

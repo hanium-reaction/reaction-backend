@@ -45,6 +45,7 @@ from reaction_backend.orchestrator.goal_structuring import (
 )
 from reaction_backend.orchestrator.plan_scheduler import schedule_actions_multiday
 from reaction_backend.repositories.fixed_schedule_repo import FixedScheduleRepo
+from reaction_backend.repositories.review_repo import ReviewRepo, TopFailureContext
 from reaction_backend.repositories.scheduled_block_repo import ScheduledBlockRepo
 from reaction_backend.repositories.time_policy_repo import TimePolicyRepo
 from reaction_backend.schemas.common import KST, now_kst, to_kst
@@ -274,6 +275,25 @@ def tier_violation_for(outcome: InterviewOutcome) -> str | None:
     return None
 
 
+async def _failure_contexts(
+    config: RunnableConfig, user_id: UUID, reference_date: date
+) -> list[TopFailureContext]:
+    """최근 28일 실패 사유 상위 3개(#345 2단계) — decompose 프롬프트 `failure_summary` 재료.
+
+    `ReviewRepo.get_top_failure_contexts`(#301, 근거 A5) 를 그대로 재사용한다 — 새 집계를
+    만들지 않는다. `d0=d1=reference_date` 로 넘겨 [reference_date-27, reference_date] 창을
+    만드는 건 `routes/review.py::_top_failure_contexts` 와 같은 관례.
+
+    session 이 없으면(단위 테스트/시스템) 빈 리스트 → `_failure_summary` 가 '(없음)' 으로 내림.
+    """
+    session = _session(config)
+    if session is None:
+        return []
+    return list(
+        await ReviewRepo(session).get_top_failure_contexts(user_id, reference_date, reference_date)
+    )
+
+
 async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> FirstPlanState:
     """VALIDATING — 필수 슬롯 누락 + Focus/Maintain cap 검증.
 
@@ -283,6 +303,7 @@ async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> Firs
     """
     outcome = state["outcome"]
     violation = tier_violation_for(outcome)
+    target_date = date.fromisoformat(state["target_date"])
     # 참고 자료를 링크로만 줬으면 여기서 한 번 열어본다 (#226). I/O 는 이 노드가 하고
     # 컨텍스트 조립은 순수 함수로 남긴다. 실패해도 예외는 안 나오고, 그때는 예전처럼
     # '(없음)' 으로 내려가 프롬프트의 지어내기 방지 가드가 그대로 작동한다.
@@ -291,6 +312,7 @@ async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> Firs
         outcome.core_goals[0] if outcome.core_goals else None,
     )
     materials = await materials_resolver.resolve(heaviest.materials_note if heaviest else None)
+    failure_contexts = await _failure_contexts(config, state["user_id"], target_date)
     return {
         **state,
         "missing_fields": list(outcome.unresolved_slots),
@@ -300,8 +322,9 @@ async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> Firs
         "planning_context": first_plan_adapter.context_from_outcome(
             outcome,
             density=state["density"],
-            target_date=date.fromisoformat(state["target_date"]),
+            target_date=target_date,
             fetched_materials=materials.text,
+            failure_contexts=failure_contexts,
             max_weeks=state["max_plan_weeks"],
         ),
     }
