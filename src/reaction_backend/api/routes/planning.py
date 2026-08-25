@@ -1312,14 +1312,22 @@ async def generate_replan(
         scheduled_pairs = await block_repo.list_scheduled_between(user.id, scan_start, scan_end)
         backlog = await action_repo.list_planned_without_block(user.id)
         committed_blocks = await block_repo.list_committed_between(user.id, scan_start, scan_end)
+        # **밀린 일** — 시작 시각이 이미 지났는데 한 번도 착수 안 된 블록. 위 세 조회 중
+        # 어느 것에도 안 잡히고 만료 cron 도 못 쓸어내던 구멍이다(`list_stale_scheduled_before`
+        # docstring 의 표 참고). "계획만 세워두고 그냥 안 한" 카드가 재계획 후보에서 통째로
+        # 빠지면, 가장 도움이 필요한 순간에 재계획이 빈손으로 돈다.
+        stale_pairs = await block_repo.list_stale_scheduled_before(user.id, now_kst())
 
-        # 후보(action_id dedup) + 각 후보가 교체할 옛 미래 블록 **전부**.
+        # 후보(action_id dedup) + 각 후보가 교체할 옛 블록 **전부**.
         # #115 스케줄러가 긴 액션을 여러 세션 블록으로 쪼개므로 한 액션에 옛 블록이 여러 개일
         # 수 있다. 1개만 잡으면 승인 때 나머지가 유령으로 남거나 새 세션이 드롭된다(리뷰 지적).
         cand: dict[UUID, replan.ReplanCandidate] = {}
         old_blocks_by_action: dict[UUID, list[UUID]] = {}
         actions_by_id: dict[UUID, Any] = {}
-        for block, action in scheduled_pairs:
+        # 밀린 블록을 미래 블록보다 **먼저** 넣는다 — 아래 `covered` 산수가 "교체 대상(old_ids)"
+        # 과 "살아남는 미래 블록"을 가르는데, 밀린 블록도 교체 대상에 들어가야 그 몫이 남은
+        # 분량에서 이중으로 빠지지 않는다.
+        for block, action in (*stale_pairs, *scheduled_pairs):
             actions_by_id[action.id] = action
             old_blocks_by_action.setdefault(action.id, []).append(block.id)
 

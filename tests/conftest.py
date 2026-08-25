@@ -1779,6 +1779,26 @@ class FakeScheduledBlockRepo:
                 rows.append((b, action))
         return sorted(rows, key=lambda r: r[0].start_at)
 
+    async def list_stale_scheduled_before(
+        self, user_id: UUID, before_dt: datetime
+    ) -> list[tuple[ScheduledBlock, ActionItem]]:
+        """밀린 미착수 블록 + ActionItem — `list_scheduled_between` 과 필터 동일, 시간만 과거."""
+        rows: list[tuple[ScheduledBlock, ActionItem]] = []
+        for b in self._blocks.values():
+            if not (
+                b.user_id == user_id
+                and b.block_status == "scheduled"
+                and b.source != "user_edit"
+                and b.start_at < before_dt
+            ):
+                continue
+            action = None
+            if self._action_repo is not None:
+                action = await self._action_repo.get_by_id(user_id, b.action_item_id)
+            if action is not None:
+                rows.append((b, action))
+        return sorted(rows, key=lambda r: r[0].start_at)
+
     async def list_committed_between(
         self, user_id: UUID, start_dt: datetime, end_dt: datetime
     ) -> list[ScheduledBlock]:
