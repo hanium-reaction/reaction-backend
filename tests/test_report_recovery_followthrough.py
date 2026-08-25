@@ -45,6 +45,7 @@ def _row(
     original_action_item_id=None,
     original_goal_id=None,
     first_viewed_at: datetime | None = _NOW,
+    re_engagement_anchor_at: datetime | None = None,
 ) -> AttemptRow:
     return AttemptRow(
         execution_id=execution_id or uuid4(),
@@ -56,6 +57,7 @@ def _row(
         original_action_item_id=original_action_item_id or uuid4(),
         original_goal_id=original_goal_id,
         first_viewed_at=first_viewed_at,
+        re_engagement_anchor_at=re_engagement_anchor_at,
     )
 
 
@@ -278,6 +280,58 @@ def test_no_card_group_park_pending_is_not_followthrough() -> None:
             rows, derived_done_ids=set(), reschedule_success={}, park_success_by_goal={}
         )
         is False
+    )
+
+
+def test_no_card_group_park_prefers_real_anchor_over_decided_at() -> None:
+    """S8(#336) 이후 결정 건은 `re_engagement_anchor_at`(다음 주 월요일)을 창 시작점으로
+    쓴다 — `recovery_decided_at`(결정 시각) 기준이면 놓칠 완주를 실제 앵커 기준으로는 잡는다.
+    """
+    goal_id = uuid4()
+    anchor = _NOW + timedelta(days=4)  # 결정 시각보다 한참 뒤(예: 다음 주 월요일)
+    success_at = anchor + timedelta(days=1)  # decided_at(NOW) 기준 7일 창은 이미 지났다고 가정
+    rows = [
+        _row(
+            group="PARK",
+            decision="accepted",
+            original_goal_id=goal_id,
+            decided_at=_NOW,
+            re_engagement_anchor_at=anchor,
+        )
+    ]
+    assert (
+        _is_followthrough(
+            rows,
+            derived_done_ids=set(),
+            reschedule_success={},
+            park_success_by_goal={goal_id: [success_at]},
+        )
+        is True
+    )
+
+
+def test_no_card_group_park_falls_back_to_decided_at_when_anchor_missing() -> None:
+    """S8 이전에 결정된(마이그레이션 이전) 행은 `re_engagement_anchor_at` 이 NULL —
+    옛 근사(`recovery_decided_at`)로 계속 판정한다. 데이터를 조용히 잃지 않는다.
+    """
+    goal_id = uuid4()
+    rows = [
+        _row(
+            group="PARK",
+            decision="accepted",
+            original_goal_id=goal_id,
+            decided_at=_NOW,
+            re_engagement_anchor_at=None,
+        )
+    ]
+    assert (
+        _is_followthrough(
+            rows,
+            derived_done_ids=set(),
+            reschedule_success={},
+            park_success_by_goal={goal_id: [_NOW + timedelta(days=2)]},
+        )
+        is True
     )
 
 

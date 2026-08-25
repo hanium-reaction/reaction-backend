@@ -156,6 +156,32 @@ def test_update_title(client: TestClient) -> None:
     assert resp.json()["title"] == "수정"
 
 
+def test_update_category(client: TestClient) -> None:
+    """목표 테마 변경 — 생성 후엔 못 바꾸던 것을 PATCH 로 허용 (#326, FE #216 차단 해소)."""
+    created = _new_goal(client)
+    assert created["category"] == "project"
+    resp = client.patch(f"/goals/{created['goalId']}", json={"category": "health"})
+    assert resp.status_code == 200
+    assert resp.json()["category"] == "health"
+
+
+def test_update_category_rejects_invalid_value(client: TestClient) -> None:
+    created = _new_goal(client)
+    resp = client.patch(f"/goals/{created['goalId']}", json={"category": "not-a-category"})
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"
+
+
+def test_update_omitting_category_keeps_existing_value(client: TestClient) -> None:
+    """category 를 생략하면(title 만 보내는 기존 클라이언트) 기존 값이 유지된다."""
+    created = _new_goal(client)
+    resp = client.patch(f"/goals/{created['goalId']}", json={"title": "제목만 변경"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "제목만 변경"
+    assert body["category"] == "project"
+
+
 def test_update_tier_focus_to_parked(client: TestClient) -> None:
     created = _new_goal(client, tier="focus")
     resp = client.patch(f"/goals/{created['goalId']}", json={"goalTier": "parked"})

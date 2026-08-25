@@ -630,3 +630,97 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
     갱신하고 이름도 바꿨다(예전 이름이 "보정 안 함"을 의도된 동작으로 서술하고 있었다 —
     이제는 그게 결함이었다는 게 확인됐으므로). 신규 3건: quiet hours 꼬리 당김, 다음날
     07시로 밀린 블록도 리드·격자 불변식을 지키는지, 며칠 뒤 뒤늦은 승인도 보정되는지.
+19. ✅ **`notification_sends` 확장 — `target_action_item_id` + `opened_at` — 완료.**
+    근거 대장 §6.1 "선행 조건" — S9 재알림 T1 억제 조건과 근접 효과 측정에 "먼저 필요"
+    하다고 명시한 두 컬럼(A1, 도그푸딩과 무관하게 지금 착수 가능한 항목으로 재우선순위화).
+
+    - **`target_action_item_id`**(FK → action_items, nullable) — pre_card 알림은 항상
+      그 블록의 카드로 채우고, evening_reflection 은 카드 하나가 아니라 대기 전체에 대한
+      것이라 항상 `None`. 이제 알림 sent_at 과 그 카드의 실행·회복 이력을 조인해 근접
+      효과를 볼 수 있다(FE 클릭 추적 없이도 가능한 최소 계측).
+    - **`opened_at`**(nullable, 최초 1회만 — `recovery_repo.stamp_first_viewed` 와 같은
+      관례) — 이건 채우려면 **id 를 발송 전에 미리 만들어야** 한다는 게 핵심 설계 결정:
+      `NotificationSend.id` 를 이제 `notify_sweeps.py` 가 `uuid4()` 로 미리 생성해 push
+      payload 의 `id` 필드(`notif_` 접두어)에 실어 보내고, `push_gate.send_push()`/
+      `NotificationSendRepo.record()` 가 그 값을 **그대로**(서버 재발급 없이) PK 로 쓴다.
+      그래야 나중에 FE 가 "이 알림 열었다"고 그 id 를 되돌려줄 때 같은 행을 찾을 수 있다
+      — 발송 **후**에 server_default 로 id 를 새로 만들던 예전 방식으로는 원리적으로
+      불가능했다.
+    - `POST /notifications/{notificationId}/opened` 신설(api-contract v1.73) — 204 멱등,
+      404 `NOTIF_NOT_FOUND`(형식 오류·미존재·타 사용자 소유를 한 코드로 묶어 존재 여부를
+      안 흘림).
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **이 endpoint 를 부르는 FE 콜백(push `notificationclick` 핸들러)은 없다** — 인프라만
+      미리 준비해 뒀다. 그래서 `opened_at` 은 FE 가 배선하기 전까지 항상 NULL 로 남는다
+      (`notification_send.py`/`notification_send_repo.py` 모듈 docstring에 명시).
+    - **근접 효과 분석 SQL/리포트 자체는 안 만들었다** — 이번 항목은 그 분석에 필요한
+      "재료"(컬럼 2개)만 준비한 것. `target_action_item_id` 로 실제 집계를 뽑는 건 데이터가
+      쌓인 뒤(=도그푸딩 지속)의 별도 작업.
+
+    신규 테스트 14건 — `push_gate` 3건(호출부가 준 id 를 그대로 쓰는지, target 있음/기본
+    None), `notify_sweeps` 2건(pre_card 는 target 이 그 카드 id, evening 은 None + payload
+    id 가 저장된 행의 PK 와 일치), `notifications` 라우트 5건(204+스탬프, 멱등, 404 3종 —
+    미존재/형식오류/타 사용자), 리포지토리 4건(실 Postgres — 명시 id 로 INSERT, FK 저장,
+    사용자 스코프 조회, stamp_opened 최초 1회). 기존 `test_web_push_e2e.py` 4건도 새
+    시그니처(`notification_id` 필수 인자)에 맞게 갱신.
+20. ✅ **S8 재관여 앵커 — `re_engagement_anchor_at` 백엔드 기본값 — 완료.** 근거 대장
+    §3 S8("PARK/CARRY_OVER 수락 시 필수") — FE #221(사용자가 직접 고르는 UI)과 무관하게
+    지금 넣을 수 있는 **서버 기본값**만 먼저 얹었다.
+
+    - `recovery_attempts.re_engagement_anchor_at`(nullable) 신설.
+    - `orchestrator/recovery.py::re_engagement_anchor_at(option_group, decided_at)` —
+      **PARK 는 새 카드를 안 만든다**(`_GROUP_TO_SOURCE` 밖)는 게 이 필드가 "필수"인
+      이유: 없으면 "보류"가 곧 "영영 안 돌아옴"이 된다. 카탈로그 템플릿이 이미 약속한
+      "다음 주 리뷰"(GOAL_RECHECK/PARK_DEFAULT 문구) 그대로 **다음 주(오늘이 월요일이어도
+      이번 주 아님) 월요일 09시**로 잡는다(C5 프레시 스타트 — 새 주가 랜드마크).
+      CARRY_OVER 는 내일 09시. DOWNSCOPE/RESCHEDULE 은 `None`(이미 접점이 있음).
+    - `routes/recovery.py::_adopt()` 에서 결정 스탬프와 같이 찍는다.
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **정밀 발송 시각은 아직 아니다** — 09시는 `NotificationSetting.morning_brief_time`
+      기본값과 가까운 고정값일 뿐, 사용자별 실제 설정을 반영하지 않는다(순수 함수라
+      repo 접근이 없다). 이 앵커를 실제로 **소비**해서 알림을 쏘는 로직(S9 T2)은 아직
+      없다 — 지금은 DB 에 값만 남는다.
+    - **API 응답에 노출 안 함** — A1(`opened_at`)과 같은 이유로, FE 가 볼 방법이
+      아직 없어도 백엔드 값만 먼저 준비해 둔다.
+    - **L3 재협상의 PARK 수락**(§5.2, 별도 3장 UI)도 이 필드를 필요로 하지만 L3 자체가
+      아직 미구현이라 그쪽 배선은 범위 밖.
+
+    신규 테스트 7건 — 순수함수 5건(DOWNSCOPE/RESCHEDULE None, CARRY_OVER 내일, PARK 다음 주
+    월요일, 월요일에 결정해도 오늘이 아니라 다음 주로 건너뜀, 결정 시각과 무관하게 시각은
+    고정 — `test_recovery.py`), 라우트 통합 2건(PARK 수락 시 앵커 스탬프 + 새 카드 없음
+    확인, DOWNSCOPE 수락은 앵커가 계속 None).
+21. ✅ **S10 근접창 판정 — `proximal_execution_rate_60m` 리포트 + PARK 완주 판정 앵커
+    교체 — 완료.** 근거 대장 §7.2 대체 지표 표의 마지막 줄("알림 후 60분 내 해당 카드
+    실행 발생률 — D3, 단 `notification_sends.target_action_item_id` 신설이 선행 조건")
+    — #335 로 그 선행 조건이 끝나 이제 이 지표를 잴 수 있다.
+
+    - **`scripts/report_proximal_execution.py`** 신설(읽기 전용, SELECT 뿐) —
+      `notification_class='pre_card'` AND `target_action_item_id IS NOT NULL` 인 발송을
+      분모로, 그 카드의 `ExecutionEvent.actual_start_at` 이 발송 후 60분 안(D3 — Bell
+      et al. 2023, "알림 후 1시간 내 앱 오픈 3.5배")에 있으면 분자로 센다. `evening_
+      reflection`/`morning_brief` 는 특정 카드 하나를 안 가리켜(`target_action_item_id`
+      항상 NULL) 이 지표의 정의 자체가 성립하지 않아 제외. 회복 파생 카드인지 원래
+      계획 카드인지도 안 가른다 — `pre_card` 스윕이 그 둘을 안 구분하고 보내므로
+      회복 전용으로 좁히면 분모가 왜곡된다.
+    - **`report_recovery_followthrough.py`(#278 이후 도구) 의 PARK 완주 판정 앵커를
+      교체** — 그 스크립트가 이미 스스로 "그 컬럼이 생기면 이 근사부터 교체할 것"
+      이라고 적어 둔 부채를 갚았다. `re_engagement_anchor_at`(S8, #336) 이 있으면
+      그걸 쓰고, S8 이전에 결정된(NULL인) 옛 행은 여전히 `recovery_decided_at` 로
+      근사한다 — 옛 데이터를 조용히 버리지 않는 하위호환.
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **인과가 아니라 상관이다** — `opened_at`(#335) 클릭 추적을 실제로 채우는 FE
+      콜백이 아직 없어, "알림을 봤기 때문에" 시작했는지는 이 리포트만으로는 못 가른다.
+      `pre_card` 자체가 시작 2~7분 전에 나가므로 상관은 구조적으로 높게 나오는 것도
+      한계로 명시.
+    - **§7.2 의 나머지 대체 지표**(`next_day_return_rate`, `re_engagement_rate`,
+      `consistency_rolling14`)는 이번 범위 밖 — `proximal_execution_rate_60m` 하나만
+      요청 범위였다.
+
+    신규 테스트 8건 — 순수함수 6건(판정 창 경계·미시작·알림 이전 시작 배제·여러 실행 중
+    하나만 맞아도 인정 등 — `test_report_proximal_execution.py`), 실 Postgres 2건(쿼리가
+    다른 클래스·target 없는 행·요청 밖 action_item 을 실제로 걸러내는지 —
+    `test_report_proximal_execution_sql.py`). 기존 followthrough 리포트 테스트에도
+    앵커 우선순위(신규 앵커 우선, 없으면 결정 시각 폴백) 2건 추가.

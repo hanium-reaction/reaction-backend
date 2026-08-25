@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import time
 from http import HTTPStatus
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +29,12 @@ from reaction_backend.repositories.notification_repo import (
     NotificationRepo,
     get_notification_repo,
 )
+from reaction_backend.repositories.notification_send_repo import (
+    NotificationSendRepo,
+    get_notification_send_repo,
+)
 from reaction_backend.repositories.user_repo import UserRepo, get_user_repo
+from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.notifications import (
     NotificationSettings,
@@ -38,6 +44,8 @@ from reaction_backend.schemas.notifications import (
 )
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
+
+_NOTIFICATION_PREFIX = "notif_"
 
 
 def _to_schema(setting: NotificationSetting) -> NotificationSettings:
@@ -82,7 +90,25 @@ def _enforce_evening(t: time) -> None:
         )
 
 
+def _parse_notification_id(raw: str) -> UUID:
+    if not raw.startswith(_NOTIFICATION_PREFIX):
+        raise ApiError(
+            ErrorCode.NOTIF_NOT_FOUND,
+            "해당 알림을 찾을 수 없어요.",
+            http_status=HTTPStatus.NOT_FOUND,
+        )
+    try:
+        return UUID(raw[len(_NOTIFICATION_PREFIX) :])
+    except ValueError as e:
+        raise ApiError(
+            ErrorCode.NOTIF_NOT_FOUND,
+            "해당 알림을 찾을 수 없어요.",
+            http_status=HTTPStatus.NOT_FOUND,
+        ) from e
+
+
 RepoDep = Annotated[NotificationRepo, Depends(get_notification_repo)]
+SendRepoDep = Annotated[NotificationSendRepo, Depends(get_notification_send_repo)]
 UserRepoDep = Annotated[UserRepo, Depends(get_user_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
@@ -192,4 +218,35 @@ async def unsubscribe(
     if setting is not None and setting.push_subscription is not None:
         await repo.clear_push_subscription(setting)
         await session.commit()
+    return None
+
+
+# ───── 발송 이력 (근거 대장 §6.1 — S9 재알림 선행 조건) ─────
+
+
+@router.post("/{notification_id}/opened", status_code=status.HTTP_204_NO_CONTENT)
+async def mark_notification_opened(
+    notification_id: str,
+    user: CurrentUser,
+    send_repo: SendRepoDep,
+    session: SessionDep,
+) -> None:
+    """이 알림을 열었다고 표시 (멱등 — 최초 1회만 `openedAt` 을 채운다).
+
+    `notificationId` 는 push payload 의 `id` 필드를 그대로 넘긴다 — 서버가 발송 **전에**
+    미리 만들어 실어 보낸 값이라(`notify_sweeps.py`), 이 발송 이력 행의 PK 와 항상 같다.
+
+    ⚠️ **이 endpoint 를 호출하는 FE 콜백(push `notificationclick` 핸들러)은 아직 없다.**
+    인프라만 미리 준비해 둔 것 — 배선되기 전까지는 아무도 이 경로를 타지 않는다.
+    """
+    notif_id = _parse_notification_id(notification_id)
+    notification = await send_repo.get_by_id(notif_id, user.id)
+    if notification is None:
+        raise ApiError(
+            ErrorCode.NOTIF_NOT_FOUND,
+            "해당 알림을 찾을 수 없어요.",
+            http_status=HTTPStatus.NOT_FOUND,
+        )
+    await send_repo.stamp_opened(notification, now_kst())
+    await session.commit()
     return None

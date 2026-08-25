@@ -231,17 +231,21 @@ async def _next_cycle_proposals(
     쓰는 것과 같은 판정(`fetch_promoted_active_goals_for_user`)이다. 각 목표의 **현재 활성**
     계획 트리 leaf 에 매달린 action_item 만 보고 판정한다(과거 주기 종결 카드가 섞이면
     첫 주기 이후 판정이 항상 참이 돼버린다 — `cycle_proposal.should_propose_next_cycle` 참고).
+
+    `today` 는 `week_start` 가 아니라 **실제 오늘**(KST)이다 — 이 카드가 "지금 열어도 되는가"를
+    말하는 것과 같은 이유로, 밀린 카드 판정도 조회 대상 주가 아니라 현재 시각 기준이어야 한다.
     """
     goals = await mandala_adapter.fetch_promoted_active_goals_for_user(session, user_id)
     if not goals:
         return []
     axis_titles = await mandala_adapter.fetch_promoted_axis_titles(session, [g.id for g in goals])
+    today = now_kst().date()
     proposals: list[NextCycleProposal] = []
     for goal in goals:
         nodes = await goal_repo.list_nodes(goal.id, tree_kind="plan")
         leaf_ids = [n.id for n in nodes if n.node_type == "leaf"]
         action_items = await cycle_proposal.fetch_action_items_for_leaf_nodes(session, leaf_ids)
-        if cycle_proposal.should_propose_next_cycle(action_items):
+        if cycle_proposal.should_propose_next_cycle(action_items, today=today):
             proposals.append(
                 NextCycleProposal(
                     goal_id=goal.id, goal_title=goal.title, axis_title=axis_titles.get(goal.id)

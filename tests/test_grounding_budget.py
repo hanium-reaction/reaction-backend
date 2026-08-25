@@ -34,6 +34,22 @@ from reaction_backend.schemas.common import now_kst
 pytestmark = pytest.mark.usefixtures("real_db_session")
 
 
+@pytest.fixture(autouse=True)
+def _pin_llm_budgets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """이 파일의 테스트는 `get_settings()` 의 실제 한도값을 기준으로 seed 건수를 계산한다
+    (예: `limit * 4`, `limit - 1`). 로컬 `.env`/환경변수가 0(무제한 관례, #259 §3)으로
+    오버라이드해 두면 `limit`이 0이 돼 이 산술이 전부 깨지고 예산 가드가 트리거되지
+    않는다 — 실제 시각에 따라 깨지는 harvest_slots 시한폭탄과 같은 종류의, 테스트가
+    통제하지 않는 외부 상태(여기서는 환경설정)에 대한 암묵적 가정이다.
+
+    테스트마다 알려진 양수 값으로 고정해 환경과 무관하게 만든다. `test_zero_limit_means_unlimited`
+    는 이 위에서 grounding 한도를 0으로 다시 덮어써 자신의 케이스를 검증한다.
+    """
+    settings = get_settings()
+    monkeypatch.setattr(settings, "llm_daily_grounding_budget", 5, raising=False)
+    monkeypatch.setattr(settings, "llm_daily_token_budget", 200_000, raising=False)
+
+
 def _grounding_run(user_id: uuid.UUID, *, requests: int, days_ago: int = 0) -> LlmRun:
     """그라운딩 호출 1건 — **토큰은 거의 0**이다(#259 §3 실측: in 17 / out 1,263)."""
     row = LlmRun(

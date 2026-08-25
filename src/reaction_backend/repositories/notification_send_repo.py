@@ -1,23 +1,30 @@
 """NotificationSend repository — 발송 이력 조회/기록 (Issue #20 알림 cron).
 
-INSERT only — 발송 이력은 게이트 enforce 의 근거라 수정·삭제 메서드를 두지 않는다
-(`llm_runs` 와 같은 원칙). 기록은 **발송 성공 시에만** — 호출 규약은 `safety/push_gate.py`.
-commit 은 호출자(sweep) 책임.
+게이트 enforce 근거 컬럼(`user_id`/`notification_class`/`sent_at`)은 INSERT only —
+수정·삭제 메서드를 두지 않는다(`llm_runs` 와 같은 원칙). 기록은 **발송 성공 시에만** —
+호출 규약은 `safety/push_gate.py`. commit 은 호출자(sweep) 책임.
+
+`opened_at` 은 예외다 — 게이트 판정과 무관한 별도 컬럼(근거 대장 §6.1)이라 `stamp_opened`
+로 최초 1회만 채운다(`recovery_repo.stamp_first_viewed` 와 같은 관례). `POST
+/notifications/{notificationId}/opened` 가 이걸 호출하지만, **그 endpoint 를 실제로
+부르는 FE 콜백(push `notificationclick` 핸들러)은 아직 없다** — 인프라만 미리 준비해
+둔 것이고, FE 가 배선하기 전까지 `opened_at` 은 항상 NULL 이다.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
+from fastapi import Depends
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.notification_send import NotificationSend
+from reaction_backend.db.session import get_db
 
 if TYPE_CHECKING:
     from datetime import datetime
-
-    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class NotificationSendRepo:
@@ -64,13 +71,47 @@ class NotificationSendRepo:
         return int(result.scalar_one()) > 0
 
     async def record(
-        self, *, user_id: UUID, notification_class: str, sent_at: datetime
+        self,
+        *,
+        id: UUID,  # noqa: A002 — 발송 전 호출부가 미리 만든 id (push payload 에 이미 실려 나감)
+        user_id: UUID,
+        notification_class: str,
+        sent_at: datetime,
+        target_action_item_id: UUID | None = None,
     ) -> NotificationSend:
+        """`id` 는 서버가 이 시점에 새로 발급하지 않는다 — `notify_sweeps.py` 가 payload
+        를 만들기 **전**에 미리 생성해 넘긴다. 그래야 브라우저로 나간 push payload 의
+        `id` 와 여기 저장되는 행의 PK 가 같아서, 나중에 클라이언트가 "이 알림을 열었다"고
+        되돌려줄 때 그 id 로 이 행을 찾을 수 있다 — 발송 **후**에 서버가 id 를 새로
+        만들면(예전 `server_default`) 그 값이 payload 에 없어 영원히 못 찾는다.
+        """
         row = NotificationSend(
+            id=id,
             user_id=user_id,
             notification_class=notification_class,
             sent_at=sent_at,
+            target_action_item_id=target_action_item_id,
         )
         self._session.add(row)
         await self._session.flush()
         return row
+
+    async def get_by_id(self, notification_id: UUID, user_id: UUID) -> NotificationSend | None:
+        stmt = select(NotificationSend).where(
+            NotificationSend.id == notification_id,
+            NotificationSend.user_id == user_id,
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def stamp_opened(self, notification: NotificationSend, opened_at: datetime) -> None:
+        """최초 1회만 채운다 — 재클릭·중복 콜백이 최초 오픈 시각을 덮어쓰지 않는다."""
+        if notification.opened_at is None:
+            notification.opened_at = opened_at
+
+
+SessionDep = Annotated[AsyncSession, Depends(get_db)]
+
+
+def get_notification_send_repo(session: SessionDep) -> NotificationSendRepo:
+    return NotificationSendRepo(session)

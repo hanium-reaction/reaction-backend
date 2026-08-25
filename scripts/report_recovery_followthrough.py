@@ -18,9 +18,9 @@
   `_validated_target` 주석 — "조정은 문구가 아니라 시간이고 그 경로는 S15"). 따라서 완주
   신호는 **같은 action_item 의, 회복 결정 이후 첫 성공 실행**이다.
 - PARK: **같은 goal 계보**(원본 카드의 `goal_id`) 카드가 앵커 이후 7일 내 완주했는가.
-  "앵커"는 설계상 재관여 앵커 시각(`re_engagement_anchor_at`)이어야 하지만 그 컬럼은
-  아직 없다(S8, 회복 재설계 로드맵 미착수) — 지금은 이미 있는 `recovery_decided_at`
-  (결정 시각)으로 근사한다. 그 컬럼이 생기면 이 근사부터 교체할 것.
+  앵커는 `re_engagement_anchor_at`(S8, #336)을 쓰고, 그 컬럼이 아직 없던(NULL) 결정
+  건은 이전과 같이 `recovery_decided_at`(결정 시각)으로 근사한다 — 옛 데이터를 조용히
+  버리지 않으면서, 새 데이터부터는 설계된 앵커를 그대로 쓴다.
 
 ⚠️ **`recovery_attempts.recovery_result == 'completed'` 를 쓰지 않는다 — 구조적으로 항상
 'pending' 이기 때문이다.** 그 컬럼을 채우는 유일한 생산자 `RecoveryRepo.complete_for_action`
@@ -104,6 +104,9 @@ class AttemptRow(NamedTuple):
     original_goal_id: UUID | None
     # 카드가 응답으로 나간 시각(P6). NULL = 한 번도 안 나갔다 → ITT 분모에서 제외.
     first_viewed_at: datetime | None
+    # S8(#336) 이후 채워지는 진짜 재관여 앵커 — PARK 완주 판정의 창 시작점.
+    # NULL 이면(S8 이전에 결정된 행) `recovery_decided_at` 로 근사한다(`_is_followthrough`).
+    re_engagement_anchor_at: datetime | None
 
 
 async def _fetch_attempts(session: AsyncSession) -> list[AttemptRow]:
@@ -118,6 +121,7 @@ async def _fetch_attempts(session: AsyncSession) -> list[AttemptRow]:
             ExecutionEvent.action_item_id,
             ActionItem.goal_id,
             RecoveryAttempt.first_viewed_at,
+            RecoveryAttempt.re_engagement_anchor_at,
         )
         .join(ExecutionEvent, ExecutionEvent.id == RecoveryAttempt.execution_id)
         .join(ActionItem, ActionItem.id == ExecutionEvent.action_item_id)
@@ -205,20 +209,24 @@ def _reschedule_followthrough(
 
 
 def _park_followthrough(
-    decided_at: datetime | None,
+    anchor_at: datetime | None,
     original_goal_id: UUID | None,
     success_plan_starts_by_goal: dict[UUID, list[datetime]],
 ) -> bool:
-    """앵커(근사: 결정 시각) 이후 7일 내 같은 goal 계보 카드가 완주했는가.
+    """앵커 이후 7일 내 같은 goal 계보 카드가 완주했는가.
+
+    `anchor_at` 은 호출부(`_is_followthrough`)가 이미 `re_engagement_anchor_at ??
+    recovery_decided_at` 로 정리해서 넘긴다 — S8(#336) 이전에 결정된 행은 여전히
+    결정 시각으로 근사한다(그 컬럼이 그때는 없었으므로).
 
     goal 이 없는 원본 카드(습관/인박스/수동 출처)는 "계보" 자체가 없어 판정 불가 —
     완주로 잘못 세지 않도록 보수적으로 False.
     """
-    if decided_at is None or original_goal_id is None:
+    if anchor_at is None or original_goal_id is None:
         return False
-    deadline = decided_at + _PARK_WINDOW
+    deadline = anchor_at + _PARK_WINDOW
     return any(
-        decided_at < ts <= deadline for ts in success_plan_starts_by_goal.get(original_goal_id, [])
+        anchor_at < ts <= deadline for ts in success_plan_starts_by_goal.get(original_goal_id, [])
     )
 
 
@@ -245,7 +253,9 @@ def _is_followthrough(
             ):
                 return True
         elif r.option_group == "PARK" and _park_followthrough(
-            r.recovery_decided_at, r.original_goal_id, park_success_by_goal
+            r.re_engagement_anchor_at or r.recovery_decided_at,
+            r.original_goal_id,
+            park_success_by_goal,
         ):
             return True
     return False

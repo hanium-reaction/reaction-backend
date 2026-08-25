@@ -54,6 +54,7 @@ async def _send(
     result = await send_push(
         setting=setting,
         notification_class=klass,
+        notification_id=uuid4(),
         payload=_PAYLOAD,
         now=now,
         send_repo=send_repo,  # type: ignore[arg-type]
@@ -75,6 +76,59 @@ async def test_send_records_history() -> None:
     assert len(send_repo._sends) == 1
     assert send_repo._sends[0].notification_class == "evening_reflection"
     assert send_repo._sends[0].sent_at == NOW
+
+
+async def test_send_uses_the_caller_provided_notification_id_not_a_new_one() -> None:
+    """`notification_id` 는 호출부가 payload 를 만들기 전에 미리 준 값 그대로 저장된다.
+
+    근거 대장 §6.1 — 이 id 가 push payload 에 실려 나간 값과 다르면(예: repo 가 새로
+    발급하면) FE 가 나중에 "이 알림 열었다"고 돌려줘도 영영 못 찾는다.
+    """
+    setting = _setting()
+    send_repo = FakeNotificationSendRepo()
+    sender = FakeWebPushSender()
+    given_id = uuid4()
+    result = await send_push(
+        setting=setting,
+        notification_class="evening_reflection",
+        notification_id=given_id,
+        payload=_PAYLOAD,
+        now=NOW,
+        send_repo=send_repo,  # type: ignore[arg-type]
+        sender=sender,  # type: ignore[arg-type]
+    )
+
+    assert result.sent is True
+    assert send_repo._sends[0].id == given_id
+
+
+async def test_send_records_target_action_item_id_when_given() -> None:
+    """pre_card 처럼 특정 카드에 대한 알림이면 그 카드 id 가 그대로 저장된다."""
+    setting = _setting()
+    send_repo = FakeNotificationSendRepo()
+    sender = FakeWebPushSender()
+    action_item_id = uuid4()
+    await send_push(
+        setting=setting,
+        notification_class="pre_card",
+        notification_id=uuid4(),
+        payload={"class": "pre_card", "title": "t", "body": "b"},
+        now=NOW,
+        send_repo=send_repo,  # type: ignore[arg-type]
+        sender=sender,  # type: ignore[arg-type]
+        target_action_item_id=action_item_id,
+    )
+
+    assert send_repo._sends[0].target_action_item_id == action_item_id
+
+
+async def test_send_leaves_target_action_item_id_none_by_default() -> None:
+    """evening_reflection 처럼 특정 카드 하나가 아니면 target 이 안 채워진다(기본값)."""
+    setting = _setting()
+    result, send_repo, _ = await _send(setting)
+
+    assert result.sent is True
+    assert send_repo._sends[0].target_action_item_id is None
 
 
 async def test_unknown_class_is_rejected() -> None:

@@ -13,6 +13,7 @@ import pytest
 
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.execution_event import ExecutionEvent
+from reaction_backend.db.models.notification_send import NOTIFICATION_ID_PREFIX
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.user import User
@@ -336,6 +337,36 @@ async def test_pre_card_sends_for_block_in_window() -> None:
     assert "리포트 초안 쓰기" in payload["body"]
     assert "21:06" in payload["body"]  # 시작 시각 HH:MM
     assert h.session.commit_count >= 1  # 건당 commit (evening 쪽 테스트와 같은 근거)
+
+
+async def test_pre_card_records_target_action_item_and_matching_payload_id() -> None:
+    """근거 대장 §6.1 — 발송 이력이 그 카드를 가리키고, payload 의 id 가 그 행의 PK 와 같다.
+
+    id 를 payload 구성 **전에** 미리 만들어야 하는 이유가 여기서 실제로 검증된다 —
+    발송 후에 새로 발급했다면 이 둘이 절대 같을 수 없다.
+    """
+    h = _PreCardHarness()
+    block = h.seed_block()
+
+    await h.run()
+
+    payload = h.sender.calls[0][1]
+    sent_row = h.send_repo._sends[0]
+    assert sent_row.target_action_item_id == block.action_item_id
+    assert payload["id"] == f"{NOTIFICATION_ID_PREFIX}{sent_row.id}"
+
+
+async def test_evening_leaves_target_action_item_id_none() -> None:
+    """회고 알림은 카드 전체에 대한 것이라 특정 카드 하나로 좁히지 않는다."""
+    h = _EveningHarness()
+    h.seed_user(pending=2)
+
+    await h.run()
+
+    sent_row = h.send_repo._sends[0]
+    assert sent_row.target_action_item_id is None
+    payload = h.sender.calls[0][1]
+    assert payload["id"] == f"{NOTIFICATION_ID_PREFIX}{sent_row.id}"
 
 
 async def test_pre_card_window_is_2_to_7_minutes() -> None:

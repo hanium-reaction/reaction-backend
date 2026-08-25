@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from uuid import uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 
 from reaction_backend.config import get_settings
+from reaction_backend.db.models.notification_send import NotificationSend
 from reaction_backend.db.models.user import User
-from tests.conftest import DEMO_USER_UUID, FakeNotificationRepo
+from reaction_backend.schemas.common import KST
+from tests.conftest import DEMO_USER_UUID, FakeNotificationRepo, FakeNotificationSendRepo
 
 _SUBSCRIPTION = {"endpoint": "https://push.example.com/x", "keys": {"p256dh": "k", "auth": "a"}}
 
@@ -145,3 +150,73 @@ def test_vapid_public_key_null_when_unconfigured(
     resp = client.get("/notifications/vapid-public-key")
     assert resp.status_code == 200
     assert resp.json()["publicKey"] is None
+
+
+# ── POST /notifications/{id}/opened (근거 대장 §6.1 — 아직 FE 콜백 없는 인프라) ──
+
+
+def _seed_notification(
+    repo: FakeNotificationSendRepo,
+    *,
+    user_id: object = DEMO_USER_UUID,
+    sent_at: datetime = datetime(2026, 7, 21, 21, 0, tzinfo=KST),
+) -> NotificationSend:
+    row = NotificationSend()
+    row.id = uuid4()
+    row.user_id = user_id
+    row.notification_class = "evening_reflection"
+    row.sent_at = sent_at
+    row.target_action_item_id = None
+    row.opened_at = None
+    repo._sends.append(row)
+    return row
+
+
+def test_mark_opened_returns_204_and_stamps_opened_at(
+    client: TestClient, fake_notification_send_repo: FakeNotificationSendRepo
+) -> None:
+    row = _seed_notification(fake_notification_send_repo)
+
+    resp = client.post(f"/notifications/notif_{row.id}/opened")
+
+    assert resp.status_code == 204
+    assert row.opened_at is not None
+
+
+def test_mark_opened_is_idempotent_keeps_first_open_time(
+    client: TestClient, fake_notification_send_repo: FakeNotificationSendRepo
+) -> None:
+    row = _seed_notification(fake_notification_send_repo)
+
+    first = client.post(f"/notifications/notif_{row.id}/opened")
+    first_opened_at = row.opened_at
+    second = client.post(f"/notifications/notif_{row.id}/opened")
+
+    assert first.status_code == 204
+    assert second.status_code == 204
+    assert row.opened_at == first_opened_at, "재클릭이 최초 오픈 시각을 덮어썼다"
+
+
+def test_mark_opened_404_for_unknown_id(client: TestClient) -> None:
+    resp = client.post(f"/notifications/notif_{uuid4()}/opened")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "NOTIF_NOT_FOUND"
+
+
+def test_mark_opened_404_for_malformed_id(client: TestClient) -> None:
+    """접두어(`notif_`)가 없거나 UUID 가 아니면 — 존재하는 다른 알림 id 를 흘리지 않는다."""
+    resp = client.post("/notifications/not-a-real-id/opened")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "NOTIF_NOT_FOUND"
+
+
+def test_mark_opened_404_for_another_users_notification(
+    client: TestClient, fake_notification_send_repo: FakeNotificationSendRepo
+) -> None:
+    """다른 사용자의 발송 이력은 내가 못 연다 — id 를 안다고 다 여는 게 아니다."""
+    row = _seed_notification(fake_notification_send_repo, user_id=uuid4())
+
+    resp = client.post(f"/notifications/notif_{row.id}/opened")
+
+    assert resp.status_code == 404
+    assert row.opened_at is None
