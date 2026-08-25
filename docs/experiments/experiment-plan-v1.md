@@ -691,3 +691,36 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
     월요일, 월요일에 결정해도 오늘이 아니라 다음 주로 건너뜀, 결정 시각과 무관하게 시각은
     고정 — `test_recovery.py`), 라우트 통합 2건(PARK 수락 시 앵커 스탬프 + 새 카드 없음
     확인, DOWNSCOPE 수락은 앵커가 계속 None).
+21. ✅ **S10 근접창 판정 — `proximal_execution_rate_60m` 리포트 + PARK 완주 판정 앵커
+    교체 — 완료.** 근거 대장 §7.2 대체 지표 표의 마지막 줄("알림 후 60분 내 해당 카드
+    실행 발생률 — D3, 단 `notification_sends.target_action_item_id` 신설이 선행 조건")
+    — #335 로 그 선행 조건이 끝나 이제 이 지표를 잴 수 있다.
+
+    - **`scripts/report_proximal_execution.py`** 신설(읽기 전용, SELECT 뿐) —
+      `notification_class='pre_card'` AND `target_action_item_id IS NOT NULL` 인 발송을
+      분모로, 그 카드의 `ExecutionEvent.actual_start_at` 이 발송 후 60분 안(D3 — Bell
+      et al. 2023, "알림 후 1시간 내 앱 오픈 3.5배")에 있으면 분자로 센다. `evening_
+      reflection`/`morning_brief` 는 특정 카드 하나를 안 가리켜(`target_action_item_id`
+      항상 NULL) 이 지표의 정의 자체가 성립하지 않아 제외. 회복 파생 카드인지 원래
+      계획 카드인지도 안 가른다 — `pre_card` 스윕이 그 둘을 안 구분하고 보내므로
+      회복 전용으로 좁히면 분모가 왜곡된다.
+    - **`report_recovery_followthrough.py`(#278 이후 도구) 의 PARK 완주 판정 앵커를
+      교체** — 그 스크립트가 이미 스스로 "그 컬럼이 생기면 이 근사부터 교체할 것"
+      이라고 적어 둔 부채를 갚았다. `re_engagement_anchor_at`(S8, #336) 이 있으면
+      그걸 쓰고, S8 이전에 결정된(NULL인) 옛 행은 여전히 `recovery_decided_at` 로
+      근사한다 — 옛 데이터를 조용히 버리지 않는 하위호환.
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **인과가 아니라 상관이다** — `opened_at`(#335) 클릭 추적을 실제로 채우는 FE
+      콜백이 아직 없어, "알림을 봤기 때문에" 시작했는지는 이 리포트만으로는 못 가른다.
+      `pre_card` 자체가 시작 2~7분 전에 나가므로 상관은 구조적으로 높게 나오는 것도
+      한계로 명시.
+    - **§7.2 의 나머지 대체 지표**(`next_day_return_rate`, `re_engagement_rate`,
+      `consistency_rolling14`)는 이번 범위 밖 — `proximal_execution_rate_60m` 하나만
+      요청 범위였다.
+
+    신규 테스트 8건 — 순수함수 6건(판정 창 경계·미시작·알림 이전 시작 배제·여러 실행 중
+    하나만 맞아도 인정 등 — `test_report_proximal_execution.py`), 실 Postgres 2건(쿼리가
+    다른 클래스·target 없는 행·요청 밖 action_item 을 실제로 걸러내는지 —
+    `test_report_proximal_execution_sql.py`). 기존 followthrough 리포트 테스트에도
+    앵커 우선순위(신규 앵커 우선, 없으면 결정 시각 폴백) 2건 추가.
