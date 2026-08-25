@@ -36,6 +36,7 @@ from reaction_backend.db.models.interaction_style import InteractionStyle
 from reaction_backend.db.models.interruption_event import InterruptionEvent
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionModel
 from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
+from reaction_backend.db.models.invite_code import InviteCode
 from reaction_backend.db.models.notification_send import NotificationSend
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.period_summary import PeriodSummary
@@ -60,6 +61,7 @@ from reaction_backend.repositories.habit_instance_repo import get_habit_instance
 from reaction_backend.repositories.habit_repo import get_habit_repo
 from reaction_backend.repositories.inbox_repo import get_inbox_repo
 from reaction_backend.repositories.interview_repo import get_interview_repo
+from reaction_backend.repositories.invite_code_repo import get_invite_code_repo, normalize_code
 from reaction_backend.repositories.notification_repo import get_notification_repo
 from reaction_backend.repositories.notification_send_repo import get_notification_send_repo
 from reaction_backend.repositories.plan_draft_repo import get_plan_draft_repo
@@ -2064,6 +2066,9 @@ class FakeUserRepo:
             if u.onboarding_state == "ACTIVE" and not getattr(u, "is_anonymized", False)
         ]
 
+    async def count_signed_up(self) -> int:
+        return sum(1 for u in self._by_id.values() if getattr(u, "archived_at", None) is None)
+
     async def upsert_from_google(self, profile: GoogleProfile) -> User:
         existing = self._by_email.get(profile.email)
         if existing is not None:
@@ -2097,6 +2102,36 @@ class FakeUserRepo:
         return False
 
 
+class FakeInviteCodeRepo:
+    """in-memory InviteCodeRepo — 가입 게이트 테스트용 (#324)."""
+
+    def __init__(self) -> None:
+        self._by_code: dict[str, InviteCode] = {}
+
+    def seed(self, raw_code: str, *, used: bool = False, note: str | None = None) -> InviteCode:
+        row = InviteCode()
+        row.id = uuid4()
+        row.code = normalize_code(raw_code)
+        row.note = note
+        row.used_at = now_kst() if used else None
+        row.used_by_user_id = None
+        self._by_code[row.code] = row
+        return row
+
+    async def get_by_code(self, raw_code: str) -> InviteCode | None:
+        return self._by_code.get(normalize_code(raw_code))
+
+    async def mark_used(self, row: InviteCode, *, used_by_user_id: UUID) -> None:
+        row.used_at = now_kst()
+        row.used_by_user_id = used_by_user_id
+
+    async def create(self, raw_code: str, *, note: str | None = None) -> InviteCode:
+        return self.seed(raw_code, note=note)
+
+    async def list_all(self) -> list[InviteCode]:
+        return list(self._by_code.values())
+
+
 # ───── 일반 도메인 client (인증 + 모든 fake) ─────
 
 
@@ -2124,6 +2159,11 @@ def fake_notification_repo() -> FakeNotificationRepo:
 @pytest.fixture
 def fake_user_repo() -> FakeUserRepo:
     return FakeUserRepo()
+
+
+@pytest.fixture
+def fake_invite_code_repo() -> FakeInviteCodeRepo:
+    return FakeInviteCodeRepo()
 
 
 @pytest.fixture
@@ -2370,7 +2410,9 @@ def unauthed_client() -> Iterator[TestClient]:
 
 
 @pytest.fixture
-def auth_client(fake_user_repo: FakeUserRepo) -> Iterator[TestClient]:
+def auth_client(
+    fake_user_repo: FakeUserRepo, fake_invite_code_repo: FakeInviteCodeRepo
+) -> Iterator[TestClient]:
     """`/auth/*` 테스트 — repo/session 만 override, 인증은 실제 JWT 흐름."""
     _reset_process_singletons()
     app = create_app()
@@ -2380,6 +2422,7 @@ def auth_client(fake_user_repo: FakeUserRepo) -> Iterator[TestClient]:
 
     app.dependency_overrides[get_db] = _fake_session_gen
     app.dependency_overrides[get_user_repo] = lambda: fake_user_repo
+    app.dependency_overrides[get_invite_code_repo] = lambda: fake_invite_code_repo
     with TestClient(app) as c:
         yield c
 

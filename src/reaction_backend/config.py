@@ -194,6 +194,15 @@ class Settings(BaseSettings):
     # 다중 인스턴스 배포 시 중복 실행(모든 job idempotent → 안전하나 단일 인스턴스 권장).
     scheduler_enabled: bool = False
 
+    # ── 가입 게이트 (#324, FE #237 §8) ──
+    # False 면 신규 가입(POST /auth/google, 신규 email)을 전부 403 으로 막는다 — 장애·비용
+    # 폭주 시 재배포 없이 끄는 긴급 스위치(toggle-signups.yml, SCHEDULER_ENABLED 와 같은 관례).
+    # 기존 사용자 로그인은 이 값과 무관하게 항상 통과한다.
+    signups_enabled: bool = True
+    # 신규 가입 인원 상한(누적, 초대코드 유효와 별개 조건). Play 첫 공개 30명 원칙(#237).
+    # soft-delete(archived_at) 된 사용자는 세지 않는다 — 나간 자리는 다시 채울 수 있어야 한다.
+    signup_capacity: int = 30
+
     # ── Web Push VAPID (#16/#20) ──
     # 비어있으면 발송이 unconfigured 로 조용히 skip (GEMINI_API_KEY 부재와 같은 degrade).
     # 라이브 키는 provision-vapid.yml 워크플로가 EC2 .env 에 생성 — private key 는 레포·

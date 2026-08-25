@@ -7,6 +7,22 @@
 
 ---
 
+## v1.76 — 2026-08-25 (신규 가입 초대코드 게이트 — #324, FE #237 §8)
+
+**추가만(하위호환)** — endpoint 변경 없음. `POST /auth/google` 요청에 선택 필드
+`inviteCode` 가 추가된다.
+
+- **기존 사용자 로그인은 완전히 영향받지 않는다** — 게이트는 신규 가입(새 email)에만 적용.
+- 신규 가입 3중 검사(순서대로): `SIGNUPS_ENABLED` 긴급 스위치 → `SIGNUP_CAPACITY`(기본
+  30) 인원 상한 → 초대코드 유효성.
+- 새 에러 코드 4개: `AUTH_SIGNUPS_DISABLED`(403) · `AUTH_SIGNUP_CAPACITY_REACHED`(403) ·
+  `AUTH_INVALID_INVITE_CODE`(422) · `AUTH_INVITE_CODE_ALREADY_USED`(409).
+- 마이그레이션 `e9fb35d3f448` — `invite_codes` 테이블 신설(코드/발급메모/소진시각/소진자).
+- 운영: `scripts/manage_invite_codes.py` 로 발급·현황 조회. `SIGNUPS_ENABLED` 는
+  `toggle-signups.yml` 워크플로로 재배포 없이 토글.
+
+---
+
 ## v1.75 — 2026-08-25 (`morning_brief` 첫 push 발송 신설 — 근거 대장 §6.2 T2)
 
 **추가만(하위호환)** — 새 endpoint 없음. §15 발송 가드 문면에 조건 1개 추가.
@@ -35,7 +51,6 @@
   원칙). 배지를 몇 번 보여줄지·언제 지울지는 FE 책임.
 - ⚠️ **최근 앱 세션·무응답 누적에 따른 억제는 아직 없다** — 그 신호는 `app_sessions`
   테이블 없이는 계산 불가능해 이번 범위 밖. 미체크 조건만 만족하면 항상 `true`.
-
 ---
 
 ## v1.73 — 2026-08-25 (`POST /notifications/{notificationId}/opened` 신설 — 근거 대장 §6.1)

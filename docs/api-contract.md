@@ -109,10 +109,24 @@ body 해시가 같아 mismatch 409 로도 안 걸러지고, 다른 사용자의 
 
 | Method | Path | 설명 |
 | --- | --- | --- |
-| POST | `/auth/google` | Google id_token → 자체 JWT (access+refresh) 발급 |
+| POST | `/auth/google` | Google id_token → 자체 JWT (access+refresh) 발급. **신규 가입만** 가입 게이트(#324) 대상 |
 | POST | `/auth/refresh` | refresh → 새 access |
 | POST | `/auth/logout` | refresh 무효화 |
 | GET | `/auth/me` | 현재 사용자 (`onboarding_state` 포함) |
+
+**가입 게이트(#324, FE #237 §8)** — `POST /auth/google` 요청에 선택 필드 `inviteCode` 가
+추가된다. **기존 사용자 로그인(요청의 email 이 이미 `users` 에 있음)은 이 게이트를 전혀
+거치지 않는다** — `inviteCode` 를 생략하거나 무효값을 보내도 영향 없다. 신규 가입(새
+email)에만 순서대로 3중 검사가 적용된다:
+
+1. `SIGNUPS_ENABLED=false`(긴급 차단, 재배포 없이 토글) → 403 `AUTH_SIGNUPS_DISABLED`.
+2. 누적 가입 인원이 `SIGNUP_CAPACITY`(기본 30)에 도달 → 403 `AUTH_SIGNUP_CAPACITY_REACHED`.
+3. `inviteCode` 미제공/무효 → 422 `AUTH_INVALID_INVITE_CODE`. 이미 소진된 코드 →
+   409 `AUTH_INVITE_CODE_ALREADY_USED`.
+
+코드는 대소문자·앞뒤 공백 무관하게 정규화해 비교한다. 유효한 코드는 그 가입에서 **1회만**
+소비되며(재사용 불가), `scripts/manage_invite_codes.py` 로 운영자가 미리 발급한다(admin
+API 없음 — 이 레포의 다른 운영 작업과 같은 CLI 스크립트 관례).
 
 ---
 

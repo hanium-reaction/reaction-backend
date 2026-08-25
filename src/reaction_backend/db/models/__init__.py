@@ -52,6 +52,7 @@ from reaction_backend.db.models.interaction_style import InteractionStyle
 from reaction_backend.db.models.interruption_event import InterruptionEvent
 from reaction_backend.db.models.interview_session import InterviewSession
 from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
+from reaction_backend.db.models.invite_code import InviteCode
 from reaction_backend.db.models.llm_run import LlmRun
 from reaction_backend.db.models.notification_send import NotificationSend
 from reaction_backend.db.models.notification_setting import NotificationSetting
@@ -86,6 +87,7 @@ __all__ = [
     "InterruptionEvent",
     "InterviewSession",
     "InterviewSlotAnswer",
+    "InviteCode",
     "LlmRun",
     "NotificationSend",
     "NotificationSetting",
