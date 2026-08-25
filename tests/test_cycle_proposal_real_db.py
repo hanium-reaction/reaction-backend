@@ -15,6 +15,7 @@ DATABASE_URL 이 없으면 스킵 — 다른 real-DB 테스트와 같은 게이�
 from __future__ import annotations
 
 import uuid
+from datetime import date, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -79,7 +80,12 @@ async def _seed_leaf(session: AsyncSession, goal: Goal, *, archived: bool) -> Go
 
 
 async def _seed_action(
-    session: AsyncSession, goal: Goal, leaf: GoalNode, *, status: str
+    session: AsyncSession,
+    goal: Goal,
+    leaf: GoalNode,
+    *,
+    status: str,
+    target_date: date | None = None,
 ) -> ActionItem:
     a = ActionItem()
     a.id = uuid.uuid4()
@@ -87,7 +93,7 @@ async def _seed_action(
     a.goal_id = goal.id
     a.goal_node_id = leaf.id
     a.title = "카드"
-    a.target_date = now_kst().date()
+    a.target_date = target_date or now_kst().date()
     a.category = "other"
     a.status = status
     a.source = "goal"
@@ -115,7 +121,9 @@ async def test_past_cycle_terminal_action_does_not_leak_into_current_cycle_judgm
 
     statuses = {a.status for a in action_items}
     assert statuses == {"planned"}  # 옛 주기의 'done' 카드가 섞이지 않았다
-    assert cycle_proposal.should_propose_next_cycle(action_items) is False  # 남은 카드가 있다
+    assert (
+        cycle_proposal.should_propose_next_cycle(action_items, today=now_kst().date()) is False
+    )  # 남은 카드가 있다(target_date 가 오늘이라 아직 안 지났다)
 
 
 async def test_current_cycle_all_terminal_proposes_next_cycle(
@@ -134,4 +142,32 @@ async def test_current_cycle_all_terminal_proposes_next_cycle(
     action_items = await cycle_proposal.fetch_action_items_for_leaf_nodes(real_db_session, leaf_ids)
 
     assert len(action_items) == 1  # 옛 주기의 done 카드는 제외, 새 주기 것만
-    assert cycle_proposal.should_propose_next_cycle(action_items) is True
+    assert cycle_proposal.should_propose_next_cycle(action_items, today=now_kst().date()) is True
+
+
+async def test_overdue_planned_card_does_not_block_next_cycle(
+    real_db_session: AsyncSession,
+) -> None:
+    """밀린 `planned` 카드가 다음 주기 제안을 막지 않는다 — 실 DB 경로로 확인.
+
+    이 카드는 한 번도 [▶시작] 하지 않아 execution_event 가 없으므로 `expire_unreflected` cron
+    (=`completion_status='in_progress'` 인 실행만 대상)이 **영원히 못 쓸어낸다.** 즉 archive 로
+    입력에서 빠지길 기대할 수 없고, 판정 함수가 날짜로 걸러야 한다.
+    """
+    goal = await _seed_goal(real_db_session)
+    leaf = await _seed_leaf(real_db_session, goal, archived=False)
+    today = now_kst().date()
+    await _seed_action(
+        real_db_session, goal, leaf, status="done", target_date=today - timedelta(days=14)
+    )
+    await _seed_action(
+        real_db_session, goal, leaf, status="planned", target_date=today - timedelta(days=3)
+    )
+
+    repo = GoalRepo(real_db_session)
+    nodes = await repo.list_nodes(goal.id, tree_kind="plan")
+    leaf_ids = [n.id for n in nodes if n.node_type == "leaf"]
+    action_items = await cycle_proposal.fetch_action_items_for_leaf_nodes(real_db_session, leaf_ids)
+
+    assert len(action_items) == 2  # 밀린 카드는 archive 되지 않아 그대로 조회된다
+    assert cycle_proposal.should_propose_next_cycle(action_items, today=today) is True
