@@ -338,6 +338,7 @@ def _tree_node(
     depth: int,
     completed_at: Any = None,
     title: str = "노드",
+    created_at: Any = None,
 ) -> GoalNode:
     n = GoalNode()
     n.id = node_id or uuid4()
@@ -345,6 +346,7 @@ def _tree_node(
     n.depth = depth
     n.completed_at = completed_at
     n.title = title
+    n.created_at = created_at or now_kst()
     return n
 
 
@@ -612,6 +614,7 @@ def test_compute_weekly_stat_axis_untouched_when_nothing_happened() -> None:
     )
 
     assert stat.untouched_axis_titles == ["손못댄축"]
+    assert stat.untouched_axis_ids == [untouched_axis.id]
 
 
 def test_compute_weekly_stat_habit_stats_report_axis_title_and_counts() -> None:
@@ -682,6 +685,62 @@ def test_compute_weekly_stat_total_leaves_counts_both_project_and_repeat_types()
     )
 
     assert stat.total_leaves == 2
+
+
+# ───────────── compute_stale_axes (ADR-0008 §6, §8 "H") ─────────────
+
+
+def test_compute_stale_axes_returns_axis_untouched_in_every_given_week() -> None:
+    old_axis = _tree_node(depth=1, title="방치축", created_at=_dt_in_week(-30))
+    fresh_axis = _tree_node(depth=1, title="새축", created_at=_dt_in_week(-30))
+    week_sets = [{old_axis.id}, {old_axis.id}, {old_axis.id}]
+
+    stale = mandala_adapter.compute_stale_axes(
+        [old_axis, fresh_axis], week_sets, earliest_week_start=WEEK_START - timedelta(weeks=2)
+    )
+
+    assert [a.id for a in stale] == [old_axis.id]
+
+
+def test_compute_stale_axes_excludes_axis_touched_in_any_week() -> None:
+    """3주 중 한 주라도 손댔으면 교집합에서 빠진다 — 3주 연속이어야 한다."""
+    axis = _tree_node(depth=1, title="가끔굴림", created_at=_dt_in_week(-30))
+    week_sets = [{axis.id}, set(), {axis.id}]  # 지난주엔 손댐
+
+    stale = mandala_adapter.compute_stale_axes(
+        [axis], week_sets, earliest_week_start=WEEK_START - timedelta(weeks=2)
+    )
+
+    assert stale == []
+
+
+def test_compute_stale_axes_excludes_axis_created_after_earliest_week() -> None:
+    """막 만든 축은 이전 주 데이터가 없어 '손 못 댐'으로 잡혀도 방치 취급하지 않는다."""
+    new_axis = _tree_node(depth=1, title="갓생긴축", created_at=_dt_in_week(0))  # 이번 주에 생성
+    week_sets = [{new_axis.id}, {new_axis.id}, {new_axis.id}]
+
+    stale = mandala_adapter.compute_stale_axes(
+        [new_axis], week_sets, earliest_week_start=WEEK_START - timedelta(weeks=2)
+    )
+
+    assert stale == []
+
+
+def test_compute_stale_axes_axis_created_exactly_on_earliest_week_start_counts() -> None:
+    """생성일이 가장 오래된 주의 시작일과 같으면(그 주 내내 존재) 대상에 포함(경계 포함)."""
+    axis = _tree_node(depth=1, title="딱걸림", created_at=_dt_in_week(-14))
+    week_sets = [{axis.id}, {axis.id}, {axis.id}]
+
+    stale = mandala_adapter.compute_stale_axes(
+        [axis], week_sets, earliest_week_start=WEEK_START - timedelta(weeks=2)
+    )
+
+    assert [a.id for a in stale] == [axis.id]
+
+
+def test_compute_stale_axes_empty_week_sets_returns_empty() -> None:
+    axis = _tree_node(depth=1, title="축", created_at=_dt_in_week(-30))
+    assert mandala_adapter.compute_stale_axes([axis], [], earliest_week_start=WEEK_START) == []
 
 
 # ───────────────────── 만다라 → 오늘/브리프 연결 (PR7) ─────────────────────

@@ -57,6 +57,18 @@ class NextCycleProposal(CamelModel):
     axis_title: str | None = None
 
 
+class StaleAxisProposal(CamelModel):
+    """3주 연속 손 못 댄 축 — "줄이거나 바꾸자" 제안 1건 (ADR-0008 §6, §8 "H").
+
+    수정 수단은 이미 있는 것을 그대로 쓴다 — 이 카드는 새 엔드포인트를 만들지 않는다.
+    칸/축 텍스트는 `PATCH /goals/mandala/nodes/{id}`, 축 8칸 재생성은
+    `POST /plans/mandala/{planId}/regenerate-branch`.
+    """
+
+    axis_id: UUID
+    axis_title: str
+
+
 class WeeklyReviewResponse(CamelModel):
     """GET /reviews/weekly · generate 응답 — 룰 기반 주간 리뷰 카드 (S21)."""
 
@@ -79,6 +91,7 @@ class WeeklyReviewResponse(CamelModel):
 
     mandala: MandalaWeeklySummary | None = None
     next_cycle_proposals: list[NextCycleProposal] = Field(default_factory=list)
+    stale_axis_proposals: list[StaleAxisProposal] = Field(default_factory=list)
 
     generated_at: KstDatetime
 

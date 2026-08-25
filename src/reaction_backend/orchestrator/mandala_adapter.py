@@ -538,6 +538,7 @@ class MandalaWeeklyStat:
     total_leaves: int
     touched_this_week: int
     untouched_axis_titles: list[str] = field(default_factory=list)
+    untouched_axis_ids: list[uuid.UUID] = field(default_factory=list)
     habits: list[MandalaHabitWeeklyStat] = field(default_factory=list)
 
 
@@ -590,8 +591,8 @@ def compute_weekly_stat(
                 completed_this_week += 1
                 touched_leaf_ids.add(leaf.id)
 
-    untouched_axis_titles = [
-        sg.title
+    untouched_axes = [
+        sg
         for sg in subgoals_by_id.values()
         if all(leaf.id not in touched_leaf_ids for leaf in leaves if leaf.parent_node_id == sg.id)
     ]
@@ -601,9 +602,41 @@ def compute_weekly_stat(
         completed_total=completed_total,
         total_leaves=len(leaves),
         touched_this_week=len(touched_leaf_ids),
-        untouched_axis_titles=untouched_axis_titles,
+        untouched_axis_titles=[sg.title for sg in untouched_axes],
+        untouched_axis_ids=[sg.id for sg in untouched_axes],
         habits=habit_stats,
     )
+
+
+def compute_stale_axes(
+    nodes: Sequence[GoalNode],
+    untouched_axis_id_sets: Sequence[set[uuid.UUID]],
+    *,
+    earliest_week_start: date,
+) -> list[GoalNode]:
+    """N주(호출자가 넘긴 주 수) 연속 손 못 댄 축 — "큰 목표 수정" 제안 대상(ADR-0008 §6, §8 "H").
+
+    `untouched_axis_id_sets` 는 최근 N개 주(예: 이번 주·지난 주·2주 전) 각각의
+    `compute_weekly_stat(...).untouched_axis_ids` 를 호출자가 모아 넘긴다 — 이 함수는 그
+    교집합만 구하는 순수 판정이다. 제목이 아니라 id 로 맞춘다 — `PATCH .../nodes/{id}` 로
+    축 제목을 바꿔도(§6 이 "수정 수단"으로 나열하는 바로 그 endpoint) 판정이 끊기지 않는다.
+
+    `earliest_week_start` **이후에** 만들어진 축은 뺀다 — 막 만든 축은 아직 그 주 데이터가
+    없어(=습관 체크인·완료 이력 자체가 없어) "손 못 댐"으로 잡히는데, 이건 방치가 아니라
+    갓 생긴 축일 뿐이다. 새로 만든 축을 방치 취급하면 신뢰를 잃는다(§6 의 "비난 없는" 톤).
+    """
+    if not untouched_axis_id_sets:
+        return []
+    stale_ids = set.intersection(*(set(s) for s in untouched_axis_id_sets))
+    subgoals_by_id = {n.id: n for n in nodes if n.depth == 1}
+    result: list[GoalNode] = []
+    for axis_id in stale_ids:
+        axis = subgoals_by_id.get(axis_id)
+        if axis is None or axis.created_at is None:
+            continue
+        if to_kst(axis.created_at).date() <= earliest_week_start:
+            result.append(axis)
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -724,6 +757,7 @@ __all__ = [
     "MandalaHabitWeeklyStat",
     "MandalaWeeklyStat",
     "compute_progress",
+    "compute_stale_axes",
     "compute_weekly_stat",
     "context_from_ultimate",
     "fetch_actions_for_nodes",

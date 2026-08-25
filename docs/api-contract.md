@@ -699,6 +699,19 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
   최근 완료 인터뷰를 자동 재투영) + `POST /plans/{id}/approve` 를 그대로 쓴다. 마감 없는
   만다라 목표는 다시 2주로 캡된다(§8 "D").
 
+손 못 댄 축 축소 제안 (ADR-0008 §6, §8 "H"):
+- 응답에 `staleAxisProposals: StaleAxisProposal[]`(빈 배열이 기본) — `{ axisId, axisTitle }`.
+  `weekStart` 와 무관하게 항상 **현재**(실제 `now`) 기준 최근 3주를 본다. 궁극목표가
+  없거나 승인된 만다라 트리가 없으면 `[]`(`mandala` 절과 같은 전제).
+- 판정: 최근 3개 주(이번 주·지난 주·2주 전) 전부에서 손 못 댄(완료 체크도 습관 체크인도
+  없는) 축만, 그것도 그 축이 3주 전 이미 존재했을 때만(막 만든 축은 데이터 없음만으로
+  방치 취급하지 않는다) — `mandala_adapter.compute_stale_axes`.
+- **수정도 새 엔드포인트가 없다** — 이미 있는 걸 그대로 쓴다: 칸/축 텍스트는
+  `PATCH /goals/mandala/nodes/{id}`(U9), 축 8칸 재생성은
+  `POST /plans/mandala/{planId}/regenerate-branch`(U5, 승인 전 초안 한정). 마일스톤
+  재조정(ADR-0007 §10)은 이번 스코프에 없다 — 마일스톤 있는 임의 목표의 주기 전환
+  트랙(ADR-0007 PR-3·4) 자체가 아직 없어 "재조정할 주기"가 없다.
+
 ---
 
 ## 14. Policy Snapshot (`/policy-snapshot`)
