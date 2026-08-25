@@ -7,7 +7,7 @@
 
 ---
 
-## v1.76 — 2026-08-25 (`RecoveryCard.obstacle/copingClause/acknowledgment` 추가 — acknowledgment/v3 승격, AVOIDANCE 전용)
+## v1.78 — 2026-08-25 (`RecoveryCard.obstacle/copingClause/acknowledgment` 추가 — acknowledgment/v3 승격, AVOIDANCE 전용)
 
 **추가만(하위호환)** — endpoint 변경 없음. `POST /recovery/proposals/generate` 응답의
 각 카드에 선택 필드 3개가 늘어난다.
@@ -24,6 +24,40 @@
 - ⚠️ L1-1 오프라인 A/B(v3 vs v1 승률 1.000)가 근거지만 judge–human κ=0.482 로 보조
   지표 강등(#278)됐고 실 도그푸딩 검증도 없다 — 노출 범위를 AVOIDANCE 태그로 좁혀
   리스크를 제한했다. 문제가 생기면 `_PROMPT_ID_V3` 라우팅만 되돌리면 된다.
+
+---
+
+## v1.77 — 2026-08-25 (LLM 비용/사용량 상한 — #325)
+
+**추가만(하위호환)** — 새 에러 코드 + 응답 헤더. 기존 성공 응답 스키마 변경 없음.
+
+- `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(429) 신설 — 비싼 엔드포인트(`/interview/sessions/{id}/answers`,
+  `/interview/sessions/{id}/next-question`, `/plans/generate`, `/plans/mandala/subgoals`,
+  `/plans/mandala/generate`, `/recovery/proposals/generate`)의 사용자별 일일 호출 횟수가
+  `LLM_ENDPOINT_DAILY_CALL_LIMIT` 을 넘으면 반환. `Retry-After` 헤더(초, 다음 KST 자정까지)
+  동봉. `/recovery/proposals/generate` 는 pending 카드 캐시 반환·이미 결정된 실행 409 같은
+  기존 short-circuit 뒤에 걸려, 새로고침 재호출은 상한을 안 먹는다.
+- 전역 일일 토큰 예산(`LLM_GLOBAL_DAILY_TOKEN_BUDGET`) 신설 — 전 사용자 합산 토큰이
+  한도를 넘으면 신규 LLM 호출(인터뷰/계획·만다라트/회복 전부)이 **조용히 룰 폴백**으로
+  전환(200 OK, `aiSource="rule"`). 기존 `isDraft`/`aiSource` 필드로 이미 FE 가 판별
+  가능해 새 신호 불필요(§1.10).
+- §1.4 에러 코드 prefix 표에 `RATE_LIMIT_*` 추가.
+
+---
+
+## v1.76 — 2026-08-25 (신규 가입 초대코드 게이트 — #324, FE #237 §8)
+
+**추가만(하위호환)** — endpoint 변경 없음. `POST /auth/google` 요청에 선택 필드
+`inviteCode` 가 추가된다.
+
+- **기존 사용자 로그인은 완전히 영향받지 않는다** — 게이트는 신규 가입(새 email)에만 적용.
+- 신규 가입 3중 검사(순서대로): `SIGNUPS_ENABLED` 긴급 스위치 → `SIGNUP_CAPACITY`(기본
+  30) 인원 상한 → 초대코드 유효성.
+- 새 에러 코드 4개: `AUTH_SIGNUPS_DISABLED`(403) · `AUTH_SIGNUP_CAPACITY_REACHED`(403) ·
+  `AUTH_INVALID_INVITE_CODE`(422) · `AUTH_INVITE_CODE_ALREADY_USED`(409).
+- 마이그레이션 `e9fb35d3f448` — `invite_codes` 테이블 신설(코드/발급메모/소진시각/소진자).
+- 운영: `scripts/manage_invite_codes.py` 로 발급·현황 조회. `SIGNUPS_ENABLED` 는
+  `toggle-signups.yml` 워크플로로 재배포 없이 토글.
 
 ---
 
@@ -55,7 +89,6 @@
   원칙). 배지를 몇 번 보여줄지·언제 지울지는 FE 책임.
 - ⚠️ **최근 앱 세션·무응답 누적에 따른 억제는 아직 없다** — 그 신호는 `app_sessions`
   테이블 없이는 계산 불가능해 이번 범위 밖. 미체크 조건만 만족하면 항상 `true`.
-
 ---
 
 ## v1.73 — 2026-08-25 (`POST /notifications/{notificationId}/opened` 신설 — 근거 대장 §6.1)

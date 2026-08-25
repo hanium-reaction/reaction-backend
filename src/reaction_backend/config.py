@@ -154,6 +154,27 @@ class Settings(BaseSettings):
     llm_planning_timeout_seconds: float = 45.0
     # 일일 토큰 예산 (in + out 합산, 사용자당). 0 이면 무제한.
     llm_daily_token_budget: int = 200_000
+    # 일일 토큰 예산 — **전 사용자 합산**(#325, FE #237 §8). 0 이면 무제한. 사용자별
+    # 예산(위)과 별개 축이다 — 사용자별은 "이 사람이 폭주"를, 이건 "전체가 합쳐서 폭주"를
+    # 막는다(다수가 나눠서 조금씩 쓰면 사용자별 상한엔 아무도 안 걸리면서 청구서만 큰
+    # 시나리오가 사용자별 예산만으로는 안 막힌다). 초과 시 `BudgetExceeded` 를 그대로
+    # 재사용해 Tool Executor 가 기존과 똑같이 룰 폴백으로 내린다(#325 팀 결정 — 회복은
+    # 이미 검증된 룰 엔진, 계획·만다라도 폴백이 있으므로 전체 상한도 조용히 처리).
+    #
+    # 2,000,000 인 이유: 사용자별 상한(200k)의 10배 — 초대코드 30명 상한(#324) 아래에서
+    # "10명이 동시에 개인 상한까지 꽉 채워 쓰는 날"에 걸리는 값이다. gemini-3.5-flash-lite
+    # 단가(출력 $2.50/1M)로 최악(전부 출력) 잡아도 하루 $5 수준 — 베타 규모 회로차단기로
+    # 적당하다. 이 값은 팀이 실사용을 보고 조정할 정책 숫자이지 실측으로 고정된 게 아니다.
+    llm_global_daily_token_budget: int = 2_000_000
+    # 비싼 엔드포인트(interview turn/plans generate/mandala generate/recovery proposals)의
+    # **사용자별 일일 호출 횟수** 상한 (#325). 0 이면 무제한. 위 토큰 예산과 다른 축이다 —
+    # 이건 "AI 비용"이 아니라 "이 엔드포인트 자체(오케스트레이션·DB 왕복)를 오늘 몇 번
+    # 실행했는가"를 센다(성공/룰 폴백 무관 — `llm_runs` 행 자체가 신호).
+    #
+    # 20 인 이유: 정상 사용 패턴에서 하루에 계획을 20번 다시 짜거나 인터뷰 턴을 20번 넘게
+    # 부를 일은 없다(1회성 온보딩 흐름 + 가끔의 재계획). 폭주 차단선이지 정상 상한이 아니다
+    # — `llm_daily_grounding_budget` 와 같은 관례.
+    llm_endpoint_daily_call_limit: int = 20
     # 사용자별 **일일 검색 그라운딩 요청** 상한 (#259 §3). 0 이면 무제한(토큰 예산과 동일 관례).
     #
     # 5 인 이유: 그라운딩은 사용자가 버튼을 눌러야 도는 명시적 행위이고(#259 §4.1 ③ 결정),
@@ -193,6 +214,15 @@ class Settings(BaseSettings):
     # 기본 False — 테스트/로컬은 안 돈다(데모는 시드로 커버). ⚠️ in-process 라
     # 다중 인스턴스 배포 시 중복 실행(모든 job idempotent → 안전하나 단일 인스턴스 권장).
     scheduler_enabled: bool = False
+
+    # ── 가입 게이트 (#324, FE #237 §8) ──
+    # False 면 신규 가입(POST /auth/google, 신규 email)을 전부 403 으로 막는다 — 장애·비용
+    # 폭주 시 재배포 없이 끄는 긴급 스위치(toggle-signups.yml, SCHEDULER_ENABLED 와 같은 관례).
+    # 기존 사용자 로그인은 이 값과 무관하게 항상 통과한다.
+    signups_enabled: bool = True
+    # 신규 가입 인원 상한(누적, 초대코드 유효와 별개 조건). Play 첫 공개 30명 원칙(#237).
+    # soft-delete(archived_at) 된 사용자는 세지 않는다 — 나간 자리는 다시 채울 수 있어야 한다.
+    signup_capacity: int = 30
 
     # ── Web Push VAPID (#16/#20) ──
     # 비어있으면 발송이 unconfigured 로 조용히 skip (GEMINI_API_KEY 부재와 같은 degrade).

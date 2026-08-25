@@ -40,6 +40,11 @@ class ErrorCode(StrEnum):
     AUTH_INVALID_ID_TOKEN = "AUTH_INVALID_ID_TOKEN"
     AUTH_INVALID_TOKEN = "AUTH_INVALID_TOKEN"
     AUTH_TOKEN_EXPIRED = "AUTH_TOKEN_EXPIRED"
+    # 가입 게이트(#324) — 신규 가입(신규 email)에만 해당, 기존 사용자 로그인은 겪지 않는다.
+    AUTH_INVALID_INVITE_CODE = "AUTH_INVALID_INVITE_CODE"
+    AUTH_INVITE_CODE_ALREADY_USED = "AUTH_INVITE_CODE_ALREADY_USED"
+    AUTH_SIGNUP_CAPACITY_REACHED = "AUTH_SIGNUP_CAPACITY_REACHED"
+    AUTH_SIGNUPS_DISABLED = "AUTH_SIGNUPS_DISABLED"
 
     # ── Interview (INTERVIEW_) — #3-B ──
     INTERVIEW_SESSION_EXISTS = "INTERVIEW_SESSION_EXISTS"
@@ -131,6 +136,13 @@ class ErrorCode(StrEnum):
     # user_id × agent advisory lock 미획득 (다른 디바이스에서 진행 중). Interview/Planning/Recovery 공용.
     AGENT_CONCURRENT_ACCESS = "AGENT_CONCURRENT_ACCESS"
 
+    # ── Rate Limit (RATE_LIMIT_) — #325 ──
+    # 비싼 엔드포인트(interview turn/plans generate/mandala generate/recovery proposals)의
+    # 사용자별 일일 호출 횟수 상한. 전역 LLM 예산(BudgetExceeded)과는 다른 축이다 — 이건
+    # "AI 가 꺼져서"가 아니라 "이 사람이 이 엔드포인트를 오늘 너무 많이 불러서" 막는 것이라
+    # 룰 폴백으로 조용히 내려주지 않고 명시 거절한다(재시도 시점을 아는 게 사용자에게 낫다).
+    RATE_LIMIT_DAILY_CALLS_EXCEEDED = "RATE_LIMIT_DAILY_CALLS_EXCEEDED"
+
 
 class ApiError(Exception):
     """도메인 코드가 던지는 표준 에러.
@@ -142,6 +154,9 @@ class ApiError(Exception):
         message: 사용자 노출 가능한 한국어 메시지.
         http_status: HTTP 상태 코드 (기본 400).
         field: 입력 검증 에러일 때 해당 필드명.
+        headers: 추가 응답 헤더(예: 429 의 `Retry-After`) — 에러 본문(JSON) 형태(ADR-0002
+            §2.2)는 절대 안 늘린다는 원칙을 지키면서 "언제 풀리는지" 를 표준 HTTP 메커니즘
+            으로 전달하기 위함(#325). 대부분의 에러는 안 쓴다(기본 None).
     """
 
     def __init__(
@@ -151,9 +166,11 @@ class ApiError(Exception):
         *,
         http_status: HTTPStatus | int = HTTPStatus.BAD_REQUEST,
         field: str | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self.code: ErrorCode = code
         self.message = message
         self.http_status = int(http_status)
         self.field = field
+        self.headers = headers
         super().__init__(f"{code.value}: {message}")

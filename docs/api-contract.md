@@ -60,6 +60,7 @@
 | `INBOX_*` | Life Inbox |
 | `FIXED_SCHEDULE_*` | 고정 일정 |
 | `LLM_*` | LLM 호출 (timeout, fallback used 등) |
+| `RATE_LIMIT_*` | 비싼 엔드포인트 사용량 상한 (§1.10, #325) |
 | `AGENT_*` | Agent 동시성 (advisory lock 미획득 등, ADR-0005 §7.6) |
 | `IDEMPOTENCY_*` | 멱등 키 충돌 |
 | `COMMON_*` | 공통 (검증 실패·미구현·내부 오류) |
@@ -103,16 +104,46 @@ body 해시가 같아 mismatch 409 로도 안 걸러지고, 다른 사용자의 
 - 응답 도메인 객체 필드는 **camelCase** (`goalId`, `ambiguityScore`, `weekStart` …)
 - `ErrorResponse`(§1.3) · `HealthResponse`(§17) 등 공통 메타 응답은 정의된 필드명을 그대로 사용 (`server_time` 등)
 
+### 1.10 LLM 비용/사용량 상한 (#325)
+
+두 축이 서로 다른 문제를 막는다 — 헷갈리지 말 것:
+
+- **전역 일일 토큰 예산**(`LLM_GLOBAL_DAILY_TOKEN_BUDGET`) — 전 사용자 합산 토큰이 한도를
+  넘으면, 그 시점부터 신규 LLM 호출은 **조용히 룰 기반 폴백으로 전환**된다(200 OK,
+  `aiSource="rule"`). 인터뷰·계획·만다라트·회복 **전부** 이 동작 — 명시적 에러를 내지
+  않는다. 이미 모든 Draft 응답에 `isDraft`+`aiSource` 가 실려 있어(Draft Layer) FE 가
+  "이번 결과는 AI 가 아니라 룰로 나왔다"를 판별할 수 있으므로 별도 신호가 불필요하다.
+- **엔드포인트별 사용자 일일 호출 횟수 상한**(`LLM_ENDPOINT_DAILY_CALL_LIMIT`, 대상:
+  인터뷰/계획·만다라트/회복) — 이건 폴백으로 대신하지 않는다. 한 사용자가 같은 기능을
+  하루에 너무 많이 눌러 반복 재생성하는 상황을 막는 것이라, 요청 자체를 **429
+  `RATE_LIMIT_DAILY_CALLS_EXCEEDED`** 로 명시 거절한다. 응답에 `Retry-After`
+  헤더(초, 다음 KST 자정까지 남은 시간)를 싣는다 — FE 는 이 값으로 "언제 다시 가능한지"
+  안내한다. 두 한도 모두 0 이면 무제한.
+
 ---
 
 ## 2. Auth (`/auth`)
 
 | Method | Path | 설명 |
 | --- | --- | --- |
-| POST | `/auth/google` | Google id_token → 자체 JWT (access+refresh) 발급 |
+| POST | `/auth/google` | Google id_token → 자체 JWT (access+refresh) 발급. **신규 가입만** 가입 게이트(#324) 대상 |
 | POST | `/auth/refresh` | refresh → 새 access |
 | POST | `/auth/logout` | refresh 무효화 |
 | GET | `/auth/me` | 현재 사용자 (`onboarding_state` 포함) |
+
+**가입 게이트(#324, FE #237 §8)** — `POST /auth/google` 요청에 선택 필드 `inviteCode` 가
+추가된다. **기존 사용자 로그인(요청의 email 이 이미 `users` 에 있음)은 이 게이트를 전혀
+거치지 않는다** — `inviteCode` 를 생략하거나 무효값을 보내도 영향 없다. 신규 가입(새
+email)에만 순서대로 3중 검사가 적용된다:
+
+1. `SIGNUPS_ENABLED=false`(긴급 차단, 재배포 없이 토글) → 403 `AUTH_SIGNUPS_DISABLED`.
+2. 누적 가입 인원이 `SIGNUP_CAPACITY`(기본 30)에 도달 → 403 `AUTH_SIGNUP_CAPACITY_REACHED`.
+3. `inviteCode` 미제공/무효 → 422 `AUTH_INVALID_INVITE_CODE`. 이미 소진된 코드 →
+   409 `AUTH_INVITE_CODE_ALREADY_USED`.
+
+코드는 대소문자·앞뒤 공백 무관하게 정규화해 비교한다. 유효한 코드는 그 가입에서 **1회만**
+소비되며(재사용 불가), `scripts/manage_invite_codes.py` 로 운영자가 미리 발급한다(admin
+API 없음 — 이 레포의 다른 운영 작업과 같은 CLI 스크립트 관례).
 
 ---
 
@@ -197,6 +228,8 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 - 궁극목표 인터뷰(S29, 필수 9슬롯: `ultimate.statement`·`domain`·`horizon`·`measure`·`success_image`·`identity`·`current_position`·`pillars_hint`·`constraints`, 선택 3슬롯: `values`·`assets`·`role_model`)는 계획 인터뷰와 **양방향 이월**된다: 계획 인터뷰의 `identity.*`/`recovery.*` 등은 궁극목표 인터뷰 시작 시드로, 궁극목표 인터뷰의 `ultimate.*` 전량은 계획 인터뷰 시작 시드로 회수된다 — 단 `goals.list` 같은 **다른 슬롯을 자동으로 채우지는 않는다**(그 목표는 사용자가 직접 고른다).
 - 궁극목표 세션 완료는 계획 목표 영속 경로(`materialize_goals`/`supersede_proposed_goals`)를 타지 않는다 — 직전 계획 인터뷰의 잠정 목표가 지워지지 않는다.
 - 구현 상태(#6, #6-B): 엔진+영속화 배선 + 단일 활성 세션(restart-wins, kind 별) + 동시성 lock(kind 별) + 궁극목표 인터뷰(kind="ultimate") 완료. **후속**: 재조립 시 transient 상태(stall_count·used_fallback) 영속. `POST /goals/ultimate`(U1, `UltimateGoalOutcome` → `Goal` 영속)는 `goal_nodes.tree_kind` 도입(§6 후속 PR)과 함께 배선된다.
+- `answers`/`next-question`(LLM 호출) 은 사용자별 일일 호출 상한 대상 — 초과 시 429
+  `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(§1.10, #325).
 
 ---
 
@@ -450,6 +483,8 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
   `PLAN_INVALID_TIME`, 블록 없음 404 `PLAN_BLOCK_NOT_FOUND`. 적용 시 `source='user_edit'`.
 - 정책 판정은 순수 함수 `orchestrator/plan_edit.py`. `no_touch`/`break_min`/freebusy·fixed_schedule
   충돌은 후속. DB 마이그레이션 없음.
+- `generate`/`mandala/subgoals`/`mandala/generate`(LLM 호출) 은 사용자별 일일 호출
+  상한 대상(module="planning" 공유) — 초과 시 429 `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(§1.10, #325).
 
 ---
 
@@ -600,7 +635,11 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   **함께** 회복으로 센다.
 - 에러: `RECOVERY_EXECUTION_NOT_FOUND`(404) / `RECOVERY_NOT_ELIGIBLE`(422) /
   `RECOVERY_NO_PROPOSAL`(422) / `RECOVERY_ATTEMPT_NOT_FOUND`(404) /
-  `RECOVERY_ALREADY_DECIDED`(409) / `RECOVERY_EDIT_NOT_SUPPORTED`(422).
+  `RECOVERY_ALREADY_DECIDED`(409) / `RECOVERY_EDIT_NOT_SUPPORTED`(422) /
+  `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(429, §1.10, #325).
+- `generate` 의 일일 호출 상한(§1.10)은 **신규 카드 생성**에만 적용된다 — pending 카드가
+  있어 캐시를 그대로 반환하는 재호출(새로고침)은 오케스트레이션이 안 일어나므로 상한에
+  안 걸린다(가드가 그 두 short-circuit 뒤, 실제 LLM/룰 생성 직전에 있다).
 
 #20-B 구현 메모 (replan S20):
 - `GET /replan/{executionId}` — 수락한 회복의 일정 변화 프리뷰. 응답 Draft Layer

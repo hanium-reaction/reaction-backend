@@ -82,6 +82,7 @@ from reaction_backend.repositories.scheduled_block_repo import (
 )
 from reaction_backend.repositories.time_policy_repo import TimePolicyRepo, get_time_policy_repo
 from reaction_backend.repositories.user_repo import UserRepo, get_user_repo
+from reaction_backend.safety import endpoint_rate_limit
 from reaction_backend.scheduler.weekly_review_precompute import run_weekly_review_for_user
 from reaction_backend.schemas.common import KST, now_kst, to_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
@@ -376,6 +377,7 @@ async def generate_plan(
 
     동시성 lock(ADR-0005 §7.6): 다중 디바이스 동시 생성으로 인한 state race 방지.
     """
+    await endpoint_rate_limit.enforce(session, user_id=user.id, module="planning")
     outcome = _apply_edited_availability(await _resolve_outcome(body, user.id, repo), user)
     target_date = _resolve_target_date(body.target_date)
     max_plan_weeks = await _max_plan_weeks(session, user.id, outcome)
@@ -987,6 +989,7 @@ async def generate_mandala_subgoals(
 
     사용자가 이 8개를 로컬에서 확인·편집한 뒤 `POST /plans/mandala/generate`(U3) 로 넘긴다.
     """
+    await endpoint_rate_limit.enforce(session, user_id=user.id, module="planning")
     goal = await _load_ultimate_goal(goal_repo, user.id, body.goal_id)
     outcome = await _resolve_ultimate_outcome(repo, user.id)
     subgoals, fell_back = await mandala.generate_subgoals(
@@ -1011,6 +1014,7 @@ async def generate_mandala_draft(
     session: SessionDep,
 ) -> MandalaDraftResponse:
     """Stage B(U3) — 확정된 8축 → 축당 8칸. LLM 1콜, lock 있음, `plan_drafts` 1행(72h)."""
+    await endpoint_rate_limit.enforce(session, user_id=user.id, module="planning")
     goal = await _load_ultimate_goal(goal_repo, user.id, body.goal_id)
     outcome = await _resolve_ultimate_outcome(repo, user.id)
 

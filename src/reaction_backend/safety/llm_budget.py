@@ -177,6 +177,20 @@ async def _used_grounding_today(
     return int(result.scalar_one() or 0)
 
 
+async def _used_tokens_today_global(session: AsyncSession) -> int:
+    """KST 기준 오늘 0시부터 **전 사용자 합산** (tokens_in + tokens_out) — #325.
+
+    `_used_tokens_today(user_id=None)` 과 다르다 — 그건 "system 호출(user_id IS NULL)만"
+    을 뜻하고, 이건 user_id 필터를 아예 안 걸어 **모든 행**(system 포함)을 합산한다.
+    """
+    start_of_day_kst = now_kst().replace(hour=0, minute=0, second=0, microsecond=0)
+    stmt = select(func.coalesce(func.sum(LlmRun.tokens_in + LlmRun.tokens_out), 0)).where(
+        LlmRun.created_at >= start_of_day_kst
+    )
+    result = await session.execute(stmt)
+    return int(result.scalar_one() or 0)
+
+
 async def check_grounding(
     session: AsyncSession,
     *,
@@ -209,11 +223,21 @@ async def check(
     user_id: uuid.UUID | None,
     projected_tokens: int = 0,
 ) -> BudgetStatus:
-    """예산 가드. 한도 초과면 `BudgetExceeded` raise.
+    """예산 가드. 한도 초과면 `BudgetExceeded` raise — **전역 먼저, 그다음 사용자별**(#325).
+
+    순서가 중요하다: 전역 상한을 사용자별보다 먼저 검사해야, 사용자별 예산이 넉넉히
+    남은 사용자라도 "시스템 전체가 오늘 다 썼으면" 똑같이 막힌다(그 반대 순서면 전역
+    상한이 사실상 죽은 코드가 된다 — 사용자별 체크가 항상 먼저 걸릴 테니).
 
     `projected_tokens` 은 이번 호출이 추가로 소비할 것으로 예상하는 토큰
     (보통 prompt 토큰 추정치). 0 이면 단순 잔량 확인.
     """
+    global_limit = get_settings().llm_global_daily_token_budget
+    if global_limit > 0:
+        global_used = await _used_tokens_today_global(session)
+        if global_used + max(projected_tokens, 0) > global_limit:
+            raise BudgetExceeded(used=global_used, limit=global_limit)
+
     limit = get_settings().llm_daily_token_budget
     if limit <= 0:
         return BudgetStatus(used=0, limit=0, remaining=2**31 - 1)

@@ -1,7 +1,7 @@
 """recovery_attempts v3 coping plan fields
 
 Revision ID: c0197d8e48a9
-Revises: cd1196cb65a1
+Revises: e9fb35d3f448
 Create Date: 2026-08-25 20:47:44.937201
 
 근거 대장 §6.2 T2 후속 — S9 T2(#343)에서 사용 중인 `re_engagement_anchor_at` 옆에,
@@ -17,7 +17,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "c0197d8e48a9"
-down_revision: str | Sequence[str] | None = "cd1196cb65a1"
+down_revision: str | Sequence[str] | None = "e9fb35d3f448"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
