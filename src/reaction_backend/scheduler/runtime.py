@@ -11,7 +11,7 @@
 
 시각 기준 = KST. cron 시간표는 `scheduler/README.md`. 등록 대상은 **job 함수가 존재하는 것만**:
 morning_brief / weekly_review / interruption_resolver / expire_drafts / expire_reflections
-/ evening_reflection_notify / pre_card_notify / habit_instances.
+/ evening_reflection_notify / pre_card_notify / morning_brief_notify / habit_instances.
 (anonymize_inactive 는 job 함수 미구현 → 미등록 (#15).
 notification_dispatcher 는 별도 job 이 아니라 발송 게이트로 대체 — ADR-0006 §1.)
 """
@@ -143,6 +143,20 @@ async def _evening_reflection_notify_job() -> None:
         )
 
 
+async def _morning_brief_notify_job() -> None:
+    async for session in _session_scope():
+        await notify_sweeps.run_morning_brief_notify_sweep(
+            now_kst(),
+            user_repo=UserRepo(session),
+            notif_repo=NotificationRepo(session),
+            recovery_repo=RecoveryRepo(session),
+            action_repo=ActionItemRepo(session),
+            send_repo=NotificationSendRepo(session),
+            sender=get_web_push_sender(),
+            session=session,
+        )
+
+
 async def _habit_instances_job() -> None:
     # week_start 는 `GET /today/agenda` 가 읽을 때 쓰는 것과 **같은 함수**로 계산한다 —
     # 생성 쪽과 조회 쪽이 각자 주 경계를 재면 어긋난 주에 행이 생겨 습관이 안 보인다.
@@ -251,6 +265,15 @@ def build_scheduler() -> AsyncIOScheduler:
         _pre_card_notify_job,
         CronTrigger(minute="*/5", timezone=KST),
         id="pre_card_notify",
+        replace_existing=True,
+        misfire_grace_time=60,
+    )
+    # 06~10시 5분 폴 — evening_reflection_notify 와 같은 이유(사용자별 morning_brief_time
+    # 을 분 단위로 존중). T2(근거 대장 §6.2) — 대상 없는 날은 매 폴 즉시 skip 이라 비용 없음.
+    scheduler.add_job(
+        _morning_brief_notify_job,
+        CronTrigger(hour="6-10", minute="*/5", timezone=KST),
+        id="morning_brief_notify",
         replace_existing=True,
         misfire_grace_time=60,
     )

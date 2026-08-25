@@ -164,6 +164,42 @@ class ScheduledBlockRepo:
         result = await self._session.execute(stmt)
         return [(block, action) for block, action in result.all()]
 
+    async def list_stale_scheduled_before(
+        self, user_id: UUID, before_dt: datetime
+    ) -> list[tuple[ScheduledBlock, ActionItem]]:
+        """`before_dt` 이전에 시작했어야 하는데 **한 번도 착수 안 된** 블록 + 그 ActionItem.
+
+        `list_scheduled_between` 과 필터가 같고 시간 방향만 반대다(과거). 재계획이 **밀린 일**을
+        후보로 집기 위한 것 — 아래 셋의 교집합 밖으로 새어나가던 카드를 회수한다.
+
+        | 조회 경로 | 왜 이 카드를 못 보나 |
+        |---|---|
+        | `list_scheduled_between` | `start_at >= 다음 주 월요일` — 과거 블록은 대상 밖 |
+        | `ActionItemRepo.list_planned_without_block` | 이 카드는 **비-cancelled 블록을 갖고 있어** 백로그 정의에서 빠진다 |
+        | `expire_unreflected`(만료 cron) | `execution_events.completion_status='in_progress'` 기준 — **[▶시작] 을 한 번도 안 눌러 execution_event 자체가 없는** 카드는 영원히 안 걸린다 |
+
+        즉 "계획만 세워두고 그냥 안 한" 카드 — **가장 흔한 실패 모드** — 가 재계획 후보에서
+        통째로 사라지고 있었다. 그 카드는 `status='planned'` 인 채 영구히 남아 사용자의 목록만
+        어지럽힌다.
+
+        `source != 'user_edit'` 를 그대로 지키므로 사용자가 직접 옮긴 블록은 여전히 불변이다
+        (#113). 반환 형태를 `list_scheduled_between` 과 맞춰 호출부가 같은 루프로 합류시킨다.
+        """
+        stmt = (
+            select(ScheduledBlock, ActionItem)
+            .join(ActionItem, ScheduledBlock.action_item_id == ActionItem.id)
+            .where(
+                ScheduledBlock.user_id == user_id,
+                ScheduledBlock.block_status == "scheduled",
+                ScheduledBlock.source != "user_edit",
+                ScheduledBlock.start_at < before_dt,
+                ActionItem.archived_at.is_(None),
+            )
+            .order_by(ScheduledBlock.start_at)
+        )
+        result = await self._session.execute(stmt)
+        return [(block, action) for block, action in result.all()]
+
     async def list_committed_between(
         self, user_id: UUID, start_dt: datetime, end_dt: datetime
     ) -> list[ScheduledBlock]:

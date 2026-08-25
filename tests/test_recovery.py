@@ -194,6 +194,113 @@ def test_generate_applies_llm_personalized_text_to_leading_card(
     assert body["aiSource"] == "llm"
 
 
+def test_generate_avoidance_tag_routes_to_v3_and_fills_coping_plan_on_leading_card_only(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """AVOIDANCE 태그 → v3(코핑 플랜 + acknowledgment) 라우팅 (acknowledgment/v3 승격, AVOIDANCE 전용).
+
+    v3 는 v2 와 입력 변수 계약이 같으므로 갈리는 건 `prompt_id`/`schema` 뿐 — 그 둘을
+    실제로 호출부가 넘겼는지 캡처해서 확인한다. 코핑 플랜은 실제로 personalize 된
+    선두 카드에만 실려야 한다 — 형제 카드는 카탈로그 템플릿 그대로라 붙이면 내용이
+    어긋난다(`db/models/recovery_attempt.py` 모듈 주석의 근거).
+    """
+    from reaction_backend.llm import RunResult, aiClient
+    from reaction_backend.schemas.recovery import RecoveryProposalLLMv3
+
+    captured: dict[str, Any] = {}
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        captured["prompt_id"] = kwargs["prompt_id"]
+        captured["schema"] = kwargs["schema"]
+        return RunResult(
+            value=RecoveryProposalLLMv3(
+                strategy_code="downscope",
+                if_clause="책상 앞에 앉으면",
+                then_clause="오늘 배울 표현 하나만 소리 내어 3번 읽어봐요",
+                rationale="시작하는 마음 자체가 무거웠던 것 같아요.",
+                obstacle="소리 내어 읽는 게 괜히 부담스러울 수 있어요",
+                coping_clause="그마저 부담스러우면 오늘은 표현을 눈으로만 한 번 읽어봐요",
+                acknowledgment="누구나 시작이 막막할 때가 있어요",
+                estimated_workload_change_minutes=-20,
+            ),
+            fell_back=False,
+            reason=None,
+            prompt_id="recovery/if_then_proposal",
+            prompt_version="v3",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo,
+        fake_action_item_repo,
+        failure_tags=["AVOIDANCE", "HARD_TO_START"],
+    )
+    body = _generate(client, exec_id).json()
+
+    assert captured["prompt_id"] == "recovery/if_then_proposal@v3"
+    assert captured["schema"] is RecoveryProposalLLMv3
+
+    top = body["cards"][0]
+    assert top["obstacle"] == "소리 내어 읽는 게 괜히 부담스러울 수 있어요"
+    assert top["copingClause"] == "그마저 부담스러우면 오늘은 표현을 눈으로만 한 번 읽어봐요"
+    assert top["acknowledgment"] == "누구나 시작이 막막할 때가 있어요"
+    assert body["aiSource"] == "llm"
+
+    assert len(body["cards"]) >= 2, "최소 2장 보장 — 형제 카드가 있어야 이 단언이 의미 있다"
+    for sibling in body["cards"][1:]:
+        assert sibling["obstacle"] is None
+        assert sibling["copingClause"] is None
+        assert sibling["acknowledgment"] is None
+
+
+def test_generate_non_avoidance_tag_stays_on_v2_without_coping_plan(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """AVOIDANCE 가 없으면 v3 로 새지 않는다 — 여전히 v2, 코핑 플랜 필드는 전부 null."""
+    from reaction_backend.llm import RunResult, aiClient
+    from reaction_backend.schemas.recovery import RecoveryProposalLLM
+
+    captured: dict[str, Any] = {}
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        captured["prompt_id"] = kwargs["prompt_id"]
+        captured["schema"] = kwargs["schema"]
+        return RunResult(
+            value=RecoveryProposalLLM(
+                strategy_code="downscope",
+                if_clause="책상에 앉으면",
+                then_clause="핵심 2문제만 풀어봐요",
+                rationale="",
+            ),
+            fell_back=False,
+            reason=None,
+            prompt_id="recovery/if_then_proposal",
+            prompt_version="v2",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["HARD_TO_START"]
+    )
+    body = _generate(client, exec_id).json()
+
+    assert captured["prompt_id"] == "recovery/if_then_proposal@v2"
+    assert captured["schema"] is RecoveryProposalLLM
+
+    for card in body["cards"]:
+        assert card["obstacle"] is None
+        assert card["copingClause"] is None
+        assert card["acknowledgment"] is None
+
+
 def test_generate_forces_environment_shift_lead_and_skips_llm_at_l2(
     client: TestClient,
     fake_recovery_repo: FakeRecoveryRepo,
@@ -371,9 +478,10 @@ def test_generate_stamps_prompt_version_on_created_attempts(
     """P4 — 생성 배치가 쓴 프롬프트 버전이 attempt 에 남는다.
 
     `GEMINI_API_KEY` 가 없어 룰 fallback 으로 빠지지만, 프롬프트 렌더는 provider 호출보다
-    먼저 일어난다(tool_executor.py) — `_PROMPT_ID`("recovery/if_then_proposal@v2")가
-    fallback 경로에서도 정상 해석돼 버전 "2" 가 채워져야 한다. 카드 여러 장이 한 배치에서
-    나오므로(선두 카드만 실제 personalize) `llm_fallback_used` 와 같은 범위로 전부 동일.
+    먼저 일어난다(tool_executor.py) — AMBIGUITY 는 AVOIDANCE 가 아니라 `_PROMPT_ID_V2`
+    ("recovery/if_then_proposal@v2")로 라우팅되고, fallback 경로에서도 정상 해석돼
+    버전 "2" 가 채워져야 한다. 카드 여러 장이 한 배치에서 나오므로(선두 카드만 실제
+    personalize) `llm_fallback_used` 와 같은 범위로 전부 동일.
     """
     exec_id = _seed_failed_execution(
         fake_recovery_repo, fake_action_item_repo, failure_tags=["AMBIGUITY"]

@@ -19,6 +19,7 @@ from reaction_backend.orchestrator.weekly_review import (
     RecoveryStat,
     compute_weekly_kpis,
 )
+from reaction_backend.repositories.review_repo import TopFailureContext
 from reaction_backend.scheduler.weekly_review_precompute import (
     run_weekly_review_for_user,
     week_start_of,
@@ -332,6 +333,48 @@ def test_get_weekly_next_cycle_proposals_field_present_and_empty(client: TestCli
     resp = _get(client, WEEK.isoformat())
     assert resp.status_code == 200
     assert resp.json()["nextCycleProposals"] == []
+
+
+# ────── GET /reviews/weekly — 실패 사유 상위 3개 (BCT 2.3, 근거 A5, #301) ──────
+
+
+def test_get_weekly_top_failure_contexts_field_present_and_empty(client: TestClient) -> None:
+    """실패 태그가 하나도 없으면(seed 없음) 빈 배열 — FE 는 이때 섹션을 렌더하지 않는다."""
+    resp = _get(client, WEEK.isoformat())
+    assert resp.status_code == 200
+    assert resp.json()["topFailureContexts"] == []
+
+
+def test_get_weekly_top_failure_contexts_from_repo(
+    client: TestClient, fake_review_repo: FakeReviewRepo
+) -> None:
+    """repo 가 반환한 상위 3개가 camelCase 로 그대로 응답에 실린다."""
+    fake_review_repo.seed_top_failure_context(
+        TopFailureContext(tag_code="AMBIGUITY", label_ko="모호함", count=4, share=0.4)
+    )
+    fake_review_repo.seed_top_failure_context(
+        TopFailureContext(tag_code="FATIGUE", label_ko="피로", count=3, share=0.3)
+    )
+    resp = _get(client, WEEK.isoformat())
+    assert resp.status_code == 200
+    assert resp.json()["topFailureContexts"] == [
+        {"tagCode": "AMBIGUITY", "labelKo": "모호함", "count": 4, "share": 0.4},
+        {"tagCode": "FATIGUE", "labelKo": "피로", "count": 3, "share": 0.3},
+    ]
+
+
+def test_generate_weekly_review_includes_top_failure_contexts(
+    client: TestClient, fake_review_repo: FakeReviewRepo
+) -> None:
+    fake_review_repo.seed_execution(_exec("done", "study", 0, 9))
+    fake_review_repo.seed_top_failure_context(
+        TopFailureContext(tag_code="OVERRUN", label_ko="시간 초과", count=1, share=1.0)
+    )
+    resp = client.post("/reviews/weekly/generate", json={"weekStart": WEEK.isoformat()})
+    assert resp.status_code == 200
+    assert resp.json()["topFailureContexts"] == [
+        {"tagCode": "OVERRUN", "labelKo": "시간 초과", "count": 1, "share": 1.0}
+    ]
 
 
 # ────── GET /reviews/weekly — 손 못 댄 축 제안 (ADR-0008 §6, §8 "H") ──────

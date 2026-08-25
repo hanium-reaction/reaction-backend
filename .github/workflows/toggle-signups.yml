@@ -1,0 +1,88 @@
+name: Toggle SIGNUPS_ENABLED (EC2)
+
+# 라이브 EC2 의 `.env` 에서 SIGNUPS_ENABLED 를 켜고/끄고 앱을 재기동한다 (#324, FE #237 §8).
+#
+# `toggle-scheduler.yml` 과 완전히 같은 구조/이유(deploy.yml 이 `.env` 를 rsync 제외하므로
+# 이 값은 레포에서 못 켠다 — 워크플로가 버전 관리·감사 로그·즉시 롤백을 제공한다).
+#
+# SCHEDULER_ENABLED 와 다른 점: 이 값은 부팅 시 1회 읽는 게 아니라 매 `POST /auth/google`
+# 요청마다 읽힌다(`get_settings()`, lru_cache 라 재기동 없이는 갱신되지 않는다 — 그래서
+# 이 워크플로도 재기동을 한다). 켜도/꺼도 기존 로그인엔 영향이 없다 — 신규 가입만 막힌다.
+#
+# 안전:
+# - workflow_dispatch 전용 (push/PR 로는 절대 트리거되지 않음)
+# - `.env` 전체를 로그에 출력하지 않는다 — SIGNUPS_ENABLED 한 줄만
+# - 재기동 후 health check 실패 시 job 실패 → 이상을 즉시 알 수 있다
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "enable(가입 재개) 또는 disable(긴급 차단)"
+        type: choice
+        options:
+          - enable
+          - disable
+        default: enable
+
+concurrency:
+  # deploy/toggle-scheduler 와 같은 앱 디렉터리·서비스를 건드리므로 직렬화.
+  group: deploy-ec2
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  toggle:
+    name: "toggle (${{ inputs.mode }})"
+    runs-on: [self-hosted, ec2, reaction-backend]
+    timeout-minutes: 10
+
+    env:
+      APP_DIR: /home/ubuntu/reaction-backend
+
+    steps:
+      - name: Set SIGNUPS_ENABLED
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          VALUE=$([ "${{ inputs.mode }}" = "enable" ] && echo true || echo false)
+
+          # 이 파일만 grep 한다 — .env 전체를 절대 출력하지 않는다(비밀값 유출).
+          echo "before: $(grep '^SIGNUPS_ENABLED=' .env || echo '(설정 없음 → 기본 true)')"
+
+          if grep -q '^SIGNUPS_ENABLED=' .env; then
+            sed -i "s/^SIGNUPS_ENABLED=.*/SIGNUPS_ENABLED=${VALUE}/" .env
+          else
+            printf '\nSIGNUPS_ENABLED=%s\n' "${VALUE}" >> .env
+          fi
+
+          echo "after : $(grep '^SIGNUPS_ENABLED=' .env)"
+
+      - name: Restart app
+        run: sudo systemctl restart reaction-backend
+
+      - name: Health check
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://127.0.0.1:8000/health -o /tmp/health.json; then
+              if grep -q '"status":"ok"' /tmp/health.json; then
+                echo "healthy:"; cat /tmp/health.json; exit 0
+              fi
+            fi
+            sleep 2
+          done
+          echo "::error::health check failed after restart"
+          exit 1
+
+      - name: Summary
+        if: always()
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          {
+            echo "### Toggle SIGNUPS_ENABLED — ${{ inputs.mode }}"
+            echo '```'
+            grep '^SIGNUPS_ENABLED=' .env || echo '(설정 없음)'
+            echo '```'
+            echo "disable 이면 신규 가입만 403 AUTH_SIGNUPS_DISABLED 로 막힌다 — 기존 로그인은 영향 없음."
+            echo "롤백: 같은 워크플로를 mode=disable 로 재실행."
+          } >> "$GITHUB_STEP_SUMMARY"

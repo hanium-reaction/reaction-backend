@@ -1040,6 +1040,12 @@ def context_from_outcome(
     # 재분해(replan) 시 first_plan.decompose_goal 이 직전 리뷰 피드백으로 채운다.
     prompt_vars: dict[str, str] = {
         "goal_title": heaviest.title,
+        # 사용자 맥락(학년/시기·학기·전공) — 단계의 난이도·표현을 맞추는 데만 쓴다.
+        # 분량은 weekly_hours/sessions_per_week 가 정한다(프롬프트가 그렇게 못 박는다).
+        "identity": _identity_line(outcome),
+        # 마감까지 이 목표에 쓸 수 있는 **총 시간** — 마일스톤 크기의 상한 (ADR-0007 §11).
+        # `horizon_weeks`(4주 캡)와 달리 **자르지 않은** 마감까지 전체를 쓴다.
+        "total_capacity": _total_capacity(outcome, target_date),
         "why_now": heaviest.why_now or "",
         # 완료 기준(DoD) — 인터뷰가 goals.success_image 로 이미 수집하나 그동안 decompose 에
         # 안 실려 버려졌다. 분해가 '무엇을 달성하면 끝인지' 를 알아야 leaf 가 목표에 정렬된다(#B).
@@ -1091,6 +1097,60 @@ def context_from_outcome(
         "horizon": outcome.horizon,
         "unresolved_slots": list(outcome.unresolved_slots),
     }
+
+
+def full_horizon_weeks(target_date: date | None, horizon: str | None) -> int | None:
+    """target_date ~ 마감까지의 **실제** 주 수. 마감이 없거나 계산 불가면 None.
+
+    `_horizon_weeks` 와 다르다 — 그쪽은 `_MAX_PLAN_WEEKS`(4)로 **자른** 값이라 "이번 구간이
+    몇 주인가" 를 답한다. 마일스톤은 그 구간이 아니라 **마감까지 전체**를 덮는 뼈대라
+    (ADR-0007 §1), 크기를 가늠하려면 자르지 않은 값이 필요하다.
+    """
+    if not horizon or target_date is None:
+        return None
+    try:
+        deadline = date.fromisoformat(horizon)
+    except ValueError:
+        return None
+    return max(1, -(-max((deadline - target_date).days, 0) // 7))
+
+
+def _identity_line(outcome: InterviewOutcome) -> str:
+    """사용자 맥락 한 줄 — 학년/시기·학기·전공 (`identity.*` 슬롯).
+
+    이 슬롯들은 인터뷰가 **필수로 묻는데** 그동안 어느 프롬프트에도 실리지 않아, 요약 카드
+    headline 문자열 말고는 쓰이는 곳이 없었다(#audit 이 같은 이유로 time.fixed_blocks·
+    no_touch·constraints.* 를 걷어냈는데 identity 만 남아 있었다). 학기 중이냐 방학이냐는
+    실제 가용 시간에 직결되는 신호라, 걷어내는 대신 **쓰는 쪽**을 택한다.
+
+    분량 산정에는 쓰지 않는다 — 그건 `weekly_hours`·`sessions_per_week` 가 정한다(프롬프트가
+    그렇게 못 박는다). 여기서 오는 건 단계의 난이도·표현을 맞추는 맥락뿐이다.
+    """
+    i = outcome.identity
+    parts = [p for p in (i.role, i.season, i.major) if p and p != "미상"]
+    return " · ".join(parts) if parts else "(미입력)"
+
+
+def _total_capacity(outcome: InterviewOutcome, target_date: date | None) -> str:
+    """마감까지 이 목표에 쓸 수 있는 **총 시간** — 마일스톤 크기의 상한 (ADR-0007 §11).
+
+    마일스톤 프롬프트는 그동안 마감(`horizon`)만 받고 **주당 가용 시간을 받지 않았다.**
+    그래서 "석 달 안에 주 3시간" 인 사용자에게 물리적으로 불가능한 분량의 뼈대가 나올 수
+    있었고, 그 뼈대가 영속되면(PR-2) 주기가 아무리 돌아도 끝나지 않는다.
+
+    마감이 없으면 총량이라는 개념 자체가 없다 — 리듬형 목표는 마일스톤을 만들지 않는 게
+    맞다(ADR-0007 §12). 그 판단을 프롬프트가 할 수 있도록 사실을 그대로 알린다.
+    """
+    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    hours = heaviest.weekly_hours
+    weeks = full_horizon_weeks(target_date, outcome.horizon)
+    if weeks is None:
+        return (
+            "마감이 없어 총량이 정해지지 않는다 — 끝이 있는 목표가 아니라 계속 이어지는 리듬이다."
+        )
+    if not hours or hours <= 0:
+        return f"마감까지 약 {weeks}주 (주당 가용 시간 미입력)"
+    return f"약 {hours * weeks}시간 = 주 {hours}시간 × 마감까지 {weeks}주"
 
 
 def _window_coverage(target_date: date | None, horizon: str | None, horizon_weeks: int) -> str:

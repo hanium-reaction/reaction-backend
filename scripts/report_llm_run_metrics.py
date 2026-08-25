@@ -9,6 +9,11 @@
 데이터 출처는 `llm_runs`(이미 존재) 하나뿐이고, 이 스크립트는 그 위에서 **집계만** 한다.
 신규 테이블도, 쓰기도 없다.
 
+부차적으로 #325("비용 사용량을 볼 수 있는 방법")의 관측 창구도 겸한다 — `_print_today_budget_status`
+가 오늘(KST) 누적 토큰/호출 수를 `LLM_GLOBAL_DAILY_TOKEN_BUDGET`/`LLM_ENDPOINT_DAILY_CALL_LIMIT`
+과 나란히 보여준다(별도 스크립트를 새로 만들지 않았다 — 같은 `llm_runs` 위의 같은 종류의
+집계라 여기 얹는 쪽이 두 곳에서 따로 유지하는 것보다 낫다).
+
 ## fallback 원인 분해 — 계획서의 "3분해"와 실제 `reason` 코드의 대응
 
 계획서 §2 L1-4 는 "timeout / 형식검증 실패 / 톤게이트 거부" 3분해를 요구하며 이를 위해
@@ -49,12 +54,14 @@ S6 톤·구조 게이트 구현) — reason 컬럼이 이미 이 3분해를 포�
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections import Counter, defaultdict
 from typing import NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from reaction_backend.config import get_settings
 from reaction_backend.db.models.llm_run import LlmRun
 from reaction_backend.db.session import get_sessionmaker
 from reaction_backend.schemas.common import now_kst, to_kst
@@ -186,10 +193,65 @@ def _print_summary(label: str, s: Summary) -> None:
             print(f"    {reason:15s} {n:4d}건 ({pct:.1%} of fallback) — {planned}")
 
 
+class TodayRow(NamedTuple):
+    """오늘(KST) 사용량 대 #325 상한 대조용 — 집계에 필요한 컬럼만."""
+
+    user_id: uuid.UUID | None
+    module: str
+    tokens_in: int
+    tokens_out: int
+
+
+async def _fetch_today_rows(session: AsyncSession) -> list[TodayRow]:
+    start_of_day_kst = now_kst().replace(hour=0, minute=0, second=0, microsecond=0)
+    stmt = select(LlmRun.user_id, LlmRun.module, LlmRun.tokens_in, LlmRun.tokens_out).where(
+        LlmRun.created_at >= start_of_day_kst
+    )
+    rows = (await session.execute(stmt)).all()
+    return [TodayRow(*r) for r in rows]
+
+
+def _print_today_budget_status(rows: list[TodayRow]) -> None:
+    """오늘 누적 사용량을 #325 상한과 나란히 보여준다 — 한도에 얼마나 가까운지."""
+    settings = get_settings()
+    print("■ 오늘(KST) 사용량 vs 상한 (#325)")
+
+    global_used = sum(r.tokens_in + r.tokens_out for r in rows)
+    global_limit = settings.llm_global_daily_token_budget
+    if global_limit > 0:
+        print(f"  전역 토큰 {global_used:,} / {global_limit:,} ({global_used / global_limit:.1%})")
+    else:
+        print(f"  전역 토큰 {global_used:,} (LLM_GLOBAL_DAILY_TOKEN_BUDGET=0, 무제한)")
+
+    call_limit = settings.llm_endpoint_daily_call_limit
+    if call_limit <= 0:
+        print("  엔드포인트 호출 한도 없음(LLM_ENDPOINT_DAILY_CALL_LIMIT=0)")
+        print()
+        return
+
+    counts: Counter[tuple[uuid.UUID, str]] = Counter(
+        (r.user_id, r.module) for r in rows if r.user_id is not None
+    )
+    near_limit = [(u, m, n) for (u, m), n in counts.items() if n >= call_limit * 0.5]
+    if not near_limit:
+        print(f"  호출 한도({call_limit}/일)의 절반 이상 사용한 사용자 없음")
+        print()
+        return
+
+    print(f"  호출 한도({call_limit}/일)의 절반 이상 사용한 사용자×모듈:")
+    for user_id, module, n in sorted(near_limit, key=lambda t: -t[2]):
+        flag = " ⚠️ 상한 도달(429 발생 중)" if n >= call_limit else ""
+        print(f"    {user_id} × {module}: {n}건{flag}")
+    print()
+
+
 async def _preview(session: AsyncSession) -> None:
     print(f"기준 시각: {now_kst().isoformat()}")
     print("분모: llm_runs 전체 행(module 무관). 신규 컬럼·백필 없음 — 있는 데이터만 집계.")
     print()
+
+    today_rows = await _fetch_today_rows(session)
+    _print_today_budget_status(today_rows)
 
     rows = await _fetch_runs(session)
     if not rows:

@@ -42,6 +42,11 @@ class AgendaCard(CamelModel):
     # 규칙을 복제하면 규칙이 바뀔 때 조용히 어긋난다(FE #196·#200 에서 겪은 드리프트).
     # 특히 '실행 이력 없음' 은 FE 가 받는 필드로는 계산할 수 없다.
     cancellable: bool
+    # T1 미체크 배지를 그릴지 FE 가 판단할 근거 (근거 대장 §6.2, reaction-frontend#224).
+    # **파생 필드** — 블록 시작 +20분이 지났는데 아직 [▶ 시작] 을 안 눌렀는가
+    # (`domain/missed_check_in.py`). push 가 아니라 인앱 배지용 신호다 — 배지를 몇 번
+    # 보여줄지·언제 지울지는 FE 책임, 서버는 "지금 미체크인가"만 알려준다.
+    missed_check_in: bool
 
 
 class AgendaHabit(CamelModel):

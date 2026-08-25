@@ -175,6 +175,43 @@ def test_decompose_prompt_keeps_milestone_and_grounding_contract() -> None:
         assert f"{{{{{var}}}}}" in body, f"{var} 가 분해 프롬프트에서 사라졌다."
 
 
+def test_milestone_prompt_is_bounded_by_total_capacity() -> None:
+    """마일스톤 프롬프트가 **마감까지 쓸 수 있는 총 시간**을 받아서 그 안에 끊는다 (ADR-0007 §11).
+
+    회귀 배경: 이 프롬프트는 마감(`horizon`)만 받고 **주당 가용 시간을 받지 않았다.** 그래서
+    "석 달 안에 주 3시간" 인 사용자에게 물리적으로 담기지 않는 뼈대가 나올 수 있었다.
+    마일스톤은 한 주기짜리가 아니라 **마감까지 계속 쓰이는 뼈대**라(ADR-0007 §1), 그 크기가
+    틀리면 사용자가 아무리 성실히 해도 목표가 끝나지 않는다.
+
+    `total_capacity` 는 4주로 자른 `horizon_weeks` 가 아니라 **마감까지 전체**로 계산된다
+    (`full_horizon_weeks`) — 뼈대가 덮는 범위가 그거라서다.
+    """
+    body = registry.get("planning/plan_milestones").body
+    assert "{{total_capacity}}" in body, (
+        "마일스톤 프롬프트가 총 가용 시간을 받지 않는다 — 담기지 않는 뼈대가 영속된다."
+    )
+    assert "총량 안에 담아라" in body, "총량 제약 규칙이 사라졌다."
+
+
+def test_identity_reaches_planning_prompts_without_driving_volume() -> None:
+    """`identity.*` 가 계획 프롬프트에 실리되 **분량을 좌우하지 않는다**.
+
+    인터뷰가 학년/시기·학기를 **필수로 묻는데** 어느 프롬프트에도 실리지 않아, 요약 카드
+    headline 말고는 쓰이는 곳이 없었다(#audit 이 같은 이유로 `time.fixed_blocks`·`no_touch`·
+    `constraints.*` 를 걷어냈는데 identity 만 남아 있었다). 걷어내는 대신 쓰는 쪽을 택했다.
+
+    다만 분량은 `weekly_hours`·`sessions_per_week`·`total_capacity` 가 정한다 — LLM 이
+    "학기 중이니 적게" 로 사용자가 말한 값을 덮으면 `plan_quality` v1 이 세션 길이를 반토막
+    냈던 것과 같은 사고가 된다. 두 프롬프트 모두 그 경계를 명시적으로 못 박는지 확인한다.
+    """
+    for prompt_id in ("planning/goal_decompose", "planning/plan_milestones"):
+        body = registry.get(prompt_id).body
+        assert "{{identity}}" in body, f"{prompt_id} 가 사용자 맥락을 받지 않는다"
+        assert "난이도·표현을 맞추는 데만" in body, (
+            f"{prompt_id} 에서 '분량을 좌우하지 않는다' 경계가 사라졌다"
+        )
+
+
 def test_review_prompt_defers_to_user_session_length() -> None:
     """검토 프롬프트가 **사용자가 말한 집중 길이**를 받아서 본다.
 

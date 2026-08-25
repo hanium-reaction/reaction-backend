@@ -11,9 +11,14 @@ from reaction_backend.schemas.common import CamelModel
 
 
 class GoogleLoginRequest(CamelModel):
-    """POST /auth/google 요청 — Google id_token."""
+    """POST /auth/google 요청 — Google id_token (+ 신규 가입만 `inviteCode` 필요, #324)."""
 
     id_token: str = Field(min_length=1, description="Google OAuth id_token")
+    invite_code: str | None = Field(
+        default=None,
+        max_length=32,
+        description="신규 가입에만 필요. 기존 사용자 로그인은 무시된다.",
+    )
 
 
 class RefreshRequest(CamelModel):

@@ -9,12 +9,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import ActionItem
@@ -30,6 +31,41 @@ from reaction_backend.orchestrator.weekly_review import (
     RecoveryStat,
     WeeklyKpi,
 )
+
+
+@dataclass(frozen=True)
+class TopFailureContext:
+    """실패 사유 상위 3개(태그별 건수/비중) — #301, 근거 대장 §7.3 SQL#4 파생."""
+
+    tag_code: str
+    label_ko: str
+    count: int
+    share: float
+
+
+# 근거 대장 §7.3 SQL#4(`tests/test_recovery_evidence_sql.py::_TOP_FAILURE_CONTEXTS_SQL`)에서
+# 파생 — WHERE/GROUP BY/LIMIT 의 집계 동작(윈도우 함수 분모가 LIMIT 이전이라 상위 3개
+# share 합이 1.0 이 아닐 수 있음)은 그대로 두고, `failure_reason_tags` 를 조인해 `label_ko`
+# 를 함께 뽑는다 — FE 가 `/reflection/failure-tags` 라벨과 이중 관리하지 않도록 마스터
+# 테이블을 단일 소스로 쓴다(#301 요청). `modal_hour_kst` 는 API 계약에 없어 뺐다.
+#
+# 평가 문서의 원문(SQL#4)은 한 글자도 안 고쳤다는 게 그 파일의 핀 테스트 의미라 그 파일은
+# 건드리지 않는다 — 이 프로덕션 버전은 `tests/test_review_repo_sql.py` 가 실 DB 로 별도 검증.
+_TOP_FAILURE_CONTEXTS_SQL = text("""
+    SELECT t.tag_code,
+           frt.label_ko                                        AS label_ko,
+           count(*)                                            AS n,
+           round(count(*)::numeric / sum(count(*)) OVER (), 4) AS share
+    FROM   execution_events       e
+    JOIN   execution_failure_tags t   ON t.execution_id = e.id
+    JOIN   failure_reason_tags    frt ON frt.tag_code = t.tag_code
+    WHERE  e.user_id = :user_id
+      AND  e.completion_status IN ('failed','partial_done')
+      AND  (e.plan_start_at AT TIME ZONE 'Asia/Seoul')::date BETWEEN (:d0)::date - 27 AND :d1
+    GROUP  BY t.tag_code, frt.label_ko
+    ORDER  BY n DESC
+    LIMIT  3
+""")
 
 
 class ReviewRepo:
@@ -145,6 +181,27 @@ class ReviewRepo:
         )
         result = await self._session.execute(stmt)
         return [RecoveryStat(recovery_duration_minutes=m) for m in result.scalars().all()]
+
+    async def get_top_failure_contexts(
+        self, user_id: UUID, d0: date, d1: date
+    ) -> list[TopFailureContext]:
+        """[d0-27, d1] 28일 창의 실패/부분완료 실행 중 실패 사유 상위 3개 (근거 A5, #301).
+
+        `share` 는 LIMIT 이전(태그 전체)을 분모로 하는 비중이라, 반환된 3건의 share 합이
+        1.0 이 아닐 수 있다(태그가 4개 이상이면) — SQL#4 원문의 의도된 동작.
+        """
+        result = await self._session.execute(
+            _TOP_FAILURE_CONTEXTS_SQL, {"user_id": user_id, "d0": d0, "d1": d1}
+        )
+        return [
+            TopFailureContext(
+                tag_code=row.tag_code,
+                label_ko=row.label_ko,
+                count=row.n,
+                share=float(row.share),
+            )
+            for row in result.all()
+        ]
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_db)]

@@ -222,6 +222,89 @@ def test_generate_wires_replaces_id_and_backlog(
     assert by_action[f"action_{action_b.id}"]["replacesBlockId"] is None
 
 
+def test_generate_picks_up_stale_never_started_card(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+) -> None:
+    """**핵심 회귀 테스트.** 시작 시각이 지났는데 한 번도 착수 안 된 카드가 재계획에 잡힌다.
+
+    이 카드는 세 조회 어디에도 안 걸리던 구멍이었다:
+    - `list_scheduled_between` → `start_at >= 다음 주 월요일` 이라 과거 블록은 대상 밖
+    - `list_planned_without_block` → 비-cancelled 블록을 갖고 있어 백로그 정의에서 빠짐
+    - `expire_unreflected` cron → execution_events 기준이라 [▶시작] 안 한 카드는 영원히 안 걸림
+
+    즉 "계획만 세워두고 그냥 안 한" 가장 흔한 실패 모드의 카드가 재계획에서 통째로 사라졌다.
+    """
+    _freeze_now(monkeypatch)  # 2026-07-09(목) 12:00
+    stale = _seed_action(fake_action_item_repo, title="밀린 카드", target=date(2026, 7, 6))
+    old = _seed_block(
+        fake_scheduled_block_repo,
+        action_id=stale.id,
+        start=_kst(2026, 7, 6, 10, 0),  # 3일 전 — 한 번도 착수 안 함(status='scheduled')
+        end=_kst(2026, 7, 6, 10, 30),
+    )
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+
+    by_action = {b["actionId"]: b for b in body["blocks"]}
+    assert f"action_{stale.id}" in by_action, "밀린 카드가 재계획 후보에 잡혀야 한다"
+    # 밀린 옛 블록이 '교체 대상'으로 실려야 승인 때 취소되고 새 블록으로 대체된다.
+    # (payload 의 oldBlocks 는 응답에 노출되지 않으므로 replacesBlockId 로 확인한다.)
+    assert by_action[f"action_{stale.id}"]["replacesBlockId"] == f"block_{old.id}"
+    # 새 블록은 재배치 창(다음 주 월요일 이후)에 놓인다 — 과거에 다시 배치하지 않는다.
+    assert by_action[f"action_{stale.id}"]["start"][:10] >= WINDOW_START.isoformat()
+
+
+def test_generate_stale_card_started_is_left_alone(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+) -> None:
+    """과거 블록이라도 **착수한** 것은 건드리지 않는다 — 기존 불변 규칙이 밀린 일 회수보다 우선."""
+    _freeze_now(monkeypatch)
+    started = _seed_action(fake_action_item_repo, title="착수함", target=date(2026, 7, 6))
+    _seed_block(
+        fake_scheduled_block_repo,
+        action_id=started.id,
+        start=_kst(2026, 7, 6, 10, 0),
+        end=_kst(2026, 7, 6, 10, 30),
+        status="started",
+    )
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    by_action = {b["actionId"] for b in resp.json()["blocks"]}
+    assert f"action_{started.id}" not in by_action
+
+
+def test_generate_stale_user_edit_block_is_preserved(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+) -> None:
+    """사용자가 직접 옮긴 과거 블록도 불변(#113) — 밀린 일 회수가 이 원칙을 뚫지 않는다."""
+    _freeze_now(monkeypatch)
+    moved = _seed_action(fake_action_item_repo, title="직접 옮김", target=date(2026, 7, 6))
+    _seed_block(
+        fake_scheduled_block_repo,
+        action_id=moved.id,
+        start=_kst(2026, 7, 6, 10, 0),
+        end=_kst(2026, 7, 6, 10, 30),
+        source="user_edit",
+    )
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    by_action = {b["actionId"] for b in resp.json()["blocks"]}
+    assert f"action_{moved.id}" not in by_action
+
+
 def test_generate_backlog_only_spreads_over_week_not_one_day(
     monkeypatch: Any,
     client: TestClient,

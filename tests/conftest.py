@@ -36,6 +36,7 @@ from reaction_backend.db.models.interaction_style import InteractionStyle
 from reaction_backend.db.models.interruption_event import InterruptionEvent
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionModel
 from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
+from reaction_backend.db.models.invite_code import InviteCode
 from reaction_backend.db.models.notification_send import NotificationSend
 from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.period_summary import PeriodSummary
@@ -60,6 +61,7 @@ from reaction_backend.repositories.habit_instance_repo import get_habit_instance
 from reaction_backend.repositories.habit_repo import get_habit_repo
 from reaction_backend.repositories.inbox_repo import get_inbox_repo
 from reaction_backend.repositories.interview_repo import get_interview_repo
+from reaction_backend.repositories.invite_code_repo import get_invite_code_repo, normalize_code
 from reaction_backend.repositories.notification_repo import get_notification_repo
 from reaction_backend.repositories.notification_send_repo import get_notification_send_repo
 from reaction_backend.repositories.plan_draft_repo import get_plan_draft_repo
@@ -67,11 +69,11 @@ from reaction_backend.repositories.policy_snapshot_repo import get_policy_snapsh
 from reaction_backend.repositories.privacy_repo import get_privacy_repo
 from reaction_backend.repositories.profile_repo import get_profile_repo
 from reaction_backend.repositories.recovery_repo import get_recovery_repo
-from reaction_backend.repositories.review_repo import get_review_repo
+from reaction_backend.repositories.review_repo import TopFailureContext, get_review_repo
 from reaction_backend.repositories.scheduled_block_repo import get_scheduled_block_repo
 from reaction_backend.repositories.time_policy_repo import get_time_policy_repo
 from reaction_backend.repositories.user_repo import GoogleProfile, get_user_repo
-from reaction_backend.schemas.common import now_kst
+from reaction_backend.schemas.common import KST, now_kst
 
 DEMO_USER_UUID = UUID("11111111-1111-4111-8111-111111111111")
 
@@ -1230,6 +1232,17 @@ class FakeRecoveryRepo:
             if a.user_id == user_id and a.execution_id == execution_id
         ]
 
+    async def list_due_re_engagement(
+        self, user_id: UUID, target_date: date
+    ) -> list[RecoveryAttempt]:
+        return [
+            a
+            for a in self._attempts.values()
+            if a.user_id == user_id
+            and a.re_engagement_anchor_at is not None
+            and a.re_engagement_anchor_at.astimezone(KST).date() == target_date
+        ]
+
     async def get_strategy(self, strategy_type: str) -> RecoveryStrategyCatalog | None:
         # 실 repo 와 같이 **is_active 필터 포함** — 비활성이면 None 이라 호출자가 기본
         # 회복 단위(5분)로 떨어지는 동작이 fake 에서도 재현돼야 한다.
@@ -1249,6 +1262,9 @@ class FakeRecoveryRepo:
         trigger_tag: str | None,
         llm_fallback_used: bool,
         prompt_version: str | None = None,
+        obstacle: str | None = None,
+        coping_clause: str | None = None,
+        acknowledgment: str | None = None,
     ) -> RecoveryAttempt:
         a = RecoveryAttempt()
         a.id = uuid4()
@@ -1260,6 +1276,9 @@ class FakeRecoveryRepo:
         a.trigger_tag = trigger_tag
         a.llm_fallback_used = llm_fallback_used
         a.prompt_version = prompt_version
+        a.obstacle = obstacle
+        a.coping_clause = coping_clause
+        a.acknowledgment = acknowledgment
         a.assigned_arm = None
         a.first_viewed_at = None
         a.user_decision = "pending"
@@ -1402,6 +1421,17 @@ class FakeExecutionRepo:
             and b.block_status in ("scheduled", "started")
         ]
         return min(candidates, key=lambda b: b.start_at) if candidates else None
+
+    async def list_active_blocks_for_actions(
+        self, user_id: UUID, action_item_ids: Sequence[UUID]
+    ) -> list[tuple[UUID, str, datetime]]:
+        """T1 미체크 배지 재료 (실 repo 미러 — 근거 대장 §6.2)."""
+        wanted = set(action_item_ids)
+        return [
+            (b.action_item_id, b.block_status, b.start_at)
+            for b in self._blocks.values()
+            if b.user_id == user_id and b.action_item_id in wanted and b.block_status != "cancelled"
+        ]
 
     async def create_adhoc_block(
         self, *, user_id: UUID, action_item: ActionItem, start_at: datetime
@@ -1605,6 +1635,7 @@ class FakeReviewRepo:
         self._summaries: dict[tuple[UUID, date], PeriodSummary] = {}
         self._exec_stats: list[ExecutionStat] = []
         self._recovery_stats: list[RecoveryStat] = []
+        self._top_failure_contexts: list[TopFailureContext] = []
 
     # ── 테스트 보조 seed ──
     def seed_execution(self, stat: ExecutionStat) -> None:
@@ -1612,6 +1643,9 @@ class FakeReviewRepo:
 
     def seed_recovery(self, stat: RecoveryStat) -> None:
         self._recovery_stats.append(stat)
+
+    def seed_top_failure_context(self, ctx: TopFailureContext) -> None:
+        self._top_failure_contexts.append(ctx)
 
     # ── ReviewRepo 인터페이스 ──
     async def get_weekly(self, user_id: UUID, week_start: date) -> PeriodSummary | None:
@@ -1626,6 +1660,11 @@ class FakeReviewRepo:
         self, user_id: UUID, start_dt: datetime, end_dt: datetime
     ) -> list[RecoveryStat]:
         return list(self._recovery_stats)
+
+    async def get_top_failure_contexts(
+        self, user_id: UUID, d0: date, d1: date
+    ) -> list[TopFailureContext]:
+        return list(self._top_failure_contexts)
 
     async def upsert_weekly(
         self,
@@ -1770,6 +1809,26 @@ class FakeScheduledBlockRepo:
                 and b.block_status == "scheduled"
                 and b.source != "user_edit"
                 and start_dt <= b.start_at < end_dt
+            ):
+                continue
+            action = None
+            if self._action_repo is not None:
+                action = await self._action_repo.get_by_id(user_id, b.action_item_id)
+            if action is not None:
+                rows.append((b, action))
+        return sorted(rows, key=lambda r: r[0].start_at)
+
+    async def list_stale_scheduled_before(
+        self, user_id: UUID, before_dt: datetime
+    ) -> list[tuple[ScheduledBlock, ActionItem]]:
+        """밀린 미착수 블록 + ActionItem — `list_scheduled_between` 과 필터 동일, 시간만 과거."""
+        rows: list[tuple[ScheduledBlock, ActionItem]] = []
+        for b in self._blocks.values():
+            if not (
+                b.user_id == user_id
+                and b.block_status == "scheduled"
+                and b.source != "user_edit"
+                and b.start_at < before_dt
             ):
                 continue
             action = None
@@ -2022,6 +2081,9 @@ class FakeUserRepo:
             if u.onboarding_state == "ACTIVE" and not getattr(u, "is_anonymized", False)
         ]
 
+    async def count_signed_up(self) -> int:
+        return sum(1 for u in self._by_id.values() if getattr(u, "archived_at", None) is None)
+
     async def upsert_from_google(self, profile: GoogleProfile) -> User:
         existing = self._by_email.get(profile.email)
         if existing is not None:
@@ -2055,6 +2117,36 @@ class FakeUserRepo:
         return False
 
 
+class FakeInviteCodeRepo:
+    """in-memory InviteCodeRepo — 가입 게이트 테스트용 (#324)."""
+
+    def __init__(self) -> None:
+        self._by_code: dict[str, InviteCode] = {}
+
+    def seed(self, raw_code: str, *, used: bool = False, note: str | None = None) -> InviteCode:
+        row = InviteCode()
+        row.id = uuid4()
+        row.code = normalize_code(raw_code)
+        row.note = note
+        row.used_at = now_kst() if used else None
+        row.used_by_user_id = None
+        self._by_code[row.code] = row
+        return row
+
+    async def get_by_code(self, raw_code: str) -> InviteCode | None:
+        return self._by_code.get(normalize_code(raw_code))
+
+    async def mark_used(self, row: InviteCode, *, used_by_user_id: UUID) -> None:
+        row.used_at = now_kst()
+        row.used_by_user_id = used_by_user_id
+
+    async def create(self, raw_code: str, *, note: str | None = None) -> InviteCode:
+        return self.seed(raw_code, note=note)
+
+    async def list_all(self) -> list[InviteCode]:
+        return list(self._by_code.values())
+
+
 # ───── 일반 도메인 client (인증 + 모든 fake) ─────
 
 
@@ -2082,6 +2174,11 @@ def fake_notification_repo() -> FakeNotificationRepo:
 @pytest.fixture
 def fake_user_repo() -> FakeUserRepo:
     return FakeUserRepo()
+
+
+@pytest.fixture
+def fake_invite_code_repo() -> FakeInviteCodeRepo:
+    return FakeInviteCodeRepo()
 
 
 @pytest.fixture
@@ -2328,7 +2425,9 @@ def unauthed_client() -> Iterator[TestClient]:
 
 
 @pytest.fixture
-def auth_client(fake_user_repo: FakeUserRepo) -> Iterator[TestClient]:
+def auth_client(
+    fake_user_repo: FakeUserRepo, fake_invite_code_repo: FakeInviteCodeRepo
+) -> Iterator[TestClient]:
     """`/auth/*` 테스트 — repo/session 만 override, 인증은 실제 JWT 흐름."""
     _reset_process_singletons()
     app = create_app()
@@ -2338,6 +2437,7 @@ def auth_client(fake_user_repo: FakeUserRepo) -> Iterator[TestClient]:
 
     app.dependency_overrides[get_db] = _fake_session_gen
     app.dependency_overrides[get_user_repo] = lambda: fake_user_repo
+    app.dependency_overrides[get_invite_code_repo] = lambda: fake_invite_code_repo
     with TestClient(app) as c:
         yield c
 

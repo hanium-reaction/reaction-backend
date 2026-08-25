@@ -2545,3 +2545,56 @@ def test_other_goals_deferred_notice_folds_long_lists() -> None:
     assert notice is not None
     assert "외 2개" in notice
     assert "목표4" not in notice  # 접힌 것은 이름이 안 나온다
+
+
+def test_total_capacity_uses_full_horizon_not_the_four_week_cap() -> None:
+    """마일스톤 크기 기준은 **마감까지 전체**다 — 4주 캡(`horizon_weeks`)이 아니다 (ADR-0007 §11).
+
+    두 값을 헷갈리면 12주짜리 목표의 뼈대를 4주치 용량으로 재게 되어, 담을 수 있는 것보다
+    훨씬 작게 끊긴다. `_horizon_weeks` 는 '이번 구간', `full_horizon_weeks` 는 '마감까지'.
+    """
+    start = date(2026, 8, 23)
+    outcome = _outcome_with(
+        "iv_capacity",
+        **{
+            "goals.deadlines": {"type": "text", "raw": "2026-11-15"},  # 12주
+            "goals.weekly_time": {"type": "chip", "values": ["3시간"]},
+            "goals.frequency": {"type": "chip", "values": ["몰아서 · 상관없음"]},
+        },
+    )
+    v = first_plan_adapter.context_from_outcome(outcome, target_date=start)["prompt_vars"]
+    assert first_plan_adapter.full_horizon_weeks(start, "2026-11-15") == 12
+    assert "36시간" in v["total_capacity"]  # 3 × 12 — 4주 캡이면 12시간이 됐을 것
+    assert "12주" in v["total_capacity"]
+    # 같은 outcome 의 '이번 구간' 은 여전히 4주로 잘려 있다(두 값이 서로 다른 질문에 답한다).
+    assert v["horizon_weeks"] == "4"
+
+
+def test_total_capacity_says_rhythm_when_there_is_no_deadline() -> None:
+    """마감이 없으면 총량 개념이 없다 — 리듬형이라는 사실을 그대로 알린다 (ADR-0007 §12).
+
+    프롬프트가 이 문구를 보고 '억지로 단계를 지어내지 않는' 분기를 탄다. 숫자를 지어내
+    넘기면(예: 4주 캡으로 12시간) 끝이 없는 목표에 가짜 완료 시점이 박힌다.
+    """
+    outcome = _outcome_with("iv_capacity_none", **{"goals.deadlines": {"type": "text", "raw": ""}})
+    v = first_plan_adapter.context_from_outcome(outcome, target_date=date(2026, 8, 23))[
+        "prompt_vars"
+    ]
+    assert "마감이 없어" in v["total_capacity"]
+    assert first_plan_adapter.full_horizon_weeks(date(2026, 8, 23), None) is None
+
+
+def test_identity_line_skips_unanswered_slots() -> None:
+    """미응답(`미상`)은 사람이 읽는 줄에 싣지 않는다 — 없는 사실을 만들지 않는다."""
+    filled = _outcome_with("iv_id_filled")
+    assert first_plan_adapter.context_from_outcome(filled)["prompt_vars"]["identity"] == (
+        "대3 · 학기중 · 컴퓨터공학"
+    )
+    bare = interview_adapter.build_outcome(
+        session_id="iv_id_bare",
+        slot_answers={},
+        ambiguity_final=0.1,
+        end_reason="early_user",
+        analysis_source="rule",
+    )
+    assert first_plan_adapter.context_from_outcome(bare)["prompt_vars"]["identity"] == "(미입력)"

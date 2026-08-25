@@ -28,7 +28,7 @@ from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.fixed_schedule import FixedSchedule
 from reaction_backend.db.models.habit_instance import HabitInstance
 from reaction_backend.db.session import get_db
-from reaction_backend.domain import action_cancel
+from reaction_backend.domain import action_cancel, missed_check_in
 from reaction_backend.repositories.action_item_repo import ActionItemRepo, get_action_item_repo
 from reaction_backend.repositories.daily_brief_repo import DailyBriefRepo, get_daily_brief_repo
 from reaction_backend.repositories.execution_repo import ExecutionRepo, get_execution_repo
@@ -103,7 +103,7 @@ def _brief_schema(brief: DailyBrief | None) -> MorningBrief | None:
     )
 
 
-def _card_schema(a: ActionItem, *, has_execution_history: bool) -> AgendaCard:
+def _card_schema(a: ActionItem, *, has_execution_history: bool, missed: bool) -> AgendaCard:
     return AgendaCard(
         action_id=f"{_ACTION_PREFIX}{a.id}",
         title=a.title,
@@ -119,6 +119,7 @@ def _card_schema(a: ActionItem, *, has_execution_history: bool) -> AgendaCard:
             source=a.source,
             has_execution_history=has_execution_history,
         ),
+        missed_check_in=missed,
     )
 
 
@@ -165,8 +166,17 @@ async def today_agenda(
 
     brief = await brief_repo.get_by_date(user.id, today)
     cards = await action_repo.list_by_date(user.id, today)
+    action_ids = [c.id for c in cards]
     # 카드마다 묻지 않는다 — 한 번에 받아 `cancellable` 판정에 쓴다 (#214).
-    with_history = await execution_repo.action_ids_with_history(user.id, [c.id for c in cards])
+    with_history = await execution_repo.action_ids_with_history(user.id, action_ids)
+    # T1 미체크 배지(근거 대장 §6.2) — 판정은 domain.missed_check_in, 재료만 여기서 배치 조회.
+    now = now_kst()
+    active_blocks = await execution_repo.list_active_blocks_for_actions(user.id, action_ids)
+    missed_ids = {
+        action_item_id
+        for action_item_id, block_status, start_at in active_blocks
+        if missed_check_in.is_missed_check_in(block_status=block_status, start_at=start_at, now=now)
+    }
     habit_instances = await habit_inst_repo.list_for_user_week(user.id, current_week_start_kst())
     fixed = await fixed_repo.list_active(user.id)
     todays_fixed = [s for s in fixed if weekday in (s.days_of_week or [])]
@@ -174,7 +184,10 @@ async def today_agenda(
     return TodayAgenda(
         date=today.isoformat(),
         brief=_brief_schema(brief),
-        cards=[_card_schema(a, has_execution_history=a.id in with_history) for a in cards],
+        cards=[
+            _card_schema(a, has_execution_history=a.id in with_history, missed=a.id in missed_ids)
+            for a in cards
+        ],
         habits=[_habit_schema(i) for i in habit_instances],
         fixed_schedules=[_fixed_schema(s) for s in todays_fixed],
     )

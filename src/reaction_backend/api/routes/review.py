@@ -57,6 +57,7 @@ from reaction_backend.schemas.reviews import (
     MandalaWeeklySummary,
     NextCycleProposal,
     StaleAxisProposal,
+    TopFailureContext,
     WeeklyGenerateRequest,
     WeeklyReviewResponse,
 )
@@ -94,6 +95,7 @@ def _from_summary(
     mandala: MandalaWeeklySummary | None,
     next_cycle_proposals: list[NextCycleProposal],
     stale_axis_proposals: list[StaleAxisProposal],
+    top_failure_contexts: list[TopFailureContext],
 ) -> WeeklyReviewResponse:
     """precomputed PeriodSummary → 응답 (Numeric→float)."""
     return WeeklyReviewResponse(
@@ -111,6 +113,7 @@ def _from_summary(
         drain_window=summary.drain_point_window,
         one_liner=summary.llm_one_liner,
         policy_update_candidates=summary.policy_update_candidates,
+        top_failure_contexts=top_failure_contexts,
         mandala=mandala,
         next_cycle_proposals=next_cycle_proposals,
         stale_axis_proposals=stale_axis_proposals,
@@ -125,6 +128,7 @@ def _from_kpi(
     mandala: MandalaWeeklySummary | None,
     next_cycle_proposals: list[NextCycleProposal],
     stale_axis_proposals: list[StaleAxisProposal],
+    top_failure_contexts: list[TopFailureContext],
 ) -> WeeklyReviewResponse:
     """즉석 계산한 KPI → 응답 (영속화 전, generated_at=now)."""
     return WeeklyReviewResponse(
@@ -142,6 +146,7 @@ def _from_kpi(
         drain_window=kpi.drain_point_window,
         one_liner=kpi.one_liner,
         policy_update_candidates=kpi.policy_update_candidates,
+        top_failure_contexts=top_failure_contexts,
         mandala=mandala,
         next_cycle_proposals=next_cycle_proposals,
         stale_axis_proposals=stale_axis_proposals,
@@ -197,6 +202,22 @@ async def _mandala_weekly_summary(
             for h in stat.habits
         ],
     )
+
+
+async def _top_failure_contexts(
+    user_id: UUID, week_end: date, *, repo: ReviewRepo
+) -> list[TopFailureContext]:
+    """최근 28일(해당 주 일요일 기준 역산) 실패 사유 상위 3개 — #301.
+
+    `mandala`/`next_cycle_proposals` 와 같은 이유로 `period_summaries` 에 저장하지 않고
+    조회 시점에 파생한다 — 이번 주 실패 하나가 지난주 저장된 스냅샷에 안 잡히는 지연을
+    피한다. `d0=d1=week_end` 로 넘겨 [week_end-27, week_end] 28일 창을 만든다.
+    """
+    rows = await repo.get_top_failure_contexts(user_id, week_end, week_end)
+    return [
+        TopFailureContext(tag_code=r.tag_code, label_ko=r.label_ko, count=r.count, share=r.share)
+        for r in rows
+    ]
 
 
 async def _next_cycle_proposals(
@@ -289,6 +310,7 @@ async def get_weekly_review(
     mandala = await _mandala_weekly_summary(user.id, monday, goal_repo=goal_repo, session=session)
     proposals = await _next_cycle_proposals(user.id, goal_repo=goal_repo, session=session)
     stale_axes = await _stale_axis_proposals(user.id, goal_repo=goal_repo, session=session)
+    top_failures = await _top_failure_contexts(user.id, monday + timedelta(days=6), repo=repo)
     existing = await repo.get_weekly(user.id, monday)
     if existing is not None:
         return _from_summary(
@@ -296,6 +318,7 @@ async def get_weekly_review(
             mandala=mandala,
             next_cycle_proposals=proposals,
             stale_axis_proposals=stale_axes,
+            top_failure_contexts=top_failures,
         )
     kpi = await compute_weekly_review(user.id, monday, repo=repo)
     return _from_kpi(
@@ -304,6 +327,7 @@ async def get_weekly_review(
         mandala=mandala,
         next_cycle_proposals=proposals,
         stale_axis_proposals=stale_axes,
+        top_failure_contexts=top_failures,
     )
 
 
@@ -320,10 +344,15 @@ async def generate_weekly_review(
     mandala = await _mandala_weekly_summary(user.id, monday, goal_repo=goal_repo, session=session)
     proposals = await _next_cycle_proposals(user.id, goal_repo=goal_repo, session=session)
     stale_axes = await _stale_axis_proposals(user.id, goal_repo=goal_repo, session=session)
+    top_failures = await _top_failure_contexts(user.id, monday + timedelta(days=6), repo=repo)
     summary = await run_weekly_review_for_user(user.id, monday, now_kst(), repo=repo, force=True)
     await session.commit()
     return _from_summary(
-        summary, mandala=mandala, next_cycle_proposals=proposals, stale_axis_proposals=stale_axes
+        summary,
+        mandala=mandala,
+        next_cycle_proposals=proposals,
+        stale_axis_proposals=stale_axes,
+        top_failure_contexts=top_failures,
     )
 
 
