@@ -55,6 +55,8 @@ class ErrorCode(StrEnum):
     POLICY_NOT_FOUND = "POLICY_NOT_FOUND"
     # 블록 편집(S15)이 활성 시간 정책 윈도우(sleep/lunch/late_night_block)에 진입 — #21-B
     POLICY_VIOLATION = "POLICY_VIOLATION"
+    # 이미 활성인 버전으로 롤백 요청 → 409 (#168). 같은 값을 한 번 더 쌓을 이유가 없다.
+    POLICY_ALREADY_ACTIVE = "POLICY_ALREADY_ACTIVE"
 
     # ── Planning / Blocks (PLAN_) — #21-B ──
     PLAN_BLOCK_NOT_FOUND = "PLAN_BLOCK_NOT_FOUND"

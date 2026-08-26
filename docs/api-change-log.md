@@ -7,6 +7,24 @@
 
 ---
 
+## v1.88 — 2026-08-26 (Policy Snapshot 생산 경로 — endpoint 4개 신설, #168)
+
+**추가만(하위호환)** — 기존 `GET /policy-snapshot/current` 의 요청·응답은 변경 없음.
+
+- `GET /policy-snapshot/history` · `POST /policy-snapshot/preview-update` ·
+  `POST /policy-snapshot/apply` · `POST /policy-snapshot/rollback/{version}` 신설.
+  **계약 문서에는 있었지만 라우트가 없던 4개**를 실제로 구현했다(계약-구현 불일치 해소).
+- ⚠️ `GET /policy-snapshot/current` 는 그동안 **프로덕션에서 항상 404** 였다 — 스냅샷을
+  만드는 코드가 레포 전체에 0곳이었기 때문. 이제 `apply` 로 생성된다. FE 는 주간 리뷰의
+  카운트-only 폴백을 걷어낼 수 있다.
+- `preview-update` 는 `isDraft=true` + `aiSource="rule"` (Draft Layer) 로 내려가고
+  **아무것도 저장하지 않는다**. `changes[]` 에 `{area, field, before, after, why}` 가 실려
+  "왜 이 값이 됐나"를 숫자로 보여준다.
+- `apply`/`rollback` 은 **201**. 새 에러 코드 `POLICY_ALREADY_ACTIVE`(409) — 이미 활성인
+  버전으로 롤백 요청.
+- 4 영역 JSONB 의 **내부 키는 snake_case** 다(`daily_max_load` 등). CamelModel 은 필드명만
+  변환한다 — 기존 `current` 응답도 동일했으나 명시가 없어 이번에 계약에 적었다.
+- 마이그레이션 없음 — `policy_snapshots` 테이블·컬럼은 이미 있었다.
 ## v1.87 — 2026-08-26 (목표 재협상 모드 — `recoveryMode`, #328)
 
 **추가만(하위호환)** — `POST /recovery/proposals/generate` 응답에 필드 1개 추가. 기존

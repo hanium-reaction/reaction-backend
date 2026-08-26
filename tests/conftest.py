@@ -1676,9 +1676,18 @@ class FakeReviewRepo:
     def seed_top_failure_context(self, ctx: TopFailureContext) -> None:
         self._top_failure_contexts.append(ctx)
 
+    def seed_summary(self, summary: PeriodSummary) -> None:
+        """이미 집계된 주간 요약을 심는다 (#168 정책 후보 입력)."""
+        self._summaries[(summary.user_id, summary.start_date)] = summary
+
     # ── ReviewRepo 인터페이스 ──
     async def get_weekly(self, user_id: UUID, week_start: date) -> PeriodSummary | None:
         return self._summaries.get((user_id, week_start))
+
+    async def get_latest_weekly(self, user_id: UUID) -> PeriodSummary | None:
+        """가장 최근 주(start_date 최대) — 정책 후보 산출(#168) 입력."""
+        mine = [v for (uid, _), v in self._summaries.items() if uid == user_id]
+        return max(mine, key=lambda s: s.start_date) if mine else None
 
     async def collect_execution_stats(
         self, user_id: UUID, start_dt: datetime, end_dt: datetime
@@ -2350,7 +2359,7 @@ def fake_profile_repo() -> FakeProfileRepo:
 
 
 class FakePolicySnapshotRepo:
-    """in-memory PolicySnapshotRepo — #83 §14 (조회만)."""
+    """in-memory PolicySnapshotRepo — #83 §14 + #168 (생산 경로)."""
 
     def __init__(self) -> None:
         self._items: list[PolicySnapshot] = []
@@ -2358,9 +2367,56 @@ class FakePolicySnapshotRepo:
     def seed(self, snapshot: PolicySnapshot) -> None:
         self._items.append(snapshot)
 
+    def all_of(self, user_id: UUID) -> list[PolicySnapshot]:
+        """테스트가 저장 결과를 직접 볼 때."""
+        return [s for s in self._items if s.user_id == user_id]
+
     async def get_active(self, user_id: UUID) -> PolicySnapshot | None:
         actives = [s for s in self._items if s.user_id == user_id and s.is_active]
         return max(actives, key=lambda s: s.version) if actives else None
+
+    async def list_history(self, user_id: UUID) -> list[PolicySnapshot]:
+        return sorted(self.all_of(user_id), key=lambda s: s.version, reverse=True)
+
+    async def get_by_version(self, user_id: UUID, version: int) -> PolicySnapshot | None:
+        return next((s for s in self.all_of(user_id) if s.version == version), None)
+
+    async def next_version(self, user_id: UUID) -> int:
+        versions = [s.version for s in self.all_of(user_id)]
+        return (max(versions) if versions else 0) + 1
+
+    async def create_active(
+        self,
+        user_id: UUID,
+        *,
+        behavioral_profile: dict[str, Any],
+        execution_constraints: dict[str, Any],
+        interaction_style: dict[str, Any],
+        recovery_policy: dict[str, Any],
+        source: str,
+        reason_for_update: str | None,
+        now: datetime,
+        prompt_version: str | None = None,
+    ) -> PolicySnapshot:
+        for previous in self.all_of(user_id):
+            if previous.is_active:
+                previous.is_active = False
+                previous.valid_to = now
+        snapshot = PolicySnapshot()
+        snapshot.user_id = user_id
+        snapshot.version = await self.next_version(user_id)
+        snapshot.is_active = True
+        snapshot.behavioral_profile = behavioral_profile
+        snapshot.execution_constraints = execution_constraints
+        snapshot.interaction_style = interaction_style
+        snapshot.recovery_policy = recovery_policy
+        snapshot.source = source
+        snapshot.reason_for_update = reason_for_update
+        snapshot.prompt_version = prompt_version
+        snapshot.valid_from = now
+        snapshot.valid_to = None
+        self._items.append(snapshot)
+        return snapshot
 
 
 @pytest.fixture

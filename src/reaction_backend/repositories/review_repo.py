@@ -84,6 +84,23 @@ class ReviewRepo:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_latest_weekly(self, user_id: UUID) -> PeriodSummary | None:
+        """가장 최근 주간 요약 — 정책 후보 산출(#168)의 입력.
+
+        `get_weekly` 는 주 시작일을 알아야 하는데, 정책 미리보기는 "가장 최근에 집계된 주"
+        를 쓴다(사용자가 몇 주 쉬었을 수도 있어 '지난주' 를 가정할 수 없다).
+        """
+        stmt = (
+            select(PeriodSummary)
+            .where(
+                PeriodSummary.user_id == user_id,
+                PeriodSummary.period_type == "weekly",
+            )
+            .order_by(PeriodSummary.start_date.desc())
+        )
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
+
     async def upsert_weekly(
         self,
         *,

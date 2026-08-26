@@ -856,15 +856,39 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 
 ## 14. Policy Snapshot (`/policy-snapshot`)
 
-| Method | Path | 설명 |
-| --- | --- | --- |
-| GET | `/policy-snapshot/current` | 현재 활성 |
-| GET | `/policy-snapshot/history` | 버전 이력 |
-| POST | `/policy-snapshot/preview-update` | 다음 버전 diff |
-| POST | `/policy-snapshot/apply` | 사용자 승인 후 활성화 (이전은 `valid_to`) |
-| POST | `/policy-snapshot/rollback/{version}` | 이전 버전 활성화 |
+| Method | Path | 설명 | 상태 |
+| --- | --- | --- | --- |
+| GET | `/policy-snapshot/current` | 현재 활성. 없으면 404 `POLICY_NOT_FOUND` | ✅ #83 |
+| GET | `/policy-snapshot/history` | 버전 이력(최신 앞, 비활성 포함). 없으면 `items: []` — **404 아님** | ✅ #168 |
+| POST | `/policy-snapshot/preview-update` | 다음 버전 후보 (Draft, **저장 안 함**) | ✅ #168 |
+| POST | `/policy-snapshot/apply` | 사용자 승인 → 새 버전 INSERT (201) | ✅ #168 |
+| POST | `/policy-snapshot/rollback/{version}` | 지난 버전 값을 **새 버전으로** 되살림 (201) | ✅ #168 |
 
 4 영역: `behavioralProfile` / `executionConstraints` / `interactionStyle` / `recoveryPolicy`
+— 각 값은 JSONB 를 그대로 노출하므로 **내부 키는 snake_case** 다(필드명만 camelCase).
+
+#168 구현 메모 — 그전까지 `current` 하나만 존재했고 `policy_snapshots` 에 행을 넣는 코드가
+레포 전체에 0곳이라 **프로덕션에서 항상 404** 였다(FE 주간 리뷰의 '다음 주 정책 자동 보정'
+은 카운트-only 폴백을 영구 유지 중이었다). 라우트 버그가 아니라 생산 경로가 통째로 없었다.
+
+- **후보 산출은 룰**(`orchestrator/policy_update.py`) — LLM 아님, `source="rule"`. 승인 화면이
+  "왜 이 값이 됐나"를 숫자로 보여줘야 하고(`changes[].why`), 정책은 이후 모든 계획 생성의
+  입력이라 비결정적이면 추적이 끊긴다. `source` 는 rule/llm/user_manual 을 전부 허용하므로
+  나중에 LLM 판단을 같은 자리에 끼울 수 있다.
+- **HITL** (AGENTS §1 자동 적용 금지): `preview-update` 는 `isDraft=true` + `aiSource="rule"`
+  로 내려가고 **아무것도 저장하지 않는다**. `apply` 를 눌러야 INSERT 된다. `changes` 가 비면
+  이번 주엔 바꿀 근거가 없다는 뜻 — FE 는 [적용] 을 비활성화하면 된다.
+- `apply` 본문은 미리보기 응답 그대로(=룰 그대로) 또는 사용자가 고친 값이다. **서버가 다시
+  계산해 덮어쓰지 않는다** — 본 것이 저장된다. 고쳤는지는 `source`(`rule`|`user_manual`)로
+  FE 가 알려준다(`/recovery/decisions` 의 accepted/edited 와 같은 관례).
+- **append-only** (ADR-0001 §3.2): 새 버전은 INSERT, 이전 활성 행은 `is_active=false` +
+  `valid_to` 로 닫는다. 기존 행의 4 영역 JSONB 는 절대 수정하지 않는다.
+- **롤백은 옛 행을 되살리지 않는다** — 값을 복사한 새 버전을 만든다. 옛 행의 `is_active` 를
+  다시 켜면 그 행의 `valid_from` 이 최초 활성화 시각 그대로라 **언제 롤백했는지가 이력에서
+  사라진다**(정책 이력 = 감사 기록). v5 에서 v2 로 롤백하면 v2 의 값을 가진 v6 이 생긴다.
+  없는 버전 404 `POLICY_NOT_FOUND`, 이미 활성인 버전 409 `POLICY_ALREADY_ACTIVE`.
+- ⚠️ **자동 적용 규칙은 넣지 않았다** — 옛 docstring 의 "주간 KPI 가 전주 대비 10%↓ 이면
+  자동 롤백" 은 잠금 결정(자동 적용 금지)과 정면으로 부딪히므로 팀 결정(AGENTS §8) 대상이다.
 
 ---
 
