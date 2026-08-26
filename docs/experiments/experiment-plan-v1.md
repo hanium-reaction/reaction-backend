@@ -936,3 +936,49 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
     신규 테스트 5건 — 순수함수 3건(`test_with_comeback_ack_*` — 미에스컬레이션 무변화,
     L1/L2 각각 프리픽스), 라우트 통합 2건(L1/L2 각각 선두 카드에 프리픽스 확인 + L1 은
     형제 카드에 안 붙음도 같이 확인 — `test_recovery.py`).
+27. ✅ **S3 에스컬레이션 L3 상태 판정 — 완료(재협상 3장 UX 는 스코프 밖).** 항목 25/26
+    직후 격차 조사에서 뽑힌 두 후보(지표 리포트·COMEBACK) 다음 순번. `escalation.py`
+    모듈 docstring 이 이미 "L3(재협상 3장)·L4(stand-down)는 뺐다"고 스코프 경계를
+    명시해 뒀던 그 항목 — 이번엔 L3 만 "상태 판정"(카운터 + 레벨 계산)까지 배선하고,
+    L4 는 여전히 손대지 않았다(진입 조건 `overwhelm≥4` 신호가 여전히 프로덕션에 없다,
+    `context_snapshots` 캡처 미완 — 항목 22 와 같은 사유).
+
+    - **`orchestrator/escalation.py`** — `EscalationLevel` 에 `"L3"` 추가.
+      `same_goal_failure_count` 카운터 신설(§5.1 표엔 없던 다섯 번째 카운터 —
+      "동일 goal 4회 연속 실패"는 "동일 카드"(L1)도 "동일 (계보,tag_code)"(L2)도
+      아닌 세 번째 모집단이라 기존 4개로는 표현이 안 됐다). `determine_escalation_level`
+      이 L3(재협상 4회 goal/2회 rejected)를 L2 보다 먼저 검사 — §5.2 "순서의 근거"
+      (재협상이 단서 전환보다 강한 개입)를 그대로 반영. `recovery_rejected_streak` 는
+      이미 계산만 되고 안 쓰이던 카운터였는데(항목 16 이 "향후 sustain talk 가드 등에
+      쓰일 수 있음"이라고 남겨 둔 바로 그 값) 이번에 처음 레벨 판정에 실제로 쓰인다.
+    - **`RecoveryRepo.list_goal_outcomes`**(L3 "동일 goal", 태그 무관 —
+      `list_lineage_outcomes_for_tag`(L2) 와 달리 동결 트릭이 없다) /
+      **`list_recovery_decisions`**(L3 "회복 2회 연속 rejected", `list_recovery_results`
+      와 같은 스코프 — 카드/goal 무관, 사용자 전체) 신설.
+    - **`routes/recovery.py`** — `action`(원본 카드) 조회를 escalation 계산 앞으로
+      끌어올려 goal_id 를 얻는다(부작용 없는 순수 조회라 이동 안전). L3 는 태그 무관
+      최강 레벨이라, 이미 L3 로 확정됐으면 태그별 L2 재검사 루프를 건너뛴다(불필요한
+      쿼리 반복 방지 — `determine_escalation_level` 과 같은 "강한 조건이 이미 이겼으면
+      더 안 본다" 원칙).
+    - **`orchestrator/recovery.py::select_strategies`** — 규칙 7(L1 축소→분해,
+      DOWNSCOPE_DEFAULT 배제)을 `"L1"`/`"L2"`/`"L3"` 전부로 확장(L3 는 L1 보다도 강한
+      에스컬레이션이라 그 보호 장치를 안 이어받을 이유가 없다). 규칙 6(L2
+      ENVIRONMENT_SHIFT 강제)은 **의도적으로 안 넓혔다** — "단서 전환"은 L2 전용 전술이고
+      L3(재협상)는 다른 개입 의도라, 재협상 UX 를 안 만든 채로 ENVIRONMENT_SHIFT 만
+      억지로 강제하면 §5.2 원문이 말한 개입과 다른 걸 내보내게 된다.
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **재협상 3장 UX 자체가 없다** — L3 에 진입해도 지금은 그냥 "L1 급 보호 장치가 붙은
+      평소 카드 선택"이 나간다(DOWNSCOPE_DEFAULT 만 빠짐). §5.2 가 요구한 "4그룹 통상
+      카드 대신 [목표 축소=DOWNSCOPE]/[기한 재설정=RESCHEDULE]/[일시 중단=PARK] 3장"은
+      FE #223(PARK 수락 플로우) 회신 전까지 화면·선택 로직 둘 다 없다.
+    - **L4(stand-down)는 여전히 미착수** — `overwhelm≥4` 신호가 없다.
+    - **API 응답에 escalation_level 노출 안 함** — L1/L2 와 같은 기존 관례(순수 내부
+      신호, FE 계약 없음)를 그대로 따랐다.
+
+    신규/갱신 테스트 — 순수함수(`test_escalation.py`, L3 케이스 8건 추가 — 임계값
+    경계·OR 조건 각각·"L3 가 L1/L2 동시 충족에도 이긴다"), 실 Postgres 쿼리 조립
+    (`test_recovery_repo_lineage.py` — `list_goal_outcomes`/`list_recovery_decisions`
+    신규 5건 + 기존 L1/L2 배선 확인 3건은 새 시그니처로 갱신), 라우트 통합
+    (`test_recovery.py` 2건 — goal 트리거·rejected-streak 트리거를 각각 다른 카드/태그로
+    L1/L2 신호와 격리해 검증).
