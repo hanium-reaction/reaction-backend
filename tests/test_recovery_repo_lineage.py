@@ -1,8 +1,12 @@
-"""`RecoveryRepo` 의 L1/L2 에스컬레이션 이력 조회 3종 — 실 Postgres (근거 대장 §5.1/§5.2).
+"""`RecoveryRepo` 의 L1/L2/L3 에스컬레이션 이력 조회 5종 — 실 Postgres (근거 대장 §5.1/§5.2).
 
 - `list_lineage_outcomes_for_tag` — L2 "동일 (계보, tag_code) 3회 연속 실패"
 - `list_same_card_outcomes` — L1 "동일 카드 2회 연속 실패"
 - `list_recovery_results` — L1 "회복 1회 abandoned"
+- `list_goal_outcomes` — L3 "동일 goal 4회 연속 실패" (태그 무관, `list_lineage_outcomes_for_tag`
+  보다 넓은 세 번째 모집단)
+- `list_recovery_decisions` — L3 "회복 2회 연속 rejected" (`list_recovery_results` 와 같은
+  스코프 — 카드/goal 무관, 사용자 전체)
 
 `orchestrator/escalation.py` 의 순수 함수는 이미 이력 리스트만 있으면 검증됐다
 (`tests/test_escalation.py`). 여기서 검증하는 건 그 리스트를 **실제로 어떻게 만드는가** —
@@ -34,6 +38,8 @@ from reaction_backend.orchestrator.escalation import (
     L1_CONSECUTIVE_FAILURE_THRESHOLD,
     L1_RECOVERY_ABANDONED_THRESHOLD,
     L2_SAME_TAG_FAILURE_THRESHOLD,
+    L3_GOAL_FAILURE_THRESHOLD,
+    L3_REJECTED_STREAK_THRESHOLD,
     compute_escalation_state,
 )
 from reaction_backend.repositories.recovery_repo import RecoveryRepo
@@ -132,11 +138,14 @@ async def _seed_recovery_attempt(
     execution_id: UUID,
     recovery_result: str,
     recovery_decided_at: datetime,
+    user_decision: str = "accepted",
 ) -> None:
-    """회복 결정 1건 시드 — `list_recovery_results` 는 카드/전략 무관하게 결과만 본다.
+    """회복 결정 1건 시드 — `list_recovery_results`/`list_recovery_decisions` 는
+    카드/전략 무관하게 결과·결정만 본다.
 
     `recovery_strategy_type` 은 마이그레이션이 이미 커밋해 둔 마스터 시드(NANO_STEP)를
-    그대로 참조한다(FK) — 이 테스트의 관심사가 아니라 뭐든 상관없다.
+    그대로 참조한다(FK) — 이 테스트의 관심사가 아니라 뭐든 상관없다. `user_decision`
+    기본값은 기존 호출부(전부 `recovery_result` 만 다르게 시딩)와 호환되게 "accepted".
     """
     session.add(
         RecoveryAttempt(
@@ -145,7 +154,7 @@ async def _seed_recovery_attempt(
             execution_id=execution_id,
             recovery_option_group="DOWNSCOPE",
             recovery_strategy_type="NANO_STEP",
-            user_decision="accepted",
+            user_decision=user_decision,
             recovery_decided_at=recovery_decided_at,
             recovery_result=recovery_result,
         )
@@ -393,6 +402,7 @@ async def test_wires_into_escalation_state_as_l2_at_the_threshold(
     state = compute_escalation_state(
         same_card_outcomes_most_recent_first=[],
         same_tag_outcomes_most_recent_first=outcomes,
+        same_goal_outcomes_most_recent_first=[],
         recovery_decisions_most_recent_first=[],
         recovery_results_most_recent_first=[],
     )
@@ -492,6 +502,7 @@ async def test_same_card_outcomes_wires_into_escalation_state_as_l1_at_the_thres
     state = compute_escalation_state(
         same_card_outcomes_most_recent_first=outcomes,
         same_tag_outcomes_most_recent_first=[],
+        same_goal_outcomes_most_recent_first=[],
         recovery_decisions_most_recent_first=[],
         recovery_results_most_recent_first=[],
     )
@@ -618,8 +629,197 @@ async def test_recovery_results_wires_into_escalation_state_as_l1_at_the_thresho
     state = compute_escalation_state(
         same_card_outcomes_most_recent_first=[],
         same_tag_outcomes_most_recent_first=[],
+        same_goal_outcomes_most_recent_first=[],
         recovery_decisions_most_recent_first=[],
         recovery_results_most_recent_first=outcomes,
     )
 
     assert state.level == "L1"
+
+
+# ═══════════════════ list_goal_outcomes — L3 "동일 goal" ═══════════════════
+
+
+async def test_goal_outcomes_span_multiple_action_items_in_the_same_goal(
+    real_db_session: AsyncSession,
+) -> None:
+    """태그 무관 — `list_lineage_outcomes_for_tag`(L2)와 달리 다른 태그의 실패도
+    그대로 센다(동결 트릭이 없다). 카드가 달라도 같은 goal 이면 한 계보로 본다."""
+    repo = RecoveryRepo(real_db_session)
+    user_id = await _seed_user(real_db_session)
+    goal_id = await _seed_goal(real_db_session, user_id=user_id)
+    card_a = await _seed_action_item(real_db_session, user_id=user_id, goal_id=goal_id)
+    card_b = await _seed_action_item(real_db_session, user_id=user_id, goal_id=goal_id)
+
+    await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=card_a,
+        completion_status="failed",
+        plan_start_at=_BASE_AT,
+        tag_code="DISTRACTION",
+    )
+    await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=card_b,
+        completion_status="failed",
+        plan_start_at=_BASE_AT + timedelta(days=1),
+        tag_code="FATIGUE",  # 다른 태그 — L2 라면 동결됐을 실패도 L3 는 그대로 센다
+    )
+
+    outcomes = await repo.list_goal_outcomes(user_id, goal_id)
+
+    assert outcomes == ["failed", "failed"]
+
+
+async def test_goal_outcomes_excludes_other_goals_and_in_progress(
+    real_db_session: AsyncSession,
+) -> None:
+    repo = RecoveryRepo(real_db_session)
+    user_id = await _seed_user(real_db_session)
+    goal_id = await _seed_goal(real_db_session, user_id=user_id)
+    other_goal_id = await _seed_goal(real_db_session, user_id=user_id)
+    card = await _seed_action_item(real_db_session, user_id=user_id, goal_id=goal_id)
+    other_card = await _seed_action_item(real_db_session, user_id=user_id, goal_id=other_goal_id)
+
+    await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=card,
+        completion_status="failed",
+        plan_start_at=_BASE_AT,
+    )
+    await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=card,
+        completion_status="in_progress",
+        plan_start_at=_BASE_AT + timedelta(days=1),
+    )
+    await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=other_card,
+        completion_status="failed",
+        plan_start_at=_BASE_AT,
+    )
+
+    outcomes = await repo.list_goal_outcomes(user_id, goal_id)
+
+    assert outcomes == ["failed"]
+
+
+async def test_goal_outcomes_wires_into_escalation_state_as_l3_at_the_threshold(
+    real_db_session: AsyncSession,
+) -> None:
+    repo = RecoveryRepo(real_db_session)
+    user_id = await _seed_user(real_db_session)
+    goal_id = await _seed_goal(real_db_session, user_id=user_id)
+    card = await _seed_action_item(real_db_session, user_id=user_id, goal_id=goal_id)
+    for i in range(L3_GOAL_FAILURE_THRESHOLD):
+        await _seed_execution(
+            real_db_session,
+            user_id=user_id,
+            action_item_id=card,
+            completion_status="failed",
+            plan_start_at=_BASE_AT + timedelta(days=i),
+        )
+
+    outcomes = await repo.list_goal_outcomes(user_id, goal_id)
+    state = compute_escalation_state(
+        same_card_outcomes_most_recent_first=[],
+        same_tag_outcomes_most_recent_first=[],
+        same_goal_outcomes_most_recent_first=outcomes,
+        recovery_decisions_most_recent_first=[],
+        recovery_results_most_recent_first=[],
+    )
+
+    assert state.level == "L3"
+
+
+# ═══════════════════ list_recovery_decisions — L3 "회복 2회 연속 rejected" ═══════════════════
+
+
+async def test_recovery_decisions_ordered_most_recent_first_and_excludes_pending(
+    real_db_session: AsyncSession,
+) -> None:
+    repo = RecoveryRepo(real_db_session)
+    user_id = await _seed_user(real_db_session)
+    action_item_id = await _seed_action_item(real_db_session, user_id=user_id)
+    exec1 = await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=action_item_id,
+        completion_status="failed",
+        plan_start_at=_BASE_AT,
+    )
+    exec2 = await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=action_item_id,
+        completion_status="failed",
+        plan_start_at=_BASE_AT + timedelta(days=1),
+    )
+    await _seed_execution(  # pending 대조군 — attempt 자체를 안 만든다
+        real_db_session,
+        user_id=user_id,
+        action_item_id=action_item_id,
+        completion_status="failed",
+        plan_start_at=_BASE_AT + timedelta(days=2),
+    )
+    await _seed_recovery_attempt(
+        real_db_session,
+        user_id=user_id,
+        execution_id=exec1,
+        recovery_result="pending",
+        recovery_decided_at=_BASE_AT,
+        user_decision="rejected",
+    )
+    await _seed_recovery_attempt(
+        real_db_session,
+        user_id=user_id,
+        execution_id=exec2,
+        recovery_result="pending",
+        recovery_decided_at=_BASE_AT + timedelta(days=1),
+        user_decision="accepted",
+    )
+
+    outcomes = await repo.list_recovery_decisions(user_id)
+
+    assert outcomes == ["accepted", "rejected"]
+
+
+async def test_recovery_decisions_wires_into_escalation_state_as_l3_at_the_threshold(
+    real_db_session: AsyncSession,
+) -> None:
+    repo = RecoveryRepo(real_db_session)
+    user_id = await _seed_user(real_db_session)
+    action_item_id = await _seed_action_item(real_db_session, user_id=user_id)
+    exec_id = await _seed_execution(
+        real_db_session,
+        user_id=user_id,
+        action_item_id=action_item_id,
+        completion_status="failed",
+        plan_start_at=_BASE_AT,
+    )
+    for _ in range(L3_REJECTED_STREAK_THRESHOLD):
+        await _seed_recovery_attempt(
+            real_db_session,
+            user_id=user_id,
+            execution_id=exec_id,
+            recovery_result="pending",
+            recovery_decided_at=_BASE_AT,
+            user_decision="rejected",
+        )
+
+    outcomes = await repo.list_recovery_decisions(user_id)
+    state = compute_escalation_state(
+        same_card_outcomes_most_recent_first=[],
+        same_tag_outcomes_most_recent_first=[],
+        same_goal_outcomes_most_recent_first=[],
+        recovery_decisions_most_recent_first=outcomes,
+        recovery_results_most_recent_first=[],
+    )
+
+    assert state.level == "L3"

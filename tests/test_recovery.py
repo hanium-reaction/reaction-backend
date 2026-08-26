@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
+from reaction_backend.orchestrator.escalation import L3_REJECTED_STREAK_THRESHOLD
 from reaction_backend.orchestrator.recovery import (
     COMEBACK_ACK_PREFIX,
     RECOVERY_NIGHT_CUTOFF_HOUR,
@@ -60,7 +61,11 @@ def _seed_failed_execution(
 
 
 def _seed_action(
-    action_repo: FakeActionItemRepo, *, title: str, target_date: date = date(2026, 6, 5)
+    action_repo: FakeActionItemRepo,
+    *,
+    title: str,
+    target_date: date = date(2026, 6, 5),
+    goal_id: UUID | None = None,
 ) -> Any:
     from reaction_backend.db.models.action_item import ActionItem
 
@@ -76,7 +81,7 @@ def _seed_action(
     a.estimated_minutes = 60
     a.why_now = None
     a.first_step = None
-    a.goal_id = None
+    a.goal_id = goal_id
     a.archived_at = None
     action_repo.seed(a)
     return a
@@ -381,6 +386,86 @@ def test_generate_does_not_escalate_one_below_l2_threshold(
     body = _generate(client, f"exec_{current.id}").json()
 
     assert body["cards"][0]["strategyType"] == "NANO_STEP"
+
+
+def test_generate_l3_escalates_on_four_consecutive_same_goal_failures(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """근거 대장 §5.2 L3 — 동일 goal 4회 연속 실패(카드·태그 무관) → L1 이 이미 가진
+    보호 장치(DOWNSCOPE_DEFAULT 배제)를 이어받고 컴백 프리픽스도 붙는다.
+
+    카드마다 태그를 번갈아(FATIGUE/PLAN_TOO_BIG) 심어 같은 태그가 L2 임계(3회)에
+    닿지 않게 격리한다 — 그래야 "동일 goal, 태그 무관"이라는 L3 만의 경로를
+    L2 와 헷갈리지 않고 검증한다.
+    """
+    goal_id = uuid4()
+    tags_cycle = ["FATIGUE", "PLAN_TOO_BIG", "FATIGUE"]
+    for i, tag in enumerate(tags_cycle):
+        card = _seed_action(fake_action_item_repo, title=f"목표 카드 {i}", goal_id=goal_id)
+        fake_recovery_repo.register_execution(
+            user_id=DEMO_USER_UUID,
+            action_item_id=card.id,
+            completion_status="failed",
+            failure_tags=[tag],
+            plan_start_at=datetime(2026, 6, 1, tzinfo=KST) + timedelta(days=i),
+        )
+    final_card = _seed_action(fake_action_item_repo, title="현재 목표 카드", goal_id=goal_id)
+    current = fake_recovery_repo.register_execution(
+        user_id=DEMO_USER_UUID,
+        action_item_id=final_card.id,
+        completion_status="failed",
+        failure_tags=["PLAN_TOO_BIG"],
+        plan_start_at=datetime(2026, 6, 1, tzinfo=KST) + timedelta(days=len(tags_cycle)),
+    )
+
+    body = _generate(client, f"exec_{current.id}").json()
+
+    types = {c["strategyType"] for c in body["cards"]}
+    assert "DOWNSCOPE_DEFAULT" not in types
+    assert body["cards"][0]["suggestedActionText"].startswith(COMEBACK_ACK_PREFIX)
+
+
+def test_generate_l3_escalates_on_two_consecutive_skipped_recoveries(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """근거 대장 §5.2 L3 — 회복 2회 연속 rejected(`skipped` 포함,
+    `compute_recovery_rejected_streak` 과 같은 정의) → 에스컬레이션.
+
+    카드·목표를 매번 새로 만들어(같은 카드/goal 을 안 씀) 다른 레벨(L1/L3-goal)이
+    동시에 안 걸리게 격리한다 — 사용자 전체 결정 이력만으로 L3 가 뜨는지 확인.
+    """
+    for i in range(L3_REJECTED_STREAK_THRESHOLD):
+        action = _seed_action(fake_action_item_repo, title=f"거절 카드 {i}")
+        exec_i = fake_recovery_repo.register_execution(
+            user_id=DEMO_USER_UUID,
+            action_item_id=action.id,
+            completion_status="failed",
+            failure_tags=["AMBIGUITY"],
+            plan_start_at=datetime(2026, 6, 1, tzinfo=KST) + timedelta(days=i),
+        )
+        _generate(client, f"exec_{exec_i.id}")
+        resp = _decide(client, {"executionId": f"exec_{exec_i.id}", "decision": "skipped"})
+        assert resp.status_code == 200, resp.json()
+
+    final_action = _seed_action(fake_action_item_repo, title="현재 실패 카드")
+    current = fake_recovery_repo.register_execution(
+        user_id=DEMO_USER_UUID,
+        action_item_id=final_action.id,
+        completion_status="failed",
+        failure_tags=["AMBIGUITY"],
+        plan_start_at=datetime(2026, 6, 1, tzinfo=KST)
+        + timedelta(days=L3_REJECTED_STREAK_THRESHOLD),
+    )
+
+    body = _generate(client, f"exec_{current.id}").json()
+
+    types = {c["strategyType"] for c in body["cards"]}
+    assert "DOWNSCOPE_DEFAULT" not in types
+    assert body["cards"][0]["suggestedActionText"].startswith(COMEBACK_ACK_PREFIX)
 
 
 def test_generate_excludes_downscope_default_at_l1_but_still_calls_llm(

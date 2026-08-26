@@ -1131,12 +1131,16 @@ class FakeRecoveryRepo:
         *,
         executions: dict[UUID, ExecutionEvent] | None = None,
         failure_tags: dict[UUID, list[str]] | None = None,
+        actions: dict[UUID, ActionItem] | None = None,
     ) -> None:
         # FakeExecutionRepo(#19-B)와 스토어 공유 가능 — E2E 루프 테스트용
         self._executions: dict[UUID, ExecutionEvent] = executions if executions is not None else {}
         self._failure_tags: dict[UUID, list[str]] = failure_tags if failure_tags is not None else {}
         self._attempts: dict[UUID, RecoveryAttempt] = {}
         self._strategies: list[RecoveryStrategyCatalog] = default_recovery_strategies()
+        # FakeActionItemRepo 와 스토어 공유(fixture 주입) — list_goal_outcomes(L3) 가
+        # action_item_id → goal_id 를 알아야 한다.
+        self._actions: dict[UUID, ActionItem] = actions if actions is not None else {}
 
     # ── 테스트 보조 seed ──
     def register_execution(
@@ -1218,6 +1222,31 @@ class FakeRecoveryRepo:
             key=lambda a: a.recovery_decided_at or datetime.min.replace(tzinfo=UTC), reverse=True
         )
         return [a.recovery_result for a in rows[:limit]]
+
+    async def list_goal_outcomes(
+        self, user_id: UUID, goal_id: UUID, *, limit: int = 20
+    ) -> list[str]:
+        rows = [
+            e
+            for e in self._executions.values()
+            if e.user_id == user_id
+            and e.completion_status != "in_progress"
+            and self._actions.get(e.action_item_id) is not None
+            and self._actions[e.action_item_id].goal_id == goal_id
+        ]
+        rows.sort(key=lambda e: e.plan_start_at, reverse=True)
+        return [e.completion_status for e in rows[:limit]]
+
+    async def list_recovery_decisions(self, user_id: UUID, *, limit: int = 20) -> list[str]:
+        rows = [
+            a
+            for a in self._attempts.values()
+            if a.user_id == user_id and a.user_decision != "pending"
+        ]
+        rows.sort(
+            key=lambda a: a.recovery_decided_at or datetime.min.replace(tzinfo=UTC), reverse=True
+        )
+        return [a.user_decision for a in rows[:limit]]
 
     async def list_active_strategies(self) -> list[RecoveryStrategyCatalog]:
         return sorted(
@@ -2236,10 +2265,12 @@ def fake_execution_repo(fake_action_item_repo: FakeActionItemRepo) -> FakeExecut
 
 @pytest.fixture
 def fake_recovery_repo(fake_execution_repo: FakeExecutionRepo) -> FakeRecoveryRepo:
-    # 실행/실패태그 스토어를 ExecutionRepo 와 공유 — 체크인→복구 E2E 가능
+    # 실행/실패태그/카드 스토어를 ExecutionRepo 와 공유 — 체크인→복구 E2E 가능,
+    # list_goal_outcomes(L3) 는 카드의 goal_id 를 알아야 한다.
     return FakeRecoveryRepo(
         executions=fake_execution_repo._executions,
         failure_tags=fake_execution_repo._failure_tags,
+        actions=fake_execution_repo._actions,
     )
 
 

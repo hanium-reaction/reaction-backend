@@ -242,45 +242,59 @@ async def generate_recovery_proposals(
     await endpoint_rate_limit.enforce(session, user_id=user.id, module="recovery")
 
     failure_tags = await repo.list_failure_tag_codes(execution.id)
+    # 원본 카드 — escalation L3(동일 goal)의 goal_id 가 필요해 템플릿 변수 구성부보다
+    # 앞으로 끌어올렸다. 순수 조회라 나중에 selected 가 비어 422 로 끝나도 부작용 없다.
+    action = await action_repo.get_by_id(user.id, execution.action_item_id)
+
     # overwhelm_level 은 의도적으로 넘기지 않는다 — PARK_DEFAULT 동적 트리거(`select_strategies`
     # 의 `overwhelm_level` 인자)를 쓸 실 데이터 출처가 아직 없다. `context_snapshots` 캡처는
     # #19-B-2 유예 중(`context_snapshot.py` 모듈 docstring) — 그게 붙으면 여기서 채운다.
     #
-    # escalation_level(L0~L2) 은 DB 이력만으로 계산해 넘긴다 — overwhelm_level 과 달리 새
-    # 캡처가 필요 없다. `consecutive_failure_count`(동일 카드)와 `recovery_abandoned_streak`
-    # (사용자 전체, §5.1 표에 "동일 카드" 한정이 없음)는 태그와 무관해 한 번만 조회한다.
+    # escalation_level(L0~L3) 은 DB 이력만으로 계산해 넘긴다 — overwhelm_level 과 달리 새
+    # 캡처가 필요 없다. `consecutive_failure_count`(동일 카드)·`same_goal_failure_count`
+    # (동일 goal)·`recovery_rejected_streak`·`recovery_abandoned_streak`(전부 사용자
+    # 전체·태그 무관, §5.1 표에 "동일 카드" 한정이 없음)는 태그와 무관해 한 번만 조회한다.
     # L2(동일 태그 3회 연속)만 태그별로 갈릴 수 있어 태그마다 다시 계산 — 하나라도 L2 면
     # 그걸로 확정(가장 강한 레벨이 이긴다, determine_escalation_level 과 같은 우선순위).
     # L1 은 select_strategies 의 축소→분해 규칙에만 쓴다 — v3/acknowledgment 라우팅은
     # escalation_level 이 아니라 아래 실패 태그(AVOIDANCE 포함 여부)로만 결정한다.
     same_card_history = await repo.list_same_card_outcomes(user.id, execution.action_item_id)
     recovery_results_history = await repo.list_recovery_results(user.id)
+    recovery_decisions_history = await repo.list_recovery_decisions(user.id)
+    same_goal_history = (
+        await repo.list_goal_outcomes(user.id, action.goal_id)
+        if action is not None and action.goal_id is not None
+        else []
+    )
 
     escalation_level: EscalationLevel | None = None
-    if (
-        compute_escalation_state(
-            same_card_outcomes_most_recent_first=same_card_history,
-            same_tag_outcomes_most_recent_first=[],
-            recovery_decisions_most_recent_first=[],
-            recovery_results_most_recent_first=recovery_results_history,
-        ).level
-        == "L1"
-    ):
-        escalation_level = "L1"
+    base_level = compute_escalation_state(
+        same_card_outcomes_most_recent_first=same_card_history,
+        same_tag_outcomes_most_recent_first=[],
+        same_goal_outcomes_most_recent_first=same_goal_history,
+        recovery_decisions_most_recent_first=recovery_decisions_history,
+        recovery_results_most_recent_first=recovery_results_history,
+    ).level
+    if base_level in ("L1", "L3"):
+        escalation_level = base_level
 
-    for tag in failure_tags:
-        tag_history = await repo.list_lineage_outcomes_for_tag(
-            user.id, execution.action_item_id, tag
-        )
-        state = compute_escalation_state(
-            same_card_outcomes_most_recent_first=same_card_history,
-            same_tag_outcomes_most_recent_first=tag_history,
-            recovery_decisions_most_recent_first=[],
-            recovery_results_most_recent_first=recovery_results_history,
-        )
-        if state.level == "L2":
-            escalation_level = "L2"
-            break
+    # L3 는 이미 태그 무관 최강 레벨이라 태그별 L2 재검사가 필요 없다 — 더 낮은
+    # 레벨로 내려갈 일이 없다(determine_escalation_level 과 같은 "강한 조건부터" 우선순위).
+    if escalation_level != "L3":
+        for tag in failure_tags:
+            tag_history = await repo.list_lineage_outcomes_for_tag(
+                user.id, execution.action_item_id, tag
+            )
+            state = compute_escalation_state(
+                same_card_outcomes_most_recent_first=same_card_history,
+                same_tag_outcomes_most_recent_first=tag_history,
+                same_goal_outcomes_most_recent_first=same_goal_history,
+                recovery_decisions_most_recent_first=recovery_decisions_history,
+                recovery_results_most_recent_first=recovery_results_history,
+            )
+            if state.level == "L2":
+                escalation_level = "L2"
+                break
 
     selected = select_strategies(failure_tags, strategies, escalation_level=escalation_level)
     if not selected:
@@ -291,7 +305,6 @@ async def generate_recovery_proposals(
         )
 
     # 템플릿 변수 — 원본 카드 제목 기반 (없어도 동작)
-    action = await action_repo.get_by_id(user.id, execution.action_item_id)
     action_title = action.title if action is not None else ""
     variables = {
         "first_step": (action.first_step or action_title) if action is not None else "",

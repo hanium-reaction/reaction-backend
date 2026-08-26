@@ -1,4 +1,4 @@
-"""연속 실패 에스컬레이션 회귀 (근거 대장 §5 L0~L2).
+"""연속 실패 에스컬레이션 회귀 (근거 대장 §5 L0~L3).
 
 세션 없는 순수 함수라 이력을 손으로 구성해 직접 검증한다 — `orchestrator/recovery.py`
 의 `select_strategies` 테스트와 같은 스타일.
@@ -12,6 +12,8 @@ from reaction_backend.orchestrator.escalation import (
     L1_CONSECUTIVE_FAILURE_THRESHOLD,
     L1_RECOVERY_ABANDONED_THRESHOLD,
     L2_SAME_TAG_FAILURE_THRESHOLD,
+    L3_GOAL_FAILURE_THRESHOLD,
+    L3_REJECTED_STREAK_THRESHOLD,
     EscalationCounters,
     compute_consecutive_failure_count,
     compute_escalation_state,
@@ -79,96 +81,132 @@ class TestComputeRecoveryAbandonedStreak:
         assert compute_recovery_abandoned_streak(["abandoned", "abandoned"]) == 2
 
 
+def _counters(
+    *,
+    consecutive_failure_count: int = 0,
+    same_tag_failure_count: int = 0,
+    same_goal_failure_count: int = 0,
+    recovery_rejected_streak: int = 0,
+    recovery_abandoned_streak: int = 0,
+) -> EscalationCounters:
+    return EscalationCounters(
+        consecutive_failure_count=consecutive_failure_count,
+        same_tag_failure_count=same_tag_failure_count,
+        same_goal_failure_count=same_goal_failure_count,
+        recovery_rejected_streak=recovery_rejected_streak,
+        recovery_abandoned_streak=recovery_abandoned_streak,
+    )
+
+
 class TestDetermineEscalationLevel:
     def test_zero_counters_is_l0(self) -> None:
-        counters = EscalationCounters(0, 0, 0, 0)
-        assert determine_escalation_level(counters) == "L0"
+        assert determine_escalation_level(_counters()) == "L0"
 
     def test_one_below_l1_threshold_stays_l0(self) -> None:
-        counters = EscalationCounters(
-            consecutive_failure_count=L1_CONSECUTIVE_FAILURE_THRESHOLD - 1,
-            same_tag_failure_count=0,
-            recovery_rejected_streak=0,
-            recovery_abandoned_streak=0,
-        )
+        counters = _counters(consecutive_failure_count=L1_CONSECUTIVE_FAILURE_THRESHOLD - 1)
         assert determine_escalation_level(counters) == "L0"
 
     def test_consecutive_failure_at_threshold_is_l1(self) -> None:
-        counters = EscalationCounters(
-            consecutive_failure_count=L1_CONSECUTIVE_FAILURE_THRESHOLD,
-            same_tag_failure_count=0,
-            recovery_rejected_streak=0,
-            recovery_abandoned_streak=0,
-        )
+        counters = _counters(consecutive_failure_count=L1_CONSECUTIVE_FAILURE_THRESHOLD)
         assert determine_escalation_level(counters) == "L1"
 
     def test_abandoned_streak_alone_at_threshold_is_l1(self) -> None:
         """L1 은 OR 조건 — consecutive_failure 가 0 이어도 abandoned 1회면 L1."""
-        counters = EscalationCounters(
-            consecutive_failure_count=0,
-            same_tag_failure_count=0,
-            recovery_rejected_streak=0,
-            recovery_abandoned_streak=L1_RECOVERY_ABANDONED_THRESHOLD,
-        )
+        counters = _counters(recovery_abandoned_streak=L1_RECOVERY_ABANDONED_THRESHOLD)
         assert determine_escalation_level(counters) == "L1"
 
     def test_same_tag_at_threshold_is_l2(self) -> None:
-        counters = EscalationCounters(
-            consecutive_failure_count=0,
-            same_tag_failure_count=L2_SAME_TAG_FAILURE_THRESHOLD,
-            recovery_rejected_streak=0,
-            recovery_abandoned_streak=0,
-        )
+        counters = _counters(same_tag_failure_count=L2_SAME_TAG_FAILURE_THRESHOLD)
         assert determine_escalation_level(counters) == "L2"
 
     def test_l2_condition_wins_even_when_l1_conditions_also_met(self) -> None:
-        counters = EscalationCounters(
+        counters = _counters(
             consecutive_failure_count=5,
             same_tag_failure_count=L2_SAME_TAG_FAILURE_THRESHOLD,
-            recovery_rejected_streak=0,
             recovery_abandoned_streak=3,
         )
         assert determine_escalation_level(counters) == "L2"
 
-    def test_recovery_rejected_streak_alone_does_not_escalate(self) -> None:
-        """§5.2 에 명시된 L1/L2 조건에 recovery_rejected_streak 은 없다 — 계산은
-        하지만(향후 sustain talk 가드 등에 쓰일 수 있음) 레벨 판정에는 안 쓴다.
-        """
-        counters = EscalationCounters(
-            consecutive_failure_count=0,
-            same_tag_failure_count=0,
-            recovery_rejected_streak=99,
-            recovery_abandoned_streak=0,
-        )
+    def test_same_goal_at_threshold_is_l3(self) -> None:
+        counters = _counters(same_goal_failure_count=L3_GOAL_FAILURE_THRESHOLD)
+        assert determine_escalation_level(counters) == "L3"
+
+    def test_one_below_l3_goal_threshold_stays_below_l3(self) -> None:
+        counters = _counters(same_goal_failure_count=L3_GOAL_FAILURE_THRESHOLD - 1)
         assert determine_escalation_level(counters) == "L0"
+
+    def test_rejected_streak_at_threshold_is_l3(self) -> None:
+        """§5.2 L3 — "회복 2회 연속 rejected" 단독으로도 진입(OR 조건, L1 과 같은 형태)."""
+        counters = _counters(recovery_rejected_streak=L3_REJECTED_STREAK_THRESHOLD)
+        assert determine_escalation_level(counters) == "L3"
+
+    def test_one_below_l3_rejected_threshold_does_not_escalate(self) -> None:
+        counters = _counters(recovery_rejected_streak=L3_REJECTED_STREAK_THRESHOLD - 1)
+        assert determine_escalation_level(counters) == "L0"
+
+    def test_l3_condition_wins_even_when_l1_and_l2_conditions_also_met(self) -> None:
+        """ "순서의 근거" — 재협상(L3)이 단서 전환(L2)·축소분해(L1)보다 강한 개입이라
+        먼저 검사된다. 셋 다 동시에 참이어도 L3 가 이긴다."""
+        counters = _counters(
+            consecutive_failure_count=5,
+            same_tag_failure_count=L2_SAME_TAG_FAILURE_THRESHOLD,
+            same_goal_failure_count=L3_GOAL_FAILURE_THRESHOLD,
+            recovery_abandoned_streak=3,
+        )
+        assert determine_escalation_level(counters) == "L3"
 
 
 class TestComputeEscalationState:
-    def test_wires_all_four_histories_into_counters_and_level(self) -> None:
+    def test_wires_all_five_histories_into_counters_and_level(self) -> None:
         state = compute_escalation_state(
             same_card_outcomes_most_recent_first=["failed", "failed"],
             same_tag_outcomes_most_recent_first=["failed"],
+            same_goal_outcomes_most_recent_first=["failed"],
             recovery_decisions_most_recent_first=["rejected"],
             recovery_results_most_recent_first=["abandoned"],
         )
 
-        assert state.counters == EscalationCounters(
+        assert state.counters == _counters(
             consecutive_failure_count=2,
             same_tag_failure_count=1,
+            same_goal_failure_count=1,
             recovery_rejected_streak=1,
             recovery_abandoned_streak=1,
         )
         # consecutive_failure_count=2 → L1 (abandoned_streak=1 도 별개로 L1 조건 충족).
+        # 나머지(same_tag=1, same_goal=1, rejected=1)는 전부 각 레벨 임계 미달.
         assert state.level == "L1"
 
     def test_clean_history_is_l0(self) -> None:
         state = compute_escalation_state(
             same_card_outcomes_most_recent_first=["done"],
             same_tag_outcomes_most_recent_first=[],
+            same_goal_outcomes_most_recent_first=[],
             recovery_decisions_most_recent_first=[],
             recovery_results_most_recent_first=[],
         )
         assert state.level == "L0"
+
+    def test_goal_failure_alone_wires_to_l3(self) -> None:
+        state = compute_escalation_state(
+            same_card_outcomes_most_recent_first=["failed"],
+            same_tag_outcomes_most_recent_first=["failed"],
+            same_goal_outcomes_most_recent_first=["failed"] * L3_GOAL_FAILURE_THRESHOLD,
+            recovery_decisions_most_recent_first=[],
+            recovery_results_most_recent_first=[],
+        )
+        assert state.counters.same_goal_failure_count == L3_GOAL_FAILURE_THRESHOLD
+        assert state.level == "L3"
+
+    def test_rejected_decisions_alone_wires_to_l3(self) -> None:
+        state = compute_escalation_state(
+            same_card_outcomes_most_recent_first=[],
+            same_tag_outcomes_most_recent_first=[],
+            same_goal_outcomes_most_recent_first=[],
+            recovery_decisions_most_recent_first=["rejected"] * L3_REJECTED_STREAK_THRESHOLD,
+            recovery_results_most_recent_first=[],
+        )
+        assert state.level == "L3"
 
 
 @pytest.mark.parametrize(

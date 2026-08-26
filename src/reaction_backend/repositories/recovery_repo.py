@@ -37,7 +37,11 @@ from reaction_backend.schemas.common import KST
 _UNDECIDED_EXPIRY_REASON = "system: 회고 창 밖 — 결정 없이 자동 정리"
 
 if TYPE_CHECKING:
-    from reaction_backend.orchestrator.escalation import ExecutionOutcome, RecoveryResultOutcome
+    from reaction_backend.orchestrator.escalation import (
+        ExecutionOutcome,
+        RecoveryDecisionOutcome,
+        RecoveryResultOutcome,
+    )
 
 
 class RecoveryRepo:
@@ -182,6 +186,58 @@ class RecoveryRepo:
         )
         result = await self._session.execute(stmt)
         return cast("list[RecoveryResultOutcome]", list(result.scalars().all()))
+
+    async def list_goal_outcomes(
+        self,
+        user_id: UUID,
+        goal_id: UUID,
+        *,
+        limit: int = 20,
+    ) -> list[ExecutionOutcome]:
+        """L3 에스컬레이션(근거 대장 §5.2 "동일 goal 4회 연속 실패")용 이력 — 시간 역순.
+
+        `list_lineage_outcomes_for_tag`(L2)와 달리 **태그 무관** — 같은 goal 산하 전체
+        action_item 의 실행 이력을 그대로 본다("다른 태그 실패는 동결" 트릭이 없다, 그건
+        "동일 (계보,tag_code)" 전용). `list_same_card_outcomes`(L1, "동일 카드")보다
+        넓고 `list_lineage_outcomes_for_tag`(L2, "동일 (계보,tag_code)")보다 좁지 않은
+        — 계보 전체를 태그로 좁히지 않는 — 세 번째 모집단이다.
+        """
+        stmt = (
+            select(ExecutionEvent.completion_status)
+            .join(ActionItem, ActionItem.id == ExecutionEvent.action_item_id)
+            .where(
+                ExecutionEvent.user_id == user_id,
+                ActionItem.goal_id == goal_id,
+                ExecutionEvent.completion_status != "in_progress",
+            )
+            .order_by(ExecutionEvent.plan_start_at.desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return cast("list[ExecutionOutcome]", list(result.scalars().all()))
+
+    async def list_recovery_decisions(
+        self,
+        user_id: UUID,
+        *,
+        limit: int = 20,
+    ) -> list[RecoveryDecisionOutcome]:
+        """L3 에스컬레이션(근거 대장 §5.2 "회복 2회 연속 rejected")용 이력 — 시간 역순.
+
+        `list_recovery_results`(abandoned_streak)와 같은 스코프 — 카드/goal 무관,
+        이 사용자의 **회복 결정 전체**에서 본다. `pending`(아직 결정 안 됨)은 제외.
+        """
+        stmt = (
+            select(RecoveryAttempt.user_decision)
+            .where(
+                RecoveryAttempt.user_id == user_id,
+                RecoveryAttempt.user_decision != "pending",
+            )
+            .order_by(RecoveryAttempt.recovery_decided_at.desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return cast("list[RecoveryDecisionOutcome]", list(result.scalars().all()))
 
     async def list_active_strategies(self) -> list[RecoveryStrategyCatalog]:
         stmt = (

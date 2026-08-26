@@ -130,7 +130,7 @@ def select_strategies(
        빠진다. 카탈로그에 `ENVIRONMENT_SHIFT` 가 없거나 비활성이면 이 규칙은 조용히
        no-op — 카드 개수가 깨지지 않는다. `escalation_level=None`(기본값)이면 완전히
        비활성 — 기존 동작과 100% 동일하다.
-    7. **L1 축소→분해** (근거 대장 §5.2): `escalation_level` 이 `"L1"` **또는** `"L2"`
+    7. **L1 축소→분해** (근거 대장 §5.2): `escalation_level` 이 `"L1"`/`"L2"`/`"L3"`
        면(레벨은 아래에서 위로 누적된다 — §5.2 "순서의 근거") `DOWNSCOPE_DEFAULT` 를
        후보 자체에서 뺀다. 카탈로그 5개 DOWNSCOPE 전략 중 유일하게 "오늘은 절반만,
        가능한 만큼만"처럼 모호한 비율(축소)로 쓰여 있고, 나머지(`NANO_STEP`/
@@ -139,9 +139,17 @@ def select_strategies(
        두면 기존 점수·패딩 로직이 자연히 분해 스타일을 선택한다(별도 강제 로직 불필요).
        `FATIGUE`/`PLAN_TOO_BIG` 실매칭이 있었다면 그 슬롯은 매칭 0 으로 떨어질 수 있고,
        그러면 규칙 4 패딩이 다음 우선순위 DOWNSCOPE 전략(`NANO_STEP`)으로 채운다.
+
+    ⚠️ **L3 는 아직 "상태 판정"만 배선돼 있다.** 근거 대장 §5.2 가 요구한 "4그룹 통상
+    카드 대신 재협상 3장([목표 축소]/[기한 재설정]/[일시 중단])"은 이 함수가 아직 안
+    만든다 — 그 UX 는 FE 쪽 PARK 수락 플로우(`reaction-frontend#223`)가 아직 수락 안
+    돼 화면이 없다. L3 에선 지금 규칙 7(DOWNSCOPE_DEFAULT 배제)만 L1/L2 와 똑같이
+    이어받고, 규칙 6(ENVIRONMENT_SHIFT 강제)은 **안 이어받는다** — 그건 L2 전용
+    "단서 전환" 전술이라 재협상이라는 다른 개입 의도의 L3 에 그대로 재사용할 근거가
+    없다(`escalation.py` 모듈 docstring 의 스코프 경계 참고).
     """
     active = [s for s in strategies if s.is_active]
-    if escalation_level in ("L1", "L2"):
+    if escalation_level in ("L1", "L2", "L3"):
         active = [s for s in active if s.strategy_type != DOWNSCOPE_DEFAULT_STRATEGY_TYPE]
     tag_set = set(failure_tags)
     park_default_triggered = (

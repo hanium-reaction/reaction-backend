@@ -12,9 +12,14 @@ SQL 뷰로 "연속" + "partial_done 동결"을 표현하면 윈도우 함수가 
 불변으로 쌓이고 있으므로, 매번 다시 계산해도 항상 최신이라는 이점도 있다.
 
 ⚠️ **스코프 경계 (정직 표기)**:
-- **L3(재협상 3장)·L4(stand-down)는 뺐다** — L3 는 FE 쪽 PARK 수락 플로우 UI
-  (`reaction-frontend#223`)가 아직 수락 안 됐고, L4 는 진입 조건(`overwhelm≥4`)의
-  신호 자체가 프로덕션에 없다(`context_snapshots` 실제 캡처 미완, #19-B-2 유예).
+- **L3(재협상 3장)은 "상태 판정"만 있다 — 재협상 3장 UX 자체는 아직 없다.** `EscalationLevel`
+  에 `"L3"` 은 있고 `determine_escalation_level` 도 L3 를 정확히 판정하지만,
+  `orchestrator/recovery.py::select_strategies` 는 L3 를 L1/L2 가 이미 가진 보호
+  장치(DOWNSCOPE_DEFAULT 배제)만 이어받을 뿐 §5.2 가 요구한 "4그룹 통상 카드 대신
+  재협상 3장([목표 축소]/[기한 재설정]/[일시 중단])"은 아직 안 만든다 — 그 UX 는
+  FE 쪽 PARK 수락 플로우(`reaction-frontend#223`)가 아직 수락 안 돼 화면이 없다.
+- **L4(stand-down)는 여전히 뺐다** — 진입 조건(`overwhelm≥4`)의 신호 자체가
+  프로덕션에 없다(`context_snapshots` 실제 캡처 미완, #19-B-2 유예).
 - **이 모듈은 레벨을 계산하는 로직만 제공한다.** `routes/recovery.py`나
   `orchestrator/recovery.py::select_strategies` 에 실제로 배선(L2 의 ENVIRONMENT_SHIFT
   선두 강제, L1 의 acknowledgment 활성화 등)하는 건 별도 작업이다. 특히 L1 의
@@ -23,9 +28,9 @@ SQL 뷰로 "연속" + "partial_done 동결"을 표현하면 윈도우 함수가 
   프롬프트에 새 template 변수를 추가해야 한다 — 그러면 모든 버전이 같은 placeholder
   계약을 지켜야 하는 기존 테스트(`tests/prompts/test_recovery_prompts.py::test_every_version_matches_code_variables`)
   때문에 v1/v2 도 같이 손대야 한다. 그건 이번 작업 범위 밖이라고 판단했다.
-- **"동일 카드"/"동일 (계보, tag_code)" 이력을 정확히 무엇으로 조회할지**(특히 회복으로
-  생성된 파생 카드까지 잇는 계보 그래프)는 이 모듈이 책임지지 않는다 — 호출부가 이미
-  올바르게 필터링·시간 역순 정렬한 이력 리스트를 넘긴다고 가정한다.
+- **"동일 카드"/"동일 (계보, tag_code)"/"동일 goal" 이력을 정확히 무엇으로 조회할지**
+  (특히 회복으로 생성된 파생 카드까지 잇는 계보 그래프)는 이 모듈이 책임지지 않는다 —
+  호출부가 이미 올바르게 필터링·시간 역순 정렬한 이력 리스트를 넘긴다고 가정한다.
 
 모든 함수는 **최신이 먼저**(index 0 = 가장 최근) 오는 리스트를 받는다.
 """
@@ -45,20 +50,23 @@ RecoveryDecisionOutcome = Literal["accepted", "edited", "rejected", "skipped"]
 RecoveryResultOutcome = Literal["completed", "abandoned"]
 """`recovery_attempts.recovery_result` 중 종결된 값만 — `pending` 은 제외한다."""
 
-EscalationLevel = Literal["L0", "L1", "L2"]
+EscalationLevel = Literal["L0", "L1", "L2", "L3"]
 
 # 근거 대장 §5.4 — "설계자 판단"으로 이미 고정된 값. acknowledgment 조건(overwhelm 등)과
 # 달리 로그 재추정이 필요한 값이 아니다.
 L1_CONSECUTIVE_FAILURE_THRESHOLD = 2
 L1_RECOVERY_ABANDONED_THRESHOLD = 1
 L2_SAME_TAG_FAILURE_THRESHOLD = 3
+L3_GOAL_FAILURE_THRESHOLD = 4
+L3_REJECTED_STREAK_THRESHOLD = 2
 
 
 class EscalationCounters(NamedTuple):
-    """근거 대장 §5.1 의 4개 카운터."""
+    """근거 대장 §5.1 의 카운터 — L3(§5.2) 판정에 쓰는 `same_goal_failure_count` 포함."""
 
     consecutive_failure_count: int
     same_tag_failure_count: int
+    same_goal_failure_count: int
     recovery_rejected_streak: int
     recovery_abandoned_streak: int
 
@@ -116,13 +124,19 @@ def compute_recovery_abandoned_streak(
 
 
 def determine_escalation_level(counters: EscalationCounters) -> EscalationLevel:
-    """§5.2 레벨 정책(L0~L2 만) — 더 강한 조건(L2)부터 검사한다.
+    """§5.2 레벨 정책(L0~L3) — 더 강한 조건부터 검사한다("순서의 근거": 재협상(L3)이
+    단서 전환(L2)보다 강한 개입).
 
-    L2 는 "동일 태그 3회 연속 실패" 하나뿐이라 단순 비교. L1 은 "동일 카드 2회 연속
-    실패 **또는** 회복 1회 abandoned" 중 하나만 충족해도 된다(OR). L2 조건이 L1 보다
-    항상 세다는 보장은 없지만(서로 다른 카운터를 본다), §5.2 "순서의 근거"가 단서
-    전환(L2)을 재협상(L3) 바로 아래 더 강한 개입으로 두고 있어 L2 를 먼저 검사한다.
+    L3 는 "동일 goal 4회 연속 실패" **또는** "회복 2회 연속 rejected" 중 하나만
+    충족해도 된다(OR, L1 과 같은 형태). L2 는 "동일 태그 3회 연속 실패" 하나뿐이라
+    단순 비교. L1 은 "동일 카드 2회 연속 실패 **또는** 회복 1회 abandoned" 중 하나만
+    충족해도 된다(OR).
     """
+    if (
+        counters.same_goal_failure_count >= L3_GOAL_FAILURE_THRESHOLD
+        or counters.recovery_rejected_streak >= L3_REJECTED_STREAK_THRESHOLD
+    ):
+        return "L3"
     if counters.same_tag_failure_count >= L2_SAME_TAG_FAILURE_THRESHOLD:
         return "L2"
     if (
@@ -137,16 +151,20 @@ def compute_escalation_state(
     *,
     same_card_outcomes_most_recent_first: list[ExecutionOutcome],
     same_tag_outcomes_most_recent_first: list[ExecutionOutcome],
+    same_goal_outcomes_most_recent_first: list[ExecutionOutcome],
     recovery_decisions_most_recent_first: list[RecoveryDecisionOutcome],
     recovery_results_most_recent_first: list[RecoveryResultOutcome],
 ) -> EscalationState:
-    """네 이력 리스트에서 카운터 + 레벨을 한 번에 계산 — 호출부의 실제 진입점."""
+    """다섯 이력 리스트에서 카운터 + 레벨을 한 번에 계산 — 호출부의 실제 진입점."""
     counters = EscalationCounters(
         consecutive_failure_count=compute_consecutive_failure_count(
             same_card_outcomes_most_recent_first
         ),
         same_tag_failure_count=compute_consecutive_failure_count(
             same_tag_outcomes_most_recent_first
+        ),
+        same_goal_failure_count=compute_consecutive_failure_count(
+            same_goal_outcomes_most_recent_first
         ),
         recovery_rejected_streak=compute_recovery_rejected_streak(
             recovery_decisions_most_recent_first
