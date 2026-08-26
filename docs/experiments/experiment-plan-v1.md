@@ -902,3 +902,37 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
     전용 EC2 워크플로 4개(`.github/workflows/report-{next-day-return,re-engagement,
     consistency-rolling14,burden-index}.yml`). 넷 다 로컬에서 실제 실행해 빈 데이터에도
     정상 종료함을 확인.
+26. ✅ **COMEBACK 문구 프리픽스 (`comeback_ack`) — 완료.** 근거 대장 §4.1 — D6(Milkman
+    et al. 2021, '놓친 뒤 복귀' 개입)을 5번째 UX 그룹 없이(AGENTS.md §1 잠금) 문구 층에만
+    얹는 저비용 개입. 항목 24/25 직후 격차 조사에서 뽑힌 두 후보(이 항목, S3 L3 상태
+    판정) 중 스키마 변경 0·범위가 더 좁은 이쪽을 먼저 진행.
+
+    - **`orchestrator/recovery.py::with_comeback_ack(text, *, escalation_level)`** 신설
+      (순수 함수) — `escalation_level` 이 `None` 이 아니면(L1 또는 L2, 둘 다 §5.2 "동일
+      카드/계보 반복 실패"가 전제) 고정 프리픽스 `COMEBACK_ACK_PREFIX`("다시 돌아온
+      지금이 중요해요. ")를 앞에 붙인다. "연속실패≥2"를 재는 새 카운터를 만들지 않고
+      **이미 `generate_recovery_proposals` 가 계산해 둔 `escalation_level` 을 그대로
+      재사용** — 근거 대장이 요구한 "스키마 변경 0"을 그대로 지킨다.
+    - `routes/recovery.py` 에서 선두 카드 문구(`texts[top.strategy_type]`)에만 적용 —
+      L2 처럼 LLM 호출 자체를 건너뛴 경우(카탈로그 원본 템플릿)에도 똑같이 붙는다(고정
+      문구라 personalize 성패와 무관). 형제(패딩) 카드는 원문 그대로.
+    - 문구는 tone 규칙과 같은 원칙으로 썼다 — 자존감 부양("역시 잘하시네요" 류, A1 이
+      자기자비보다 약하다고 확인한 조건) 대신 **지금 이 순간**에 초점을 맞춘 상황적
+      문구, 금지어 없음(`safety/banned_words.py::scan` 으로 방어적 확인).
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **"연속실패≥2"를 L1 의 원시 카운터로 별도 계산하지 않는다** — `escalation_level`
+      (L1 **또는** L2)을 그대로 재사용한다. L2 는 "동일 (계보,tag_code) 3회"라 엄밀히는
+      "동일 카드 2회 연속"과 다른 모집단일 수 있으나, 근거 대장 원문이 "연속실패≥2"를
+      정밀한 카운터 스펙이 아니라 "반복되면 보인다"는 취지로 쓴 것으로 읽어 이미 있는
+      신호를 그대로 썼다 — 새 카운터 인프라를 만들지 않는다는 근거 대장의 명시적 요구와
+      더 부합.
+    - **api-contract 갱신 없음** — 응답 필드가 아니라 기존 `suggestedActionText` 의
+      **내용**만 조건부로 바뀌는 것이라 계약(스키마) 변경이 아니다(push 알림 본문 문구와
+      같은 취급 — 그쪽도 계약 문서에 문구 자체는 안 싣는다).
+    - **A/B 처치 변수로는 아직 안 씀** — 근거 대장이 "A/B 처치 변수로도 쓸 수 있다"고
+      언급한 잠재 활용은 이번 스코프 밖. 지금은 무조건(에스컬레이션 시) 켜져 있다.
+
+    신규 테스트 5건 — 순수함수 3건(`test_with_comeback_ack_*` — 미에스컬레이션 무변화,
+    L1/L2 각각 프리픽스), 라우트 통합 2건(L1/L2 각각 선두 카드에 프리픽스 확인 + L1 은
+    형제 카드에 안 붙음도 같이 확인 — `test_recovery.py`).

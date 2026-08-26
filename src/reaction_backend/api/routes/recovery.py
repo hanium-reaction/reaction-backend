@@ -53,6 +53,7 @@ from reaction_backend.orchestrator.recovery import (
     render_template,
     select_strategies,
     shift_to_recovery_day,
+    with_comeback_ack,
 )
 from reaction_backend.repositories.action_item_repo import (
     ActionItemRepo,
@@ -367,6 +368,12 @@ async def generate_recovery_proposals(
                 top_obstacle = result.value.obstacle or None
                 top_coping_clause = result.value.coping_clause or None
                 top_acknowledgment = result.value.acknowledgment or None
+
+    # COMEBACK 프리픽스(근거 대장 §4.1, D6) — 연속실패≥2(에스컬레이션 발생)일 때만 선두
+    # 카드 문구 맨 앞에 얹는다. personalize 성패와 무관하게 적용(고정 문구, LLM 출력 아님).
+    texts[top.strategy_type] = with_comeback_ack(
+        texts[top.strategy_type], escalation_level=escalation_level
+    )
 
     attempts = [
         await repo.create_attempt(

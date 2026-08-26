@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from reaction_backend.orchestrator.recovery import (
+    COMEBACK_ACK_PREFIX,
     RECOVERY_NIGHT_CUTOFF_HOUR,
     re_engagement_anchor_at,
     recovery_target_date,
@@ -21,6 +22,7 @@ from reaction_backend.orchestrator.recovery import (
     render_template,
     select_strategies,
     shift_to_recovery_day,
+    with_comeback_ack,
 )
 from reaction_backend.schemas.common import KST
 from tests.conftest import (
@@ -437,6 +439,98 @@ def test_generate_excludes_downscope_default_at_l1_but_still_calls_llm(
     assert "DOWNSCOPE_DEFAULT" not in types
     assert "NANO_STEP" in types
     assert body["aiSource"] == "llm"
+
+
+def test_generate_l1_escalation_prefixes_leading_card_with_comeback_ack(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """근거 대장 §4.1 — 연속실패≥2(L1) 면 선두 카드 문구에 컴백 프리픽스가 붙는다."""
+    from reaction_backend.llm import RunResult, aiClient
+    from reaction_backend.schemas.recovery import RecoveryProposalLLM
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        return RunResult(
+            value=RecoveryProposalLLM(
+                strategy_code="downscope",
+                if_clause="많이 지쳤으면",
+                then_clause="가벼운 산책 후 정리만 해볼까요",
+                rationale="",
+            ),
+            fell_back=False,
+            reason=None,
+            prompt_id="recovery/if_then_proposal",
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+    action = _seed_action(fake_action_item_repo, title="보고서 작성")
+    fake_recovery_repo.register_execution(
+        user_id=DEMO_USER_UUID,
+        action_item_id=action.id,
+        completion_status="failed",
+        failure_tags=["FATIGUE"],
+        plan_start_at=datetime(2026, 6, 1, tzinfo=KST),
+    )
+    current = fake_recovery_repo.register_execution(
+        user_id=DEMO_USER_UUID,
+        action_item_id=action.id,
+        completion_status="failed",
+        failure_tags=["FATIGUE"],
+        plan_start_at=datetime(2026, 6, 2, tzinfo=KST),
+    )
+
+    body = _generate(client, f"exec_{current.id}").json()
+
+    top = body["cards"][0]
+    assert top["suggestedActionText"] == (
+        f"{COMEBACK_ACK_PREFIX}많이 지쳤으면 가벼운 산책 후 정리만 해볼까요"
+    )
+    # 형제 카드(패딩)에는 안 붙는다 — "선두 카드"에만 얹는다.
+    for sibling in body["cards"][1:]:
+        assert not sibling["suggestedActionText"].startswith(COMEBACK_ACK_PREFIX)
+
+
+def test_generate_l2_escalation_prefixes_leading_card_with_comeback_ack(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """L2 는 LLM 호출 자체를 건너뛰지만(문구 다듬기 중단) 컴백 프리픽스는 고정 문구라
+    똑같이 붙는다 — 카탈로그 원본 템플릿 앞에 실린다."""
+    from reaction_backend.llm import aiClient
+
+    async def stub_run(**kwargs: Any) -> Any:
+        raise AssertionError("L2 에서는 aiClient.run 이 호출되면 안 된다")
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+    action = _seed_action(fake_action_item_repo, title="집중 안 되는 작업")
+    for i in range(2):
+        fake_recovery_repo.register_execution(
+            user_id=DEMO_USER_UUID,
+            action_item_id=action.id,
+            completion_status="failed",
+            failure_tags=["DISTRACTION"],
+            plan_start_at=datetime(2026, 6, 1, tzinfo=KST) + timedelta(days=i),
+        )
+    current = fake_recovery_repo.register_execution(
+        user_id=DEMO_USER_UUID,
+        action_item_id=action.id,
+        completion_status="failed",
+        failure_tags=["HARD_TO_START", "DISTRACTION"],
+        plan_start_at=datetime(2026, 6, 1, tzinfo=KST) + timedelta(days=2),
+    )
+
+    body = _generate(client, f"exec_{current.id}").json()
+
+    top = body["cards"][0]
+    assert top["strategyType"] == "ENVIRONMENT_SHIFT"
+    assert top["suggestedActionText"].startswith(COMEBACK_ACK_PREFIX)
 
 
 def test_generate_does_not_escalate_one_below_l1_threshold(
@@ -1193,6 +1287,26 @@ def test_recovery_target_date_only_carry_over_moves_to_tomorrow() -> None:
     assert recovery_target_date(decided_on, "CARRY_OVER") == date(2026, 7, 30)
     for group in ("DOWNSCOPE", "RESCHEDULE", "PARK"):
         assert recovery_target_date(decided_on, group) == decided_on
+
+
+# ── with_comeback_ack (근거 대장 §4.1, D6) ──────────────────────────────
+
+
+def test_with_comeback_ack_no_escalation_leaves_text_unchanged() -> None:
+    assert with_comeback_ack("가벼운 산책 후 정리만 해볼까요", escalation_level=None) == (
+        "가벼운 산책 후 정리만 해볼까요"
+    )
+
+
+def test_with_comeback_ack_l1_prefixes_the_text() -> None:
+    result = with_comeback_ack("가벼운 산책 후 정리만 해볼까요", escalation_level="L1")
+    assert result == f"{COMEBACK_ACK_PREFIX}가벼운 산책 후 정리만 해볼까요"
+
+
+def test_with_comeback_ack_l2_prefixes_the_text() -> None:
+    """LLM 호출 자체를 건너뛰는 L2 도 컴백 프리픽스는 그대로 적용된다(고정 문구라 무관)."""
+    result = with_comeback_ack("가벼운 산책 후 정리만 해볼까요", escalation_level="L2")
+    assert result == f"{COMEBACK_ACK_PREFIX}가벼운 산책 후 정리만 해볼까요"
 
 
 # ── re_engagement_anchor_at (근거 대장 §3 S8) ──────────────────────────────

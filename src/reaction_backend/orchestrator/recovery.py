@@ -61,6 +61,12 @@ ENVIRONMENT_SHIFT_STRATEGY_TYPE = "ENVIRONMENT_SHIFT"
 # "전체를 15분만"(축소) 패턴과 같은 스타일(모호한 비율)인 유일한 DOWNSCOPE 전략.
 DOWNSCOPE_DEFAULT_STRATEGY_TYPE = "DOWNSCOPE_DEFAULT"
 
+# COMEBACK 프리픽스(근거 대장 §4.1) — D6(Milkman et al. 2021, '놓친 뒤 복귀' 개입)를
+# 5번째 UX 그룹 없이(AGENTS.md §1 잠금) 문구 층에만 얹는다. "역시 잘하시네요" 류 자존감
+# 부양이 아니라(A1 — 그 조건이 자기자비보다 약했다) **지금 이 순간**에 초점을 맞춘
+# 상황적 문구 — tone 규칙(비난 없는 청유형, 금지어 없음)과 같은 원칙.
+COMEBACK_ACK_PREFIX = "다시 돌아온 지금이 중요해요. "
+
 
 class _SafeFormatDict(dict[str, str]):
     """템플릿 변수 누락 시 빈 문자열 치환 — `{first_step}` 등."""
@@ -73,6 +79,20 @@ def render_template(template: str, variables: dict[str, str] | None = None) -> s
     """카탈로그 `if_then_template` 의 `{변수}` 를 치환. 누락 변수는 빈 문자열 + 공백 정리."""
     rendered = template.format_map(_SafeFormatDict(variables or {}))
     return " ".join(rendered.split())
+
+
+def with_comeback_ack(text: str, *, escalation_level: EscalationLevel | None) -> str:
+    """연속실패≥2(에스컬레이션 발생) 일 때만 선두 카드 문구에 컴백 프리픽스를 얹는다.
+
+    근거 대장 §4.1 — L1/L2 에스컬레이션은 둘 다 "동일 카드/계보 반복 실패"(§5.2)가
+    전제라 이미 계산된 `escalation_level` 을 그대로 재사용한다(새 카운터 불필요, 스키마
+    변경 0). LLM personalize 가 성공했든 실패해 카탈로그 템플릿이 그대로 노출됐든
+    똑같이 적용한다 — 이 프리픽스는 LLM 출력이 아니라 고정 문구라 personalize 성패와
+    무관하다(L2 는 LLM 호출 자체를 건너뛰지만 그래도 컴백 신호는 필요하다).
+    """
+    if escalation_level is None:
+        return text
+    return f"{COMEBACK_ACK_PREFIX}{text}"
 
 
 def select_strategies(
