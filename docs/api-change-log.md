@@ -7,6 +7,23 @@
 
 ---
 
+## v1.84 — 2026-08-26 (refresh token httpOnly 쿠키 — #323)
+
+**추가만(하위호환)** — 응답 헤더 1개 추가 + 기존 요청 필드 완화. 기존 응답 스키마 변경 없음.
+
+- `POST /auth/google` 이 `refreshToken` 을 응답 본문(그대로 유지)과 `reaction_refresh`
+  httpOnly 쿠키(`Path=/auth`, `SameSite=Lax`, `APP_ENV≠local` 이면 `Secure`)로 **둘 다**
+  내려준다 — 웹이 새로고침해도 세션이 안 끊기게(기존엔 XSS 우려로 refresh 를 메모리에만
+  둬서 60분마다 재로그인해야 했다).
+- `RefreshRequest.refreshToken`/`LogoutRequest.refreshToken` 이 이제 **선택**(하위호환) —
+  생략하면 `reaction_refresh` 쿠키로 폴백. 본문·쿠키 둘 다 없으면 401
+  `AUTH_INVALID_TOKEN`.
+- `POST /auth/logout` 은 성공/실패 무관하게 항상 쿠키를 지운다.
+- 네이티브 앱은 영향 없음 — 계속 본문의 `refreshToken` 만 쓴다(크로스오리진이라 쿠키
+  미사용, 이미 Keystore 로 안전).
+
+---
+
 ## v1.83 — 2026-08-25 (계정 삭제 — #321, FE #237 §4)
 
 **추가만(하위호환)** — 새 endpoint 1개 + `/auth/refresh` 동작 보강. 기존 응답 스키마 변경 없음.

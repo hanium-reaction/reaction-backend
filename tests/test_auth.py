@@ -413,3 +413,85 @@ def test_existing_user_login_unaffected_by_capacity(
     resp = auth_client.post("/auth/google", json={"idToken": "stub"})
     get_settings.cache_clear()
     assert resp.status_code == 200
+
+
+# ───────────────────────── refresh token httpOnly 쿠키 (#323) ─────────────────────────
+
+
+def test_login_sets_refresh_cookie(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    fake_invite_code_repo.seed("TESTCODE")
+    resp = auth_client.post("/auth/google", json={"idToken": "stub", "inviteCode": "TESTCODE"})
+    assert resp.status_code == 200
+
+    set_cookie_headers = resp.headers.get_list("set-cookie")
+    refresh_cookie = next(h for h in set_cookie_headers if h.startswith("reaction_refresh="))
+    assert "HttpOnly" in refresh_cookie
+    assert "Path=/auth" in refresh_cookie
+    assert "samesite=lax" in refresh_cookie.lower()
+    # app_env=local(테스트 기본값) 이라 Secure 는 안 붙는다 — https 없는 로컬 개발 대응.
+    assert "Secure" not in refresh_cookie
+
+    # 이행 기간 — 본문에도 여전히 refreshToken 이 실린다(네이티브·기존 클라이언트용).
+    assert resp.json()["refreshToken"]
+
+
+def test_refresh_works_with_cookie_only(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    """httpx TestClient 는 로그인 응답의 Set-Cookie 를 쿠키 jar 에 저장해 이후 요청에
+    자동으로 실어 보낸다 — 그래서 본문 없이 호출해도 로그인 시 받은 쿠키로 통한다."""
+    _login(auth_client, fake_invite_code_repo)
+    resp = auth_client.post("/auth/refresh", json={})
+    assert resp.status_code == 200
+    assert resp.json()["accessToken"]
+
+
+def test_refresh_without_body_or_cookie_returns_401(auth_client: TestClient) -> None:
+    resp = auth_client.post("/auth/refresh", json={})
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "AUTH_INVALID_TOKEN"
+
+
+def test_body_token_takes_precedence_over_cookie(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    """쿠키가 심겨 있어도 본문에 유효한 토큰을 보내면 그쪽이 쓰인다(순서 계약 고정)."""
+    login = _login(auth_client, fake_invite_code_repo)  # 쿠키도 함께 심어짐
+    resp = auth_client.post("/auth/refresh", json={"refreshToken": login["refreshToken"]})
+    assert resp.status_code == 200
+
+
+def test_logout_clears_cookie(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    _login(auth_client, fake_invite_code_repo)
+    assert "reaction_refresh" in auth_client.cookies
+
+    resp = auth_client.post("/auth/logout", json={})
+    assert resp.status_code == 204
+    set_cookie_headers = resp.headers.get_list("set-cookie")
+    cleared = next(h for h in set_cookie_headers if h.startswith("reaction_refresh="))
+    assert 'reaction_refresh=""' in cleared or "reaction_refresh=;" in cleared
+    assert "reaction_refresh" not in auth_client.cookies
+
+
+def test_logout_works_with_cookie_only_and_revokes_it(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    login = _login(auth_client, fake_invite_code_repo)
+    refresh = login["refreshToken"]
+
+    logout_resp = auth_client.post("/auth/logout", json={})  # 쿠키만으로 로그아웃
+    assert logout_resp.status_code == 204
+
+    # 쿠키는 이제 지워졌으니, 원래 발급됐던 토큰을 본문으로 다시 보내 revoke 확인.
+    resp = auth_client.post("/auth/refresh", json={"refreshToken": refresh})
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "AUTH_INVALID_TOKEN"
+
+
+def test_logout_without_body_or_cookie_is_still_idempotent(auth_client: TestClient) -> None:
+    resp = auth_client.post("/auth/logout", json={})
+    assert resp.status_code == 204

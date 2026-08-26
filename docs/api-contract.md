@@ -150,6 +150,31 @@ API 없음 — 이 레포의 다른 운영 작업과 같은 CLI 스크립트 관
 된 계정이면 401 `AUTH_INVALID_TOKEN`. 이전에는 jti revoke set 여부만 확인해, 계정을
 삭제해도 삭제 전 발급된 refresh token 으로 계속 새 access 를 받을 수 있었다.
 
+**refresh token httpOnly 쿠키(#323)** — 웹은 새로고침하면 메모리에만 두던 refresh
+token 이 사라져 60분마다 재로그인해야 했다(XSS 노출을 우려해 localStorage 에 안
+뒀기 때문). 이제 `POST /auth/google` 이 `refreshToken` 을 응답 본문(그대로 유지)과
+`reaction_refresh` httpOnly 쿠키로 **둘 다** 내려준다:
+
+```
+Set-Cookie: reaction_refresh=<token>; HttpOnly; Path=/auth; SameSite=Lax; Max-Age=1209599[; Secure]
+```
+
+- `Secure` 는 `APP_ENV≠local` 일 때만 붙는다(로컬 개발은 http 라 Secure 쿠키가 아예
+  전송 안 됨).
+- `POST /auth/refresh`·`POST /auth/logout` 은 **본문 우선, 없으면 쿠키로 폴백** — 요청
+  본문에 `refreshToken` 을 아예 생략해도(빈 객체 `{}`) 쿠키가 있으면 동작한다. 이제
+  `refreshToken` 은 두 요청 스키마 모두에서 **선택**(하위호환 — 기존처럼 본문에 실어
+  보내는 클라이언트는 무변경 동작).
+- 본문·쿠키 **둘 다** 없으면 401 `AUTH_INVALID_TOKEN`.
+- `logout` 은 성공/실패 무관하게 항상 쿠키를 지운다(`Max-Age=0`) — 브라우저 쪽 정리가
+  목적이라 토큰 유효성과 별개.
+- **네이티브 앱(capacitor://localhost)은 쿠키를 쓰지 않는다** — 크로스오리진이라
+  `SameSite=None` 이 필요한데, 이미 OS Keystore 로 안전한 저장소가 있어 그 CSRF 노출을
+  감수할 이유가 없다(이슈가 명시한 "단순한 쪽"). 계속 본문의 `refreshToken` 을 읽어
+  Keystore 에 저장한다 — 이번 변경으로 아무것도 안 바뀐다.
+- CORS: `allow_credentials=True` + 명시적 origin 화이트리스트(`CORS_ALLOW_ORIGINS`)는
+  이미 설정돼 있었다(§1.1 base URL 별 CORS 설정) — 이번 PR 에서 변경 없음.
+
 ---
 
 ## 3. Onboarding (`/onboarding`)

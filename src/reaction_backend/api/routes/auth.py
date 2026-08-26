@@ -6,6 +6,14 @@ Issue #16 실구현:
 - `/auth/logout`  : refresh 의 jti 를 revoke set 에 등록. 잘못된 토큰이어도 멱등하게 204.
 - `/auth/me`      : `CurrentUser` 의존성 (api/deps.py) — Bearer JWT 검증.
 
+Issue #323 — refresh token httpOnly 쿠키 (웹 새로고침 시 재로그인 문제):
+- `/auth/google` 이 `refreshToken` 을 응답 본문(그대로 유지, 네이티브·이행기간용)과
+  `reaction_refresh` httpOnly 쿠키(`Path=/auth`, `SameSite=Lax`) 로 **둘 다** 내려준다.
+- `/auth/refresh`·`/auth/logout` 은 본문에 토큰이 없으면 쿠키로 폴백 — 어느 쪽이든
+  하나만 있으면 동작한다.
+- 네이티브(capacitor://localhost)는 크로스오리진이라 쿠키를 안 쓰고 지금처럼 본문만
+  본다 — 이미 Keystore 로 안전해 `SameSite=None` 의 CSRF 노출을 감수할 이유가 없다.
+
 Issue #324 — 신규 가입 게이트 (기존 사용자 로그인은 완전히 영향받지 않는다):
 - `SIGNUPS_ENABLED=false` — 긴급 차단, 재배포 없이 끌 수 있다(`toggle-signups.yml`).
 - 가입 인원 상한(`SIGNUP_CAPACITY`, 기본 30) 도달 시 차단.
@@ -19,10 +27,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Cookie, Depends, Response, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,6 +70,16 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # 과 겹치지 않게 그 범위 밖의 고정값을 쓴다. 신규 가입은 순간적인 동작(LLM 호출 없음)이라
 # `_common.user_agent_lock` 의 "5s 대기 후 409" 복잡도가 필요 없다 — 그냥 블로킹 대기.
 _SIGNUP_LOCK_KEY = -(2**62)
+
+# refresh token httpOnly 쿠키 (#323, FE #246 후속) — `Path=/auth` 로 스코프해
+# `/auth/refresh`·`/auth/logout` 호출에만 실린다. 네이티브 앱(capacitor://localhost)은
+# 크로스오리진이라 쿠키를 안 쓰고 지금처럼 본문으로만 받는다 — 이미 Keystore 로
+# 안전해서 굳이 SameSite=None 의 CSRF 노출을 감수할 이유가 없다(이슈가 명시한 "단순한
+# 쪽" 선택). 그래서 로그인 응답은 본문 `refreshToken` 도 그대로 유지한다(이행 기간 겸
+# 네이티브용) — 웹은 앞으로 쿠키만 읽어도 되고, `/auth/refresh`·`/auth/logout` 은 본문이
+# 없으면 쿠키로 폴백한다.
+_REFRESH_COOKIE_NAME = "reaction_refresh"
+_REFRESH_COOKIE_PATH = "/auth"
 
 
 @asynccontextmanager
@@ -143,9 +162,23 @@ async def _validate_new_signup(
     return code_row
 
 
+def _set_refresh_cookie(response: Response, token: str, expires_at: datetime) -> None:
+    max_age = max(int((expires_at - datetime.now(UTC)).total_seconds()), 0)
+    response.set_cookie(
+        key=_REFRESH_COOKIE_NAME,
+        value=token,
+        max_age=max_age,
+        path=_REFRESH_COOKIE_PATH,
+        httponly=True,
+        secure=get_settings().app_env != "local",
+        samesite="lax",
+    )
+
+
 @router.post("/google")
 async def login_with_google(
     body: GoogleLoginRequest,
+    response: Response,
     user_repo: Annotated[UserRepo, Depends(get_user_repo)],
     invite_repo: Annotated[InviteCodeRepo, Depends(get_invite_code_repo)],
     session: Annotated[AsyncSession, Depends(get_db)],
@@ -182,6 +215,7 @@ async def login_with_google(
 
     access = issue_access_token(user.id)
     refresh = issue_refresh_token(user.id)
+    _set_refresh_cookie(response, refresh.token, refresh.expires_at)
     return AuthSession(
         access_token=access.token,
         refresh_token=refresh.token,
@@ -194,8 +228,13 @@ async def refresh_access_token(
     body: RefreshRequest,
     revoke_store: Annotated[RevokeStore, Depends(get_revoke_store)],
     user_repo: Annotated[UserRepo, Depends(get_user_repo)],
+    reaction_refresh: Annotated[str | None, Cookie()] = None,
 ) -> AccessToken:
     """refresh → 새 access. refresh 회전 X (refresh 자체 재발급 안 함).
+
+    토큰 출처는 본문 우선, 없으면 `reaction_refresh` 쿠키(#323) — 웹이 쿠키로 옮겨가도
+    네이티브(본문만 보냄)와 과거 웹 클라이언트(둘 다 안 옮긴 상태)가 계속 동작해야 한다.
+    둘 다 없으면 애초에 세션이 없는 것이므로 401.
 
     사용자 존재 확인(#321) — 이전에는 jti revoke 여부만 보고 `decoded.user_id` 로 바로
     access 를 재발급했다. 계정 삭제(`POST /settings/delete-account`)는 개별 jti 를
@@ -204,8 +243,16 @@ async def refresh_access_token(
     가 이미 같은 필터로 access token 을 막고 있으니, 여기도 같은 기준을 적용해야
     "삭제된 계정은 refresh 로도 못 살아난다"가 성립한다.
     """
+    token = body.refresh_token or reaction_refresh
+    if token is None:
+        raise ApiError(
+            ErrorCode.AUTH_INVALID_TOKEN,
+            "refresh token 이 없습니다.",
+            http_status=HTTPStatus.UNAUTHORIZED,
+        )
+
     try:
-        decoded = decode_token(body.refresh_token, expected_type="refresh")
+        decoded = decode_token(token, expected_type="refresh")
     except JwtError as e:
         if e.reason is JwtErrorReason.EXPIRED:
             raise ApiError(
@@ -240,11 +287,22 @@ async def refresh_access_token(
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
     body: LogoutRequest,
+    response: Response,
     revoke_store: Annotated[RevokeStore, Depends(get_revoke_store)],
+    reaction_refresh: Annotated[str | None, Cookie()] = None,
 ) -> None:
-    """refresh 의 jti 를 revoke set 에 등록. 잘못된 토큰이어도 멱등 204."""
+    """refresh 의 jti 를 revoke set 에 등록 + 쿠키 삭제. 잘못된/없는 토큰이어도 멱등 204.
+
+    쿠키는 토큰 유효성과 무관하게 항상 지운다(#323) — 브라우저에 남은 쿠키를 정리하는
+    게 목적이라, revoke 대상 jti 를 못 찾는 경우(토큰 없음/깨짐)에도 해야 할 일이다.
+    """
+    response.delete_cookie(key=_REFRESH_COOKIE_NAME, path=_REFRESH_COOKIE_PATH)
+
+    token = body.refresh_token or reaction_refresh
+    if token is None:
+        return None
     try:
-        decoded = decode_token(body.refresh_token, expected_type="refresh")
+        decoded = decode_token(token, expected_type="refresh")
     except JwtError:
         return None
     revoke_store.revoke(decoded.jti, decoded.expires_at)

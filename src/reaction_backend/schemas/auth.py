@@ -22,15 +22,20 @@ class GoogleLoginRequest(CamelModel):
 
 
 class RefreshRequest(CamelModel):
-    """POST /auth/refresh 요청."""
+    """POST /auth/refresh 요청.
 
-    refresh_token: str = Field(min_length=1)
+    `refreshToken` 생략 가능(#323) — 웹은 `reaction_refresh` httpOnly 쿠키로 대신 보낼 수
+    있다(로그인 시 서버가 body 와 쿠키에 **둘 다** 내려준다, 이행 기간). 본문·쿠키 둘 다
+    없으면 401 `AUTH_INVALID_TOKEN`.
+    """
+
+    refresh_token: str | None = Field(default=None, min_length=1)
 
 
 class LogoutRequest(CamelModel):
-    """POST /auth/logout 요청."""
+    """POST /auth/logout 요청. `refreshToken` 생략 가능 — `RefreshRequest` 와 동일한 이유(#323)."""
 
-    refresh_token: str = Field(min_length=1)
+    refresh_token: str | None = Field(default=None, min_length=1)
 
 
 class UserProfile(CamelModel):
