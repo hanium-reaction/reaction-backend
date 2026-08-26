@@ -684,11 +684,14 @@ def test_earliest_fit_falls_back_when_window_start_has_no_room() -> None:
     assert start == _at(day, 9), "창에 못 넣으면 활동창 가장 이른 지점"
 
 
-# ── #252 자정을 넘는 활동창 조각화 ────────────────────────────────────────
+# ── #252 자정을 넘는 활동창 ───────────────────────────────────────────────
 #
 # 회귀(실측): 활동 시간대 22:00~02:00 + 세션 3시간 → **블록 0개**, "배치할 가용 시간을 찾지
-# 못했어요" 12줄. 배치는 달력 날짜 단위라 자정을 넘는 활동창은 [00:00~02:00] · [22:00~24:00]
-# 두 조각이 되고, 22:00→02:00 연속 4시간이 만들어지지 않는다. 2시간 초과 세션은 100% 실패.
+# 못했어요" 12줄. 배치가 달력 날짜 단위라 자정을 넘는 활동창이 [00:00~02:00] · [22:00~24:00]
+# 두 조각으로 갈려 22:00→02:00 연속 4시간이 만들어지지 않았다 — 2시간 초과 세션은 100% 실패.
+#
+# 스케줄러가 자정에서 free 를 이어붙이도록 고쳐졌다(`plan_scheduler._join_midnight`).
+# 이제 그 조합은 **정상 배치**되고, 안내는 "창 자체가 세션보다 짧을 때"만 나간다.
 
 
 def _window_outcome(*, start: str, end: str, session_min: int) -> InterviewOutcome:
@@ -717,42 +720,55 @@ def _window_outcome(*, start: str, end: str, session_min: int) -> InterviewOutco
     )
 
 
-def test_split_window_notice_explains_why_nothing_fits() -> None:
-    """자정을 넘는 창 + 조각보다 긴 세션 → 원인과 다음 행동을 숫자로 말한다."""
-    notice = first_plan_adapter.split_activity_window_notice(
-        _window_outcome(start="22:00", end="02:00", session_min=180)
-    )
-    assert notice is not None
-    assert "자정을 넘어서" in notice
-    assert "00:00~02:00 · 22:00~24:00" in notice
-    assert "가장 긴 쪽 약 2시간" in notice
-    assert "한 번에 3시간씩" in notice
-    assert "2시간 이하로 줄이거나" in notice
+def test_narrow_window_notice_counts_the_joined_span_across_midnight() -> None:
+    """자정을 넘는 창은 **이어붙인 길이**로 잰다 — 조각(2h)이 아니라 연속(4h) 기준.
 
-
-def test_split_window_silent_when_session_fits_a_fragment() -> None:
-    """조각 안에 들어가는 세션이면 침묵 — 자정을 넘는다는 것만으로 경고하지 않는다."""
+    회귀: 조각 기준으로 재면 22:00~02:00 + 3시간이 '안 들어감' 으로 판정되는데, 스케줄러는
+    이제 그걸 잘 배치한다 — 멀쩡한 계획에 거짓 경고가 붙는다.
+    """
     assert (
-        first_plan_adapter.split_activity_window_notice(
-            _window_outcome(start="22:00", end="02:00", session_min=120)
+        first_plan_adapter.narrow_activity_window_notice(
+            _window_outcome(start="22:00", end="02:00", session_min=180)
         )
         is None
+    ), "연속 4시간에 3시간 세션은 들어간다 — 경고하면 안 된다"
+
+
+def test_narrow_window_notice_fires_when_even_joined_span_is_too_short() -> None:
+    """이어붙여도 모자랄 때만 원인과 다음 행동을 숫자로 말한다 (22:00~02:00 = 4h < 5h)."""
+    notice = first_plan_adapter.narrow_activity_window_notice(
+        _window_outcome(start="22:00", end="02:00", session_min=300)
     )
+    assert notice is not None
+    assert "자정을 넘겨 이어지지만" in notice
+    assert "약 4시간" in notice
+    assert "한 번에 5시간씩" in notice
+    assert "4시간 이하로 줄이거나" in notice
 
 
-def test_split_window_silent_for_normal_window() -> None:
-    """자정을 안 넘는 창은 조각화 자체가 없다 — 09:00~00:00 은 '자정까지' 라 한 조각이다."""
+def test_narrow_window_notice_also_covers_plain_short_windows() -> None:
+    """자정을 안 넘어도 창이 세션보다 짧으면 같은 증상 — 일반화된 안내가 나간다."""
+    notice = first_plan_adapter.narrow_activity_window_notice(
+        _window_outcome(start="09:00", end="11:00", session_min=180)
+    )
+    assert notice is not None
+    assert "약 2시간" in notice
+    assert "자정" not in notice, "자정을 안 넘는 창에 자정 문구가 붙으면 안 된다"
+
+
+def test_narrow_window_silent_for_roomy_window() -> None:
+    """세션이 들어가는 창은 침묵."""
     for start, end in (("09:00", "23:00"), ("09:00", "00:00")):
         assert (
-            first_plan_adapter.split_activity_window_notice(
+            first_plan_adapter.narrow_activity_window_notice(
                 _window_outcome(start=start, end=end, session_min=240)
             )
             is None
         ), f"{start}~{end}"
 
 
-async def test_split_window_replaces_repeated_unplaced_warnings() -> None:
-    """같은 원인의 배치 실패 12줄을 원인 한 줄로 대체한다 — 반복 문구는 읽히지 않는다."""
+async def test_midnight_window_now_places_sessions_across_the_boundary() -> None:
+    """#252 근본 수정 — 자정을 넘는 활동창에 조각보다 긴 세션이 실제로 배치된다."""
     session = _RoutingSession(blocks=[], fixed=[], policies=[])
     config: Any = {"configurable": {"session": session, "tone_mode": None}}
     outcome = _window_outcome(start="22:00", end="02:00", session_min=180)
@@ -784,11 +800,18 @@ async def test_split_window_replaces_repeated_unplaced_warnings() -> None:
     )
     new_state = await first_plan.schedule_blocks({**state, "goal_plan": gp}, config)
     warns = new_state["schedule_warnings"]
-    assert not new_state["scheduled_blocks"], "조각보다 긴 세션이라 배치는 실패가 맞다"
+    blocks = new_state["scheduled_blocks"]
+
+    # #252 핵심: 예전엔 여기가 0개였다. 이제 22:00→01:00 처럼 자정을 넘겨 배치된다.
+    assert blocks, f"자정을 넘는 창에 3시간 세션이 배치돼야 한다 — warns={warns}"
     assert sum(1 for w in warns if "배치할 가용 시간을 찾지 못했어요" in w) == 0, (
         f"반복 실패 문구가 남았다 — {warns}"
     )
-    assert any("자정을 넘어서" in w for w in warns), f"원인 고지가 없다 — {warns}"
+    crossing = [b for b in blocks if b.start.date() != b.end.date()]
+    assert crossing, f"자정을 넘겨 이어진 블록이 하나도 없다 — {[(b.start, b.end) for b in blocks]}"
+    for b in crossing:
+        assert b.start.hour >= 22, f"활동창(22:00~02:00) 밖에서 시작했다 — {b.start}"
+        assert b.end.hour <= 2, f"활동창 밖에서 끝났다 — {b.end}"
 
 
 # ── #191 여백 덧대기 ───────────────────────────────────────────────────────

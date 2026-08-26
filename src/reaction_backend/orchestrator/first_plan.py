@@ -625,13 +625,13 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         roomy_busy_for_day=roomy_busy_for_day,
     )
 
-    # 자정을 넘는 활동창이 하루를 두 조각으로 갈라 세션이 어디에도 안 들어간 경우(#252):
+    # 세션 하나가 활동창의 연속 가용 길이보다 길어 어디에도 안 들어간 경우(#252):
     # 배치 실패는 **전부 같은 원인**이므로, 항목마다 같은 문장을 반복하는 대신 원인과 다음
     # 행동을 담은 한 줄로 바꾼다(실측: 같은 경고 12줄 → 1줄). 실패가 없으면 아무것도 안 한다.
-    split_window = first_plan_adapter.split_activity_window_notice(outcome)
-    if split_window and warnings:
+    narrow_window = first_plan_adapter.narrow_activity_window_notice(outcome)
+    if narrow_window and warnings:
         warnings = [
-            split_window,
+            narrow_window,
             *(w for w in warnings if _UNPLACED_MARKER not in w),
         ]
 

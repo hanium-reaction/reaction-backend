@@ -567,3 +567,153 @@ def test_roomy_and_hard_views_never_double_book() -> None:
     ordered = sorted((b.interval for b in blocks), key=lambda iv: iv.start)
     for a, b in zip(ordered, ordered[1:], strict=False):
         assert a.end <= b.start, f"겹침: {a} vs {b}"
+
+
+# ── #252 자정을 넘는 활동창 ───────────────────────────────────────────────
+#
+# `compute_free_blocks` 는 하루 [00:00,24:00) 안에서만 free 를 계산해서, 22:00~02:00 활동창은
+# 같은 날 [00:00~02:00] · [22:00~24:00] 두 조각이 됐다. 22:00→02:00 연속 4시간이 어디에도
+# 없으니 2시간 초과 세션은 **구조적으로 100% 실패**했다(실측: 블록 0개 + 같은 경고 12줄).
+# `_join_midnight` 이 자정에서 두 조각을 이어붙여 그 구멍을 막는다.
+
+
+def _busy_22_02(day: date) -> list[BusyBlock]:
+    """활동창 22:00~02:00 (자정 넘김)."""
+    return _active_window_busy(day, time(22, 0), time(2, 0))
+
+
+def test_midnight_window_places_session_longer_than_either_fragment() -> None:
+    """3시간 세션 — 조각(각 2시간)보다 길지만 이어붙인 4시간에는 들어간다."""
+    blocks, warnings = schedule_actions_multiday(
+        start_day=START,
+        horizon_day=START + timedelta(days=6),
+        actions=[_action("심야작업", 180)],
+        busy_for_day=_busy_22_02,
+        peak_windows=[],
+        focus_chunk_min=180,
+        break_min=10,
+        daily_focus_cap_min=240,
+    )
+
+    assert not warnings, f"배치 실패 경고가 남았다 — {warnings}"
+    assert len(blocks) == 1
+    iv = blocks[0].interval
+    assert iv.duration_minutes == 180
+    assert iv.start.hour >= 22, f"활동창 밖에서 시작 — {iv.start}"
+    assert iv.end.date() == iv.start.date() + timedelta(days=1), "자정을 넘겨야 한다"
+    assert iv.end.hour <= 2, f"활동창 밖에서 종료 — {iv.end}"
+
+
+def test_midnight_window_does_not_double_book_the_next_morning() -> None:
+    """자정을 넘긴 배치가 **다음 날 새벽 조각도 소비**해야 한다.
+
+    회귀: day D 의 조인 뷰와 day D+1 의 본체가 같은 [D+1 00:00~02:00) 을 가리키므로, 한쪽에서만
+    빼면 같은 시간이 두 번 나간다. 하루치를 단일 소스로 두고 조인을 읽기 시점 뷰로 만든 이유가
+    이것 — 이 테스트가 그 계약을 고정한다.
+    """
+    blocks, _ = schedule_actions_multiday(
+        start_day=START,
+        horizon_day=START + timedelta(days=3),
+        actions=[_action(f"작업{i}", 180) for i in range(4)],
+        busy_for_day=_busy_22_02,
+        peak_windows=[],
+        focus_chunk_min=180,
+        break_min=10,
+        daily_focus_cap_min=240,
+    )
+
+    ordered = sorted((b.interval for b in blocks), key=lambda iv: iv.start)
+    for a, b in zip(ordered, ordered[1:], strict=False):
+        assert a.end <= b.start, f"자정 경계에서 이중 배치 — {a} vs {b}"
+
+
+def test_normal_window_is_untouched_by_the_join() -> None:
+    """자정에 안 닿는 활동창은 조인 대상이 아니다 — 일반 계획의 동작은 그대로."""
+    blocks, warnings = schedule_actions_multiday(
+        start_day=START,
+        horizon_day=START + timedelta(days=6),
+        actions=[_action(f"작업{i}", 60) for i in range(3)],
+        busy_for_day=_busy_09_2330,
+        peak_windows=[],
+        focus_chunk_min=60,
+        break_min=10,
+        daily_focus_cap_min=180,
+    )
+
+    assert not warnings
+    for b in blocks:
+        assert b.interval.start.date() == b.interval.end.date(), (
+            f"자정을 안 넘는 창인데 날짜를 넘겼다 — {b.interval}"
+        )
+
+
+def test_session_longer_than_the_joined_span_still_fails() -> None:
+    """이어붙여도 모자라면(4시간 창 + 5시간 세션) 여전히 실패 — 조인이 만능은 아니다."""
+    blocks, warnings = schedule_actions_multiday(
+        start_day=START,
+        horizon_day=START + timedelta(days=6),
+        actions=[_action("너무긴작업", 300)],
+        busy_for_day=_busy_22_02,
+        peak_windows=[],
+        focus_chunk_min=300,
+        break_min=10,
+        daily_focus_cap_min=600,
+    )
+
+    assert not blocks
+    assert warnings
+
+
+def test_midnight_crossing_placement_is_consumed_in_both_free_views() -> None:
+    """1차(여유 뷰)에서 자정을 넘겨 배치하면 **2차(빡빡한 뷰)도** 그 시간을 잃어야 한다.
+
+    회귀(#252 + #191 상호작용): 1차는 `roomy_free_by_day` 만 캐시한다. 소비를 '시작한 날' 로만
+    하면 `free_by_day[D+1]` 이 캐시되지 않은 채 남고, 나중에 `busy_for_day` 로 새로 계산되면서
+    **자정을 넘긴 블록이 없던 일이 된다** — 2차가 그 새벽 시간을 다시 내주어 두 블록이 겹친다.
+    두 뷰를 쓰는 건 실제 운영 경로(`first_plan` 이 `roomy_busy_for_day` 를 넘긴다)라 실전 버그다.
+
+    cap 을 세션 하나 크기로 잡아 1차가 하루 1개만 놓고 나머지를 2차로 흘려보낸다.
+    """
+    blocks, _ = schedule_actions_multiday(
+        start_day=START,
+        horizon_day=START + timedelta(days=1),
+        actions=[_action("긴작업", 180), _action("작업B", 120), _action("작업C", 120)],
+        busy_for_day=_busy_22_02,
+        peak_windows=[],
+        focus_chunk_min=180,
+        break_min=10,
+        daily_focus_cap_min=180,
+        roomy_busy_for_day=_busy_22_02,  # 별도 캐시를 강제 — 내용은 같아도 dict 가 다르다
+    )
+
+    ordered = sorted((b.interval for b in blocks), key=lambda iv: iv.start)
+    for a, b in zip(ordered, ordered[1:], strict=False):
+        assert a.end <= b.start, (
+            f"자정을 넘긴 배치가 다음 날 뷰에서 안 빠져 겹쳤다 — {a.start}~{a.end} vs {b.start}~{b.end}"
+        )
+
+
+def test_window_ending_exactly_at_midnight_does_not_join_into_next_day_sleep() -> None:
+    """자정에 **끝나되 넘지 않는** 창은 이어붙이면 안 된다 — 다음 날 수면으로 넘어간다.
+
+    회귀: 활동창 22:00~24:00 은 day D 의 free 가 정확히 자정에서 끝난다(`tail.end == D+1 00:00`).
+    '자정에 닿았다' 만 보고 이어붙이면 다음 날 free(22:00~24:00)와 붙어 `[D 22:00, D+1 24:00)`
+    라는 26시간짜리 가짜 구간이 생기고, 3시간 세션이 D+1 01:00 —— **자는 시간** —— 까지 흐른다.
+    그래서 '다음 날 free 가 자정부터 시작하는가' 를 함께 봐야 한다.
+    """
+    blocks, warnings = schedule_actions_multiday(
+        start_day=START,
+        horizon_day=START + timedelta(days=6),
+        actions=[_action("긴작업", 180)],
+        busy_for_day=lambda d: _active_window_busy(d, time(22, 0), time(0, 0)),
+        peak_windows=[],
+        focus_chunk_min=180,
+        break_min=10,
+        daily_focus_cap_min=240,
+    )
+
+    # 하루 2시간뿐인 창에 3시간 세션 → 배치 불가가 정답. 억지로 이어붙여 수면을 침범하면 안 된다.
+    assert not blocks, (
+        f"수면 시간대로 넘어간 배치가 생겼다 — {[(b.interval.start, b.interval.end) for b in blocks]}"
+    )
+    assert warnings

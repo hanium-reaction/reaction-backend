@@ -264,6 +264,60 @@ def schedule_actions_multiday(
             roomy_free_by_day[day] = cached
         return cached
 
+    def _join_midnight(
+        day: date, per_day: Callable[[date], list[TimeInterval]]
+    ) -> list[TimeInterval]:
+        """day 의 free 에 **다음 날 선두 조각**을 자정에서 이어붙인 뷰 (#252).
+
+        `compute_free_blocks` 는 하루 [00:00, 24:00) 안에서만 free 를 계산한다. 그래서 활동창이
+        자정을 넘으면(예: 22:00~02:00) 같은 날이 `[00:00, 02:00)` 과 `[22:00, 24:00)` 두 조각으로
+        갈리고, **22:00→02:00 으로 이어지는 연속 4시간이 어디에도 만들어지지 않는다**. `_earliest_fit`
+        은 세션이 통째로 들어갈 연속 구간을 찾으므로, 조각보다 긴 세션은 구조적으로 100% 실패했다
+        (실측: 22:00~02:00 + 3시간 세션 → 블록 0개, 배치 실패 경고 12줄).
+
+        **캐시가 아니라 읽기 시점 뷰인 이유**: 조인 결과를 캐시하면 두 개의 진실이 생긴다 —
+        day 의 조인된 사본과 day+1 의 본체. day+1 에 뭔가 배치되면 day 의 사본은 그걸 모른 채
+        같은 시간을 다시 내주어 이중 배치가 된다. 하루치(`free_by_day`)만 단일 소스로 두고
+        조인은 매번 계산하면 그 어긋남 자체가 불가능하다. 재귀도 안 생긴다(다음 날 **하루치**만
+        보고, 그 날의 조인 뷰를 보지 않는다).
+
+        맞닿지 않으면(활동창이 자정 전에 끝나면) 원본 그대로 — 일반적인 계획은 영향 없다.
+        """
+        today = per_day(day)
+        if not today:
+            return []
+        tail = today[-1]
+        next_day = day + timedelta(days=1)
+        if tail.end != _at(next_day, time(0, 0)):
+            # 빠른 경로 — 자정에 안 닿으면 아래 검사가 어차피 걸러낸다(`tomorrow[0].start` 는
+            # 다음 날 안이라 자정이 아닌 `tail.end` 와 같아질 수 없다). 여기서 끊는 이유는
+            # **다음 날 free 계산을 강제하지 않기 위해서** — 일반적인 창에서 매일 하루치를
+            # 더 계산하고 캐시에 얹는 부수효과를 피한다.
+            return list(today)
+        tomorrow = per_day(next_day)
+        if not tomorrow or tomorrow[0].start != tail.end:
+            # 다음 날이 자정부터 비어 있지 않으면(수면 등) 이어진 게 아니다. 이 검사가
+            # 없으면 22:00~24:00 처럼 **자정에 끝나되 넘지 않는** 창이 다음 날 밤 free 와
+            # 붙어 26시간짜리 가짜 구간이 되고, 세션이 새벽 수면으로 흘러든다.
+            return list(today)
+        return [*today[:-1], TimeInterval(tail.start, tomorrow[0].end)]
+
+    def _consume(interval: TimeInterval) -> None:
+        """배치된 구간을 겹치는 **모든 날짜 뷰**에서 뺀다.
+
+        자정을 넘는 배치(#252)는 두 날짜의 하루치를 동시에 소비한다. 끝나는 날의 캐시를
+        **먼저 만들어 두는 것**이 중요하다 — 아직 계산 전이면 나중에 `busy_for_day` 로 새로
+        계산되면서 이 배치가 빠진 채 되살아나 같은 시간이 두 번 나간다.
+        """
+        for day in {interval.start.date(), interval.end.date()}:
+            free_of(day)
+            if roomy_busy_for_day is not None:
+                roomy_free_of(day)
+        for cached_day in list(free_by_day):
+            free_by_day[cached_day] = _subtract(free_by_day[cached_day], interval, gap)
+        for cached_day in list(roomy_free_by_day):
+            roomy_free_by_day[cached_day] = _subtract(roomy_free_by_day[cached_day], interval, gap)
+
     # 세션 평탄화 — 분해 순서 보존(앞 작업이 앞 인덱스). 긴 카드는 여러 세션으로 쪼갬.
     flat: list[tuple[PlanAction, int, int, int]] = []
     for action in actions:
@@ -301,15 +355,16 @@ def schedule_actions_multiday(
             day = days[di]
             if respect_cap and used_by_day[day] > 0 and used_by_day[day] + minutes > cap:
                 continue
-            source = roomy_free_of(day) if respect_cap else free_of(day)
+            source = _join_midnight(day, roomy_free_of if respect_cap else free_of)
             start = _earliest_fit(source, need, _peak_intervals(day, peak_windows))
             if start is None:
                 continue
             interval = TimeInterval(start, start + need)
             placements.append((interval, action, n))
-            free_by_day[day] = _subtract(free_of(day), interval, gap)
-            if roomy_busy_for_day is not None:
-                roomy_free_by_day[day] = _subtract(roomy_free_of(day), interval, gap)
+            _consume(interval)
+            # 자정을 넘겨도 하루 상한은 **시작한 날**에 전부 단다 (#252). 사용자에게 22:00→02:00
+            # 은 '그날 밤' 한 덩어리지 이틀이 아니다 — 다음 날 앞에 나눠 달면 그 날 몫이 미리
+            # 깎여, 정작 다음 날 밤에 배치할 자리가 이유 없이 줄어든다.
             used_by_day[day] += minutes
             return True
         return False
