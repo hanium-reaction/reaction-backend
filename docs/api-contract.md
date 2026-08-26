@@ -801,21 +801,30 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
   (`mandala_adapter.compute_weekly_stat`, 순수 함수) — `goal_nodes.progress` 컬럼을 안
   두는 것과 같은 이유. 마이그레이션 없음.
 
-다음 2주 제안 (ADR-0008 §8 "G"):
+다음 주기 제안 (ADR-0008 §8 "G" + ADR-0007 §5 PR-4, 2026-08-25 일반형으로 확장):
 - 응답에 `nextCycleProposals: NextCycleProposal[]`(빈 배열이 기본, 없으면 `[]`) —
   `{ goalId, goalTitle, axisTitle? }`. `week_start` 와 무관하게 항상 **현재** 상태만 본다
   (과거 주를 조회해도 이 카드는 지금 열어도 되는지를 말한다).
-- 대상은 승격된 만다라 축 목표 중 `status='active'`인 것. 판정: 그 목표의 **현재 활성**
-  계획 트리(`tree_kind='plan'`) leaf 에 매달린 action_item 중 (a) **아직 날짜가 안 지난**
+- 대상은 두 스코프를 합친다 — 승격된 만다라 축 목표 중 `status='active'`인 것(**만다라
+  2주**, `axisTitle` 이 채워짐) + 마일스톤이 있는 임의 목표 중 위와 안 겹치는 것
+  (**일반형**, `axisTitle: null`). 판정 공통부: 그 목표의 **현재 활성** 계획 트리
+  (`tree_kind='plan'`) leaf 에 매달린 action_item 중 (a) **아직 날짜가 안 지난**
   (`targetDate >= 오늘`) 미종결(`planned`/`in_progress`) 카드가 없고 (b) 종결(`done`/
   `partial_done`/`failed`/`over_done`) 카드가 하나 이상 있으면 제안. 카드 자체가 없으면
   (승인 직후 등) 제안하지 않는다 (`orchestrator/cycle_proposal.should_propose_next_cycle`).
+- **일반형만의 세 번째 조건**: 마일스톤이 있는 목표는 **열린 마일스톤**(`completed_at`
+  이 안 찍힌 것)이 하나 이상 있어야 제안한다 — 없으면 '다음 주기'가 아니라 '목표 완료
+  확인' 대상이라서(그 신호는 아직 응답에 없음, ADR-0007 PR-6 스코프). 만다라 2주 스코프는
+  마일스톤 층이 없을 수 있어 이 조건이 없다.
 - **날짜가 지난 미종결 카드는 판정에서 빠진다** — '남은 일'이 아니라 '밀린 일'이라서.
   이걸 세면, 한 번도 시작 안 한 `planned` 카드는 만료 cron(`in_progress` 실행만 대상)이
   영영 못 쓸어내므로 밀린 카드 한 장 때문에 제안이 영구히 안 뜬다(2026-08-25 정정).
 - **승인은 새 엔드포인트가 없다** — FE 는 기존 `POST /plans/generate`(바디 없이 호출하면
   최근 완료 인터뷰를 자동 재투영) + `POST /plans/{id}/approve` 를 그대로 쓴다. 마감 없는
-  만다라 목표는 다시 2주로 캡된다(§8 "D").
+  만다라 목표는 다시 2주로 캡된다(§8 "D"), 일반형은 기존 4주 캡 그대로.
+  ⚠️ 사용자가 마일스톤 있는 목표를 여러 개 굴리는데 가장 최근 인터뷰가 그중 하나에 대한
+  것이 아니면 "빈 바디 재투영"이 엉뚱한 목표를 대상으로 계획을 만들 수 있다 — 만다라
+  2주 스코프가 이미 안고 있던 위험을 일반형도 그대로 물려받는다(미해결).
 
 손 못 댄 축 축소 제안 (ADR-0008 §6, §8 "H"):
 - 응답에 `staleAxisProposals: StaleAxisProposal[]`(빈 배열이 기본) — `{ axisId, axisTitle }`.

@@ -319,14 +319,15 @@ def test_generate_weekly_review_includes_mandala_summary(
     assert resp.json()["mandala"]["completedThisWeek"] == 1
 
 
-# ────── GET /reviews/weekly — 다음 2주 제안 (ADR-0008 §8 "G") ──────
+# ────── GET /reviews/weekly — 다음 주기 제안 (ADR-0008 §8 "G" + ADR-0007 PR-4 일반형) ──────
 #
-# `fetch_promoted_active_goals_for_user`/`fetch_action_items_for_leaf_nodes` 는 raw session
-# 을 쓰는데 `_FakeSession.execute()` 는 어떤 쿼리를 넣어도 항상 빈 결과다(HTTP 경계 한계,
-# `mandala.habits` 와 같은 이유 — `test_mandala_tree_route.py` 참고). 그래서 여기선 필드가
-# 항상 빈 배열로 안전하게 응답에 실리는지만 확인한다. 실제 판정 로직은
+# `fetch_promoted_active_goals_for_user`/`fetch_goals_with_milestones`/
+# `fetch_action_items_for_leaf_nodes` 는 전부 raw session 을 쓰는데 `_FakeSession.execute()`
+# 는 어떤 쿼리를 넣어도 항상 빈 결과다(HTTP 경계 한계, `mandala.habits` 와 같은 이유 —
+# `test_mandala_tree_route.py` 참고). 그래서 여기선 필드가 항상 빈 배열로 안전하게 응답에
+# 실리는지만 확인한다(만다라 스코프·일반형 둘 다 동일 한계). 실제 판정 로직은
 # `test_cycle_proposal.py`(순수 함수) + `test_cycle_proposal_real_db.py`(실 DB, 과거 주기
-# 격리)가 이미 표로 검증했다.
+# 격리 + `fetch_goals_with_milestones` SQL)가 이미 표로 검증했다.
 
 
 def test_get_weekly_next_cycle_proposals_field_present_and_empty(client: TestClient) -> None:

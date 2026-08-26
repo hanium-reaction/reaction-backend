@@ -171,3 +171,90 @@ async def test_overdue_planned_card_does_not_block_next_cycle(
 
     assert len(action_items) == 2  # 밀린 카드는 archive 되지 않아 그대로 조회된다
     assert cycle_proposal.should_propose_next_cycle(action_items, today=today) is True
+
+
+# ── fetch_goals_with_milestones (ADR-0007 PR-4 일반형) ──
+
+
+async def _seed_milestone(
+    session: AsyncSession,
+    goal: Goal,
+    *,
+    order_index: int,
+    completed: bool = False,
+    archived: bool = False,
+) -> GoalNode:
+    n = GoalNode()
+    n.id = uuid.uuid4()
+    n.goal_id = goal.id
+    n.parent_node_id = None
+    n.title = f"마일스톤 {order_index}"
+    n.node_type = "milestone"
+    n.depth = 1
+    n.order_index = order_index
+    n.is_leaf = False
+    n.tree_kind = "plan"
+    n.source = "llm"
+    n.completed_at = now_kst() if completed else None
+    n.archived_at = now_kst() if archived else None
+    session.add(n)
+    await session.flush()
+    return n
+
+
+async def test_fetch_goals_with_milestones_scoped_to_user_and_active_status(
+    real_db_session: AsyncSession,
+) -> None:
+    """다른 사용자·비활성(status!='active') 목표의 마일스톤은 안 섞인다."""
+    mine = await _seed_goal(real_db_session)
+    await _seed_milestone(real_db_session, mine, order_index=0)
+
+    other = await _seed_goal(real_db_session)
+    await _seed_milestone(real_db_session, other, order_index=0)
+
+    proposed = await _seed_goal(real_db_session)
+    proposed.status = "proposed"
+    await real_db_session.flush()
+    await _seed_milestone(real_db_session, proposed, order_index=0)
+
+    result = await cycle_proposal.fetch_goals_with_milestones(real_db_session, mine.user_id)
+
+    assert set(result.keys()) == {mine.id}
+
+
+async def test_fetch_goals_with_milestones_excludes_archived_milestones(
+    real_db_session: AsyncSession,
+) -> None:
+    """보관된 마일스톤(재승인으로 빠진 것)은 안 보인다 — 지금 뼈대만."""
+    goal = await _seed_goal(real_db_session)
+    await _seed_milestone(real_db_session, goal, order_index=0, archived=True)
+    live = await _seed_milestone(real_db_session, goal, order_index=1)
+
+    result = await cycle_proposal.fetch_goals_with_milestones(real_db_session, goal.user_id)
+
+    assert [n.id for n in result[goal.id]] == [live.id]
+
+
+async def test_fetch_goals_with_milestones_orders_by_order_index(
+    real_db_session: AsyncSession,
+) -> None:
+    """반환 순서는 확정 순서(`order_index`) — 커서 판정이 "가장 이른 미완료"를 신뢰하는 전제."""
+    goal = await _seed_goal(real_db_session)
+    m2 = await _seed_milestone(real_db_session, goal, order_index=2)
+    m0 = await _seed_milestone(real_db_session, goal, order_index=0)
+    m1 = await _seed_milestone(real_db_session, goal, order_index=1)
+
+    result = await cycle_proposal.fetch_goals_with_milestones(real_db_session, goal.user_id)
+
+    assert [n.id for n in result[goal.id]] == [m0.id, m1.id, m2.id]
+
+
+async def test_fetch_goals_with_milestones_omits_goals_without_any(
+    real_db_session: AsyncSession,
+) -> None:
+    """마일스톤이 아예 없는 목표는 dict 에 나타나지 않는다(리듬형 등)."""
+    goal = await _seed_goal(real_db_session)
+
+    result = await cycle_proposal.fetch_goals_with_milestones(real_db_session, goal.user_id)
+
+    assert goal.id not in result

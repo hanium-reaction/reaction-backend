@@ -223,25 +223,34 @@ async def _top_failure_contexts(
 async def _next_cycle_proposals(
     user_id: UUID, *, goal_repo: GoalRepo, session: AsyncSession
 ) -> list[NextCycleProposal]:
-    """다음 2주 열기 제안 목록 (ADR-0008 §8 "G") — `week_start` 와 무관하게 **현재** 상태만 본다.
+    """다음 주기 열기 제안 목록 (ADR-0008 §8 "G" + ADR-0007 §5 PR-4) — `week_start` 와 무관하게
+    **현재** 상태만 본다.
 
     조회 대상 주가 과거든 이번 주든, 이 카드는 항상 "지금 열어도 되는가"를 말한다(달력
-    스냅샷이 아니라 실시간 콜투액션이라서). 대상은 승격된 만다라 축 목표 중 실행 중
-    (`status='active'`)인 것 전부 — `first_plan_adapter._max_plan_weeks` 가 2주 캡을 매길 때
-    쓰는 것과 같은 판정(`fetch_promoted_active_goals_for_user`)이다. 각 목표의 **현재 활성**
-    계획 트리 leaf 에 매달린 action_item 만 보고 판정한다(과거 주기 종결 카드가 섞이면
-    첫 주기 이후 판정이 항상 참이 돼버린다 — `cycle_proposal.should_propose_next_cycle` 참고).
+    스냅샷이 아니라 실시간 콜투액션이라서). 두 스코프를 합쳐서 낸다:
+
+    ① **만다라 2주(G)** — 승격된 만다라 축 목표 중 실행 중(`status='active'`)인 것 전부
+       (`fetch_promoted_active_goals_for_user`). 마일스톤 층이 없을 수 있어 가드 없이 판정.
+    ② **일반형(PR-4)** — 마일스톤이 있는 임의 목표(`fetch_goals_with_milestones`) 중 ①과
+       겹치지 않는 것. 열린 마일스톤이 남아 있어야만 제안한다(`has_open_milestone`) — 그래야
+       "다음 주기"와 "목표 완료 확인"이 갈린다(§5 세 번째 가드).
+
+    ①·②를 교집합 제거 없이 각자 돌리면 같은 목표가 두 번 뜰 수 있다 — 만다라 승격 목표도
+    Stage A 를 거쳐 마일스톤을 가질 수 있기 때문(이 점은 확인되지 않았다, 방어적으로 겹치지
+    않게 뺀다). 각 목표의 **현재 활성** 계획 트리 leaf 에 매달린 action_item 만 보고 판정한다
+    (과거 주기 종결 카드가 섞이면 첫 주기 이후 판정이 항상 참이 돼버린다 —
+    `cycle_proposal.should_propose_next_cycle` 참고).
 
     `today` 는 `week_start` 가 아니라 **실제 오늘**(KST)이다 — 이 카드가 "지금 열어도 되는가"를
     말하는 것과 같은 이유로, 밀린 카드 판정도 조회 대상 주가 아니라 현재 시각 기준이어야 한다.
     """
-    goals = await mandala_adapter.fetch_promoted_active_goals_for_user(session, user_id)
-    if not goals:
-        return []
-    axis_titles = await mandala_adapter.fetch_promoted_axis_titles(session, [g.id for g in goals])
     today = now_kst().date()
     proposals: list[NextCycleProposal] = []
-    for goal in goals:
+
+    mandala_goals = await mandala_adapter.fetch_promoted_active_goals_for_user(session, user_id)
+    mandala_goal_ids = {g.id for g in mandala_goals}
+    axis_titles = await mandala_adapter.fetch_promoted_axis_titles(session, list(mandala_goal_ids))
+    for goal in mandala_goals:
         nodes = await goal_repo.list_nodes(goal.id, tree_kind="plan")
         leaf_ids = [n.id for n in nodes if n.node_type == "leaf"]
         action_items = await cycle_proposal.fetch_action_items_for_leaf_nodes(session, leaf_ids)
@@ -251,6 +260,27 @@ async def _next_cycle_proposals(
                     goal_id=goal.id, goal_title=goal.title, axis_title=axis_titles.get(goal.id)
                 )
             )
+
+    milestones_by_goal = await cycle_proposal.fetch_goals_with_milestones(session, user_id)
+    for goal_id, milestones in milestones_by_goal.items():
+        if goal_id in mandala_goal_ids:
+            continue  # 방어적 — ① 에서 이미 판정됨(위 docstring 참고)
+        target_goal = await goal_repo.get_by_id(user_id, goal_id)
+        if target_goal is None:
+            continue
+        nodes = await goal_repo.list_nodes(goal_id, tree_kind="plan")
+        leaf_ids = [n.id for n in nodes if n.node_type == "leaf"]
+        action_items = await cycle_proposal.fetch_action_items_for_leaf_nodes(session, leaf_ids)
+        has_open = cycle_proposal.has_open_milestone(milestones)
+        if cycle_proposal.should_propose_next_cycle(
+            action_items, today=today, has_open_milestone=has_open
+        ):
+            proposals.append(
+                NextCycleProposal(
+                    goal_id=target_goal.id, goal_title=target_goal.title, axis_title=None
+                )
+            )
+
     return proposals
 
 
