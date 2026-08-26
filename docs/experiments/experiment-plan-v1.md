@@ -847,3 +847,58 @@ UI) · [#222](https://github.com/hanium-reaction/reaction-frontend/issues/222)
     신설 2건(실 Postgres — 세 컬럼 왕복, v2 배치는 전부 NULL), `test_recovery_prompts.py`
     프로덕션 고정 테스트 3종 파라미터화(v2/v3 각각, 총 6 케이스) + 마지막 테스트 전제
     갱신.
+25. ✅ **지표 리포트 4종 (M4/M5/M6/M11) — 완료(M11 은 부분치).** 항목 24 직후 진행한
+    포괄 격차 조사에서 §5 M-표의 report_*.py 미착수분을 다시 확인해 우선순위로 뽑았다
+    (M1-M3 은 `report_recovery_followthrough.py`, M12 는 `report_proximal_execution.py`
+    로 이미 있음). 넷 다 기존 report_*.py 관례(읽기 전용 SELECT 뿐, `--apply` 옵션 없음,
+    `_preview`+`_main` 골격, workflow_dispatch 전용 EC2 워크플로)를 그대로 따른다.
+
+    - **`scripts/report_next_day_return.py`**(M4) — 근거 대장 §7.3 SQL#3 을 전 사용자
+      풀링으로 일반화. 원문은 `:user_id` 파라미터로 한 사용자만 쟀지만, 이 레포의
+      report_*.py 관례(전체 집계)를 따르려면 "다음날"을 **(사용자, 날짜) 쌍**으로 잡아야
+      한다 — 그냥 날짜로만 집합을 만들면 A 의 실패 다음날 B 가 뭘 했는지가 새어 들어간다.
+      주 정의(failed 만)와 민감도(partial_done 포함) 둘 다 출력 — §7.2 원문이 명시한
+      "주 정의/민감도" 이원 표기를 그대로 따름.
+    - **`scripts/report_re_engagement.py`**(M5) — M2(`recovery_followthrough_rate`)와
+      다른 질문임을 분명히 함: PARK/CARRY_OVER 채택 중 **앵커가 이미 도래한** 건만
+      분모(미래 앵커·NULL 앵커는 판정 불가라 제외), 앵커 이후 7일 내 **같은 goal 계보**
+      완주 여부로 잰다 — CARRY_OVER 도 "그 파생 카드"가 아니라 "그 목표로 돌아왔는가"를
+      넓게 본다(A3, Wrosch 2003 — 이탈·재관여는 별개 역량).
+    - **`scripts/report_consistency_rolling14.py`**(M6) — 사용자별 지표라 활성 사용자
+      분포(평균·중앙값·최솟값·최댓값)로 집계. 구현 중 **타임존 버그를 하나 발견해
+      고쳤다**: 처음엔 `since=now.date()`(naive `date`)를 `timestamptz` 컬럼과 직접
+      비교했는데, asyncpg 가 tzinfo 없는 값을 **UTC 자정**으로 해석해 KST 와 최대 9시간
+      어긋난 창 경계가 된다 — SQL 테스트를 쓰기 전엔 안 보였을 조용한 오류였다.
+      `datetime.combine(date, time.min, tzinfo=KST)` 로 명시적 KST-aware 경계를 만드는
+      것으로 수정.
+    - **`scripts/report_burden_index.py`**(M11) — **3성분 중 2성분만 계측**(카드
+      거절률·회고 미응답률). "알림 해제" 성분은 뺐다 — `notification_settings` 가 현재
+      상태 스냅샷뿐이라 이력이 없고, 남은 두 컬럼(`preCardEnabled` 기본값 false=옵트인,
+      `push_subscription` gone-정리)도 전부 "해제 이벤트"와 "애초에 켠 적 없음/구독이
+      죽음"을 구분 못 해 억지로 근사하면 없는 정밀도를 있는 척하게 된다 — §5 의 "계산
+      불가 → 미측정 표기" 관행을 그대로 따라 2성분 부분치로만 낸다. 회고 미응답률은
+      `execution_repo.reflectable_from()`(회고 창의 단일 기준식)을 재사용해 "그 시점에
+      회고 가능해진 실행 전체"를 분모로 잡는다 — **현재** `completion_status` 로 거르면
+      안 된다는 게 핵심: 체크인으로 상태가 바뀐(=성공적으로 응답한) 카드까지 걸러지면
+      무응답률이 구조적으로 과대평가된다.
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **M11 의 "알림 해제" 성분은 계측 불가** — 위 사유. 3성분 합성 `burden_index` 자체는
+      아직 계산 못 한다. 계측하려면 `notification_settings` 변경 이력 테이블(새 스키마)
+      이 선행 조건 — 이번엔 스키마 변경 없이 갈 수 있는 데까지만 갔다.
+    - **라이브 트래픽 실측(dispatch)은 안 했다** — 넷 다 로컬에서 빈 결과로 정상 종료만
+      확인. 실제 도그푸딩 숫자는 배포 후 workflow_dispatch 로 각자 실행해야 나온다
+      (M2/M12 도 같은 절차를 거쳤다, §11 항목 7/21).
+    - **M3(drop_after_accept)·M10(cost_per_card_krw) 은 이번 범위 밖** — 격차 조사가
+      "리포트 스크립트 명시 확인 안 됨"으로 표시한 항목들인데, M3 는 M1-M2 값에서 바로
+      파생 가능(별도 스크립트 불필요, `report_recovery_followthrough.py` 가 이미
+      `drop_after_accept` 를 출력함 — 조사 시점엔 그 사실이 로그에 명시적으로 안 보였을
+      뿐 실은 이미 있었다), M10 은 `report_llm_run_metrics.py`(다른 트랙, #325) 소관이라
+      제외.
+
+    신규 파일 16개 — 스크립트 4개, 순수함수 테스트 24건(M4 7·M5 6·M6 5·M11 6,
+    `test_report_{next_day_return,re_engagement,consistency_rolling14,burden_index}.py`),
+    실 Postgres 쿼리 조립 테스트 11건(M4 2·M5 3·M6 3·M11 3, `*_sql.py`), workflow_dispatch
+    전용 EC2 워크플로 4개(`.github/workflows/report-{next-day-return,re-engagement,
+    consistency-rolling14,burden-index}.yml`). 넷 다 로컬에서 실제 실행해 빈 데이터에도
+    정상 종료함을 확인.
