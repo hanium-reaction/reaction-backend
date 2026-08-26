@@ -1,0 +1,16 @@
+# EC2 앞단 TLS 종료 — 이슈 #320(API 전 구간 HTTPS).
+#
+# 도메인은 sslip.io 무료 서비스를 쓴다: <IP를 -로 이은 것>.sslip.io 는 별도 등록·DNS
+# 설정 없이 그 IP로 풀린다. Caddy가 이 도메인에 Let's Encrypt 인증서를 자동 발급·갱신한다.
+# ⚠️ EC2에 고정 IP(Elastic IP)가 아니면 재시작 때 IP가 바뀌어 이 도메인이 깨진다 — 아직
+# 확인 전이면 먼저 Elastic IP를 붙여야 한다.
+#
+# `deploy.yml`이 이 저장소를 통째로 `/home/ubuntu/reaction-backend`에 rsync 하므로
+# 이 파일도 매 배포마다 그 경로에 자동으로 올라간다. `/etc/caddy/Caddyfile`을 이 경로로
+# 심볼릭 링크해 두면 수정할 때마다 재배포만으로 반영된다 — 최초 설치는 수동(SSH) 1회,
+# 자동화하지 않은 이유는 `docs/DEPLOY_AWS.md`의 "HTTPS 고정 도메인" 절 참고(러너의 sudo
+# 권한이 `systemctl restart reaction-backend`로 좁게 스코프돼 있어 패키지 설치는 못 한다).
+
+54-184-8-149.sslip.io {
+	reverse_proxy 127.0.0.1:8000
+}

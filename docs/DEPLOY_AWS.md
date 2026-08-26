@@ -10,6 +10,50 @@
 > - **로컬 개발 `.env` 만 아직 Supabase** (ap-northeast-2). 즉 로컬=Supabase, staging=RDS 로 서로 다르다.
 > - 아래 §1~§9(Lightsail Containers 권장 등)와 [`DEPLOY.md`](DEPLOY.md)(Render)·[`cicd.md`](cicd.md)(Supabase `migrate.yml`)·[`BUDGET.md`](BUDGET.md)("Supabase 유지")·[`architecture.md`](architecture.md) 일부는 **이 전환 이전 계획**이라 낡았다.
 
+## HTTPS 고정 도메인 — 이슈 #320 (진행 중)
+
+지금 앱은 `http://54.184.8.149:8000`으로 평문 서빙되고, FE(Vercel)가 `vercel.json` rewrite로
+프록시해 "앱↔Vercel"만 HTTPS다(Vercel↔EC2 구간은 평문) — [이슈 #320](https://github.com/hanium-reaction/reaction-backend/issues/320) 참고.
+
+**결정한 방향 — ALB(월 $16~20 추가) 대신 EC2 + Caddy/Let's Encrypt(추가 비용 0원).**
+ACM 인증서는 ALB/CloudFront 전용이라 EC2에 직접 못 박는다 — "AWS 인증서"를 쓰려면 ALB가
+필수인데, 한이음 클라우드 지원 cap(월 ₩35~40k, §8)이 이미 빠듯해 ALB를 얹으면 거의 다 쓴다.
+
+**도메인 — sslip.io**(무료, 등록·DNS 설정 불필요): `54-184-8-149.sslip.io`는 별도 설정 없이
+그 IP로 풀린다. Caddy가 이 도메인에 Let's Encrypt 인증서를 자동 발급·갱신한다.
+⚠️ EC2가 Elastic IP가 아니면 재시작 때 IP가 바뀌어 이 도메인이 깨진다 — 최초 설치 전에
+Elastic IP 여부를 확인해야 한다.
+
+설정은 [`deploy/Caddyfile`](../deploy/Caddyfile)에 있다 — `deploy.yml`이 저장소를 통째로
+rsync 하므로 이 파일도 매 배포마다 서버에 자동으로 올라간다. **다만 Caddy 설치·서비스
+등록 자체는 CI가 못 한다** — self-hosted 러너의 `sudo`는 `systemctl restart
+reaction-backend`(+`journalctl`)로 좁게 스코프돼 있어 `apt install`이 막힌다(의도된
+보안 스코프라 넓히지 않는다). 그래서 최초 1회는 SSH로 직접 해야 한다:
+
+```bash
+# EC2에 SSH 접속 후, 한 번만:
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+  | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+  | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install -y caddy
+
+# 리포 안의 Caddyfile을 그대로 가리키게 심볼릭 링크 — 이후 수정은 재배포만으로 반영
+sudo rm -f /etc/caddy/Caddyfile
+sudo ln -s /home/ubuntu/reaction-backend/deploy/Caddyfile /etc/caddy/Caddyfile
+sudo systemctl enable --now caddy
+sudo systemctl reload caddy   # Caddyfile 갱신할 때마다
+```
+
+**이것도 SSH/AWS 콘솔에서 사람이 해야 한다(코드로 못 함)**:
+- EC2 보안 그룹에 **인바운드 443 허용**(Caddy가 붙잡을 포트).
+- 완료 조건 "평문 http 포트는 리다이렉트하거나 닫는다" — 보안 그룹에서 **8000번 외부 인바운드를 닫거나** 사설 대역(VPC 내부/로컬호스트)으로 제한. Caddy는 로컬(`127.0.0.1:8000`)로만 붙으므로 앱 자체는 그대로 둬도 된다.
+- (확인 필요) `.env`의 `CORS_ALLOW_ORIGINS`에 네이티브 앱 origin(`capacitor://localhost`)이 이미 있는지 — 없으면 추가해야 앱이 이 도메인에 직접 붙었을 때 CORS를 통과한다. 웹(Vercel)은 origin이 그대로라 추가 불필요.
+
+완료되면 FE `VITE_NATIVE_API_BASE_URL`을 `https://54-184-8-149.sslip.io`로 설정 — FE #244가
+이미 이 환경변수를 분리해 뒀다(코드 수정 없이 빌드 환경변수만 변경).
+
 ---
 
 ## 0. 한이음 클라우드 계정 흐름 (먼저 이해)
