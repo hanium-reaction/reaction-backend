@@ -2090,6 +2090,16 @@ class FakeUserRepo:
     async def count_signed_up(self) -> int:
         return sum(1 for u in self._by_id.values() if getattr(u, "archived_at", None) is None)
 
+    async def list_inactive_for_anonymization(self, *, before: datetime) -> list[User]:
+        """90일 비활성 익명화 대상 (#24). 실 repo 와 같은 두 조건만 본다."""
+        return [
+            u
+            for u in self._by_id.values()
+            if u.last_active_at is not None
+            and u.last_active_at < before
+            and getattr(u, "anonymized_at", None) is None
+        ]
+
     async def upsert_from_google(self, profile: GoogleProfile) -> User:
         existing = self._by_email.get(profile.email)
         if existing is not None:

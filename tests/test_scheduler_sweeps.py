@@ -150,6 +150,7 @@ def test_build_scheduler_registers_expected_jobs() -> None:
         "expire_drafts",
         "expire_reflections",
         "expire_proposed_goals",
+        "anonymize_inactive",
         "evening_reflection_notify",
         "pre_card_notify",
         "morning_brief_notify",
@@ -190,6 +191,26 @@ def test_expire_proposed_goals_job_is_wired_to_the_right_function_and_time() -> 
     fields = {f.name: str(f) for f in job.trigger.fields}
     assert fields["hour"] == "4", f"만료 cron 시각이 04시가 아니다: {fields}"
     assert fields["minute"] == "0", f"만료 cron 분이 00분이 아니다: {fields}"
+    assert str(job.trigger.timezone) == "Asia/Seoul"
+
+
+def test_anonymize_inactive_job_is_wired_to_the_right_function_and_time() -> None:
+    """90일 비활성 익명화 cron 이 **매일 04:00 KST 에 익명화 job 을** 부른다 (#24).
+
+    회귀: job id 집합만 보는 위 테스트는 (a) 다른 함수를 꽂거나 (b) 시각을 바꿔도 통과한다.
+    이 job 은 특히 중요하다 — DevBaseline §1.4 가 "매일 04:00 KST" 를 잠갔고, 실제로
+    **되돌릴 수 없는 마스킹**을 트리거한다. 그리고 이 job 은 오랫동안 "job 함수 미구현 →
+    미등록" 상태였다(runtime.py 헤더가 자인). 다시 조용히 빠지면 90일 지난 사용자 데이터가
+    영원히 남는데 CI 는 green 이다 — 그 구멍을 여기서 막는다.
+    """
+    from reaction_backend.scheduler import runtime
+
+    job = next(j for j in runtime.build_scheduler().get_jobs() if j.id == "anonymize_inactive")
+
+    assert job.func is runtime._anonymize_inactive_job
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"] == "4", f"익명화 cron 시각이 04시가 아니다: {fields}"
+    assert fields["minute"] == "0", f"익명화 cron 분이 00분이 아니다: {fields}"
     assert str(job.trigger.timezone) == "Asia/Seoul"
 
 

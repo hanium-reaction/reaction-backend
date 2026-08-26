@@ -11,9 +11,9 @@
 
 시각 기준 = KST. cron 시간표는 `scheduler/README.md`. 등록 대상은 **job 함수가 존재하는 것만**:
 morning_brief / weekly_review / interruption_resolver / expire_drafts / expire_reflections
-/ evening_reflection_notify / pre_card_notify / morning_brief_notify / habit_instances.
-(anonymize_inactive 는 job 함수 미구현 → 미등록 (#15).
-notification_dispatcher 는 별도 job 이 아니라 발송 게이트로 대체 — ADR-0006 §1.)
+/ expire_proposed_goals / anonymize_inactive / evening_reflection_notify / pre_card_notify
+/ morning_brief_notify / habit_instances.
+(notification_dispatcher 는 별도 job 이 아니라 발송 게이트로 대체 — ADR-0006 §1.)
 """
 
 from __future__ import annotations
@@ -35,10 +35,12 @@ from reaction_backend.repositories.interruption_event_repo import InterruptionEv
 from reaction_backend.repositories.notification_repo import NotificationRepo
 from reaction_backend.repositories.notification_send_repo import NotificationSendRepo
 from reaction_backend.repositories.plan_draft_repo import PlanDraftRepo
+from reaction_backend.repositories.privacy_repo import PrivacyRepo
 from reaction_backend.repositories.recovery_repo import RecoveryRepo
 from reaction_backend.repositories.review_repo import ReviewRepo
 from reaction_backend.repositories.user_repo import UserRepo
 from reaction_backend.scheduler import (
+    anonymize_inactive,
     expire_drafts,
     expire_proposed_goals,
     expire_reflections,
@@ -128,6 +130,16 @@ async def _expire_proposed_goals_job() -> None:
         await expire_proposed_goals.run_expire_stale_proposed_goals(
             session, now=now_kst(), repo=GoalRepo(session)
         )  # 내부 commit
+
+
+async def _anonymize_inactive_job() -> None:
+    async for session in _session_scope():
+        await anonymize_inactive.run_anonymize_inactive_users(
+            session,
+            now=now_kst(),
+            user_repo=UserRepo(session),
+            privacy_repo=PrivacyRepo(session),
+        )  # 내부 commit (사용자 단위)
 
 
 async def _evening_reflection_notify_job() -> None:
@@ -231,6 +243,16 @@ def build_scheduler() -> AsyncIOScheduler:
         _expire_proposed_goals_job,
         CronTrigger(hour=4, minute=0, timezone=KST),
         id="expire_proposed_goals",
+        replace_existing=True,
+    )
+    # 매일 04:00 — 90일 비활성 자동 익명화 (#24, DevBaseline §1.4 잠금 결정).
+    # 같은 04:00 슬롯의 다른 배치와 합류하되 **마지막에 둔다**: 만료 배치가 먼저 돌아
+    # 카드·목표를 정리한 뒤 익명화가 남은 텍스트를 덮는 순서가 자연스럽다(APScheduler 가
+    # 순서를 보장하진 않지만, 어느 순서로 돌아도 결과는 같다 — 양쪽 다 idempotent).
+    scheduler.add_job(
+        _anonymize_inactive_job,
+        CronTrigger(hour=4, minute=0, timezone=KST),
+        id="anonymize_inactive",
         replace_existing=True,
     )
     # 매일 00:05 — 설계서 표기는 "매주 월요일 00:00" 이지만 **일 단위로 돌린다**.

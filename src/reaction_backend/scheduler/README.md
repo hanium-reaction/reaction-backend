@@ -38,6 +38,7 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 | `run_morning_brief_notify_sweep(now, *, user_repo, notif_repo, recovery_repo, action_repo, send_repo, sender, session)` | `notify_sweeps.py` | 회복 재설계 S9(T2) | ✅ 오늘이 `re_engagement_anchor_at` 인 채택 PARK/CARRY_OVER 사용자에게만 발송 — 새 클래스 없이 `morning_brief` 재사용(근거 대장 §6.2). 대상 없으면 그날은 skip(빈 알림 금지). 동일 게이트 경유 |
 | `run_habit_instances_sweep(week_start, *, user_repo, habit_repo, instance_repo, session)` | `habit_instances.py` | #22 | ✅ 활성 사용자 × 활성 습관의 그 주 인스턴스 생성, idempotent(`(habit_id, week_start)` UNIQUE + get-or-create). `week_start` 는 호출자 주입 — 런타임 job 이 `GET /today/agenda` 와 **같은 함수** `habit_repo.current_week_start_kst()` 를 쓴다(생성/조회 주 경계 단일 소스). `target_count` 는 `habit.target_count`(S22 `apply_penalty` 가 쓰는 자리) |
 | `run_expire_stale_proposed_goals(session, *, now, repo)` | `expire_proposed_goals.py` | #178 | ✅ job 로직 (TTL 14일 지난 proposed 목표 보관, idempotent). 경계 `proposed_goal_stale_before(now)` 는 프리뷰 스크립트(`scripts/preview_expire_proposed_goals.py`)도 재사용하는 단일 소스. 사용자 알림 없음(ADR-0005 §7.8 선례 — 알림 4번째 클래스는 AGENTS §1 잠금이라 §8 대상) |
+| `run_anonymize_inactive_users(session, *, now, user_repo, privacy_repo)` | `anonymize_inactive.py` | #24 | ✅ job 로직 (90일 비활성 → `POST /settings/anonymize` 와 **같은 정의**의 익명화: `*_encrypted` 마스킹 + 이름 마스킹 + `is_anonymized`/`anonymized_at`. **email 은 안 건드린다** — 로그인 1차 키라 마스킹하면 익명화가 아니라 사실상 계정 삭제가 된다). 경계 `inactive_anonymize_before(now)` 는 프리뷰 스크립트도 재사용하는 단일 소스. 사용자 단위 commit + except 격리(6개 테이블을 건드려 한 명 실패가 배치를 롤백하면 안 된다). TTL 90일은 DevBaseline §1.4 잠금이라 임의 변경 불가 |
 
 ## 런타임 (#24)
 
@@ -45,7 +46,7 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 | --- | --- |
 | `sweeps.py` | **전체 활성 사용자 순회 wrapper** — `run_morning_brief_sweep` / `run_weekly_review_sweep`. per-user job 을 `user_repo.list_active()` 전체에 실행(개별 try/except 격리, 사용자 톤 반영). |
 | `habit_instances.py` | **전체 활성 사용자 × 활성 습관 순회** — `run_habit_instances_sweep`. `notify_sweeps` 와 같은 트랜잭션 규약(사용자 단위 commit + except rollback). |
-| `runtime.py` | **APScheduler(AsyncIOScheduler) 등록** — `build_scheduler()` 가 10 job 을 KST cron 으로 add_job. job wrapper 가 1회용 세션·repo 를 만들어 sweep/전역 job 호출. |
+| `runtime.py` | **APScheduler(AsyncIOScheduler) 등록** — `build_scheduler()` 가 11 job 을 KST cron 으로 add_job. job wrapper 가 1회용 세션·repo 를 만들어 sweep/전역 job 호출. |
 
 등록 시각: morning_brief=매일 06:00 · weekly_review=일요일 03:00 · interruption_resolver=6h ·
 expire_drafts=6h · expire_reflections=매일 04:00 · expire_proposed_goals=매일 04:00 ·
@@ -64,5 +65,5 @@ morning_brief_notify=06~10시 */5분 · habit_instances=매일 00:05.
 
 > ⚠️ **in-process** — 다중 인스턴스 배포 시 중복 실행(모든 job idempotent → 안전, 단일 인스턴스 권장).
 > Render 배포 시 `SCHEDULER_ENABLED=true` + 단일 인스턴스 = #24 PM 배포 설정.
-> 미등록 job(anonymize_inactive=#15 등)은
-> job 함수 구현 후 `runtime.build_scheduler` 에 add_job 추가.
+> 새 job 은 함수 구현 후 `runtime.build_scheduler` 에 add_job 추가.
+> (`anonymize_inactive` 는 #24 로 구현·등록 완료 — 2026-08-26.)

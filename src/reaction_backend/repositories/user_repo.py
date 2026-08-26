@@ -56,6 +56,26 @@ class UserRepo:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_inactive_for_anonymization(self, *, before: datetime) -> list[User]:
+        """`last_active_at` 이 `before` 이전인 **아직 익명화 안 된** 사용자 (#24 90일 cron).
+
+        `list_active()` 와 정반대 대상이라 필터를 공유하지 않는다 — 그쪽은 "지금 쓰는
+        사람"(ACTIVE + 익명화 안 됨)을 찾고, 이건 "떠난 사람"을 찾는다. `onboarding_state`
+        는 **안 본다**: 온보딩 중에 이탈한 계정이야말로 90일 뒤에 남아 있으면 안 되는
+        데이터다.
+
+        `anonymized_at IS NULL` 이 멱등 가드다(#24 본문). soft-delete(`archived_at`) 된
+        계정은 삭제 경로(`POST /settings/delete-account`, #321)가 이미 `anonymized_at` 을
+        세우므로 자연히 빠진다 — 옛 경로로 지워져 플래그가 없는 행이 있어도 마스킹은
+        멱등이라 해가 없다.
+        """
+        stmt = select(User).where(
+            User.last_active_at < before,
+            User.anonymized_at.is_(None),
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def count_signed_up(self) -> int:
         """가입 인원 상한(#324) 판정용 — onboarding 진행도와 무관하게 **가입한 전체**를 센다.
 

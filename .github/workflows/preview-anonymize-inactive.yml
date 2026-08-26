@@ -1,0 +1,48 @@
+name: Preview anonymize-inactive (EC2, read-only)
+
+# SCHEDULER_ENABLED 를 켜기 전 사전 실측(#24 · preview-expire-proposed-goals 선례) —
+# 90일 비활성 익명화 cron 이 첫 04:00 에 **누구를** 익명화할지 라이브 RDS 에서
+# **읽기 전용**으로 센다.
+# deploy.yml 과 같은 self-hosted EC2 runner 에서 돌아 prod .env(RDS DATABASE_URL)를 쓴다.
+#
+# 다른 프리뷰보다 이 실측이 더 중요한 이유: 마스킹은 원문을 덮어쓰므로 **되돌릴 수 없다**
+# (만료 cron 의 archived_at 은 최소한 행이 남지만, 여기는 텍스트 자체가 사라진다).
+#
+# 안전:
+# - workflow_dispatch 전용 (push/PR 로는 절대 트리거되지 않음)
+# - 스크립트는 SELECT 뿐 — 쓰기 옵션 자체가 없다(--apply 없음)
+# - 후보 판정은 cron 이 쓰는 함수를 그대로 재사용 → 프리뷰/실제 명단 드리프트 불가능
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  # deploy 와 같은 앱 디렉터리를 쓰므로 배포와 겹치지 않게 직렬화.
+  # queue: max — 기본(single)은 pending 취소로 대기 중 deploy 가 유실된다 (deploy.yml 참조).
+  group: deploy-ec2
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  preview:
+    name: "preview (read-only)"
+    runs-on: [self-hosted, ec2, reaction-backend]
+    timeout-minutes: 10
+
+    env:
+      APP_DIR: /home/ubuntu/reaction-backend
+
+    steps:
+      - name: Run preview
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          ~/.local/bin/uv run --no-dev python -m scripts.preview_anonymize_inactive | tee /tmp/preview.out
+
+      - name: Summary
+        if: always()
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          echo "### Preview anonymize-inactive (read-only)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 60 /tmp/preview.out >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

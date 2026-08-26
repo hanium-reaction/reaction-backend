@@ -16,7 +16,9 @@
 변경 + LangGraph state(tone_mode) 전달을 수반 → 후속 PR(ADR-0003 addendum). 본 PR 은
 톤 모드 영속화(PATCH)와 prefix 헬퍼까지.
 
-자동 익명화(90일 비활성, 04:00 KST cron)는 Issue #15 범위.
+자동 익명화(90일 비활성, 04:00 KST cron)는 `scheduler/anonymize_inactive.py` — 이 파일의
+`anonymize` 와 **같은 정의**의 익명화를 시간 트리거로 돌린다(#24). 마스킹 로직은 양쪽 다
+`PrivacyRepo.anonymize_user` 단일 소스.
 """
 
 from __future__ import annotations
