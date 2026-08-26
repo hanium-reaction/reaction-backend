@@ -13,6 +13,9 @@
 #20-A 구현 범위:
 - POST /recovery/proposals/generate — 룰 선택(orchestrator.recovery) + LLM personalize
   (`recovery/if_then_proposal`, fallback 시 템플릿) → recovery_attempts(pending) INSERT
+  - 동일 목표 반복 실패/거절(L3, 근거 대장 §5.2)이면 `recoveryMode="goal_renegotiation"`
+    + DOWNSCOPE/RESCHEDULE/PARK 3장 고정(#328). 카드·결정 스키마는 그대로라 이후 흐름
+    (`/recovery/decisions`, replan)은 모드를 몰라도 된다 — 이미 있는 4그룹 계약을 그대로 탄다.
 - POST /recovery/decisions — 수락/스킵 저장 (Idempotency 미들웨어 §1.7).
   수락 그룹이 DOWNSCOPE/CARRY_OVER 면 새 ActionItem(source=recovery_*) 생성.
 
@@ -25,6 +28,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from http import HTTPStatus
 from typing import Annotated, Literal
@@ -72,6 +76,7 @@ from reaction_backend.schemas.recovery import (
     RecoveryDecisionRequest,
     RecoveryDecisionResponse,
     RecoveryGenerateRequest,
+    RecoveryMode,
     RecoveryProposalLLM,
     RecoveryProposalLLMv3,
     RecoveryProposalsResponse,
@@ -81,6 +86,8 @@ from reaction_backend.schemas.recovery import (
 )
 
 router = APIRouter(tags=["recovery"])
+
+_log = logging.getLogger(__name__)
 
 # 응답의 aiSource 리터럴 (DraftMixin 과 같은 집합 — 계약 동결).
 AiSource = Literal["llm", "rule"]
@@ -188,6 +195,76 @@ async def _get_execution_or_404(
     return execution
 
 
+def _recovery_mode(level: EscalationLevel | None) -> RecoveryMode:
+    return "goal_renegotiation" if level == "L3" else "standard"
+
+
+async def _determine_escalation_level(
+    user_id: UUID,
+    execution: ExecutionEvent,
+    action: ActionItem | None,
+    failure_tags: list[str],
+    repo: RecoveryRepo,
+) -> EscalationLevel | None:
+    """L0~L3 판정 — `escalation.py` 의 "매번 이력에서 계산" 원칙을 그대로 따른다(별도
+    컬럼에 안 얹는다). 신규 생성 경로와 멱등 재조회 경로(pending 그대로 반환) 둘 다
+    이 함수를 쓴다(#328) — `recoveryMode` 가 두 경로에서 같은 판정 기준을 쓰게 하려면
+    계산을 하나로 모아야 한다. `same_card_history`/`same_goal_history` 등은 이 실행
+    건과 무관한 사용자 전체 이력이라, 아주 좁은 창(생성 직후 같은 요청 안의 재조회)
+    밖에서는 두 호출 사이에 다른 실행이 끼어들면 판정이 달라질 수 있다 — 저장하지
+    않고 매번 계산하는 대가로 받아들인 트레이드오프(escalation.py 모듈 docstring 참고).
+    """
+    same_card_history = await repo.list_same_card_outcomes(user_id, execution.action_item_id)
+    recovery_results_history = await repo.list_recovery_results(user_id)
+    recovery_decisions_history = await repo.list_recovery_decisions(user_id)
+    same_goal_history = (
+        await repo.list_goal_outcomes(user_id, action.goal_id)
+        if action is not None and action.goal_id is not None
+        else []
+    )
+
+    base_state = compute_escalation_state(
+        same_card_outcomes_most_recent_first=same_card_history,
+        same_tag_outcomes_most_recent_first=[],
+        same_goal_outcomes_most_recent_first=same_goal_history,
+        recovery_decisions_most_recent_first=recovery_decisions_history,
+        recovery_results_most_recent_first=recovery_results_history,
+    )
+    escalation_level: EscalationLevel | None = None
+    if base_state.level in ("L1", "L3"):
+        escalation_level = base_state.level
+    if base_state.level == "L3":
+        # 판정 근거를 내부 로그에 남긴다(#328 완료 조건) — 카드 문구 등 사용자 콘텐츠는
+        # 없다, 카운터 숫자와 UUID 뿐이다.
+        _log.info(
+            "recovery: L3 goal_renegotiation user=%s execution=%s "
+            "same_goal_failures=%d rejected_streak=%d",
+            user_id,
+            execution.id,
+            base_state.counters.same_goal_failure_count,
+            base_state.counters.recovery_rejected_streak,
+        )
+
+    # L3 는 이미 태그 무관 최강 레벨이라 태그별 L2 재검사가 필요 없다 — 더 낮은
+    # 레벨로 내려갈 일이 없다(determine_escalation_level 과 같은 "강한 조건부터" 우선순위).
+    if escalation_level != "L3":
+        for tag in failure_tags:
+            tag_history = await repo.list_lineage_outcomes_for_tag(
+                user_id, execution.action_item_id, tag
+            )
+            state = compute_escalation_state(
+                same_card_outcomes_most_recent_first=same_card_history,
+                same_tag_outcomes_most_recent_first=tag_history,
+                same_goal_outcomes_most_recent_first=same_goal_history,
+                recovery_decisions_most_recent_first=recovery_decisions_history,
+                recovery_results_most_recent_first=recovery_results_history,
+            )
+            if state.level == "L2":
+                escalation_level = "L2"
+                break
+    return escalation_level
+
+
 @router.post("/recovery/proposals/generate", status_code=status.HTTP_201_CREATED)
 async def generate_recovery_proposals(
     body: RecoveryGenerateRequest,
@@ -215,15 +292,7 @@ async def generate_recovery_proposals(
     # 멱등 — pending 카드가 이미 있으면 그대로 반환 (재호출/새로고침 안전)
     existing = await repo.list_attempts(user.id, execution.id)
     pending = [a for a in existing if a.user_decision == "pending"]
-    if pending:
-        await repo.stamp_first_viewed(pending, now_kst())
-        await session.commit()
-        return RecoveryProposalsResponse(
-            execution_id=body.execution_id,
-            cards=[_to_card(a, catalog.get(a.recovery_strategy_type)) for a in pending],
-            ai_source=_ai_source(all(a.llm_fallback_used for a in pending)),
-        )
-    if existing:
+    if existing and not pending:
         # 결정이 끝난 실행 — pending 이 0건이라 위 가드를 그냥 통과해 **두 번째 카드 세트**가
         # INSERT 되던 구멍. 그 결과 `/recovery/decisions` 의 409 가 무력화되고(같은 실패에
         # 회복 ActionItem 2개), `_accepted_replan_attempt` 는 created_at 오름차순에서 처음
@@ -236,66 +305,36 @@ async def generate_recovery_proposals(
             http_status=HTTPStatus.CONFLICT,
         )
 
-    # 진짜 새로 생성하는 경로에서만 카운트한다(#325) — 위 두 멱등 분기(pending 재반환/이미
-    # 결정됨)는 LLM 도, 오케스트레이션도 새로 안 돈다. 여기서 걸면 새로고침 반복이 사용자
-    # 한도를 갉아먹지 않는다.
-    await endpoint_rate_limit.enforce(session, user_id=user.id, module="recovery")
-
     failure_tags = await repo.list_failure_tag_codes(execution.id)
     # 원본 카드 — escalation L3(동일 goal)의 goal_id 가 필요해 템플릿 변수 구성부보다
     # 앞으로 끌어올렸다. 순수 조회라 나중에 selected 가 비어 422 로 끝나도 부작용 없다.
     action = await action_repo.get_by_id(user.id, execution.action_item_id)
 
+    # escalation_level(L0~L3, #328 recoveryMode 포함)은 DB 이력만으로 계산해 넘긴다 —
+    # pending 재반환 경로도 같은 기준으로 recoveryMode 를 내야 해서(멱등 응답이 모드를
+    # 바꿔 보이면 안 된다) 두 경로가 이 헬퍼 하나를 공유한다.
+    escalation_level = await _determine_escalation_level(
+        user.id, execution, action, failure_tags, repo
+    )
+    recovery_mode = _recovery_mode(escalation_level)
+
+    if pending:
+        await repo.stamp_first_viewed(pending, now_kst())
+        await session.commit()
+        return RecoveryProposalsResponse(
+            execution_id=body.execution_id,
+            cards=[_to_card(a, catalog.get(a.recovery_strategy_type)) for a in pending],
+            ai_source=_ai_source(all(a.llm_fallback_used for a in pending)),
+            recovery_mode=recovery_mode,
+        )
+
+    # 진짜 새로 생성하는 경로에서만 카운트한다(#325) — 위 멱등 분기(pending 재반환)는 LLM 도,
+    # 오케스트레이션도 새로 안 돈다. 여기서 걸면 새로고침 반복이 사용자 한도를 갉아먹지 않는다.
+    await endpoint_rate_limit.enforce(session, user_id=user.id, module="recovery")
+
     # overwhelm_level 은 의도적으로 넘기지 않는다 — PARK_DEFAULT 동적 트리거(`select_strategies`
     # 의 `overwhelm_level` 인자)를 쓸 실 데이터 출처가 아직 없다. `context_snapshots` 캡처는
     # #19-B-2 유예 중(`context_snapshot.py` 모듈 docstring) — 그게 붙으면 여기서 채운다.
-    #
-    # escalation_level(L0~L3) 은 DB 이력만으로 계산해 넘긴다 — overwhelm_level 과 달리 새
-    # 캡처가 필요 없다. `consecutive_failure_count`(동일 카드)·`same_goal_failure_count`
-    # (동일 goal)·`recovery_rejected_streak`·`recovery_abandoned_streak`(전부 사용자
-    # 전체·태그 무관, §5.1 표에 "동일 카드" 한정이 없음)는 태그와 무관해 한 번만 조회한다.
-    # L2(동일 태그 3회 연속)만 태그별로 갈릴 수 있어 태그마다 다시 계산 — 하나라도 L2 면
-    # 그걸로 확정(가장 강한 레벨이 이긴다, determine_escalation_level 과 같은 우선순위).
-    # L1 은 select_strategies 의 축소→분해 규칙에만 쓴다 — v3/acknowledgment 라우팅은
-    # escalation_level 이 아니라 아래 실패 태그(AVOIDANCE 포함 여부)로만 결정한다.
-    same_card_history = await repo.list_same_card_outcomes(user.id, execution.action_item_id)
-    recovery_results_history = await repo.list_recovery_results(user.id)
-    recovery_decisions_history = await repo.list_recovery_decisions(user.id)
-    same_goal_history = (
-        await repo.list_goal_outcomes(user.id, action.goal_id)
-        if action is not None and action.goal_id is not None
-        else []
-    )
-
-    escalation_level: EscalationLevel | None = None
-    base_level = compute_escalation_state(
-        same_card_outcomes_most_recent_first=same_card_history,
-        same_tag_outcomes_most_recent_first=[],
-        same_goal_outcomes_most_recent_first=same_goal_history,
-        recovery_decisions_most_recent_first=recovery_decisions_history,
-        recovery_results_most_recent_first=recovery_results_history,
-    ).level
-    if base_level in ("L1", "L3"):
-        escalation_level = base_level
-
-    # L3 는 이미 태그 무관 최강 레벨이라 태그별 L2 재검사가 필요 없다 — 더 낮은
-    # 레벨로 내려갈 일이 없다(determine_escalation_level 과 같은 "강한 조건부터" 우선순위).
-    if escalation_level != "L3":
-        for tag in failure_tags:
-            tag_history = await repo.list_lineage_outcomes_for_tag(
-                user.id, execution.action_item_id, tag
-            )
-            state = compute_escalation_state(
-                same_card_outcomes_most_recent_first=same_card_history,
-                same_tag_outcomes_most_recent_first=tag_history,
-                same_goal_outcomes_most_recent_first=same_goal_history,
-                recovery_decisions_most_recent_first=recovery_decisions_history,
-                recovery_results_most_recent_first=recovery_results_history,
-            )
-            if state.level == "L2":
-                escalation_level = "L2"
-                break
-
     selected = select_strategies(failure_tags, strategies, escalation_level=escalation_level)
     if not selected:
         raise ApiError(
@@ -316,13 +355,15 @@ async def generate_recovery_proposals(
     # 전략 선택은 룰이 이미 끝냈으므로, LLM 에 선두 전략(label/group/template)을 넘겨 "그 전략을
     # personalize"하게 한다(새 전략을 고르지 않음). 실패 시 카탈로그 템플릿 그대로 (PRD §9).
     #
-    # L2 는 예외 — 근거 대장 §5.2 "문구 다듬기 중단": 개인화가 오히려 "이번엔 다를 거예요"
-    # 식 재설득으로 읽혀 역효과라는 게 L2 조건의 근거(B5)라 LLM 호출 자체를 건너뛴다.
+    # L2/L3 는 예외 — 근거 대장 §5.2 "문구 다듬기 중단": 개인화가 오히려 "이번엔 다를
+    # 거예요" 식 재설득으로 읽혀 역효과라는 게 L2 조건의 근거(B5)다. L3(재협상)는 애초에
+    # "그 실패에 맞는 문구"가 아니라 "목표 자체를 조정하자"는 구조적 개입이라 개인화할
+    # 대상 자체가 안 맞는다 — 같은 이유로 확장했다(#328).
     top = selected[0]
     top_obstacle: str | None = None
     top_coping_clause: str | None = None
     top_acknowledgment: str | None = None
-    if escalation_level == "L2":
+    if escalation_level in ("L2", "L3"):
         llm_fell_back = True
         llm_prompt_version: str | None = None
     else:
@@ -413,6 +454,7 @@ async def generate_recovery_proposals(
         execution_id=body.execution_id,
         cards=[_to_card(a, catalog.get(a.recovery_strategy_type)) for a in attempts],
         ai_source=_ai_source(llm_fell_back),
+        recovery_mode=recovery_mode,
     )
 
 

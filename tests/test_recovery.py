@@ -21,6 +21,7 @@ from reaction_backend.orchestrator.recovery import (
     recovery_target_date,
     recovery_unit_minutes,
     render_template,
+    select_renegotiation_strategies,
     select_strategies,
     shift_to_recovery_day,
     with_comeback_ack,
@@ -122,6 +123,8 @@ def test_generate_returns_2_to_4_cards(
     assert body["isDraft"] is True
     # LLM 키 없음 → 룰 fallback
     assert body["aiSource"] == "rule"
+    # 에스컬레이션 없는 평범한 실패 — 재협상 모드가 아니다(#328).
+    assert body["recoveryMode"] == "standard"
 
 
 def test_generate_max_one_card_per_group(
@@ -425,6 +428,10 @@ def test_generate_l3_escalates_on_four_consecutive_same_goal_failures(
     types = {c["strategyType"] for c in body["cards"]}
     assert "DOWNSCOPE_DEFAULT" not in types
     assert body["cards"][0]["suggestedActionText"].startswith(COMEBACK_ACK_PREFIX)
+    # #328 — 목표 재협상 모드: 명시 필드 + DOWNSCOPE/RESCHEDULE/PARK 정확히 3장.
+    assert body["recoveryMode"] == "goal_renegotiation"
+    assert {c["optionGroup"] for c in body["cards"]} == {"DOWNSCOPE", "RESCHEDULE", "PARK"}
+    assert len(body["cards"]) == 3
 
 
 def test_generate_l3_escalates_on_two_consecutive_skipped_recoveries(
@@ -466,6 +473,13 @@ def test_generate_l3_escalates_on_two_consecutive_skipped_recoveries(
     types = {c["strategyType"] for c in body["cards"]}
     assert "DOWNSCOPE_DEFAULT" not in types
     assert body["cards"][0]["suggestedActionText"].startswith(COMEBACK_ACK_PREFIX)
+    assert body["recoveryMode"] == "goal_renegotiation"
+    assert {c["optionGroup"] for c in body["cards"]} == {"DOWNSCOPE", "RESCHEDULE", "PARK"}
+
+    # 멱등 재조회(같은 pending 카드) — recoveryMode 가 그대로 유지된다.
+    refetched = _generate(client, f"exec_{current.id}").json()
+    assert refetched["recoveryMode"] == "goal_renegotiation"
+    assert refetched["cards"] == body["cards"]
 
 
 def test_generate_excludes_downscope_default_at_l1_but_still_calls_llm(
@@ -1356,6 +1370,59 @@ def test_select_strategies_score_beats_priority() -> None:
     cards = select_strategies(["FATIGUE", "LOW_ENERGY"], strategies)
     reschedule_cards = [c for c in cards if c.option_group == "RESCHEDULE"]
     assert reschedule_cards and reschedule_cards[0].strategy_type == "ACTIVE_RECOVERY"
+
+
+# ───────────────────────── L3 재협상 3장 (#328) ─────────────────────────
+
+
+def test_select_renegotiation_strategies_picks_lowest_priority_per_group() -> None:
+    """세 그룹 각각 display_priority 최솟값 1장씩 — 태그와 무관하게 고정."""
+    cards = select_renegotiation_strategies(default_recovery_strategies())
+    by_group = {c.option_group: c.strategy_type for c in cards}
+    assert by_group == {
+        "DOWNSCOPE": "NANO_STEP",
+        "RESCHEDULE": "RESCHEDULE_DEFAULT",
+        "PARK": "GOAL_RECHECK",
+    }
+
+
+def test_select_renegotiation_strategies_excludes_downscope_default() -> None:
+    """DOWNSCOPE_DEFAULT(모호한 비율 축소)는 그 그룹의 최저 priority 여도 후보에서 빠진다."""
+    strategies = [s for s in default_recovery_strategies() if s.option_group == "DOWNSCOPE"]
+    cards = select_renegotiation_strategies(strategies)
+    assert {c.strategy_type for c in cards} == {"NANO_STEP"}
+    assert "DOWNSCOPE_DEFAULT" not in {c.strategy_type for c in cards}
+
+
+def test_select_renegotiation_strategies_excludes_carry_over() -> None:
+    """CARRY_OVER 는 활성 전략이 있어도 재협상 3장에 안 낀다."""
+    cards = select_renegotiation_strategies(default_recovery_strategies())
+    assert "CARRY_OVER" not in {c.option_group for c in cards}
+
+
+def test_select_renegotiation_strategies_omits_missing_group() -> None:
+    """카탈로그에 어떤 그룹이 아예 없으면 그 자리는 빠지고 강제로 채우지 않는다."""
+    strategies = [s for s in default_recovery_strategies() if s.option_group != "PARK"]
+    cards = select_renegotiation_strategies(strategies)
+    assert {c.option_group for c in cards} == {"DOWNSCOPE", "RESCHEDULE"}
+
+
+def test_select_renegotiation_strategies_ignores_inactive() -> None:
+    strategies = default_recovery_strategies()
+    for s in strategies:
+        if s.strategy_type == "NANO_STEP":
+            s.is_active = False
+    cards = select_renegotiation_strategies(strategies)
+    downscope = next(c for c in cards if c.option_group == "DOWNSCOPE")
+    assert downscope.strategy_type != "NANO_STEP"
+
+
+def test_select_strategies_l3_delegates_to_renegotiation_regardless_of_tags() -> None:
+    """`escalation_level="L3"` 면 실패 태그가 뭐든 재협상 3장으로 고정된다."""
+    strategies = default_recovery_strategies()
+    cards = select_strategies(["DISTRACTION"], strategies, escalation_level="L3")
+    assert {c.option_group for c in cards} == {"DOWNSCOPE", "RESCHEDULE", "PARK"}
+    assert len(cards) == 3
 
 
 def test_render_template_missing_var_is_safe() -> None:

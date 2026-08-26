@@ -7,6 +7,24 @@
 
 ---
 
+## v1.87 — 2026-08-26 (목표 재협상 모드 — `recoveryMode`, #328)
+
+**추가만(하위호환)** — `POST /recovery/proposals/generate` 응답에 필드 1개 추가. 기존
+필드·요청 형태 변경 없음.
+
+- `recoveryMode: "standard" | "goal_renegotiation"` 신설. 동일 목표 4회 연속 실패 또는
+  회복 2회 연속 rejected(skipped 포함)면 `goal_renegotiation` — 이때 `cards` 는 태그
+  매칭과 무관하게 DOWNSCOPE/RESCHEDULE/PARK 각 1장, 정확히 3장이다(CARRY_OVER 제외).
+- LLM personalize 도 이 모드에선 건너뛴다(L2 와 같은 이유 — "이번엔 다를 거예요" 식
+  재설득 역효과).
+- FE 는 카드 스키마·`/recovery/decisions`·replan 흐름을 그대로 재사용한다 — 새 화면
+  없음. `recoveryMode` 가 `goal_renegotiation` 일 때만 상단에 안내 문구 하나를 얹는다
+  (FE #223). 기본값이 `standard` 라 이 필드를 모르는 기존 클라이언트도 그대로 동작한다.
+- 판정 로직 자체(L3 상태 판정)는 이미 #357 로 배선돼 있었다 — 이번 PR 은 그 위에
+  3장 카드 선택(`select_renegotiation_strategies`)과 응답 노출만 얹었다.
+
+---
+
 ## v1.86 — 2026-08-26 (자정을 넘는 활동창에 계획이 배치된다 — #252)
 
 **동작 수정** — endpoint·요청/응답 스키마 변경 없음. ⚠️ **블록이 날짜를 넘을 수 있다**(FE 확인 필요).

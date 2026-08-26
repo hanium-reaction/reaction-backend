@@ -660,6 +660,15 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   가 있을 때만 personalize 가 v3 프롬프트로 라우팅되고, 그 배치의 **선두 카드에만** 값이
   실린다. 그 외 카드(형제·비-AVOIDANCE 배치·룰 폴백)는 셋 다 null. `acknowledgment` 는
   v3 안에서도 조건부라 obstacle/copingClause 만 있고 이건 null 인 경우가 있다.
+- **`recoveryMode: "standard" | "goal_renegotiation"`(#328, 근거 대장 §5.2 L3)** — 동일
+  목표 4회 연속 실패 또는 회복 2회 연속 rejected(skipped 포함)면 `goal_renegotiation` 이고,
+  이때 `cards` 는 태그 매칭과 무관하게 **DOWNSCOPE/RESCHEDULE/PARK 각 1장, 정확히 3장**
+  고정이다(CARRY_OVER 제외 — "내일로 미루기"는 재협상 취지와 안 맞음). 이 모드에선
+  LLM personalize 도 건너뛴다(L2 와 같은 이유 — 개인화가 "이번엔 다를 거예요" 식 역효과).
+  카드 스키마·`/recovery/decisions`·replan 흐름은 모드와 무관하게 동일 — FE 는 기존 회복
+  카드 목록·수락/수정/거절 인터랙션을 그대로 쓰고, 이 필드가 `goal_renegotiation` 일 때만
+  상단에 "같은 목표가 반복해서 막혔어요. 이번에는 계획 자체를 조정해볼까요?" 안내를 얹는다
+  (FE #223). `standard` 가 기본값이라 기존 클라이언트는 이 필드를 몰라도 동작한다.
   **이미 결정된 실행(pending 0건 + 결정 이력 있음)은 `RECOVERY_ALREADY_DECIDED`(409)** —
   회복 카드 세트는 실행 1건당 1세트다. 재생성을 허용하면 `/recovery/decisions` 의 409 가
   무력화돼 같은 실패에 회복 ActionItem 이 여러 개 생기고, replan 은 `created_at` 오름차순의

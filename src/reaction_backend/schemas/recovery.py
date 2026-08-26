@@ -2,6 +2,10 @@
 
 UX 4 그룹 (DOWNSCOPE / RESCHEDULE / CARRY_OVER / PARK) 카드를 Draft Layer 로 반환하고,
 사용자 결정(`/recovery/decisions`)에서만 `is_draft=False` 가 된다 (ADR-0005 §7.2).
+
+`RecoveryProposalsResponse.recovery_mode`(#328) — 동일 목표 반복 실패/거절이면
+`"goal_renegotiation"`, 그 외엔 `"standard"`. 카드 자체의 구조(그룹·필드)는 그대로다 —
+재협상도 회복 카드 3장일 뿐이라 별도 스키마를 안 만든다.
 """
 
 from __future__ import annotations
@@ -16,6 +20,11 @@ from reaction_backend.schemas.common import CamelModel, DraftMixin, KstDatetime
 RecoveryOptionGroup = Literal["DOWNSCOPE", "RESCHEDULE", "CARRY_OVER", "PARK"]
 
 RecoveryDecision = Literal["accepted", "edited", "skipped"]
+
+RecoveryMode = Literal["standard", "goal_renegotiation"]
+"""일반 회복(4그룹 중 태그 매칭) vs 목표 재협상(#328, 근거 대장 §5.2 L3) 구분 — FE 가
+카드 개수·제목으로 모드를 추론하지 않도록 명시 필드로 낸다. `goal_renegotiation` 이면
+`cards` 는 항상 DOWNSCOPE/RESCHEDULE/PARK 각 1장(카탈로그가 세 그룹 모두 활성이면)."""
 
 
 class RecoveryProposalLLM(CamelModel):
@@ -90,6 +99,7 @@ class RecoveryProposalsResponse(DraftMixin):
 
     execution_id: str
     cards: list[RecoveryCard]
+    recovery_mode: RecoveryMode = "standard"
 
 
 class RecoveryDecisionRequest(CamelModel):

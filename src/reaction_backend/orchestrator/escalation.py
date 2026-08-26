@@ -12,12 +12,11 @@ SQL 뷰로 "연속" + "partial_done 동결"을 표현하면 윈도우 함수가 
 불변으로 쌓이고 있으므로, 매번 다시 계산해도 항상 최신이라는 이점도 있다.
 
 ⚠️ **스코프 경계 (정직 표기)**:
-- **L3(재협상 3장)은 "상태 판정"만 있다 — 재협상 3장 UX 자체는 아직 없다.** `EscalationLevel`
-  에 `"L3"` 은 있고 `determine_escalation_level` 도 L3 를 정확히 판정하지만,
-  `orchestrator/recovery.py::select_strategies` 는 L3 를 L1/L2 가 이미 가진 보호
-  장치(DOWNSCOPE_DEFAULT 배제)만 이어받을 뿐 §5.2 가 요구한 "4그룹 통상 카드 대신
-  재협상 3장([목표 축소]/[기한 재설정]/[일시 중단])"은 아직 안 만든다 — 그 UX 는
-  FE 쪽 PARK 수락 플로우(`reaction-frontend#223`)가 아직 수락 안 돼 화면이 없다.
+- **L3(재협상 3장)** — `EscalationLevel` 의 `"L3"` 판정(이 모듈)과 3장 선택
+  (`orchestrator/recovery.py::select_renegotiation_strategies`, #328)까지 배선됐다.
+  다만 `recoveryMode` 필드로 FE 에 노출하는 쪽(`routes/recovery.py`)이 화면을 새로
+  만드는 건 아니다 — FE 는 여전히 기존 회복 카드 목록·수락/수정/거절 인터랙션을
+  재사용하고(`reaction-frontend#223`), 이 모드일 때만 상단 안내 문구를 얹는다.
 - **L4(stand-down)는 여전히 뺐다** — 진입 조건(`overwhelm≥4`)의 신호 자체가
   프로덕션에 없다(`context_snapshots` 실제 캡처 미완, #19-B-2 유예).
 - **이 모듈은 레벨을 계산하는 로직만 제공한다.** `routes/recovery.py`나
