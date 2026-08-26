@@ -2069,10 +2069,16 @@ class FakeUserRepo:
         self._by_id[user.id] = user
 
     async def get_by_id(self, user_id: UUID) -> User | None:
-        return self._by_id.get(user_id)
+        user = self._by_id.get(user_id)
+        if user is not None and getattr(user, "archived_at", None) is not None:
+            return None
+        return user
 
     async def get_by_email(self, email: str) -> User | None:
-        return self._by_email.get(email)
+        user = self._by_email.get(email)
+        if user is not None and getattr(user, "archived_at", None) is not None:
+            return None
+        return user
 
     async def list_active(self) -> list[User]:
         return [
@@ -2426,9 +2432,16 @@ def unauthed_client() -> Iterator[TestClient]:
 
 @pytest.fixture
 def auth_client(
-    fake_user_repo: FakeUserRepo, fake_invite_code_repo: FakeInviteCodeRepo
+    fake_user_repo: FakeUserRepo,
+    fake_invite_code_repo: FakeInviteCodeRepo,
+    fake_privacy_repo: FakePrivacyRepo,
 ) -> Iterator[TestClient]:
-    """`/auth/*` 테스트 — repo/session 만 override, 인증은 실제 JWT 흐름."""
+    """`/auth/*` 테스트 — repo/session 만 override, 인증은 실제 JWT 흐름.
+
+    `fake_privacy_repo` 도 override 한다(#321) — `/settings/delete-account` 가 실제
+    `get_current_user`(→ `fake_user_repo`) 로 인증된 뒤 access/refresh token 이 죽는지까지
+    한 클라이언트로 이어 테스트하려면, 계정 삭제 자체를 이 client 로 호출할 수 있어야 한다.
+    """
     _reset_process_singletons()
     app = create_app()
 
@@ -2438,6 +2451,7 @@ def auth_client(
     app.dependency_overrides[get_db] = _fake_session_gen
     app.dependency_overrides[get_user_repo] = lambda: fake_user_repo
     app.dependency_overrides[get_invite_code_repo] = lambda: fake_invite_code_repo
+    app.dependency_overrides[get_privacy_repo] = lambda: fake_privacy_repo
     with TestClient(app) as c:
         yield c
 

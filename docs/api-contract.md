@@ -145,6 +145,11 @@ email)에만 순서대로 3중 검사가 적용된다:
 소비되며(재사용 불가), `scripts/manage_invite_codes.py` 로 운영자가 미리 발급한다(admin
 API 없음 — 이 레포의 다른 운영 작업과 같은 CLI 스크립트 관례).
 
+**계정 삭제 후 refresh 차단(#321)** — `POST /auth/refresh` 는 이제 `decoded.user_id` 로
+사용자 존재를 조회하고, soft-delete(`archived_at` set, §16 `/settings/delete-account`)
+된 계정이면 401 `AUTH_INVALID_TOKEN`. 이전에는 jti revoke set 여부만 확인해, 계정을
+삭제해도 삭제 전 발급된 refresh token 으로 계속 새 access 를 받을 수 있었다.
+
 ---
 
 ## 3. Onboarding (`/onboarding`)
@@ -887,6 +892,7 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 | POST | `/settings/anonymize` | 즉시 익명화 (2단계 확인 토큰 필수) | ✅ #23-B |
 | GET | `/privacy/consent` | 동의 기록 | ✅ #23-B |
 | POST | `/privacy/consent` | 신규 동의 (마케팅/연구 등) | ✅ #23-B |
+| POST | `/settings/delete-account` | 계정 삭제 (2단계 확인 토큰 필수) | ✅ #321 |
 
 `GET /settings` 응답:
 
@@ -915,6 +921,25 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 - `POST /settings/anonymize` — **2단계**: 본문 없으면 `confirmationToken` 발급(`status="confirmation_required"`, 5분 TTL, HMAC). 토큰 동봉 재요청 시 검증 후 `_encrypted` 컬럼 7종 + 이름을 `[anonymized]` 마스킹 + `is_anonymized`/`anonymized_at` set(`status="anonymized"`). 토큰 위조/만료 422 `PRIVACY_INVALID_CONFIRMATION`, 이미 익명화 409 `PRIVACY_ALREADY_ANONYMIZED`. hard delete 아님(행 보존).
 - ⚠️ **새 마이그레이션** `c2d3e4f5a6b7`(user_consents) — AGENTS §8 팀 합의 동반.
 - 톤 prefix 의 `aiClient.run()` 배선은 **여전히 후속**(ADR-0003 addendum) — #23-B 범위 아님.
+
+#321 구현 메모 (Play Store 계정 삭제 요구, FE #237 §4):
+- `POST /settings/delete-account` — `anonymize` 와 같은 **2단계 확인**(별도 purpose, 토큰
+  섞어 쓰기 불가). 확인 후: `PrivacyRepo.anonymize_user()` 로 `_encrypted` 컬럼 마스킹 +
+  이름 `[anonymized]` + **email 을 `deleted-{userId}@reaction.invalid` 로 마스킹**(email
+  에 hard UNIQUE 제약이 있어 원본을 남기면 그 주소로 재가입이 영구히 막힌다) + **`archivedAt`
+  set(soft delete, hard delete 아님 — AGENTS §2)**.
+- `archivedAt` 이 서기 되는 순간 `UserRepo.get_by_id`/`get_by_email` 의 기존
+  `archived_at IS NULL` 필터에 걸린다 — 이미 발급된 **access token 은 다음 요청부터**
+  `get_current_user` 에서 401 `AUTH_INVALID_TOKEN`(새 블랙리스트 불필요). **refresh
+  token** 도 동일 필터를 타도록 `/auth/refresh` 를 이번에 함께 고쳤다(예전엔 jti revoke
+  여부만 보고 사용자 존재를 확인하지 않아, 계정을 삭제해도 refresh 로는 계속 새 access
+  를 받을 수 있었다 — 개별 jti 를 모르는 다중 기기 세션 전부를 막으려면 사용자 조회
+  자체가 막혀야 했다).
+- `anonymize`(계정은 유지한 채 과거 텍스트만 마스킹)와는 별개 작업 — 계정 삭제는 로그인
+  자체를 막는다. 토큰 재사용 방지를 위해 confirm purpose 를 분리했다(`delete_account` vs
+  `anonymize`).
+- 에러: 토큰 위조/만료 422 `PRIVACY_INVALID_CONFIRMATION`(anonymize 와 코드 공유 —
+  "확인 토큰이 틀렸다"는 의미가 같아 도메인을 더 안 쪼갰다).
 
 ---
 

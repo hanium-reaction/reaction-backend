@@ -169,3 +169,28 @@ class AnonymizeResponse(CamelModel):
     expires_at: KstDatetime | None = None
     anonymized_at: KstDatetime | None = None
     masked_count: int | None = None
+
+
+# ── 계정 삭제 (#321, FE #237 §4) ──
+
+
+class DeleteAccountRequest(CamelModel):
+    """POST /settings/delete-account 요청. `anonymize` 와 동일한 2단계 확인 모양."""
+
+    confirmation_token: str | None = None
+
+
+class DeleteAccountResponse(CamelModel):
+    """계정 삭제 응답. `status` 로 단계 구분.
+
+    - `confirmation_required` — 토큰 발급(미적용).
+    - `deleted` — 적용 완료. 이 응답을 받은 뒤로 이 access token 은 다음 요청부터
+      `AUTH_INVALID_TOKEN` 이다(계정 조회 자체가 soft-delete 필터에 걸린다) — 클라이언트는
+      곧바로 로그아웃 처리할 것.
+    """
+
+    status: Literal["confirmation_required", "deleted"]
+    message: str
+    confirmation_token: str | None = None
+    expires_at: KstDatetime | None = None
+    deleted_at: KstDatetime | None = None

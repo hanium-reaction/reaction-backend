@@ -12,6 +12,7 @@ stub 모드에서 verifier 가 고정 demo 클레임 반환 → FakeUserRepo 가
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -172,6 +173,111 @@ def test_me_returns_profile_with_valid_token(
 
 def test_me_without_token_returns_401(auth_client: TestClient) -> None:
     resp = auth_client.get("/auth/me")
+    assert resp.status_code == 401
+
+
+# ───────────────────────── POST /settings/delete-account (#321) ─────────────────────────
+
+
+def _delete_account(
+    client: TestClient, access: str, *, confirmation_token: str | None = None
+) -> Any:
+    body: dict[str, str] = {}
+    if confirmation_token is not None:
+        body["confirmationToken"] = confirmation_token
+    return client.post(
+        "/settings/delete-account",
+        json=body,
+        headers={"Authorization": f"Bearer {access}"},
+    )
+
+
+def test_deleted_account_access_token_stops_working(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    """삭제 전 발급된 access token 은 삭제 다음 요청부터 401 이다.
+
+    새 토큰 블랙리스트가 아니라 `get_current_user` → `UserRepo.get_by_id` 의 기존
+    `archived_at IS NULL` 필터 하나로 막힌다는 것이 이 테스트가 고정하는 계약이다.
+    """
+    login = _login(auth_client, fake_invite_code_repo)
+    access = login["accessToken"]
+
+    pre = auth_client.get("/auth/me", headers={"Authorization": f"Bearer {access}"})
+    assert pre.status_code == 200
+
+    token = _delete_account(auth_client, access).json()["confirmationToken"]
+    delete_resp = _delete_account(auth_client, access, confirmation_token=token)
+    assert delete_resp.status_code == 200
+    assert delete_resp.json()["status"] == "deleted"
+
+    post = auth_client.get("/auth/me", headers={"Authorization": f"Bearer {access}"})
+    assert post.status_code == 401
+    assert post.json()["code"] == "AUTH_INVALID_TOKEN"
+
+
+def test_deleted_account_refresh_token_stops_working(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    """삭제 전 발급된 refresh token 도 삭제 뒤엔 401 — jti 를 몰라도 막힌다."""
+    login = _login(auth_client, fake_invite_code_repo)
+    access = login["accessToken"]
+    refresh = login["refreshToken"]
+
+    token = _delete_account(auth_client, access).json()["confirmationToken"]
+    _delete_account(auth_client, access, confirmation_token=token)
+
+    resp = auth_client.post("/auth/refresh", json={"refreshToken": refresh})
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "AUTH_INVALID_TOKEN"
+
+
+def test_delete_account_masks_email_and_name(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo, fake_user_repo: FakeUserRepo
+) -> None:
+    login = _login(auth_client, fake_invite_code_repo)
+    access = login["accessToken"]
+    user_id = login["user"]["userId"].removeprefix("user_")
+
+    token = _delete_account(auth_client, access).json()["confirmationToken"]
+    _delete_account(auth_client, access, confirmation_token=token)
+
+    # 삭제된 계정은 public get_by_id 에서 이제 안 보인다(#321) — 내부 상태는 직접 확인.
+    stored = fake_user_repo._by_id[UUID(user_id)]
+    assert stored.is_anonymized is True
+    assert stored.name == "[anonymized]"
+    assert stored.email == f"deleted-{user_id}@reaction.invalid"
+    assert stored.archived_at is not None
+
+
+def test_delete_account_step1_issues_token_without_applying(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    login = _login(auth_client, fake_invite_code_repo)
+    access = login["accessToken"]
+
+    resp = _delete_account(auth_client, access)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "confirmation_required"
+    assert body["confirmationToken"]
+
+    # 아직 적용 안 됐으니 토큰은 여전히 산다.
+    still_alive = auth_client.get("/auth/me", headers={"Authorization": f"Bearer {access}"})
+    assert still_alive.status_code == 200
+
+
+def test_delete_account_invalid_token(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    login = _login(auth_client, fake_invite_code_repo)
+    resp = _delete_account(auth_client, login["accessToken"], confirmation_token="bad.token")
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "PRIVACY_INVALID_CONFIRMATION"
+
+
+def test_delete_account_requires_auth(auth_client: TestClient) -> None:
+    resp = auth_client.post("/settings/delete-account", json={})
     assert resp.status_code == 401
     assert resp.json()["code"] == "AUTH_INVALID_TOKEN"
 

@@ -9,6 +9,9 @@
 - GET   /privacy/consent     — 동의 기록 (append-only `user_consents` 테이블 → 마이그레이션 동반)
 - POST  /privacy/consent     — 신규 동의 (마케팅/연구 토글)
 
+#321(FE #237 §4) — Play Store 계정 삭제 요구:
+- POST  /settings/delete-account — 계정 삭제 (2단계 확인 토큰 + anonymize 마스킹 + soft delete)
+
 톤 prefix(`llm/prompt_compose.py`)의 `aiClient.run()` 배선은 ADR-0003 §1 동결 시그니처
 변경 + LangGraph state(tone_mode) 전달을 수반 → 후속 PR(ADR-0003 addendum). 본 PR 은
 톤 모드 영속화(PATCH)와 prefix 헬퍼까지.
@@ -51,6 +54,8 @@ from reaction_backend.schemas.settings import (
     ConsentCreateRequest,
     ConsentItem,
     ConsentListResponse,
+    DeleteAccountRequest,
+    DeleteAccountResponse,
     InteractionStyleView,
     NotificationSummary,
     ProfileResponse,
@@ -71,6 +76,9 @@ SessionDep = Annotated[AsyncSession, Depends(get_db)]
 
 # 2단계 확인 토큰 용도 — 익명화 전용.
 _ANONYMIZE_PURPOSE = "anonymize"
+# 계정 삭제 전용 (#321) — anonymize 와 토큰을 섞어 쓰지 않는다(서로 다른 되돌릴 수 없는
+# 작업이라 한쪽 확인 토큰으로 다른 쪽을 실행할 수 있으면 안 된다).
+_DELETE_ACCOUNT_PURPOSE = "delete_account"
 
 
 def _notif_summary(setting: NotificationSetting | None) -> NotificationSummary | None:
@@ -325,4 +333,60 @@ async def anonymize(
         message="익명화를 완료했어요. 개인정보는 더 이상 식별되지 않아요.",
         anonymized_at=anonymized_at,
         masked_count=masked,
+    )
+
+
+@router.post("/delete-account")
+async def delete_account(
+    body: DeleteAccountRequest,
+    user: CurrentUser,
+    privacy_repo: PrivacyRepoDep,
+    session: SessionDep,
+) -> DeleteAccountResponse:
+    """계정 삭제 — 2단계 확인 (#321, FE #237 §4, Play Store 정책 요구).
+
+    `anonymize`(S28, 계정은 유지한 채 과거 텍스트만 마스킹)와는 다른 작업이다 — 이건 앱에
+    다시 들어올 수 없게 만드는 것까지 포함한다. hard delete 는 하지 않는다(AGENTS §2) —
+    같은 `anonymize_user()` PII 마스킹 위에 `archived_at` 을 얹어 **soft delete** 한다.
+
+    `archived_at` 을 세우는 순간 `UserRepo.get_by_id`/`get_by_email` 의 `archived_at IS NULL`
+    필터에 걸려, 이미 발급된 access token 은 다음 요청의 `get_current_user` 에서 그대로
+    401 `AUTH_INVALID_TOKEN` 이 된다 — 별도 access-token 블랙리스트가 필요 없다. refresh
+    token 은 `/auth/refresh` 가 이제 같은 필터로 사용자 존재를 확인하므로(이 PR 에서 함께
+    고침) 동일하게 막힌다.
+
+    email 도 함께 마스킹한다 — `email` 에 hard UNIQUE 제약이 있어(파샬 인덱스 아님) 원본을
+    남기면 그 이메일로 재가입이 영영 불가능해진다. `user.id` 는 유일하므로 유니크 제약을
+    깨지 않는 결정적 sentinel 로 치환.
+    """
+    if body.confirmation_token is None:
+        token, expires_at = issue_confirmation_token(user.id, _DELETE_ACCOUNT_PURPOSE)
+        return DeleteAccountResponse(
+            status="confirmation_required",
+            message="정말 계정을 삭제할까요? 이 작업은 되돌릴 수 없어요. 확인 토큰으로 한 번 더 요청해 주세요.",
+            confirmation_token=token,
+            expires_at=expires_at,
+        )
+
+    if not verify_confirmation_token(body.confirmation_token, user.id, _DELETE_ACCOUNT_PURPOSE):
+        raise ApiError(
+            ErrorCode.PRIVACY_INVALID_CONFIRMATION,
+            "확인 토큰이 유효하지 않거나 만료됐어요. 다시 시도해 주세요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="confirmationToken",
+        )
+
+    await privacy_repo.anonymize_user(user.id)
+    deleted_at = now_kst()
+    user.is_anonymized = True
+    user.anonymized_at = deleted_at
+    user.name = ANONYMIZED_SENTINEL
+    user.email = f"deleted-{user.id}@reaction.invalid"
+    user.archived_at = deleted_at
+    await session.commit()
+
+    return DeleteAccountResponse(
+        status="deleted",
+        message="계정을 삭제했어요. 그동안 이용해 주셔서 감사합니다.",
+        deleted_at=deleted_at,
     )

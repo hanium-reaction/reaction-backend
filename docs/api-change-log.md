@@ -7,6 +7,22 @@
 
 ---
 
+## v1.83 — 2026-08-25 (계정 삭제 — #321, FE #237 §4)
+
+**추가만(하위호환)** — 새 endpoint 1개 + `/auth/refresh` 동작 보강. 기존 응답 스키마 변경 없음.
+
+- `POST /settings/delete-account` 신설 — `anonymize` 와 같은 2단계 확인 토큰(별도
+  purpose). 확인 시 PII 마스킹(`anonymize` 재사용) + email 을
+  `deleted-{userId}@reaction.invalid` 로 마스킹 + `archivedAt` set(soft delete, hard
+  delete 아님).
+- `archivedAt` 이 서는 순간 기존 `UserRepo` 의 `archived_at IS NULL` 필터로 access token
+  이 다음 요청부터 401 — 새 블랙리스트 불필요.
+- `POST /auth/refresh` 가 이제 `decoded.user_id` 로 사용자 존재를 확인한다(이전엔 jti
+  revoke 여부만 봤다) — 삭제된 계정은 refresh 로도 새 access 를 못 받는다.
+- §1.4 변경 없음(`PRIVACY_INVALID_CONFIRMATION` 재사용, 신규 코드 없음).
+
+---
+
 ## v1.82 — 2026-08-25 (확정된 마일스톤을 다시 지어내지 않는다 — ADR-0007 PR-2.5)
 
 **추가만(하위호환)** — endpoint 변경 없음. `POST /plans/milestones` 의 **동작**이 하나

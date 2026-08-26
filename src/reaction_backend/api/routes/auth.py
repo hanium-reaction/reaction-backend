@@ -2,7 +2,7 @@
 
 Issue #16 실구현:
 - `/auth/google`  : Google id_token 검증 → users upsert → access(60m) + refresh(14d) 발급
-- `/auth/refresh` : refresh → 새 access. 회전 X (MVP). revoke 된 jti 는 401.
+- `/auth/refresh` : refresh → 새 access. 회전 X (MVP). revoke 된 jti · 삭제된 계정(#321) 은 401.
 - `/auth/logout`  : refresh 의 jti 를 revoke set 에 등록. 잘못된 토큰이어도 멱등하게 204.
 - `/auth/me`      : `CurrentUser` 의존성 (api/deps.py) — Bearer JWT 검증.
 
@@ -193,8 +193,17 @@ async def login_with_google(
 async def refresh_access_token(
     body: RefreshRequest,
     revoke_store: Annotated[RevokeStore, Depends(get_revoke_store)],
+    user_repo: Annotated[UserRepo, Depends(get_user_repo)],
 ) -> AccessToken:
-    """refresh → 새 access. refresh 회전 X (refresh 자체 재발급 안 함)."""
+    """refresh → 새 access. refresh 회전 X (refresh 자체 재발급 안 함).
+
+    사용자 존재 확인(#321) — 이전에는 jti revoke 여부만 보고 `decoded.user_id` 로 바로
+    access 를 재발급했다. 계정 삭제(`POST /settings/delete-account`)는 개별 jti 를
+    모르므로(다중 기기 발급분을 전부 추적하지 않는다) revoke set 에 등록할 수 없다 —
+    대신 `UserRepo.get_by_id` 의 `archived_at IS NULL` 필터로 막는다. `get_current_user`
+    가 이미 같은 필터로 access token 을 막고 있으니, 여기도 같은 기준을 적용해야
+    "삭제된 계정은 refresh 로도 못 살아난다"가 성립한다.
+    """
     try:
         decoded = decode_token(body.refresh_token, expected_type="refresh")
     except JwtError as e:
@@ -214,6 +223,13 @@ async def refresh_access_token(
         raise ApiError(
             ErrorCode.AUTH_INVALID_TOKEN,
             "refresh token 이 더 이상 유효하지 않습니다.",
+            http_status=HTTPStatus.UNAUTHORIZED,
+        )
+
+    if await user_repo.get_by_id(decoded.user_id) is None:
+        raise ApiError(
+            ErrorCode.AUTH_INVALID_TOKEN,
+            "사용자를 찾을 수 없습니다.",
             http_status=HTTPStatus.UNAUTHORIZED,
         )
 
