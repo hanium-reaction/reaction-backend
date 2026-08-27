@@ -423,7 +423,9 @@ def test_approve_replaces_still_scheduled_block(
         ],
     )
 
-    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    resp = client.post(
+        f"/plans/replan/{draft_id}/approve", headers={"Idempotency-Key": f"test-{uuid4()}"}
+    )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (1, 1, 0)
@@ -475,7 +477,9 @@ def test_approve_moves_the_card_date_with_its_block(
         ],
     )
 
-    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    resp = client.post(
+        f"/plans/replan/{draft_id}/approve", headers={"Idempotency-Key": f"test-{uuid4()}"}
+    )
     assert resp.status_code == 200, resp.text
     assert action_a.target_date == date(2026, 7, 15), (
         f"카드가 여전히 옛 날짜다: {action_a.target_date} — 오늘 아젠다에서 영영 안 뜬다"
@@ -526,7 +530,9 @@ def test_approve_uses_the_earliest_active_block_for_split_sessions(
         ],
     )
 
-    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    resp = client.post(
+        f"/plans/replan/{draft_id}/approve", headers={"Idempotency-Key": f"test-{uuid4()}"}
+    )
     assert resp.status_code == 200, resp.text
     assert action_a.target_date == date(2026, 7, 15)
 
@@ -560,7 +566,9 @@ def test_approve_does_not_move_the_date_when_the_action_is_skipped(
         ],
     )
 
-    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    resp = client.post(
+        f"/plans/replan/{draft_id}/approve", headers={"Idempotency-Key": f"test-{uuid4()}"}
+    )
     assert resp.status_code == 200, resp.text
     assert action_a.target_date == date(2026, 7, 9), "skip 된 액션의 날짜가 바뀌었다"
 
@@ -594,7 +602,9 @@ def test_approve_skips_when_old_block_started(
         ],
     )
 
-    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    resp = client.post(
+        f"/plans/replan/{draft_id}/approve", headers={"Idempotency-Key": f"test-{uuid4()}"}
+    )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 0, 1)
@@ -636,7 +646,9 @@ def test_approve_skips_when_old_block_cancelled_concurrently(
         ],
     )
 
-    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    resp = client.post(
+        f"/plans/replan/{draft_id}/approve", headers={"Idempotency-Key": f"test-{uuid4()}"}
+    )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 0, 1)
@@ -671,7 +683,9 @@ def test_approve_preserves_unreferenced_block(
         ],
     )
 
-    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    resp = client.post(
+        f"/plans/replan/{draft_id}/approve", headers={"Idempotency-Key": f"test-{uuid4()}"}
+    )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 1, 0)
@@ -708,7 +722,9 @@ def test_approve_skips_backlog_when_active_block_appeared(
         ],
     )
 
-    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    resp = client.post(
+        f"/plans/replan/{draft_id}/approve", headers={"Idempotency-Key": f"test-{uuid4()}"}
+    )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 0, 1)
@@ -736,7 +752,9 @@ def test_approve_skips_when_action_archived_meanwhile(
         ],
     )
 
-    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    resp = client.post(
+        f"/plans/replan/{draft_id}/approve", headers={"Idempotency-Key": f"test-{uuid4()}"}
+    )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 0, 1)
@@ -817,7 +835,9 @@ def test_approve_replaces_all_split_session_blocks(
         ],
     )
 
-    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    resp = client.post(
+        f"/plans/replan/{draft_id}/approve", headers={"Idempotency-Key": f"test-{uuid4()}"}
+    )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (2, 2, 0)
@@ -874,7 +894,9 @@ def test_approve_preserves_split_action_when_one_session_started(
         ],
     )
 
-    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    resp = client.post(
+        f"/plans/replan/{draft_id}/approve", headers={"Idempotency-Key": f"test-{uuid4()}"}
+    )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 0, 2)
@@ -940,7 +962,9 @@ def test_approve_idempotent_when_already_approved(
     )
     before = len(fake_scheduled_block_repo._blocks)
 
-    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    resp = client.post(
+        f"/plans/replan/{draft_id}/approve", headers={"Idempotency-Key": f"test-{uuid4()}"}
+    )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 1, 0)
@@ -992,7 +1016,9 @@ def test_approve_preserves_block_user_moved_after_generate(
     old.start_at = _kst(2026, 7, 16, 9, 0)
     old.end_at = _kst(2026, 7, 16, 9, 30)
 
-    resp = client.post(f"/plans/replan/{draft_id}/approve")
+    resp = client.post(
+        f"/plans/replan/{draft_id}/approve", headers={"Idempotency-Key": f"test-{uuid4()}"}
+    )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert (body["cancelledBlocks"], body["createdBlocks"], body["skippedBlocks"]) == (0, 0, 1)

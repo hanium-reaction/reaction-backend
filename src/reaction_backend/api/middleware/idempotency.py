@@ -1,10 +1,13 @@
 """Idempotency-Key 미들웨어 (ADR-0002 §2.3 / api-contract.md §1.7).
 
-아래 5개 endpoint 는 `Idempotency-Key` 헤더가 **필수**다:
+아래 6개 endpoint 는 `Idempotency-Key` 헤더가 **필수**다 — "replan 최종 적용"이
+recovery(S20) · planning(주간 재계획) 두 도메인에 이름만 같고 경로가 다른 별개
+endpoint로 각각 존재한다(api-contract.md §1.7 · §11 · §12):
 
 - POST /reflection/batch
 - POST /recovery/decisions
-- POST /replan/{execution_id}/approve
+- POST /replan/{execution_id}/approve        (recovery, S20 최종 적용)
+- POST /plans/replan/{plan_id}/approve       (planning, 주간 재계획 승인)
 - POST /calendar/events/approve-insert
 - POST /reviews/habit-penalty/{habit_id}/accept
 
@@ -32,10 +35,20 @@ from reaction_backend.schemas.common import ErrorResponse
 from reaction_backend.schemas.errors import ErrorCode
 
 # Idempotency-Key 가 필수인 경로 (api-contract.md §1.7). path 파라미터는 [^/]+ 로 매칭.
+#
+# recovery.py 의 `/replan/{execution_id}/approve` 는 prefix 가 없어 예전부터 정확히
+# 매칭됐다. 반면 `/plans/replan/{plan_id}/approve` 는 planning.py 의
+# router prefix="/plans" 때문에 실제 경로에 `/plans` 가 붙는데, 예전 정규식이 이
+# prefix 를 반영하지 않아 매칭되지 않았다 — 이름이 같은 두 endpoint 중 하나만 보고
+# "고쳤다"고 착각하면 나머지 하나(recovery)의 보호가 조용히 빠진다. 그 결과 planning
+# 쪽만 헤더 필수 검사·중복 방지·인증 우회 차단이 전부 안 걸려 있었다(§ `_cache_key`
+# 문서의 "교차 사용자 재생" · "인증 우회" 두 구멍이 실제로는 이 매칭 실패 때문에
+# 원천적으로 발동조차 안 하고 있었다는 뜻 — recovery 쪽은 처음부터 안전했다).
 _IDEMPOTENT_ROUTES: tuple[re.Pattern[str], ...] = (
     re.compile(r"^/reflection/batch$"),
     re.compile(r"^/recovery/decisions$"),
     re.compile(r"^/replan/[^/]+/approve$"),
+    re.compile(r"^/plans/replan/[^/]+/approve$"),
     re.compile(r"^/calendar/events/approve-insert$"),
     re.compile(r"^/reviews/habit-penalty/[^/]+/accept$"),
 )

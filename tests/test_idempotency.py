@@ -81,7 +81,7 @@ def _build_multi_route_app() -> tuple[FastAPI, dict[str, int]]:
         calls["n"] += 1
         return {"route": "batch"}
 
-    @app.post("/replan/{execution_id}/approve")
+    @app.post("/plans/replan/{execution_id}/approve")
     async def _approve(execution_id: str) -> dict[str, str]:
         calls["n"] += 1
         return {"route": "approve", "executionId": execution_id}
@@ -94,7 +94,7 @@ def test_same_key_different_caller_does_not_replay() -> None:
     """같은 Idempotency-Key 라도 호출자가 다르면 남의 응답이 재생되지 않는다.
 
     회귀(실제 있었던 결함): 캐시 키가 헤더 값 하나뿐이라 user 스코프가 없었다.
-    `POST /replan/{id}/approve` 는 **body 가 없어** 모든 호출의 body_hash 가 sha256(b"")
+    `POST /plans/replan/{id}/approve` 는 **body 가 없어** 모든 호출의 body_hash 가 sha256(b"")
     로 같아 mismatch 409 로도 안 걸렸고, FE 키가 `replan-{Date.now()}`(밀리초)라 같은 ms
     승인만으로 충돌한다. 그러면 남의 200 응답(scheduledBlockId·남의 executionId)이 그대로
     재생되고 정작 자기 블록은 생성되지 않았다.
@@ -103,11 +103,11 @@ def test_same_key_different_caller_does_not_replay() -> None:
     client = TestClient(app)
 
     mine = client.post(
-        "/replan/exec_A/approve",
+        "/plans/replan/exec_A/approve",
         headers={"Idempotency-Key": "replan-1700000000000", "Authorization": "Bearer token-A"},
     )
     theirs = client.post(
-        "/replan/exec_B/approve",
+        "/plans/replan/exec_B/approve",
         headers={"Idempotency-Key": "replan-1700000000000", "Authorization": "Bearer token-B"},
     )
 
@@ -124,10 +124,10 @@ def test_same_key_unauthenticated_cannot_replay_authenticated_response() -> None
     client = TestClient(app)
 
     client.post(
-        "/replan/exec_A/approve",
+        "/plans/replan/exec_A/approve",
         headers={"Idempotency-Key": "shared", "Authorization": "Bearer token-A"},
     )
-    anon = client.post("/replan/exec_A/approve", headers={"Idempotency-Key": "shared"})
+    anon = client.post("/plans/replan/exec_A/approve", headers={"Idempotency-Key": "shared"})
 
     assert anon.headers.get("idempotent-replay") is None, "인증 없이 캐시된 응답을 받았다"
     assert calls["n"] == 2
@@ -140,7 +140,9 @@ def test_same_key_different_endpoint_does_not_replay() -> None:
     auth = {"Authorization": "Bearer token-A"}
 
     batch = client.post("/reflection/batch", headers={"Idempotency-Key": "same", **auth})
-    approve = client.post("/replan/exec_A/approve", headers={"Idempotency-Key": "same", **auth})
+    approve = client.post(
+        "/plans/replan/exec_A/approve", headers={"Idempotency-Key": "same", **auth}
+    )
 
     assert batch.json()["route"] == "batch"
     assert approve.json()["route"] == "approve", "다른 endpoint 의 응답이 재생됐다"
@@ -153,8 +155,8 @@ def test_same_caller_same_key_still_replays() -> None:
     client = TestClient(app)
     headers = {"Idempotency-Key": "retry-1", "Authorization": "Bearer token-A"}
 
-    first = client.post("/replan/exec_A/approve", headers=headers)
-    second = client.post("/replan/exec_A/approve", headers=headers)
+    first = client.post("/plans/replan/exec_A/approve", headers=headers)
+    second = client.post("/plans/replan/exec_A/approve", headers=headers)
 
     assert first.json() == second.json()
     assert second.headers.get("idempotent-replay") == "true"

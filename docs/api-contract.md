@@ -83,7 +83,8 @@
 
 - `POST /reflection/batch`
 - `POST /recovery/decisions`
-- `POST /replan/{execution_id}/approve`
+- `POST /replan/{execution_id}/approve` (recovery, S20 최종 적용 — §12)
+- `POST /plans/replan/{plan_id}/approve` (planning, 주간 재계획 승인 — §11)
 - `POST /calendar/events/approve-insert`
 - `POST /reviews/habit-penalty/{habit_id}/accept`
 

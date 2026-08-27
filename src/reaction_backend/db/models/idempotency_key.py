@@ -1,9 +1,10 @@
 """IdempotencyKey — 24h 멱등성 캐시.
 
-API 계약 §1.7 에 명시된 5 endpoint 가 의무 사용:
+API 계약 §1.7 에 명시된 6 endpoint 가 의무 사용:
 - POST /reflection/batch
 - POST /recovery/decisions
-- POST /replan/{execution_id}/approve
+- POST /replan/{execution_id}/approve        (recovery, S20)
+- POST /plans/replan/{plan_id}/approve       (planning, 주간 재계획)
 - POST /calendar/events/approve-insert
 - POST /reviews/habit-penalty/{habit_id}/accept
 
