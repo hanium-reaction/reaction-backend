@@ -14,7 +14,7 @@ LLM 호출은 `llm.aiClient` Tool Executor 경유 (AGENTS.md §2, ADR-0003 / ADR
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from typing import Annotated, Literal
 from uuid import UUID
@@ -29,11 +29,13 @@ from reaction_backend.db.models.inbox_item import InboxItem as InboxItemModel
 from reaction_backend.db.session import get_db
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator import inbox_resources
+from reaction_backend.orchestrator.inbox_coaching import build_coaching_advice
 from reaction_backend.repositories.action_item_repo import (
     ActionItemRepo,
     get_action_item_repo,
 )
 from reaction_backend.repositories.goal_repo import GoalRepo, get_goal_repo
+from reaction_backend.repositories.habit_repo import HabitRepo, get_habit_repo
 from reaction_backend.repositories.inbox_repo import InboxRepo, get_inbox_repo
 from reaction_backend.safety.encryption import decrypt_inbox_text, encrypt_inbox_text
 from reaction_backend.schemas.common import KST
@@ -43,6 +45,7 @@ from reaction_backend.schemas.inbox import (
     InboxAdoptStepRequest,
     InboxCategory,
     InboxClassification,
+    InboxCoachingAdvice,
     InboxCreateRequest,
     InboxItem,
     InboxResourceDetail,
@@ -163,6 +166,7 @@ def _today_kst() -> datetime:
 
 RepoDep = Annotated[InboxRepo, Depends(get_inbox_repo)]
 GoalRepoDep = Annotated[GoalRepo, Depends(get_goal_repo)]
+HabitRepoDep = Annotated[HabitRepo, Depends(get_habit_repo)]
 ActionRepoDep = Annotated[ActionItemRepo, Depends(get_action_item_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 
@@ -234,6 +238,30 @@ async def get_inbox_resource(slug: str) -> InboxResourceDetail:
     # `ContentDoc` 을 그대로 반환하면 `path`(서버 절대경로)가 응답에 실린다 — 명시 매핑.
     return InboxResourceDetail(
         slug=doc.slug, title=doc.title, markdown=doc.body, steps=list(doc.steps)
+    )
+
+
+@router.get("/coaching-advice")
+async def get_coaching_advice(
+    user: CurrentUser,
+    goal_repo: GoalRepoDep,
+    habit_repo: HabitRepoDep,
+    action_repo: ActionRepoDep,
+) -> list[InboxCoachingAdvice]:
+    """사용자 목표·습관·실행 기록에서 최대 3개의 근거 기반 조언을 만든다."""
+    generated_at = _today_kst()
+    today = generated_at.date()
+    goals = await goal_repo.list_active(user.id)
+    habits = await habit_repo.list_active(user.id)
+    today_actions = await action_repo.list_by_date(user.id, today)
+    yesterday_actions = await action_repo.list_by_date(user.id, today - timedelta(days=1))
+    return build_coaching_advice(
+        goals=goals,
+        habits=habits,
+        today_actions=today_actions,
+        yesterday_actions=yesterday_actions,
+        today=today,
+        generated_at=generated_at,
     )
 
 

@@ -1098,6 +1098,7 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 | POST | `/inbox/{id}/archive` | soft delete (`archived_at` + `status=archived`). 이후 `?status=archived` 로 조회, `restore` 로 복원 |
 | POST | `/inbox/{id}/restore` | 보관 취소 — `archived_at` 클리어 + `status`→classified/captured. 활성 항목이면 멱등. 없으면 404 `INBOX_NOT_FOUND` |
 | GET | `/inbox/resources/{slug}` | 시스템 항목이 가리키는 정적 자료 본문 — `{ slug, title, markdown, steps }`. **인증만 필요하고 소유권 검사는 하지 않는다**(레포에 커밋된 공용 콘텐츠라 소유권 개념이 없다). 없으면 404 `COMMON_NOT_FOUND` |
+| GET | `/inbox/coaching-advice` | 내 활성 목표·습관·오늘/어제 실행 기록을 서버에서 조합한 개인화 조언 최대 3건. 각 항목은 `adviceId`, `category`, `title`, `body`, `rationale`, `evidence`, `action`, `generatedAt`, `source`, `fallbackUsed` 를 반환. 기록이 없으면 빈 배열 |
 | POST | `/inbox/{id}/adopt-step` | 자료가 제안한 한 걸음을 오늘 할 일로 채택 — `{ stepIndex }` → `{ actionId, title, targetDate, resourceSlug }`. `ActionItem(source=inbox)` 생성 + `inbox_item_id` 로 자료에 연결. 카드의 `category` 는 **자료의 카테고리**(9종 원본) — `userCategory` 재분류가 있으면 그게 우선. **자료 항목은 promoted 로 바뀌지 않는다**(다른 걸음을 또 채택하거나 다시 읽을 수 있다). **도메인 멱등(#213)**: 같은 걸음(`stepIndex` 동일)을 오늘 다시 채택하면 새 카드를 만들지 않고 기존 활성 카드의 `actionId` 를 200 으로 반환 — 날짜가 바뀌거나 카드가 보관된 뒤에는 다시 새 카드가 생긴다. 없거나 보관된 항목이면 404 `INBOX_NOT_FOUND`, 자료 파일이 사라졌으면 404 `COMMON_NOT_FOUND`, system 항목이 아니면 422 `COMMON_VALIDATION_ERROR`(`field=inboxId`), 없는 인덱스면 422(`field=stepIndex`) |
 
 - `status`: `captured` / `classified` / `archived` / `promoted`. `GET /inbox` 는 기본 활성(archived 제외), `?status=archived` 로 보관함 조회

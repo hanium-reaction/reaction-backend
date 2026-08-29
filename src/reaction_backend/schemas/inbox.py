@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import Field
@@ -13,6 +14,31 @@ InboxStatus = Literal["captured", "classified", "archived", "promoted"]
 InboxCategory = Literal["study", "project", "health", "routine", "schedule", "other"]
 # 항목 출처 (BE #171) — system 은 목표 카테고리에 맞춰 자동으로 넣어 준 추천 자료.
 InboxSource = Literal["user", "system"]
+InboxAdviceCategory = Literal["recovery", "today", "goal", "habit"]
+InboxAdviceActionType = Literal["OPEN_TODAY", "OPEN_WEEKLY_PLAN", "OPEN_GOAL"]
+
+
+class InboxAdviceAction(CamelModel):
+    """조언을 확인한 사용자가 직접 선택할 수 있는 다음 화면."""
+
+    type: InboxAdviceActionType
+    label: str
+    target_id: str | None = None
+
+
+class InboxCoachingAdvice(CamelModel):
+    """사용자 기록에서 서버가 산출한 근거 기반 Inbox 조언."""
+
+    advice_id: str
+    category: InboxAdviceCategory
+    title: str
+    body: str
+    rationale: str
+    evidence: list[str]
+    action: InboxAdviceAction
+    generated_at: datetime
+    source: Literal["rules"] = "rules"
+    fallback_used: bool = False
 
 
 class InboxItem(CamelModel):
