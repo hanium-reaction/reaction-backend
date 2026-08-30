@@ -1,7 +1,7 @@
 """JWT 발급 / 검증 — re:action 자체 세션 (Issue #16).
 
 - 알고리즘: HS256 (대칭키, `JWT_SECRET`).
-- access TTL = `JWT_ACCESS_TOKEN_TTL_MINUTES` (기본 60분), `type='access'`.
+- access TTL = `JWT_ACCESS_TOKEN_TTL_MINUTES` (기본 24시간), `type='access'`.
 - refresh TTL = `JWT_REFRESH_TOKEN_TTL_DAYS` (기본 14일), `type='refresh'`.
 - claims: `sub`(user_id UUID 문자열) · `iat` · `exp` · `type` · `jti`.
 - refresh 회전 X (MVP, Issue #16 본문 명시). logout 무효화는 `auth.revoke` revoke store.

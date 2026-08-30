@@ -33,7 +33,7 @@ services:
       - key: JWT_ALGORITHM
         value: HS256
       - key: JWT_ACCESS_TOKEN_TTL_MINUTES
-        value: "60"
+        value: "1440"
       - key: JWT_REFRESH_TOKEN_TTL_DAYS
         value: "14"
       - key: CORS_ALLOW_ORIGIN_REGEX

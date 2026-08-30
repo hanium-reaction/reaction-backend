@@ -220,7 +220,9 @@ class Settings(BaseSettings):
     # JWT — HS256. JWT_SECRET 은 32+ bytes 권장 (python -c "import secrets; print(secrets.token_hex(32))").
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
-    jwt_access_token_ttl_minutes: int = 60
+    # 웹 새로고침 뒤에도 하루 동안 로그인 상태가 유지되도록 access token 자체를 24시간 유지한다.
+    # refresh token은 기존 14일을 유지하며, 명시적 로그아웃/계정 삭제 시에는 즉시 차단된다.
+    jwt_access_token_ttl_minutes: int = 24 * 60
     jwt_refresh_token_ttl_days: int = 14
 
     # Local 개발에서 Google id_token 검증을 우회하고 고정 demo user 를 발급한다.

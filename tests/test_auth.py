@@ -113,6 +113,14 @@ def test_refresh_returns_new_access(
     assert resp.json()["accessToken"]
 
 
+def test_default_access_token_ttl_is_24_hours() -> None:
+    """배포 환경 변수가 빠져도 로그인 유지 시간은 24시간이어야 한다."""
+    from reaction_backend.config import Settings
+
+    settings = Settings(_env_file=None)
+    assert settings.jwt_access_token_ttl_minutes == 24 * 60
+
+
 def test_refresh_with_invalid_token(auth_client: TestClient) -> None:
     resp = auth_client.post("/auth/refresh", json={"refreshToken": "not-a-jwt"})
     assert resp.status_code == 401
