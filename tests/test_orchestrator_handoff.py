@@ -3225,6 +3225,17 @@ def test_next_cycle_milestones_are_named_even_when_the_llm_never_made_them() -> 
     ) == ["A"]
 
 
+def test_tier_park_notice_names_the_demoted_goals() -> None:
+    """tier 한도 초과로 내린 목표를 조용히 넘어가지 않는다(#371) — waiting_steps_notice 와 같은 형식."""
+    notice = first_plan_adapter.tier_park_notice(["부수입 만들기"])
+    assert notice is not None
+    assert "부수입 만들기" in notice and "Focus 3" in notice and "parked" in notice
+    assert first_plan_adapter.tier_park_notice([]) is None
+    # 4개 이상이면 앞 3개 + 'N개' 요약.
+    many = first_plan_adapter.tier_park_notice(["a", "b", "c", "d"])
+    assert many is not None and "외 1개" in many
+
+
 async def test_decompose_drops_out_of_cycle_branches_before_refill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -518,6 +518,7 @@ def test_approve_persists_goal_tree(client: TestClient, monkeypatch: Any) -> Non
     assert j["activatedGoalNodes"] == 1
     assert j["activatedActionItems"] == 1
     assert j["activatedBlocks"] == 1
+    assert j["warnings"] == [], "한도를 안 넘긴 정상 승인은 warnings 가 빈 채로 나간다(#371)"
 
 
 def test_generate_echoes_confirmed_milestones_in_draft(

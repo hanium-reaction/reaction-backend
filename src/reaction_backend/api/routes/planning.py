@@ -911,6 +911,7 @@ async def approve_plan(
 
             await _attach_goal_resources(session, inbox_repo, goal_repo, user_id=user.id)
 
+            tier_warning = first_plan_adapter.tier_park_notice(result.tier_parked_goals)
             return FirstPlanApproveResponse(
                 plan_id=plan_id,
                 activated_goals=result.goals,
@@ -918,6 +919,7 @@ async def approve_plan(
                 activated_action_items=result.action_items,
                 activated_blocks=result.scheduled_blocks,
                 activated_at=now_kst(),
+                warnings=[tier_warning] if tier_warning else [],
             )
 
     # MAX_SAVE_RETRIES 회 모두 실패 (ADR-0005 §2.5.1)

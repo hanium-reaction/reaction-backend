@@ -150,6 +150,9 @@ class FirstPlanApproveResponse(CamelModel):
     """승인 결과 — 활성화 완료. 명시 승인 endpoint 이므로 `is_draft=False` (ADR-0005 §7.2).
 
     #62: `plan_id` 로 저장된 Draft 를 로드해 goal 트리까지 영속화한 결과 카운트.
+
+    `warnings`(#371, additive) — Focus≤3/Maintain≤5 한도를 넘겨 parked 로 내린 목표가
+    있으면 실린다. 대개 빈 리스트.
     """
 
     plan_id: str
@@ -159,6 +162,7 @@ class FirstPlanApproveResponse(CamelModel):
     activated_action_items: int
     activated_blocks: int
     activated_at: KstDatetime
+    warnings: list[str] = Field(default_factory=list)
 
 
 class FirstPlanResponse(DraftMixin):

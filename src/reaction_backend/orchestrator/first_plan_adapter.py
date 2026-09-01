@@ -19,6 +19,7 @@ import re
 import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
 from typing import Any
@@ -45,6 +46,7 @@ from reaction_backend.orchestrator.goal_structuring import (
 )
 from reaction_backend.orchestrator.interview_adapter import is_placeholder_goal
 from reaction_backend.orchestrator.plan_scheduler import PlanAction, PlanWindow
+from reaction_backend.repositories.goal_repo import GoalRepo
 from reaction_backend.repositories.review_repo import TopFailureContext
 from reaction_backend.schemas.common import now_kst, to_kst
 from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome, TimeRange
@@ -2016,12 +2018,18 @@ MAX_SAVE_RETRIES = 3  # ADR-0005 §2.5.1 — DB Agent 최대 3회 재시도 후 
 
 @dataclass(frozen=True, slots=True)
 class FirstPlanSaveResult:
-    """SAVING 영속화 결과 카운트."""
+    """SAVING 영속화 결과 카운트.
+
+    `tier_parked_goals` — 이번 승인이 Focus≤3/Maintain≤5 한도 초과로 parked 로 내린
+    목표 제목(#371). 대개 빈 리스트 — 인터뷰가 한 번에 만드는 core_goals 가 한도를
+    넘길 때만 채워진다.
+    """
 
     goals: int
     goal_nodes: int
     action_items: int
     scheduled_blocks: int
+    tier_parked_goals: list[str] = field(default_factory=list)
 
 
 def _replaceable_action(
@@ -2599,6 +2607,75 @@ async def materialize_goals(
     return goal_rows, heaviest
 
 
+# Focus ≤ 3 / Maintain ≤ 5 (DevBaseline §1.4). `goals.py::_TIER_LIMITS` 와 값이 같아야
+# 한다 — 직접 생성 경로와 승인 경로가 다른 한도를 쓰면 안 된다. `orchestrator` 가
+# `api/routes`(상위 계층)를 import 할 수 없어(§5 import 방향) 공유 상수로 못 묶고 여기
+# 복제한다(`api/routes/planning.py::_MANDALA_TIER_LIMITS` 도 같은 이유로 이미 복제돼 있다).
+_TIER_LIMITS: dict[str, int] = {"focus": 3, "maintain": 5}
+
+
+async def _park_tier_overflow_on_approval(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    goal_rows: Sequence[Goal],
+    heaviest_id: uuid.UUID,
+    previously_active_ids: AbstractSet[uuid.UUID],
+) -> list[str]:
+    """승인이 막 active 로 올린 목표 중 tier 한도 초과분을 parked 로 내린다 (#371).
+
+    `materialize_goals(status="active")` 는 인터뷰가 뽑은 `tentative_tier` 를 그대로
+    쓸 뿐 한도를 재지 않는다 — 직접 생성 경로(`goals.py::_enforce_tier_limit`)만 한도를
+    걸고 있어서, 계획 승인은 core_goals 를 몇 개든 그대로 active 로 올려 "집중 4/3" 같은
+    상태를 만들 수 있었다. 승인 자체는 막지 않는다(422 로 거절하면 사용자가 이미 끝낸
+    인터뷰가 통째로 버려진다) — 대신 넘긴 만큼만 조용히 parked 로 돌린다.
+
+    `previously_active_ids` 로 **이번 승인이 새로 active 로 올린 목표만** 후보로 삼는다 —
+    이미 active 였던 다른 목표를 이번 승인 때문에 건드리면 안 된다.
+
+    한도를 넘기는 tier 안에서는 `goal_rows`(=core_goals) 순서 뒤쪽부터 내리되, heaviest
+    (이번에 실제로 분해·배치된 목표)는 맨 앞으로 옮겨 **최후순위로만** 내린다 — 분해·배치는
+    tier 와 무관하게 이미 끝났으니(`goal_tier` 는 목표 화면 분류일 뿐 오늘 카드·실행을
+    가리지 않는다) parked 로 돌려도 안전하지만, 방금 카드까지 받은 목표부터 내리면
+    당장 혼란스럽다. 그래도 이 tier 의 새 후보가 heaviest 하나뿐이고 그마저 넘겨야 한다면
+    (기존 데이터가 이미 한도를 넘겨 있던 경우) heaviest 도 내린다 — 한도를 못 지키는
+    예외를 만들지 않는다.
+    """
+    candidates = [
+        g for g in goal_rows if g.id not in previously_active_ids and g.goal_tier in _TIER_LIMITS
+    ]
+    if not candidates:
+        return []
+    repo = GoalRepo(session)
+    demoted: list[str] = []
+    for tier, limit in _TIER_LIMITS.items():
+        # materialize_goals 가 이미 flush 했으므로 이번에 새로 active 된 만큼 반영된 개수.
+        overflow = await repo.count_by_tier(user_id, tier) - limit
+        if overflow <= 0:
+            continue
+        tier_candidates = [g for g in candidates if g.goal_tier == tier]
+        tier_candidates.sort(key=lambda g: g.id != heaviest_id)  # heaviest 를 맨 앞으로(False<True)
+        for g in tier_candidates[-overflow:]:
+            g.goal_tier = "parked"
+            demoted.append(g.title)
+    return demoted
+
+
+def tier_park_notice(demoted: list[str]) -> str | None:
+    """tier 한도 초과로 parked 로 내린 목표를 알리는 문구 (#371) — 조용히 내리지 않는다.
+
+    `waiting_steps_notice`/`out_of_cycle_notice` 와 같은 원칙·형식.
+    """
+    if not demoted:
+        return None
+    listed = " · ".join(f"'{t}'" for t in demoted[:3])
+    more = f" 외 {len(demoted) - 3}개" if len(demoted) > 3 else ""
+    return (
+        f"{listed}{more}는 집중/유지 한도(Focus 3 · Maintain 5)를 넘어 대기(parked)로 "
+        "옮겼어요 — 목표 화면에서 자리를 만들면 다시 올릴 수 있어요."
+    )
+
+
 async def supersede_proposed_goals(
     session: AsyncSession,
     *,
@@ -2665,6 +2742,13 @@ async def _apply_once(
     )
 
     async with policy_guarded_transaction(session, guard_plan, time_policies):
+        # 0) 승인 전 이미 active 인 목표 id 스냅샷 — 아래 tier 한도 조정(#371)이 방금 이번
+        #    승인으로 새로 active 가 된 목표만 건드리게 구분하는 기준. 이미 active 였던
+        #    목표는 이번 승인과 무관하므로 손대지 않는다.
+        previously_active_ids = {
+            g.id for g in await _active_goals(session, user_id) if g.status == "active"
+        }
+
         # 1) goals — 인터뷰 완료 시 이미 저장된 목표를 재사용(중복 방지, #96), placeholder 제외(#88).
         #    heaviest 가 분해 트리의 소속 goal. 승인은 '이 목표를 실제로 하겠다' 는 결정이므로
         #    잠정(proposed) 목표를 여기서 active 로 승격한다.
@@ -2682,6 +2766,18 @@ async def _apply_once(
             if on_success is not None:
                 await on_success()
             return FirstPlanSaveResult(goals=0, goal_nodes=0, action_items=0, scheduled_blocks=0)
+
+        # 1.4) tier 한도(Focus≤3/Maintain≤5) 초과분을 parked 로 (#371) — 인터뷰가 뽑은
+        #      tentative_tier 는 직접 생성 경로(`goals.py::_enforce_tier_limit`)를 거치지
+        #      않으므로, 승인이 core_goals 를 몇 개든 그대로 active 로 올려 한도를 넘길 수
+        #      있었다("집중 4/3"). 승인 자체는 막지 않는다 — 사용자는 이미 인터뷰를 마쳤다.
+        tier_parked = await _park_tier_overflow_on_approval(
+            session,
+            user_id=user_id,
+            goal_rows=goal_rows,
+            heaviest_id=heaviest.id,
+            previously_active_ids=previously_active_ids,
+        )
 
         # 1.5) 교체(supersede) — **같은 목표**의 이전 AI 계획 산출물(미시작 카드+블록)을
         #      soft 정리하고 이 계획으로 대체. 재생성→재승인 반복 시 카드/블록이 겹겹이
@@ -2782,6 +2878,7 @@ async def _apply_once(
         goal_nodes=len(goal_nodes) + len(milestone_nodes),
         action_items=len(action_by_node),
         scheduled_blocks=block_count,
+        tier_parked_goals=tier_parked,
     )
 
 
