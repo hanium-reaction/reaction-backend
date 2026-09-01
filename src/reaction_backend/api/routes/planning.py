@@ -35,7 +35,7 @@ import logging
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from typing import Annotated, Any, Literal, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Query
 from langchain_core.runnables import RunnableConfig
@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from reaction_backend.api.deps import CurrentUser
 from reaction_backend.db.models.action_item import ACTION_CATEGORY_VALUES
 from reaction_backend.db.models.goal import Goal
+from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.user import User
@@ -56,6 +57,7 @@ from reaction_backend.orchestrator import (
     interview_projection,
     mandala,
     mandala_adapter,
+    mandala_cycle,
     replan,
     ultimate_adapter,
 )
@@ -86,6 +88,7 @@ from reaction_backend.safety import endpoint_rate_limit
 from reaction_backend.scheduler.weekly_review_precompute import run_weekly_review_for_user
 from reaction_backend.schemas.common import KST, now_kst, to_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
+from reaction_backend.schemas.goals import GoalTier
 from reaction_backend.schemas.interview import InterviewOutcome, TimeRange
 from reaction_backend.schemas.mandala import (
     MandalaApproveRequest,
@@ -93,9 +96,12 @@ from reaction_backend.schemas.mandala import (
     MandalaCarryOverSummary,
     MandalaCell,
     MandalaCenterPreview,
+    MandalaCycleAxis,
     MandalaDraftResponse,
     MandalaGap,
     MandalaGenerateRequest,
+    MandalaNextCycleRequest,
+    MandalaNextCycleResponse,
     MandalaRegenerateBranchRequest,
     MandalaSubgoal,
     MandalaSubgoalsRequest,
@@ -392,7 +398,36 @@ async def generate_plan(
     """
     await endpoint_rate_limit.enforce(session, user_id=user.id, module="planning")
     outcome = _apply_edited_availability(await _resolve_outcome(body, user.id, repo), user)
-    target_date = _resolve_target_date(body.target_date)
+    return await _run_first_plan(
+        outcome=outcome,
+        milestones=body.milestones,
+        target_date=body.target_date,
+        scope=body.scope,
+        density=body.density,
+        user=user,
+        draft_repo=draft_repo,
+        session=session,
+    )
+
+
+async def _run_first_plan(
+    *,
+    outcome: InterviewOutcome,
+    milestones: list[MilestoneDraft] | None,
+    target_date: str | None,
+    scope: Literal["week", "horizon"],
+    density: Literal["light", "standard", "intense"],
+    user: User,
+    draft_repo: PlanDraftRepo,
+    session: AsyncSession,
+) -> FirstPlanResponse:
+    """First Plan 그래프 실행 → Draft 저장 (`/plans/generate` 본체).
+
+    `/plans/mandala/next-cycle`(U14) 이 같은 경로를 타야 해서 라우트 밖으로 뺐다 — 시드를
+    만드는 방법만 다르고 분해·배치·Draft 저장은 한 곳이어야 두 입구가 어긋나지 않는다.
+    호출자가 outcome 을 확정해서 넘긴다(rate limit·가용시간 덮어쓰기도 호출자 몫).
+    """
+    resolved_target = _resolve_target_date(target_date)
     max_plan_weeks = await _max_plan_weeks(session, user.id, outcome)
 
     async with user_agent_lock(session, user.id, _LOCK_AGENT):
@@ -400,7 +435,7 @@ async def generate_plan(
         # 이번 주기가 몇 번째 마일스톤부터인가 — 영속된 `completed_at` 을 보고 여기서 잰다.
         # 그래프는 DB 무관이라 직접 못 읽는다(`max_plan_weeks` 와 같은 관례, ADR-0007 §1).
         milestone_cursor = 0
-        if body.milestones:
+        if milestones:
             cursor_goal_id = await first_plan_adapter.heaviest_goal_id(
                 session, user_id=user.id, outcome=outcome
             )
@@ -411,10 +446,10 @@ async def generate_plan(
         state = first_plan.initial_state(
             user_id=user.id,
             outcome=outcome,
-            target_date=target_date,
-            scope=body.scope,
-            density=body.density,
-            milestones=body.milestones,
+            target_date=resolved_target,
+            scope=scope,
+            density=density,
+            milestones=milestones,
             max_plan_weeks=max_plan_weeks,
             milestone_cursor=milestone_cursor,
         )
@@ -438,11 +473,11 @@ async def generate_plan(
             warnings=final["schedule_warnings"],
             policy_violations=gp.policy_violations if gp is not None else [],
             generated_at=now_kst(),
-            milestones=body.milestones,
+            milestones=milestones,
         )
         draft = await draft_repo.create(
             user.id,
-            target_date=date.fromisoformat(target_date),
+            target_date=date.fromisoformat(resolved_target),
             horizon=final["horizon"],
             ai_source=ai_source,
             payload=payload,
@@ -913,6 +948,22 @@ def _goal_not_found() -> ApiError:
     )
 
 
+_NODE_PREFIX = "node_"
+
+
+def _parse_node_id(node_id: str) -> UUID:
+    """`routes/goals.py::_parse_node_id` 와 동일 규약 — nodeId 를 FE 표기(`node_<uuid>`) 그대로."""
+    raw = node_id[len(_NODE_PREFIX) :] if node_id.startswith(_NODE_PREFIX) else node_id
+    try:
+        return UUID(raw)
+    except ValueError as e:
+        raise ApiError(
+            ErrorCode.GOAL_NOT_FOUND,
+            "해당 칸을 찾을 수 없어요.",
+            http_status=HTTPStatus.NOT_FOUND,
+        ) from e
+
+
 def _parse_goal_id(goal_id: str) -> UUID:
     """`routes/goals.py::_parse_goal_id` 와 동일 규약 — 이 파일도 goalId 를 FE 표기 그대로 받는다."""
     if not goal_id.startswith(_GOAL_PREFIX):
@@ -1230,6 +1281,152 @@ async def approve_mandala_draft(
         skipped=skipped,
         carried_over=carried_over,
         activated_at=activated_at,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 축 → 다음 2주 계획 (U14, ADR-0008 §3·§8 "G") — 만다라트를 실행으로 잇는 마지막 조각.
+# 만다라트를 다시 세우면 축이 통째로 바뀌는데, `/plans/generate` 의 heaviest 는 여전히
+# **인터뷰 당시** 고른 목표다. 이 endpoint 가 "이 축으로 다음 2주" 를 한 번에 연다:
+# 승격(멱등) → 시드 교체 → 같은 First Plan 경로 → Draft. 승인은 기존 approve 그대로다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MANDALA_TIER_LIMITS: dict[str, int] = {"focus": 3, "maintain": 5}  # parked 자유(§1.4)
+
+
+async def _promote_axis_for_cycle(
+    session: AsyncSession,
+    goal_repo: GoalRepo,
+    *,
+    node: GoalNode,
+    user_id: UUID,
+    goal_tier: GoalTier,
+) -> tuple[Goal, bool]:
+    """축 → 승격된 Goal. 이미 승격돼 있으면 그 행을 그대로(멱등, `promote_mandala_node` 규칙).
+
+    반환: (Goal, 이 호출이 새로 승격했는지). tier 한도는 **새로 만들 때만** 잰다 — 이미 있는
+    목표를 다시 여는 데 한도를 걸면 Focus 가 꽉 찬 사용자가 자기 목표의 다음 주기를 못 연다.
+    """
+    if node.promoted_goal_id is not None:
+        existing = await goal_repo.get_by_id(user_id, node.promoted_goal_id)
+        if existing is not None:
+            return existing, False
+
+    limit = _MANDALA_TIER_LIMITS.get(goal_tier)
+    if limit is not None and await goal_repo.count_by_tier(user_id, goal_tier) + 1 > limit:
+        raise ApiError(
+            ErrorCode.GOAL_TIER_LIMIT_EXCEEDED,
+            f"{goal_tier.capitalize()} 목표는 최대 {limit}개까지 가질 수 있어요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="goalTier",
+        )
+
+    goal = Goal()
+    goal.id = uuid4()
+    goal.user_id = user_id
+    goal.title = node.title
+    goal.category = "other"  # 만다라 축엔 category 개념이 없다(`promote_mandala_node` 와 동일)
+    goal.goal_tier = goal_tier
+    goal.status = "proposed"
+    goal.priority_level = 3
+    goal.is_ultimate = False
+    goal.why_now = node.why_text
+    session.add(goal)
+    await session.flush()
+    node.promoted_goal_id = goal.id
+    return goal, True
+
+
+@router.post("/mandala/next-cycle")
+async def open_mandala_next_cycle(
+    body: MandalaNextCycleRequest,
+    user: CurrentUser,
+    goal_repo: GoalRepoDep,
+    repo: RepoDep,
+    draft_repo: DraftRepoDep,
+    session: SessionDep,
+) -> MandalaNextCycleResponse:
+    """축 하나로 **다음 2주 계획 Draft** 를 연다(U14). LLM 1콜(분해), `plan_drafts` 1행.
+
+    여기까지가 만다라트를 실행으로 잇는 마지막 조각이다. 지금까지는 축을 승격해도
+    `POST /plans/generate` 의 heaviest 가 **인터뷰 당시** 고른 목표라, 만다라트를 다시 세워
+    축이 바뀌어도 계획은 옛 목표를 분해했다. 이 endpoint 는 시드의 `core_goals` 를 이 축으로
+    갈아끼우고(`mandala_cycle.seed_outcome`) 축의 칸 8개를 계획 뼈대(마일스톤)로 넘긴다 —
+    사용자가 만다라트에서 확정한 분해를 계획이 그대로 따르게 하는 지점이다.
+
+    ⚠️ **자동 적용이 아니다**(§1.4). 돌려주는 건 `POST /plans/generate` 와 **같은 Draft** 이고,
+    카드·블록은 사용자가 기존 `POST /plans/{planId}/approve` 를 눌러야 생긴다.
+
+    지평이 2주인 이유는 여기에 규칙을 새로 넣어서가 아니라, 시드의 heaviest 제목이 승격된
+    목표와 같아 기존 `_max_plan_weeks`(ADR-0008 §3) 판정이 그대로 걸리기 때문이다.
+
+    **축(depth=1)만 대상**이다 — 중앙·칸은 422(`promote` 의 가드와 같은 자리). 계획 인터뷰를
+    한 번도 안 했으면 가용 시간·선호를 지어내지 않고 422 로 안내한다.
+    """
+    await endpoint_rate_limit.enforce(session, user_id=user.id, module="planning")
+
+    node = await goal_repo.get_mandala_node(user.id, _parse_node_id(body.node_id))
+    if node is None:
+        raise ApiError(
+            ErrorCode.GOAL_NOT_FOUND,
+            "해당 칸을 찾을 수 없어요.",
+            http_status=HTTPStatus.NOT_FOUND,
+        )
+    if node.depth != 1:
+        raise ApiError(
+            ErrorCode.COMMON_VALIDATION_ERROR,
+            "하위목표(축)만 이번 주기로 열 수 있어요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="nodeId",
+        )
+
+    base = await repo.get_latest_finished(user.id)
+    if base is None:
+        raise ApiError(
+            ErrorCode.COMMON_VALIDATION_ERROR,
+            "계획 인터뷰를 먼저 진행해 주세요. 활동 시간대와 선호를 알아야 계획을 배치할 수 있어요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+        )
+    base_outcome = _apply_edited_availability(await _project_session_outcome(base, repo), user)
+
+    promoted, newly = await _promote_axis_for_cycle(
+        session, goal_repo, node=node, user_id=user.id, goal_tier=body.goal_tier
+    )
+    outcome = mandala_cycle.seed_outcome(base=base_outcome, axis=node, promoted=promoted)
+
+    milestones: list[MilestoneDraft] | None = None
+    if body.use_cells_as_milestones:
+        cells = [
+            n
+            for n in await goal_repo.list_nodes(node.goal_id, tree_kind="mandala")
+            if n.parent_node_id == node.id and n.depth == 2
+        ]
+        milestones = mandala_cycle.cells_as_milestones(cells) or None
+
+    # 승격은 계획 생성 전에 커밋한다 — 분해(LLM)가 실패해도 축이 목표로 남아야 사용자가
+    # 다시 눌렀을 때 중복 목표가 생기지 않는다(`_promote_axis_for_cycle` 의 멱등 전제).
+    await session.commit()
+
+    plan = await _run_first_plan(
+        outcome=outcome,
+        milestones=milestones,
+        target_date=body.target_date,
+        scope="horizon",  # 2주 상한은 `_max_plan_weeks` 가 건다 — 여기서 주 단위로 좁히지 않는다
+        density=body.density,
+        user=user,
+        draft_repo=draft_repo,
+        session=session,
+    )
+    return MandalaNextCycleResponse(
+        **plan.model_dump(by_alias=False),
+        axis=MandalaCycleAxis(
+            node_id=f"{_NODE_PREFIX}{node.id}",
+            order_index=node.order_index,
+            title=node.title,
+            goal_id=f"{_GOAL_PREFIX}{promoted.id}",
+            goal_tier=cast(GoalTier, promoted.goal_tier),
+            newly_promoted=newly,
+        ),
     )
 
 

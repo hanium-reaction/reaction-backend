@@ -19,6 +19,7 @@ from pydantic import Field
 from reaction_backend.schemas.common import CamelModel, DraftMixin, KstDatetime
 from reaction_backend.schemas.goals import GoalNode, GoalTier
 from reaction_backend.schemas.habits import HabitCategory, TimePreference
+from reaction_backend.schemas.planning import FirstPlanResponse
 
 MandalaSource = Literal["llm", "rule", "user"]
 
@@ -244,6 +245,38 @@ class MandalaRebuildPreflightResponse(CamelModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 축 → 다음 2주 계획 (U14, ADR-0008 §3) — 만다라트를 실행으로 잇는 단일 진입점
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class MandalaNextCycleRequest(CamelModel):
+    """POST /plans/mandala/next-cycle(U14) 요청 — 이 축으로 다음 2주를 연다.
+
+    `goal_tier` 는 아직 승격 안 된 축을 이 호출이 승격할 때만 쓴다(이미 승격됐으면 무시,
+    기존 tier 유지 — `promote` 의 멱등 규칙 그대로).
+    """
+
+    node_id: str
+    goal_tier: GoalTier = "focus"
+    target_date: str | None = None  # "YYYY-MM-DD" — 미지정 시 오늘(KST)
+    density: Literal["light", "standard", "intense"] = "standard"
+    # 축의 칸 8개를 계획 뼈대(마일스톤)로 넘길지. 끄면 분해가 축 제목만 보고 다시 지어낸다 —
+    # 만다라트에서 확정한 분해를 계획이 무시하게 되므로 기본은 켜 둔다.
+    use_cells_as_milestones: bool = True
+
+
+class MandalaCycleAxis(CamelModel):
+    """이번 주기가 어느 축에서 나왔는지 — U14 응답의 출처 표시."""
+
+    node_id: str
+    order_index: int = Field(ge=0, le=7)
+    title: str
+    goal_id: str
+    goal_tier: GoalTier
+    newly_promoted: bool  # 이 호출이 승격했으면 true, 이미 승격돼 있었으면 false
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 조회·편집·승격 (U8~U10, PR6)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -282,6 +315,17 @@ class MandalaTreeResponse(CamelModel):
     nodes: list[MandalaNode]
     progress: float
     coverage: float
+
+
+class MandalaNextCycleResponse(FirstPlanResponse):
+    """U14 응답 — `POST /plans/generate` 와 **같은 Draft** 에 출처(축)만 얹은 것.
+
+    `FirstPlanResponse` 를 그대로 상속하는 게 핵심이다(§6.2 additive) — 승인은 기존
+    `POST /plans/{planId}/approve` 를 그대로 쓰고, FE 의 계획 미리보기 화면도 그대로 재사용
+    한다. 만다라 전용 승인 경로를 새로 만들면 HITL 게이트가 두 벌이 된다.
+    """
+
+    axis: MandalaCycleAxis
 
 
 class MandalaNodeUpdateRequest(CamelModel):
@@ -323,6 +367,7 @@ __all__ = [
     "MandalaApproveResponse",
     "MandalaCarryOverSummary",
     "MandalaCell",
+    "MandalaCycleAxis",
     "MandalaCellItem",
     "MandalaCellPlan",
     "MandalaCenterPreview",
@@ -331,6 +376,8 @@ __all__ = [
     "MandalaGenerateRequest",
     "MandalaHabitLinkRequest",
     "MandalaNode",
+    "MandalaNextCycleRequest",
+    "MandalaNextCycleResponse",
     "MandalaNodeUpdateRequest",
     "MandalaPromoteRequest",
     "MandalaRebuildLinkedHabit",
