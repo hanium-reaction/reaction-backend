@@ -7,6 +7,66 @@
 
 ---
 
+## v2.05 — 2026-09-01 (만다라트 "다시 세우기" — 사전 확인 + 승계)
+
+**추가 endpoint 1개 + `approve` 응답에 `carriedOver` 절**(additive, 기존 필드 무변경).
+
+### 무엇이 문제였나
+
+목표 화면의 **[다시 세우기]** 는 새 endpoint 가 필요 없었다 — `POST /plans/mandala/subgoals`
+→ `generate` → `approve` 를 한 번 더 타면 `persist_mandala` 가 옛 트리를 보관하고 새 73행을
+쓴다. 여기까지는 설계대로다.
+
+문제는 **보관되는 것에 사용자가 손으로 쌓은 것이 매달려 있다**는 점이다. 셋 다 archived 노드를
+가리킨 채 화면에서만 사라졌다:
+
+| 무엇 | 어디에 | 다시 세운 뒤 |
+| --- | --- | --- |
+| 칸 완료 표시 | `goal_nodes.completed_at` | 전부 0으로 |
+| 축 승격 | `goal_nodes.promoted_goal_id` | 목표는 남지만 축 배지·`goals.heaviest` 보기·2주 주기 스코프에서 빠짐 (셋 다 `archived_at IS NULL` 을 건다) |
+| 반복형 칸 | `habits.goal_node_id` | 습관은 계속 주간 instance 를 만드는데 그 칸이 만다라 뷰·주간 리포트에 없음 |
+
+그리고 버튼을 누르기 전에 **무엇이 사라지는지 알 방법이 없었다.** AI 산출은 Draft + 3버튼으로
+막아 두었는데(§1.4), 정작 73칸을 통째로 갈아엎는 이 동작에는 미리보기가 없었다.
+
+### 이제
+
+**① 승인 전 — `GET /goals/{goalId}/mandala/rebuild-preflight`** (읽기 전용, LLM 0콜, DB 쓰기 0)
+
+지금 트리에 걸려 있는 것을 그대로 돌려준다 — `totalCells`/`completedCells`,
+`promotedAxes[]`(축 + 그 축에서 승격된 목표), `linkedHabits[]`(반복형 칸 + 습관),
+`liveActionItems`, 그리고 확인 시트에 그대로 얹을 `warnings[]`(서버가 완성한 문장,
+`/plans/generate` 의 `warnings` 와 같은 규약). 아직 트리가 없으면 `hasTree=false` + 전부
+0/빈 배열 — 404 가 아니라 "정상, 그냥 비어 있음"(`GET /goals/{id}/mandala` 와 같은 규약)이라
+처음 세우는 경우도 FE 가 같은 경로를 타고 확인 시트만 건너뛴다.
+
+**② 승인 때 — 제목이 같은 자리로 승계**
+
+`persist_mandala` 가 옛 트리를 보관하기 **전에** 읽어 두고, 새 노드를 flush 한 **뒤에**
+이어붙인다(순서가 계약이다 — `habits.goal_node_id` UPDATE 가 새 leaf INSERT 보다 먼저 나가면
+FK 가 깨진다). 키는 축이 `title`, 칸이 `(축 title, 칸 title)` — 칸 제목만으로 맞추면
+"매일 30분" 같은 흔한 칸이 엉뚱한 축으로 건너뛴다.
+
+- 이어지는 것: 칸 `completedAt`, 축 `promotedGoalId`, 반복형 칸의 습관 링크.
+- **AI 가 채운 제목·이유는 안 이어진다** — 다시 세우기의 목적 자체가 그것이다.
+- 자리를 못 찾은 쪽은 **지우지 않는다**: 승격된 목표는 그대로 남고(축 배지만 빠짐), 습관은
+  `goalNodeId=null` 로 링크만 풀려 단독 습관이 된다(주간 횟수 기록 보존). hard delete 없음.
+
+`POST /plans/mandala/{planId}/approve` 응답에 `carriedOver` 가 붙는다 —
+`{ completedCells, promotedAxes, linkedHabits, droppedPromotedAxes[], droppedLinkedHabits[] }`.
+앞 셋은 이어진 개수, 뒤 둘은 끊긴 것의 **이름**이라 FE 가 승인 직후 그대로 보여줄 수 있다.
+조용히 사라지는 게 이 기능의 유일한 위험이라 개수가 아니라 이름으로 돌려준다.
+처음 세우는 경우엔 전부 0/빈 배열이고, 멱등 재승인은 승인 시점 스냅샷을 그대로 재현한다.
+
+### 호환
+
+- 기존 필드 무변경. `carriedOver` 는 추가 필드이고 처음 세우기에서는 0/빈 배열이라 FE 가
+  안 읽어도 종전과 같다.
+- 마이그레이션 없음 — 새 컬럼·인덱스 0개. 승계는 기존 컬럼을 새 행으로 옮겨 쓸 뿐이다.
+- LLM 비용 영향 없음 — preflight 는 0콜, 승계는 `approve`(원래 0콜) 안에서 끝난다.
+
+---
+
 ## v2.04 — 2026-08-29 (카드 [시작]이 계획 교체와 겹칠 때 유령 카드가 안 생긴다, #368)
 
 **동작 변경 — `POST /today/actions/{actionId}/start` 의 경합 처리.** 스키마 변경 없음.

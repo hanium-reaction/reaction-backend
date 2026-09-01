@@ -54,6 +54,7 @@ from reaction_backend.schemas.goals import (
     GoalNode,
     GoalNodeType,
     GoalsByTier,
+    GoalTier,
     GoalUpdateRequest,
     MilestoneCompletionRequest,
 )
@@ -63,6 +64,9 @@ from reaction_backend.schemas.mandala import (
     MandalaNode,
     MandalaNodeUpdateRequest,
     MandalaPromoteRequest,
+    MandalaRebuildLinkedHabit,
+    MandalaRebuildPreflightResponse,
+    MandalaRebuildPromotedAxis,
     MandalaSource,
     MandalaTreeResponse,
 )
@@ -443,6 +447,83 @@ async def get_mandala_tree(
         nodes=nodes,
         progress=root_progress or 0.0,
         coverage=root_coverage or 0.0,
+    )
+
+
+def _rebuild_warnings(impact: mandala_adapter.MandalaRebuildImpact) -> list[str]:
+    """확인 시트에 그대로 얹을 안내 문장 — 승계 규칙을 사용자 말로 옮긴 것.
+
+    `/plans/generate` 의 `warnings` 와 같은 규약(서버가 완성된 한국어 문장을 준다)이라 FE 는
+    문자열을 조립하지 않는다. 톤은 "네 편에서"(DevBaseline §1.4) — 겁주지 않고 사실만.
+    """
+    if not impact.has_tree:
+        return []
+    lines = [
+        "제목이 그대로인 칸은 완료 표시와 습관 링크가 새 만다라트로 그대로 넘어가요.",
+        "제목이 바뀌거나 사라진 칸은 이어지지 않아요 — 그 습관은 링크만 풀려 단독 습관으로 남아요.",
+    ]
+    if impact.completed_cells:
+        lines.append(f"지금까지 {impact.completed_cells}칸을 완료로 표시하셨어요.")
+    if impact.promoted_axes:
+        titles = ", ".join(f"「{a.goal_title}」" for a in impact.promoted_axes)
+        lines.append(
+            f"축에서 승격한 목표 {len(impact.promoted_axes)}개({titles})는 그대로 남아요. "
+            "같은 이름의 축이 새 만다라트에 없으면 축 배지만 빠져요."
+        )
+    if impact.live_action_items:
+        lines.append(f"진행 중인 카드 {impact.live_action_items}장은 다시 세워도 사라지지 않아요.")
+    return lines
+
+
+@router.get("/{goal_id}/mandala/rebuild-preflight")
+async def get_mandala_rebuild_preflight(
+    goal_id: str, user: CurrentUser, repo: RepoDep, session: SessionDep
+) -> MandalaRebuildPreflightResponse:
+    """다시 세우기 사전 확인(U13) — LLM 0콜, DB 쓰기 0.
+
+    "다시 세우기" 버튼이 확인 시트를 띄우기 위한 읽기 전용 조회다. 다시 세우면 옛 트리는
+    보관되고 새 73칸이 들어서는데, 그 사이에서 사용자가 손으로 쌓은 것(완료 표시·축 승격·
+    습관 링크)은 **제목이 같은 자리에만** 이어진다(`persist_mandala`). 무엇이 걸려 있는지
+    승인 전에 보여주지 않으면 버튼 한 번에 조용히 끊기므로, 이 endpoint 가 HITL 의
+    "무엇이 바뀌는지 먼저 보여준다" 를 만다라트 쪽에서 맡는다.
+
+    아직 트리가 없으면 `hasTree=false` + 전부 0/빈 배열(404 아님) — 처음 세우는 경우도 FE 가
+    같은 경로를 타고 확인 시트만 건너뛴다.
+    """
+    goal = await _load_ultimate_goal(repo, user.id, goal_id)
+    rows = await repo.list_nodes(goal.id, tree_kind="mandala")
+    impact = await mandala_adapter.collect_rebuild_impact(session, rows)
+    return MandalaRebuildPreflightResponse(
+        goal_id=goal_id,
+        has_tree=impact.has_tree,
+        root_node_id=f"{_NODE_PREFIX}{impact.root_node_id}" if impact.has_tree else None,
+        statement=goal.title,
+        total_cells=impact.total_cells,
+        completed_cells=impact.completed_cells,
+        promoted_axes=[
+            MandalaRebuildPromotedAxis(
+                order_index=a.order_index,
+                axis_title=a.axis_title,
+                goal_id=f"{_ID_PREFIX}{a.goal_id}",
+                goal_title=a.goal_title,
+                goal_status=a.goal_status,
+                goal_tier=cast(GoalTier, a.goal_tier),
+            )
+            for a in impact.promoted_axes
+        ],
+        linked_habits=[
+            MandalaRebuildLinkedHabit(
+                subgoal_index=h.subgoal_index,
+                order_index=h.order_index,
+                cell_title=h.cell_title,
+                habit_id=f"{_HABIT_PREFIX}{h.habit_id}",
+                habit_title=h.habit_title,
+                frequency_per_week=h.frequency_per_week,
+            )
+            for h in impact.linked_habits
+        ],
+        live_action_items=impact.live_action_items,
+        warnings=_rebuild_warnings(impact),
     )
 
 

@@ -164,6 +164,21 @@ class MandalaDraftResponse(DraftMixin):
     generated_at: KstDatetime
 
 
+class MandalaCarryOverSummary(CamelModel):
+    """U6 응답의 승계 절 — **다시 세우기**일 때만 0이 아니다(처음 세우면 전부 0/빈 배열).
+
+    앞의 셋은 새 트리로 **이어진** 개수, 뒤의 둘은 자리를 잃어 **끊긴** 것의 이름이다.
+    끊긴 쪽도 지워지지 않는다 — 승격된 목표는 그대로 남고(축 배지만 빠짐), 습관은 링크만
+    끊겨 단독 습관이 된다. FE 는 승인 직후 이 두 배열을 그대로 보여주면 된다.
+    """
+
+    completed_cells: int = 0
+    promoted_axes: int = 0
+    linked_habits: int = 0
+    dropped_promoted_axes: list[str] = Field(default_factory=list)
+    dropped_linked_habits: list[str] = Field(default_factory=list)
+
+
 class MandalaApproveResponse(CamelModel):
     """U6 응답 — 명시 승인 endpoint 이므로 `is_draft=False`(ADR-0005 §7.2)."""
 
@@ -173,7 +188,59 @@ class MandalaApproveResponse(CamelModel):
     root_node_id: str
     activated: int  # 영속된 goal_nodes 수 (1 + 8 + 채워진 leaf 수)
     skipped: int  # gaps 로 남아 저장하지 않은 칸 수
+    carried_over: MandalaCarryOverSummary = Field(default_factory=MandalaCarryOverSummary)
     activated_at: KstDatetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 다시 세우기 사전 확인 (U13) — 승인 전 HITL 미리보기
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class MandalaRebuildPromotedAxis(CamelModel):
+    """다시 세우기에 걸려 있는 승격된 축 1개."""
+
+    order_index: int = Field(ge=0, le=7)
+    axis_title: str
+    goal_id: str
+    goal_title: str
+    goal_status: str
+    goal_tier: GoalTier
+
+
+class MandalaRebuildLinkedHabit(CamelModel):
+    """다시 세우기에 걸려 있는 반복형 칸 1개(ADR-0008 §1)."""
+
+    subgoal_index: int = Field(ge=0, le=7)
+    order_index: int = Field(ge=0, le=7)
+    cell_title: str
+    habit_id: str
+    habit_title: str
+    frequency_per_week: int
+
+
+class MandalaRebuildPreflightResponse(CamelModel):
+    """GET /goals/{goalId}/mandala/rebuild-preflight(U13) 응답 — 읽기 전용, LLM 0콜, DB 쓰기 0.
+
+    "다시 세우기" 버튼이 확인 시트를 띄우기 위한 자료다. 만다라트를 다시 세우면 옛 트리는
+    보관되고 새 73칸이 들어서는데, 그 사이에서 **사용자가 손으로 쌓은 것**(완료 표시·축
+    승격·습관 링크)은 새 트리에 **제목이 같은 자리가 있을 때만** 이어진다. 무엇이 걸려
+    있는지 미리 보여주지 않으면 승인 한 번에 조용히 끊긴다 — 그걸 막는 것이 이 endpoint 다.
+
+    아직 승인된 트리가 없으면 `hasTree=false` + 전부 0/빈 배열(404 아님) — 처음 세우는
+    경우도 FE 가 같은 경로를 타고 확인 시트만 건너뛴다.
+    """
+
+    goal_id: str
+    has_tree: bool
+    root_node_id: str | None
+    statement: str
+    total_cells: int
+    completed_cells: int
+    promoted_axes: list[MandalaRebuildPromotedAxis]
+    linked_habits: list[MandalaRebuildLinkedHabit]
+    live_action_items: int
+    warnings: list[str]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -254,6 +321,7 @@ class MandalaHabitLinkRequest(CamelModel):
 __all__ = [
     "MandalaApproveRequest",
     "MandalaApproveResponse",
+    "MandalaCarryOverSummary",
     "MandalaCell",
     "MandalaCellItem",
     "MandalaCellPlan",
@@ -265,6 +333,9 @@ __all__ = [
     "MandalaNode",
     "MandalaNodeUpdateRequest",
     "MandalaPromoteRequest",
+    "MandalaRebuildLinkedHabit",
+    "MandalaRebuildPreflightResponse",
+    "MandalaRebuildPromotedAxis",
     "MandalaRegenerateBranchRequest",
     "MandalaSubgoal",
     "MandalaSubgoalItem",

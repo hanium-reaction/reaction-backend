@@ -303,6 +303,7 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | DELETE | `/goals/{id}` | soft delete |
 | POST | `/goals/ultimate` | **궁극목표 확정**(PR5, S29→S30). 딥 인터뷰(`kind="ultimate"`) 산출물 → `Goal(status="active", goalTier="parked")`. body `{ outcome? }` — 생략하면 서버가 최근 '정상 종료' 궁극목표 인터뷰에서 복구(완료된 인터뷰가 없으면 422 `COMMON_VALIDATION_ERROR`). **사용자당 1개**(`Goal.isUltimate`) — 이미 있으면 같은 행을 갱신(409 없음, 재인터뷰로 다듬는 정상 경로). 응답은 `Goal`(위 스키마 그대로, 201). `category` 는 항상 `"other"`(궁극목표는 여러 카테고리를 가로지르므로 하나로 분류하지 않는다). `GET /goals` 의 parked 그룹에 일반 목표와 섞여 나온다(의도된 동작) — `isUltimate=true` 카드에 FE 가 만다라 진입점 배지를 붙인다(S26, PR7). **`deadline`** 은 인터뷰의 `ultimate.horizon`(3/5/7/10/10년 이상/기한 없음)에서 확정된다(ADR-0008 §2) — 오늘 + N년, "기한 없음"이면 `null`. 재인터뷰로 horizon 을 바꾸면 이 값도 같이 갱신된다. **승격된 학기 목표(U10)는 이 마감을 상속하지 않는다** — `PATCH /goals/{id}` 로 사용자가 따로 정한다 |
 | GET | `/goals/{id}/mandala` | **만다라트 상시 뷰**(PR6, S31). `goal.isUltimate=true` 여야(아니면 404). 73노드(≤) + 진척도. **아직 승인된 만다라 트리가 없으면 `nodes=[]`·`rootNodeId=null`**(404 아님 — 위 `nodes` endpoint 와 같은 "정상, 그냥 비어 있음" 규약). `progress`/`coverage` 는 컬럼 캐시가 아니라 매 조회 시 파생(leaf 는 `completedAt` 직접체크 우선, 없으면 카드 성공률; 축은 leaf 8개 **고정 분모**로 나눠 "1칸 하고 100%" 착시 방지; 성공 정의는 주간 리포트 adherence 와 동일 상수 재사용) |
+| GET | `/goals/{id}/mandala/rebuild-preflight` | **다시 세우기 사전 확인**(v2.05, U13). `goal.isUltimate=true` 여야(아니면 404). 읽기 전용 — LLM 0콜, DB 쓰기 0. "다시 세우기" 버튼이 확인 시트를 띄우기 위한 자료다. 다시 세우기는 새 endpoint 가 아니라 `POST /plans/mandala/subgoals` → `generate` → `approve` 를 한 번 더 타는 것이고, 그 승인이 옛 트리를 보관하면서 **사용자가 손으로 쌓은 것**(완료 표시·축 승격·습관 링크)이 archived 노드에 매달린다. 그래서 승인 **전에** 무엇이 걸려 있는지 보여준다: `totalCells`/`completedCells`, `promotedAxes[]`(축 제목 + 그 축에서 승격된 목표), `linkedHabits[]`(반복형 칸 + 링크된 습관), `liveActionItems`(만다라 칸에 직접 매달린 미완 카드 수 — 승격 목표의 계획 트리 카드는 `tree_kind='plan'` 이라 여기 안 세고 다시 세워도 안 사라진다), `warnings[]`(승계 규칙을 사용자 말로 옮긴 완성 문장 — `/plans/generate` 의 `warnings` 와 같은 규약이라 FE 는 조립하지 않는다). **아직 트리가 없으면 `hasTree=false` + 전부 0/빈 배열**(404 아님 — 처음 세우기도 같은 경로를 타고 확인 시트만 건너뛴다) |
 | PATCH | `/goals/mandala/nodes/{nodeId}` | **셀 상세 편집**(PR6, S32). body `{ title?, whyText?, completed? }` — 준 필드만 갱신, 어떤 필드든 건드리면 `source="user"` 로 전환(AI/rule 점선 렌더가 실선으로 바뀜). `completed:true`→`completedAt=now`, `false`→`null`. 제목 길이는 노드 깊이별 상한(축 10자/셀 16자) 초과 시 422 `COMMON_VALIDATION_ERROR`. 응답은 `MandalaNode` — 이 endpoint 는 롤업(`progress`/`coverage`)을 다시 계산하지 않고 `null`(필요하면 `GET /mandala` 재호출) |
 | POST | `/goals/mandala/nodes/{nodeId}/promote` | **하위목표(축) 승격**(PR6, S32). body `{ goalTier }` — 그 축을 `Goal(status="proposed")` 로. **중앙(core)·셀(leaf)은 대상이 아니다**(depth≠1 이면 422). Focus≤3/Maintain≤5 초과 시 기존 422 `GOAL_TIER_LIMIT_EXCEEDED` 재사용. **멱등** — 이미 승격된 축을 다시 누르면(그 Goal 이 살아있으면) 새로 만들지 않고 그 행을 그대로 반환(201) |
 | POST | `/goals/mandala/nodes/{nodeId}/habit` | **반복형 전환**(U12, ADR-0008 §1). body `{ title?, category, frequencyPerWeek, minutesPerSession, timePreference, priorityLevel }` — 새 `Habit` 을 만들어 이 칸에 링크(`habits.goalNodeId`). "코딩테스트 1일 1문제"·"쓰레기 줍기" 처럼 끝이 없는 칸을 계획(action_item)으로 안 내려보내고 습관 인프라(`habit_instances.doneCount`)로만 주간 횟수를 추적하기 위함. **칸(leaf)만 대상**(depth≠2 면 422 `COMMON_VALIDATION_ERROR`). `title` 생략 시 칸 제목 그대로. **멱등** — 이미 링크된 활성 습관이 있으면 새로 안 만들고 그대로 반환(201). 응답은 `Habit`(§7) |
@@ -378,6 +379,48 @@ additive 로 추가됐다(만다라 렌더의 전제 — `orderIndex` 없이는 
 ```
 > 아직 승인된 만다라 트리가 없으면 `{"goalId": "...", "rootNodeId": null, "statement": "...", "nodes": [], "progress": 0.0, "coverage": 0.0}`.
 
+응답 예 `GET /goals/{id}/mandala/rebuild-preflight`(v2.05, U13, `MandalaRebuildPreflightResponse`).
+`warnings` 는 서버가 완성한 문장이라 FE 는 그대로 확인 시트에 얹는다:
+
+```json
+{
+  "goalId": "goal_8f...",
+  "hasTree": true,
+  "rootNodeId": "node_2a...",
+  "statement": "대기업 개발자로 입사",
+  "totalCells": 61,
+  "completedCells": 7,
+  "promotedAxes": [
+    {
+      "orderIndex": 0,
+      "axisTitle": "개발 실력",
+      "goalId": "goal_c1...",
+      "goalTitle": "사이드 프로젝트 배포",
+      "goalStatus": "active",
+      "goalTier": "focus"
+    }
+  ],
+  "linkedHabits": [
+    {
+      "subgoalIndex": 0,
+      "orderIndex": 2,
+      "cellTitle": "1일 1커밋",
+      "habitId": "habit_77...",
+      "habitTitle": "1일 1커밋",
+      "frequencyPerWeek": 5
+    }
+  ],
+  "liveActionItems": 0,
+  "warnings": [
+    "제목이 그대로인 칸은 완료 표시와 습관 링크가 새 만다라트로 그대로 넘어가요.",
+    "제목이 바뀌거나 사라진 칸은 이어지지 않아요 — 그 습관은 링크만 풀려 단독 습관으로 남아요.",
+    "지금까지 7칸을 완료로 표시하셨어요.",
+    "축에서 승격한 목표 1개(「사이드 프로젝트 배포」)는 그대로 남아요. 같은 이름의 축이 새 만다라트에 없으면 축 배지만 빠져요."
+  ]
+}
+```
+
+
 승인 전에는 `{"goalId": "...", "rootNodeId": null, "nodes": []}`.
 
 `habitId` 는 additive(ADR-0008 §1) — leaf 가 `POST /goals/mandala/nodes/{id}/habit` 으로
@@ -443,7 +486,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 | POST | `/plans/mandala/generate` | **Stage B**(S30). body `{ goalId, subgoals[8] }` — Stage A 를 사용자가 로컬에서 확인·편집한 8축 그대로(구조 편집은 여기까지, 이후 축 개수·순서 고정). 축마다 실행 셀 최대 8개(LLM 1콜, lock 있음, `plan_drafts`(kind="mandala") 1행·72h). 응답 `MandalaDraftResponse` — `cells[≤64]` + 못 채운 칸은 `gaps[]`(억지 패딩 없음, `goal_decompose` 와 동일 원칙) |
 | GET | `/plans/mandala/{planId}` | 저장된 만다라 Draft 미리보기 재구성(LLM 0회). **First Plan/재계획 draft id 를 넣으면 404** `PLAN_DRAFT_NOT_FOUND`(kind 불일치, `GET /plans/{planId}` 의 반대 방향 같은 가드) |
 | POST | `/plans/mandala/{planId}/regenerate-branch` | 링(8칸) **1개만** 재생성(LLM 1콜, lock 있음, draft UPDATE). body `{ subgoalIndex, userHint?, editedSubgoals?, editedCells? }` — 나머지 칸의 현재 편집 상태를 함께 실어 보낸다(비우면 저장된 스냅샷 사용). `source="user"`인 기존 셀(사용자가 이미 직접 편집)은 절대 재생성 대상에서 빠지지 않고 그대로 보존 |
-| POST | `/plans/mandala/{planId}/approve` | 승인(LLM 0콜, 단일 트랜잭션). body `{ centerWhyText?, subgoals[8], cells[] }` — 셀 편집(HITL 최하위 층)은 여기서 처음 서버에 닿는다(승인 전엔 서버 호출 0). `goal_nodes` 최대 73행(`tree_kind="mandala"`) 영속, 같은 목표의 기존 활성 만다라 트리는 보관 후 교체(재승인 누적 방지). 응답 `{ planId, isDraft:false, goalId, rootNodeId, activated, skipped, activatedAt }`. 멱등 — 이미 승인된 draft 재호출 시 재영속화 없이 같은 결과 반환. 만료 410 `PLAN_DRAFT_EXPIRED` |
+| POST | `/plans/mandala/{planId}/approve` | 승인(LLM 0콜, 단일 트랜잭션). body `{ centerWhyText?, subgoals[8], cells[] }` — 셀 편집(HITL 최하위 층)은 여기서 처음 서버에 닿는다(승인 전엔 서버 호출 0). `goal_nodes` 최대 73행(`tree_kind="mandala"`) 영속, 같은 목표의 기존 활성 만다라 트리는 보관 후 교체(재승인 누적 방지). 응답 `{ planId, isDraft:false, goalId, rootNodeId, activated, skipped, carriedOver, activatedAt }`. ⚠️ **이미 트리가 있으면 이 호출이 곧 '다시 세우기'다**(v2.05) — 옛 트리를 보관하고, 사용자가 손으로 쌓은 셋만 **제목이 같은 자리**로 이어붙인다. 축은 `title`, 칸은 `(축 title, 칸 title)` 이 키다(칸 제목만으로 맞추면 "매일 30분" 같은 흔한 칸이 엉뚱한 축으로 건너뛴다). 이어지는 것: 칸의 `completedAt`, 축의 `promotedGoalId`, 반복형 칸의 `habits.goalNodeId`. **AI 가 채운 제목·이유는 안 이어진다** — 다시 세우기의 목적 자체가 그것이다. 자리를 못 찾은 쪽은 **지우지 않는다**: 승격된 목표는 그대로 남고(축 배지만 빠짐), 습관은 `goalNodeId=null` 로 링크만 풀려 단독 습관이 된다(주간 횟수 기록 보존). `carriedOver` = `{ completedCells, promotedAxes, linkedHabits, droppedPromotedAxes[], droppedLinkedHabits[] }` — 앞 셋은 이어진 개수, 뒤 둘은 끊긴 것의 이름이다. 처음 세우면 전부 0/빈 배열. 무엇이 걸려 있는지 **승인 전에** 보려면 `GET /goals/{id}/mandala/rebuild-preflight`(§6). 멱등 — 이미 승인된 draft 재호출 시 재영속화 없이 같은 결과 반환(`carriedOver` 도 승인 시점 스냅샷 그대로). 만료 410 `PLAN_DRAFT_EXPIRED` |
 | POST | `/plans/{planId}/discard` | (재사용) 만다라 draft 폐기도 이 기존 endpoint 그대로 — 204, kind 무관 |
 
 > `milestones`·자료 검색 3단계(`materials/search-query`~`materials/confirm`)·`generate`·`/plans/{planId}`·`approve`·`weekly`·블록 편집·`replan`(+`replan/{id}/approve`)·만다라트(`mandala/subgoals`~`mandala/{id}/approve`)는 구현 완료. `ai-edit`/`ai-edit/apply` 만 미구현(P1, 라우트 없음).
@@ -522,7 +565,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
   "generatedAt": "2026-08-20T15:00:00+09:00"
 }
 ```
-> 승인(`POST /plans/mandala/{planId}/approve`)은 `{planId, isDraft:false, goalId, rootNodeId, activated, skipped, activatedAt}` 반환 — `rootNodeId` 는 `node_<uuid>`(§1.8), `activated`=1(중앙)+8(축)+영속된 셀 수, `skipped`=최대 64칸 중 저장 안 된 칸 수(gaps 로 남은 만큼).
+> 승인(`POST /plans/mandala/{planId}/approve`)은 `{planId, isDraft:false, goalId, rootNodeId, activated, skipped, carriedOver, activatedAt}` 반환 — `rootNodeId` 는 `node_<uuid>`(§1.8), `activated`=1(중앙)+8(축)+영속된 셀 수, `skipped`=최대 64칸 중 저장 안 된 칸 수(gaps 로 남은 만큼).
 
 #21-B 구현 메모 (S14/S15 — 영속 `scheduled_blocks` 읽기/이동):
 - Plan 테이블 없음 — `planId` 는 주(週) 논리 식별자(`plan_<weekStart>`). 편집 권한은 `blockId`.

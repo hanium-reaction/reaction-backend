@@ -284,7 +284,7 @@ async def test_persist_mandala_writes_root_subgoals_and_cells() -> None:
     cells = [MandalaCell(subgoal_index=0, order_index=0, title="러닝", source="llm")]
     session = _NodeSession()
 
-    root, activated = await mandala_adapter.persist_mandala(
+    root, activated, _ = await mandala_adapter.persist_mandala(
         session,  # type: ignore[arg-type]
         goal=_goal(),
         center_why_text="왜냐면",

@@ -254,22 +254,131 @@ def rule_branch_cells(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def _archive_previous_mandala(session: AsyncSession, *, goal_id: uuid.UUID) -> None:
-    """이 goal 의 기존 활성 만다라 트리를 보관 — `_archive_goal_nodes`(계획 트리)의 만다라판.
-
-    부분 유니크 인덱스 `uq_goal_nodes_mandala_root`(goal_id, tree_kind='mandala' AND
-    archived_at IS NULL)가 이전 트리를 보관하지 않으면 재승인 시 새 root INSERT 를 막는다
-    (재생성→재승인을 반복해도 옛 73칸이 쌓이지 않게).
-    """
+async def _load_active_mandala_nodes(
+    session: AsyncSession, *, goal_id: uuid.UUID
+) -> list[GoalNode]:
+    """이 goal 의 지금 살아 있는 만다라 트리 전체(≤73행). 없으면 `[]`."""
     stmt = select(GoalNode).where(
         GoalNode.goal_id == goal_id,
         GoalNode.tree_kind == "mandala",
         GoalNode.archived_at.is_(None),
     )
-    rows = (await session.execute(stmt)).scalars().all()
+    return list((await session.execute(stmt)).scalars().all())
+
+
+def _archive_nodes(nodes: Sequence[GoalNode]) -> None:
+    """기존 활성 만다라 트리를 보관 — `_archive_goal_nodes`(계획 트리)의 만다라판.
+
+    부분 유니크 인덱스 `uq_goal_nodes_mandala_root`(goal_id, tree_kind='mandala' AND
+    archived_at IS NULL)가 이전 트리를 보관하지 않으면 재승인 시 새 root INSERT 를 막는다
+    (재생성→재승인을 반복해도 옛 73칸이 쌓이지 않게).
+    """
     now = now_kst()
-    for n in rows:
+    for n in nodes:
         n.archived_at = now
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 다시 세우기(rebuild) 승계 — 옛 트리에서 손으로 쌓은 것만 새 트리로 옮긴다
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 승계 키. 축은 제목, 칸은 (축 제목, 칸 제목) — 칸 제목만으로 맞추면 "매일 30분" 같은 흔한
+# 칸이 엉뚱한 축으로 건너뛴다. 축까지 같아야 같은 칸으로 본다.
+type _CellKey = tuple[str, str]
+
+
+def _match_key(title: str) -> str:
+    return title.strip()
+
+
+@dataclass(frozen=True)
+class MandalaCarryOver:
+    """다시 세우기에서 새 트리로 **이어진 것**과 **자리를 잃은 것**(U6 응답, api-contract §8).
+
+    승계 대상은 셋 다 사용자가 손으로 쌓은 것뿐이다 — 완료 표시(`completed_at`), 축 승격
+    (`promoted_goal_id`), 반복형 칸의 습관 링크(`habits.goal_node_id`). AI 가 채운 제목·이유는
+    새로 만든 것이 이긴다(다시 세우기의 목적 자체가 그것이라).
+
+    자리를 잃은 쪽은 **지우지 않는다**. 승격된 목표는 그대로 남고(축 배지만 빠진다), 습관은
+    링크만 끊겨 단독 습관이 된다(주간 횟수 기록은 보존). 무엇이 끊겼는지는 이름으로 돌려줘
+    FE 가 승인 직후 그대로 보여줄 수 있게 한다 — 조용히 사라지는 게 이 기능의 유일한 위험이다.
+    """
+
+    completed_cells: int = 0
+    promoted_axes: int = 0
+    linked_habits: int = 0
+    dropped_promoted_axes: tuple[str, ...] = ()
+    dropped_linked_habits: tuple[str, ...] = ()
+
+
+async def _carry_over_previous(
+    session: AsyncSession,
+    *,
+    previous: Sequence[GoalNode],
+    new_axes: Mapping[int, GoalNode],
+    new_cells: Mapping[_CellKey, GoalNode],
+) -> MandalaCarryOver:
+    """옛 트리(보관 직전) → 새 트리로 사용자 자산을 옮긴다. 새 노드는 이미 flush 된 상태여야 한다.
+
+    호출 시점이 중요하다 — 습관 UPDATE 가 새 leaf INSERT 보다 먼저 나가면 FK 가 깨진다.
+    """
+    if not previous:
+        return MandalaCarryOver()
+
+    old_axis_by_id = {n.id: n for n in previous if n.depth == 1}
+    new_axis_by_title: dict[str, GoalNode] = {}
+    for node in new_axes.values():
+        new_axis_by_title.setdefault(_match_key(node.title), node)
+
+    # ① 축 승격(promoted_goal_id) — 제목이 살아남은 축으로 옮긴다.
+    promoted = 0
+    dropped_axes: list[str] = []
+    for old in old_axis_by_id.values():
+        if old.promoted_goal_id is None:
+            continue
+        target = new_axis_by_title.get(_match_key(old.title))
+        if target is None:
+            dropped_axes.append(old.title)
+            continue
+        target.promoted_goal_id = old.promoted_goal_id
+        promoted += 1
+
+    # ② 완료 표시(completed_at) — (축 제목, 칸 제목) 이 그대로인 칸만.
+    old_leaves = [n for n in previous if n.depth == 2]
+    old_to_new: dict[uuid.UUID, GoalNode] = {}
+    completed = 0
+    for old in old_leaves:
+        parent = old_axis_by_id.get(old.parent_node_id) if old.parent_node_id else None
+        if parent is None:
+            continue
+        target = new_cells.get((_match_key(parent.title), _match_key(old.title)))
+        if target is None:
+            continue
+        old_to_new[old.id] = target
+        if old.completed_at is not None:
+            target.completed_at = old.completed_at
+            completed += 1
+
+    # ③ 반복형 칸의 습관 링크 — 자리를 찾으면 새 칸으로, 못 찾으면 링크만 끊는다(습관은 산다).
+    linked = 0
+    dropped_habits: list[str] = []
+    habits = await fetch_habits_for_nodes(session, [n.id for n in old_leaves])
+    for old_id, habit in habits.items():
+        target = old_to_new.get(old_id)
+        if target is None:
+            habit.goal_node_id = None
+            dropped_habits.append(habit.title)
+            continue
+        habit.goal_node_id = target.id
+        linked += 1
+
+    return MandalaCarryOver(
+        completed_cells=completed,
+        promoted_axes=promoted,
+        linked_habits=linked,
+        dropped_promoted_axes=tuple(dropped_axes),
+        dropped_linked_habits=tuple(dropped_habits),
+    )
 
 
 async def persist_mandala(
@@ -279,12 +388,16 @@ async def persist_mandala(
     center_why_text: str | None,
     subgoals: Sequence[MandalaSubgoal],
     cells: Sequence[MandalaCell],
-) -> tuple[GoalNode, int]:
-    """편집본 → `goal_nodes` 73행(≤). 반환: (root 노드, 영속 행 수 = 1 + 8 + len(cells)).
+) -> tuple[GoalNode, int, MandalaCarryOver]:
+    """편집본 → `goal_nodes` 73행(≤). 반환: (root, 영속 행 수 = 1 + 8 + len(cells), 승계 결과).
 
     셀이 없는 칸은 만들지 않는다(억지 패딩 금지, §5.6) — `activated` 가 73보다 작을 수 있다.
+
+    이미 트리가 있으면 이 호출이 곧 **다시 세우기**다 — 옛 트리는 보관하고, 사용자가 손으로
+    쌓은 것(완료 표시·축 승격·습관 링크)만 제목이 같은 자리로 옮긴다(`_carry_over_previous`).
     """
-    await _archive_previous_mandala(session, goal_id=goal.id)
+    previous = await _load_active_mandala_nodes(session, goal_id=goal.id)
+    _archive_nodes(previous)
 
     # id 는 flush 로 받지 않고 여기서 미리 채운다(`first_plan_adapter.py` 의 GoalNode 생성과
     # 같은 이유) — 같은 트랜잭션 안에서 자식의 parent_node_id 로 곧바로 써야 하고, DB
@@ -322,6 +435,7 @@ async def persist_mandala(
         subgoal_nodes[sg.order_index] = node
 
     persisted_cells = 0
+    cell_nodes: dict[_CellKey, GoalNode] = {}
     for cell in cells:
         parent = subgoal_nodes.get(cell.subgoal_index)
         if parent is None:  # 방어적 — subgoals 밖의 index 는 무시(있을 수 없지만 조용히 스킵)
@@ -338,11 +452,17 @@ async def persist_mandala(
         node.tree_kind = "mandala"
         node.source = cell.source
         session.add(node)
+        cell_nodes.setdefault((_match_key(parent.title), _match_key(cell.title)), node)
         persisted_cells += 1
 
+    # 승계는 새 노드가 DB 에 들어간 **뒤**다 — `habits.goal_node_id` UPDATE 가 새 leaf INSERT
+    # 보다 먼저 나가면 FK 가 깨진다(같은 flush 안에서 순서를 SQLAlchemy 에 맡기지 않는다).
     await session.flush()
+    carried = await _carry_over_previous(
+        session, previous=previous, new_axes=subgoal_nodes, new_cells=cell_nodes
+    )
     activated = 1 + len(subgoal_nodes) + persisted_cells
-    return root, activated
+    return root, activated, carried
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -753,9 +873,131 @@ async def find_active_axis_label(session: AsyncSession, user_id: uuid.UUID) -> s
     return node.title if node is not None else None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 다시 세우기 사전 확인 (U13) — "지금 누르면 무엇이 어떻게 되는가"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 아직 안 끝난 카드. `_TERMINAL_ACTION_STATUSES` 의 여집합에서 'archived' 만 뺀 것 —
+# 이미 끝났거나 치운 카드는 다시 세우기가 건드릴 게 없다.
+_LIVE_ACTION_STATUSES = ("planned", "in_progress")
+
+
+@dataclass(frozen=True)
+class RebuildPromotedAxis:
+    """다시 세우기가 영향을 주는 승격된 축 1개 — 축과 그 축에서 나온 학기 목표."""
+
+    order_index: int
+    axis_title: str
+    goal_id: uuid.UUID
+    goal_title: str
+    goal_status: str
+    goal_tier: str
+
+
+@dataclass(frozen=True)
+class RebuildLinkedHabit:
+    """다시 세우기가 영향을 주는 반복형 칸 1개 — 칸과 거기 링크된 습관."""
+
+    subgoal_index: int
+    order_index: int
+    cell_title: str
+    habit_id: uuid.UUID
+    habit_title: str
+    frequency_per_week: int
+
+
+@dataclass(frozen=True)
+class MandalaRebuildImpact:
+    """지금 트리에 쌓여 있어 다시 세우기가 건드릴 수 있는 것 전부(읽기 전용, LLM 0콜).
+
+    `persist_mandala` 의 승계는 **제목이 같은 자리**에만 이어붙으므로, 여기 실린 항목이 전부
+    살아남는다는 뜻은 아니다 — 무엇이 걸려 있는지를 승인 **전에** 보여주기 위한 목록이다
+    (승인 **후에** 실제로 무엇이 이어졌는지는 `MandalaCarryOver`).
+    """
+
+    root_node_id: uuid.UUID | None
+    total_cells: int
+    completed_cells: int
+    promoted_axes: list[RebuildPromotedAxis]
+    linked_habits: list[RebuildLinkedHabit]
+    live_action_items: int
+
+    @property
+    def has_tree(self) -> bool:
+        return self.root_node_id is not None
+
+
+async def collect_rebuild_impact(
+    session: AsyncSession, nodes: Sequence[GoalNode]
+) -> MandalaRebuildImpact:
+    """`GET /goals/{id}/mandala/rebuild-preflight`(U13) 본체. `nodes` 는 활성 만다라 트리 전체.
+
+    트리가 없으면 전부 0/빈 목록 — 처음 세우는 것도 같은 경로를 타므로 404 로 막지 않는다
+    (`GET /goals/{id}/mandala` 의 "정상, 그냥 비어 있음" 규약과 같다).
+    """
+    root = next((n for n in nodes if n.depth == 0), None)
+    axes = {n.id: n for n in nodes if n.depth == 1}
+    leaves = [n for n in nodes if n.depth == 2]
+
+    promoted_ids = [n.promoted_goal_id for n in axes.values() if n.promoted_goal_id is not None]
+    goals_by_id = await _fetch_goals_by_ids(session, promoted_ids)
+    promoted_axes = [
+        RebuildPromotedAxis(
+            order_index=n.order_index,
+            axis_title=n.title,
+            goal_id=g.id,
+            goal_title=g.title,
+            goal_status=g.status,
+            goal_tier=g.goal_tier,
+        )
+        for n in sorted(axes.values(), key=lambda x: x.order_index)
+        if n.promoted_goal_id is not None and (g := goals_by_id.get(n.promoted_goal_id)) is not None
+    ]
+
+    habits_by_node = await fetch_habits_for_nodes(session, [n.id for n in leaves])
+    linked_habits = [
+        RebuildLinkedHabit(
+            subgoal_index=axes[n.parent_node_id].order_index,
+            order_index=n.order_index,
+            cell_title=n.title,
+            habit_id=h.id,
+            habit_title=h.title,
+            frequency_per_week=h.frequency_per_week,
+        )
+        for n in leaves
+        if n.parent_node_id in axes and (h := habits_by_node.get(n.id)) is not None
+    ]
+    linked_habits.sort(key=lambda x: (x.subgoal_index, x.order_index))
+
+    actions = await fetch_actions_for_nodes(session, [n.id for n in leaves])
+    return MandalaRebuildImpact(
+        root_node_id=root.id if root is not None else None,
+        total_cells=len(leaves),
+        completed_cells=sum(1 for n in leaves if n.completed_at is not None),
+        promoted_axes=promoted_axes,
+        linked_habits=linked_habits,
+        live_action_items=sum(1 for a in actions if a.status in _LIVE_ACTION_STATUSES),
+    )
+
+
+async def _fetch_goals_by_ids(
+    session: AsyncSession, goal_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, Goal]:
+    """승격된 목표 행 — 보관된 목표는 뺀다(축은 남아 있어도 목표를 치웠으면 걸린 게 없다)."""
+    if not goal_ids:
+        return {}
+    stmt = select(Goal).where(Goal.id.in_(goal_ids), Goal.archived_at.is_(None))
+    return {g.id: g for g in (await session.execute(stmt)).scalars().all()}
+
+
 __all__ = [
+    "MandalaCarryOver",
     "MandalaHabitWeeklyStat",
+    "MandalaRebuildImpact",
     "MandalaWeeklyStat",
+    "RebuildLinkedHabit",
+    "RebuildPromotedAxis",
+    "collect_rebuild_impact",
     "compute_progress",
     "compute_stale_axes",
     "compute_weekly_stat",

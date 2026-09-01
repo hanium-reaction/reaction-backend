@@ -90,6 +90,7 @@ from reaction_backend.schemas.interview import InterviewOutcome, TimeRange
 from reaction_backend.schemas.mandala import (
     MandalaApproveRequest,
     MandalaApproveResponse,
+    MandalaCarryOverSummary,
     MandalaCell,
     MandalaCenterPreview,
     MandalaDraftResponse,
@@ -985,6 +986,19 @@ def _mandala_draft_to_response(draft: PlanDraft) -> MandalaDraftResponse:
     )
 
 
+def _to_carry_over_summary(
+    carried: mandala_adapter.MandalaCarryOver,
+) -> MandalaCarryOverSummary:
+    """`persist_mandala` 의 승계 결과(도메인 dataclass) → 경계 스키마."""
+    return MandalaCarryOverSummary(
+        completed_cells=carried.completed_cells,
+        promoted_axes=carried.promoted_axes,
+        linked_habits=carried.linked_habits,
+        dropped_promoted_axes=list(carried.dropped_promoted_axes),
+        dropped_linked_habits=list(carried.dropped_linked_habits),
+    )
+
+
 def _approved_mandala_response(plan_id: str, payload: dict[str, Any]) -> MandalaApproveResponse:
     """이미 승인된 만다라 Draft 재승인 — 저장 스냅샷으로 멱등 응답(재영속화 없음).
 
@@ -997,6 +1011,7 @@ def _approved_mandala_response(plan_id: str, payload: dict[str, Any]) -> Mandala
         root_node_id=f"node_{payload['root_node_id']}",
         activated=int(payload.get("activated", 0)),
         skipped=int(payload.get("skipped", 0)),
+        carried_over=MandalaCarryOverSummary.model_validate(payload.get("carried_over") or {}),
         activated_at=now_kst(),
     )
 
@@ -1188,7 +1203,7 @@ async def approve_mandala_draft(
         center_why_text = body.center_why_text
         if center_why_text is None:
             center_why_text = payload.get("center", {}).get("why_text")
-        root, activated = await mandala_adapter.persist_mandala(
+        root, activated, carried = await mandala_adapter.persist_mandala(
             session,
             goal=goal,
             center_why_text=center_why_text,
@@ -1197,11 +1212,13 @@ async def approve_mandala_draft(
         )
         activated_at = now_kst()
         skipped = 64 - len(body.cells)
+        carried_over = _to_carry_over_summary(carried)
         draft.payload = {
             **payload,
             "root_node_id": str(root.id),
             "activated": activated,
             "skipped": skipped,
+            "carried_over": carried_over.model_dump(mode="json"),
         }
         await draft_repo.mark_approved(draft, approved_at=activated_at)
         await session.commit()
@@ -1211,6 +1228,7 @@ async def approve_mandala_draft(
         root_node_id=f"node_{root.id}",
         activated=activated,
         skipped=skipped,
+        carried_over=carried_over,
         activated_at=activated_at,
     )
 

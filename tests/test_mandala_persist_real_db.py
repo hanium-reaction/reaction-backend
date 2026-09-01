@@ -34,8 +34,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
+from reaction_backend.db.models.habit import Habit
 from reaction_backend.db.models.user import User
 from reaction_backend.orchestrator import mandala_adapter
+from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.mandala import MandalaCell, MandalaSubgoal
 from tests.conftest import DB_AVAILABLE
 
@@ -123,7 +125,7 @@ async def test_persist_mandala_writes_73_rows_under_real_constraints(
     """
     goal = await _seed_ultimate_goal(real_db_session)
 
-    root, activated = await mandala_adapter.persist_mandala(
+    root, activated, _ = await mandala_adapter.persist_mandala(
         real_db_session,
         goal=goal,
         center_why_text="중앙 이유",
@@ -168,7 +170,7 @@ async def test_reapprove_archives_previous_tree_without_violating_root_unique(
     )
     assert await _active_mandala_count(real_db_session, goal.id) == 73
 
-    _, activated = await mandala_adapter.persist_mandala(
+    _, activated, _ = await mandala_adapter.persist_mandala(
         real_db_session,
         goal=goal,
         center_why_text="2차",
@@ -199,7 +201,7 @@ async def test_duplicate_slot_violates_partial_unique_index(
     이 인덱스가 없으면 재생성 경로의 버그가 한 축에 9칸을 남겨도 조용히 통과한다.
     """
     goal = await _seed_ultimate_goal(real_db_session)
-    root, _ = await mandala_adapter.persist_mandala(
+    root, _, _ = await mandala_adapter.persist_mandala(
         real_db_session,
         goal=goal,
         center_why_text=None,
@@ -230,7 +232,7 @@ async def test_mandala_type_check_rejects_depth_node_type_mismatch(
     이 가드가 없으면 9×9 좌표 전개(§7.3)가 깨진 트리를 FE 가 렌더하려다 죽는다.
     """
     goal = await _seed_ultimate_goal(real_db_session)
-    root, _ = await mandala_adapter.persist_mandala(
+    root, _, _ = await mandala_adapter.persist_mandala(
         real_db_session,
         goal=goal,
         center_why_text=None,
@@ -443,3 +445,143 @@ async def test_fetch_promoted_active_goals_scoped_to_user(real_db_session: Async
     )
 
     assert goals == []
+
+
+# ── 7) 다시 세우기 승계 — FK 순서와 습관 부분 유니크가 걸리는 유일한 자리 ──
+
+
+async def _linked_habit(session: AsyncSession, *, user_id: uuid.UUID, node: GoalNode) -> Habit:
+    """만다라 칸에 링크된 반복형 습관(U12) 1행 — `uq_habits_goal_node_id_active` 대상."""
+    h = Habit()
+    h.id = uuid.uuid4()
+    h.user_id = user_id
+    h.title = "코딩테스트 1일 1문제"
+    h.category = "other"
+    h.frequency_per_week = 5
+    h.minutes_per_session = 30
+    h.time_preference = "anytime"
+    h.priority_level = 3
+    h.goal_node_id = node.id
+    session.add(h)
+    await session.flush()
+    return h
+
+
+async def _active_cell(session: AsyncSession, goal: Goal, title: str) -> GoalNode:
+    return (
+        await session.execute(
+            select(GoalNode).where(
+                GoalNode.goal_id == goal.id,
+                GoalNode.depth == 2,
+                GoalNode.title == title,
+                GoalNode.archived_at.is_(None),
+            )
+        )
+    ).scalar_one()
+
+
+async def test_rebuild_repoints_habit_link_to_the_new_cell(
+    real_db_session: AsyncSession,
+) -> None:
+    """제목이 그대로인 칸이면 습관 링크가 새 leaf 로 옮겨 붙는다 — 실 FK·유니크 위에서.
+
+    이 경로는 fake session 으로는 검증할 수 없다. `habits.goal_node_id` UPDATE 가 새 leaf
+    INSERT 보다 먼저 나가면 FK 위반이고, 옛 링크를 안 끊은 채 새 링크를 걸면
+    `uq_habits_goal_node_id_active`(활성 습관 1개/칸)에 걸린다. 둘 다 인덱스가 있는 DB
+    에서만 빨갛다.
+    """
+    goal = await _seed_ultimate_goal(real_db_session)
+    await mandala_adapter.persist_mandala(
+        real_db_session, goal=goal, center_why_text=None, subgoals=_subgoals(), cells=_cells()
+    )
+    old_cell = await _active_cell(real_db_session, goal, "셀0-0")
+    habit = await _linked_habit(real_db_session, user_id=goal.user_id, node=old_cell)
+
+    _, _, carried = await mandala_adapter.persist_mandala(
+        real_db_session, goal=goal, center_why_text=None, subgoals=_subgoals(), cells=_cells()
+    )
+    await real_db_session.flush()
+
+    new_cell = await _active_cell(real_db_session, goal, "셀0-0")
+    assert new_cell.id != old_cell.id, "다시 세우면 칸은 새 행이다(옛 행은 보관)"
+    assert habit.goal_node_id == new_cell.id
+    assert carried.linked_habits == 1
+    assert carried.dropped_linked_habits == ()
+
+
+async def test_rebuild_unlinks_habit_when_its_cell_disappears(
+    real_db_session: AsyncSession,
+) -> None:
+    """새 트리에 그 칸이 없으면 링크만 끊는다 — 습관 행은 살아 있어야 한다(하드 삭제 금지)."""
+    goal = await _seed_ultimate_goal(real_db_session)
+    await mandala_adapter.persist_mandala(
+        real_db_session, goal=goal, center_why_text=None, subgoals=_subgoals(), cells=_cells()
+    )
+    old_cell = await _active_cell(real_db_session, goal, "셀0-0")
+    habit = await _linked_habit(real_db_session, user_id=goal.user_id, node=old_cell)
+
+    renamed = [
+        MandalaSubgoal(order_index=i, title=f"새축{i}", why_text=None, source="llm")
+        for i in range(8)
+    ]
+    _, _, carried = await mandala_adapter.persist_mandala(
+        real_db_session, goal=goal, center_why_text=None, subgoals=renamed, cells=_cells()
+    )
+    await real_db_session.flush()
+
+    assert habit.goal_node_id is None
+    assert habit.archived_at is None
+    assert carried.linked_habits == 0
+    assert carried.dropped_linked_habits == (habit.title,)
+
+
+async def test_rebuild_carries_promotion_and_completion_to_matching_titles(
+    real_db_session: AsyncSession,
+) -> None:
+    """축 승격(`promoted_goal_id`)과 완료 표시(`completed_at`)는 같은 제목 자리로 이어진다."""
+    goal = await _seed_ultimate_goal(real_db_session)
+    root, _, _ = await mandala_adapter.persist_mandala(
+        real_db_session, goal=goal, center_why_text=None, subgoals=_subgoals(), cells=_cells()
+    )
+    promoted = Goal()
+    promoted.id = uuid.uuid4()
+    promoted.user_id = goal.user_id
+    promoted.title = "이번 학기 구위 올리기"
+    promoted.category = "other"
+    promoted.goal_tier = "focus"
+    promoted.status = "proposed"
+    promoted.is_ultimate = False
+    real_db_session.add(promoted)
+    await real_db_session.flush()
+
+    axis = (
+        await real_db_session.execute(
+            select(GoalNode).where(GoalNode.parent_node_id == root.id, GoalNode.order_index == 0)
+        )
+    ).scalar_one()
+    axis.promoted_goal_id = promoted.id
+    cell = await _active_cell(real_db_session, goal, "셀0-0")
+    cell.completed_at = now_kst()
+    await real_db_session.flush()
+
+    _, _, carried = await mandala_adapter.persist_mandala(
+        real_db_session, goal=goal, center_why_text=None, subgoals=_subgoals(), cells=_cells()
+    )
+    await real_db_session.flush()
+
+    new_axis = (
+        await real_db_session.execute(
+            select(GoalNode).where(
+                GoalNode.goal_id == goal.id,
+                GoalNode.depth == 1,
+                GoalNode.order_index == 0,
+                GoalNode.archived_at.is_(None),
+            )
+        )
+    ).scalar_one()
+    new_cell = await _active_cell(real_db_session, goal, "셀0-0")
+    assert new_axis.promoted_goal_id == promoted.id
+    assert new_cell.completed_at is not None
+    assert (carried.promoted_axes, carried.completed_cells) == (1, 1)
+    # 승격된 목표 자체는 건드리지 않는다 — 축 배지만 새 축으로 옮겨간다.
+    assert promoted.archived_at is None and promoted.status == "proposed"
