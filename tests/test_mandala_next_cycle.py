@@ -12,19 +12,26 @@
 
 from __future__ import annotations
 
+from datetime import time
 from typing import Any
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
 from reaction_backend.api.routes.planning import _max_plan_weeks
+from reaction_backend.db.models.behavioral_profile import BehavioralProfile
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.llm import aiClient
-from reaction_backend.orchestrator import mandala_cycle
+from reaction_backend.orchestrator import interview_adapter, mandala_cycle
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.interview import GoalCandidate
-from tests.conftest import DEMO_USER_UUID, FakeGoalRepo, FakeInterviewRepo
+from tests.conftest import (
+    DEMO_USER_UUID,
+    FakeGoalRepo,
+    FakeInterviewRepo,
+    FakeProfileRepo,
+)
 from tests.test_planning_route import (
     _outcome,
     _PromotedTitleSession,
@@ -33,6 +40,18 @@ from tests.test_planning_route import (
 )
 
 # ─────────────────────────── 시드 ───────────────────────────
+
+
+def _behavioral(*, start: time | None, end: time | None) -> BehavioralProfile:
+    """온보딩·설정에서 저장된 프로필 1행 — 활동 시간대의 지속 저장소."""
+    b = BehavioralProfile()
+    b.user_id = DEMO_USER_UUID
+    b.energy_cycle = "evening"
+    b.attention_span = 50
+    b.time_chunk_preference = "60"
+    b.preferred_start_time = start
+    b.preferred_end_time = end
+    return b
 
 
 def _ultimate(repo: FakeGoalRepo) -> Goal:
@@ -261,10 +280,61 @@ def test_next_cycle_rejects_a_cell(
     assert res.json()["field"] == "nodeId"
 
 
-def test_next_cycle_requires_a_plan_interview_instead_of_inventing_availability(
-    client: TestClient, fake_goal_repo: FakeGoalRepo
+def test_next_cycle_falls_back_to_the_onboarding_profile(
+    client: TestClient,
+    fake_goal_repo: FakeGoalRepo,
+    fake_profile_repo: FakeProfileRepo,
+    monkeypatch: Any,
 ) -> None:
-    """가용 시간을 지어내지 않는다 — 인터뷰가 없으면 422 로 안내(v2.01 교훈)."""
+    """계획 인터뷰가 없어도 **온보딩·설정에 저장된 활동 시간대**가 있으면 계획을 연다.
+
+    지어내는 게 아니라 사용자가 직접 넣은 값을 되돌리는 것이다 — 만다라트만 하고 계획
+    인터뷰는 안 한 사용자가 축을 못 여는 게 이 경로의 이유다.
+    """
+    monkeypatch.setattr(aiClient, "run", _stub())
+    fake_profile_repo._behavioral[DEMO_USER_UUID] = _behavioral(start=time(7, 0), end=time(22, 0))
+    goal = _ultimate(fake_goal_repo)
+    ids = _seed_tree(fake_goal_repo, goal)
+
+    res = client.post("/plans/mandala/next-cycle", json={"nodeId": f"node_{ids['axis'].id}"})
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["seedSource"] == "profile"
+    assert any("활동 시간대" in w for w in body["warnings"]), "무엇으로 배치했는지 알려준다"
+    assert body["axis"]["title"] == "개발 실력"
+
+
+def test_next_cycle_prefers_the_interview_over_the_profile(
+    client: TestClient,
+    fake_goal_repo: FakeGoalRepo,
+    fake_interview_repo: FakeInterviewRepo,
+    fake_profile_repo: FakeProfileRepo,
+    monkeypatch: Any,
+) -> None:
+    """인터뷰가 있으면 그게 이긴다 — 프로필은 인터뷰 답의 파생이라 원본이 더 많은 걸 안다."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    _seed_finished_session(fake_interview_repo)
+    fake_profile_repo._behavioral[DEMO_USER_UUID] = _behavioral(start=time(7, 0), end=time(22, 0))
+    goal = _ultimate(fake_goal_repo)
+    ids = _seed_tree(fake_goal_repo, goal)
+
+    res = client.post("/plans/mandala/next-cycle", json={"nodeId": f"node_{ids['axis'].id}"})
+
+    assert res.status_code == 200, res.text
+    assert res.json()["seedSource"] == "interview"
+    assert not any("활동 시간대" in w for w in res.json()["warnings"])
+
+
+def test_next_cycle_422_when_neither_interview_nor_activity_window_exists(
+    client: TestClient, fake_goal_repo: FakeGoalRepo, fake_profile_repo: FakeProfileRepo
+) -> None:
+    """활동 시간대를 **어디서도** 모르면 지어내지 않고 422 로 안내한다(v2.01 교훈).
+
+    프로필 행은 있지만 활동창이 비어 있는 경우까지 포함한다 — 피크·집중 길이는 기본값으로
+    굴러가지만 활동창은 "언제 배치해도 되는가" 라, 모르면 배치가 통째로 추측이 된다.
+    """
+    fake_profile_repo._behavioral[DEMO_USER_UUID] = _behavioral(start=None, end=None)
     goal = _ultimate(fake_goal_repo)
     ids = _seed_tree(fake_goal_repo, goal)
 
@@ -272,7 +342,7 @@ def test_next_cycle_requires_a_plan_interview_instead_of_inventing_availability(
 
     assert res.status_code == 422, res.text
     assert res.json()["code"] == "COMMON_VALIDATION_ERROR"
-    assert "인터뷰" in res.json()["message"]
+    assert "활동 시간대" in res.json()["message"]
 
 
 def test_next_cycle_can_skip_cells_as_milestones(
@@ -329,3 +399,43 @@ async def test_axis_seeded_outcome_gets_the_two_week_cap() -> None:
 
     assert seeded.core_goals[0].title == promoted.title
     assert weeks == 2, "만다라 축에서 연 주기는 2주여야 한다(ADR-0008 §3)"
+
+
+# ─────────────────── 프로필 → 슬롯 (온보딩 폴백의 심장) ───────────────────
+
+
+def test_slots_from_profile_carries_the_saved_activity_window() -> None:
+    """저장된 활동 시간대가 그대로 슬롯이 된다 — 기본값(09:00~23:00)으로 떨어지면 안 된다."""
+    behavioral = _behavioral(start=time(7, 0), end=time(22, 30))
+
+    slots = mandala_cycle.slots_from_profile(
+        behavioral=behavioral, interaction=None, focus_mode_prefs={}
+    )
+
+    assert slots["time.activity_window"] == {
+        "type": "range",
+        "start": "07:00",
+        "end": "22:30",
+    }
+    outcome = interview_adapter.build_outcome(
+        session_id="profile_test",
+        slot_answers=slots,
+        ambiguity_final=0.0,
+        end_reason="completed",
+        analysis_source="rule",
+    )
+    assert outcome.availability.activity_window.start == "07:00"
+    assert outcome.availability.activity_window.end == "22:30"
+    assert outcome.preferences.focus_duration_min == 50, "집중 길이도 프로필에서 온다"
+
+
+def test_slots_from_profile_omits_activity_window_when_profile_has_none() -> None:
+    """반쪽짜리 프로필로 창을 지어내지 않는다 — 빈 슬롯은 `unresolved_slots` 로 드러난다."""
+    slots = mandala_cycle.slots_from_profile(
+        behavioral=_behavioral(start=time(7, 0), end=None), interaction=None, focus_mode_prefs={}
+    )
+
+    assert "time.activity_window" not in slots
+    assert mandala_cycle.has_usable_profile(_behavioral(start=time(7, 0), end=None)) is False
+    assert mandala_cycle.has_usable_profile(None) is False
+    assert mandala_cycle.has_usable_profile(_behavioral(start=time(7, 0), end=time(22, 0))) is True

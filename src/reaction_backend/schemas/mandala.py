@@ -326,6 +326,10 @@ class MandalaNextCycleResponse(FirstPlanResponse):
     """
 
     axis: MandalaCycleAxis
+    # 이 계획의 정체성·활동 시간대·선호가 어디서 왔는지. "interview" = 최근 계획 인터뷰 답
+    # 그대로 / "profile" = 인터뷰가 아직 없어 온보딩·설정에 저장된 프로필에서 되돌린 값
+    # (그 경우 `warnings` 에 그 사실이 실린다).
+    seed_source: Literal["interview", "profile"] = "interview"
 
 
 class MandalaNodeUpdateRequest(CamelModel):

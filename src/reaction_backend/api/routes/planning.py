@@ -54,6 +54,7 @@ from reaction_backend.orchestrator import (
     first_plan_adapter,
     first_plan_milestones,
     inbox_resources,
+    interview_adapter,
     interview_projection,
     mandala,
     mandala_adapter,
@@ -77,6 +78,7 @@ from reaction_backend.repositories.goal_repo import GoalRepo, get_goal_repo
 from reaction_backend.repositories.inbox_repo import InboxRepo, get_inbox_repo
 from reaction_backend.repositories.interview_repo import InterviewRepo, get_interview_repo
 from reaction_backend.repositories.plan_draft_repo import PlanDraftRepo, get_plan_draft_repo
+from reaction_backend.repositories.profile_repo import ProfileRepo, get_profile_repo
 from reaction_backend.repositories.review_repo import ReviewRepo, get_review_repo
 from reaction_backend.repositories.scheduled_block_repo import (
     ScheduledBlockRepo,
@@ -148,6 +150,7 @@ logger = logging.getLogger(__name__)
 RepoDep = Annotated[InterviewRepo, Depends(get_interview_repo)]
 UserRepoDep = Annotated[UserRepo, Depends(get_user_repo)]
 DraftRepoDep = Annotated[PlanDraftRepo, Depends(get_plan_draft_repo)]
+ProfileRepoDep = Annotated[ProfileRepo, Depends(get_profile_repo)]
 BlockRepoDep = Annotated[ScheduledBlockRepo, Depends(get_scheduled_block_repo)]
 ActionRepoDep = Annotated[ActionItemRepo, Depends(get_action_item_repo)]
 PolicyRepoDep = Annotated[TimePolicyRepo, Depends(get_time_policy_repo)]
@@ -1337,12 +1340,56 @@ async def _promote_axis_for_cycle(
     return goal, True
 
 
+async def _cycle_seed_outcome(
+    user: User, repo: InterviewRepo, profile_repo: ProfileRepo
+) -> tuple[InterviewOutcome, Literal["interview", "profile"]]:
+    """U14 시드 — ① 최근 계획 인터뷰 → ② 온보딩 프로필 → ③ 둘 다 없으면 422.
+
+    ①이 언제나 우선이다. 프로필은 인터뷰 답의 **파생**(`persist_profile_from_outcome`)이라
+    원본이 있으면 원본을 쓴다 — 프로필엔 목표별 슬롯(주당 시간·세션 길이)이 없어 정보가 준다.
+
+    ②는 온보딩·설정에서 활동 시간대를 직접 넣었지만 계획 인터뷰는 아직 안 한 사용자를 위한
+    길이다. 지어내는 게 아니라 사용자가 넣은 값을 되돌리는 것이고, 못 채운 슬롯은
+    `build_outcome` 의 문서화된 기본값 + `unresolved_slots` 로 드러난다.
+
+    ③ 활동 시간대를 어디서도 모르면 422 로 인터뷰를 안내한다 — 배치할 창을 모르는 채로 만든
+    계획은 추측이라, Draft 로 보여줄 값어치가 없다.
+    """
+    latest = await repo.get_latest_finished(user.id)
+    if latest is not None:
+        outcome = await _project_session_outcome(latest, repo)
+        return _apply_edited_availability(outcome, user), "interview"
+
+    behavioral = await profile_repo.get_behavioral(user.id)
+    if not mandala_cycle.has_usable_profile(behavioral):
+        raise ApiError(
+            ErrorCode.COMMON_VALIDATION_ERROR,
+            "활동 시간대를 아직 몰라요. 계획 인터뷰를 진행하거나 설정에서 활동 시간대를 정해 주세요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+        )
+    interaction = await profile_repo.get_interaction(user.id)
+    slots = mandala_cycle.slots_from_profile(
+        behavioral=behavioral,
+        interaction=interaction,
+        focus_mode_prefs=user.focus_mode_preferences or {},
+    )
+    outcome = interview_adapter.build_outcome(
+        session_id=f"profile_{user.id}",  # 인터뷰 세션이 아니다 — 출처를 id 에 남긴다
+        slot_answers=slots,
+        ambiguity_final=0.0,
+        end_reason="completed",
+        analysis_source="rule",  # LLM 정규화를 거친 값이 아니라 저장된 프로필 그대로
+    )
+    return _apply_edited_availability(outcome, user), "profile"
+
+
 @router.post("/mandala/next-cycle")
 async def open_mandala_next_cycle(
     body: MandalaNextCycleRequest,
     user: CurrentUser,
     goal_repo: GoalRepoDep,
     repo: RepoDep,
+    profile_repo: ProfileRepoDep,
     draft_repo: DraftRepoDep,
     session: SessionDep,
 ) -> MandalaNextCycleResponse:
@@ -1380,14 +1427,7 @@ async def open_mandala_next_cycle(
             field="nodeId",
         )
 
-    base = await repo.get_latest_finished(user.id)
-    if base is None:
-        raise ApiError(
-            ErrorCode.COMMON_VALIDATION_ERROR,
-            "계획 인터뷰를 먼저 진행해 주세요. 활동 시간대와 선호를 알아야 계획을 배치할 수 있어요.",
-            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-        )
-    base_outcome = _apply_edited_availability(await _project_session_outcome(base, repo), user)
+    base_outcome, seed_source = await _cycle_seed_outcome(user, repo, profile_repo)
 
     promoted, newly = await _promote_axis_for_cycle(
         session, goal_repo, node=node, user_id=user.id, goal_tier=body.goal_tier
@@ -1417,8 +1457,14 @@ async def open_mandala_next_cycle(
         draft_repo=draft_repo,
         session=session,
     )
+    if seed_source == "profile":
+        plan.warnings = [
+            *plan.warnings,
+            "계획 인터뷰 대신 저장된 활동 시간대로 배치했어요. 시간이 안 맞으면 설정에서 고쳐 주세요.",
+        ]
     return MandalaNextCycleResponse(
         **plan.model_dump(by_alias=False),
+        seed_source=seed_source,
         axis=MandalaCycleAxis(
             node_id=f"{_NODE_PREFIX}{node.id}",
             order_index=node.order_index,
