@@ -64,3 +64,6 @@ docker-data/
 
 # L1-7B v4 실 LLM 호출 산출물 — 위와 같은 이유.
 eval/l1_7b_v4_*.jsonl
+
+# M33 3-arm 실 LLM 호출 산출물 — 위와 같은 이유.
+eval/l1_7b_m33_*.jsonl
