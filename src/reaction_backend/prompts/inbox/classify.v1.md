@@ -12,12 +12,9 @@
 
 규칙:
 - 한 카테고리만 선택.
-- confidence 가 0.5 미만이면 user_category override 가 필요함을 명시.
+- 애매하면 `other` 로 둔다 — 사용자가 화면에서 직접 고칠 수 있다. 억지로 맞히지 마라.
 
 응답 형식 (Structured Output / JSON):
 {
-  "ai_category_guess": "<study|project|health|routine|schedule|other>",
-  "confidence": <0.0-1.0>,
-  "suggested_title": "<10자 내 요약 제목>",
-  "needs_user_override": <true|false>
+  "ai_category_guess": "<study|project|health|routine|schedule|other>"
 }

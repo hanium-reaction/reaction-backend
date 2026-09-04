@@ -217,3 +217,51 @@ def test_restore_not_found(client: TestClient) -> None:
     resp = client.post("/inbox/inbox_99999999-9999-4999-8999-999999999999/restore")
     assert resp.status_code == 404
     assert resp.json()["code"] == "INBOX_NOT_FOUND"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 분류 스키마는 **쓰는 것만** 요구한다 (#428)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_classification_schema_only_asks_for_what_is_used() -> None:
+    """⚠️ LLM 이 **아무도 안 읽는 값**을 만들면, 틀려도 조용하다.
+
+    원래 넷이었는데 셋을 아무도 읽지 않았다(최초 구현 #40 이후 지금까지):
+
+    - `needs_user_override` — `confidence < 0.5` 의 **파생값**. LLM 이 자기 출력에서
+      유도되는 불리언을 스스로 계산했고, 어긋나도(confidence 0.3 인데 false) 못 잡았다.
+    - `confidence` — 그 파생의 근거였을 뿐 읽는 곳이 없다.
+    - `suggested_title` — 읽는 곳이 없다. fallback 이 사용자 입력을 되돌려주던 경로이기도 했다.
+
+    되살릴 거라면 **쓰는 쪽과 함께** 되살린다 — 이 테스트가 그 약속이다.
+    """
+    from reaction_backend.schemas.inbox import InboxClassification
+
+    assert set(InboxClassification.model_fields) == {"ai_category_guess"}
+
+
+def test_classification_prompt_matches_the_schema() -> None:
+    """프롬프트가 스키마에 없는 필드를 요구하면 LLM 이 버려질 값을 만든다."""
+    from reaction_backend.prompts import registry
+
+    body = registry.get("inbox/classify").body
+    for gone in ("confidence", "suggested_title", "needs_user_override"):
+        assert gone not in body, f"프롬프트가 아직 `{gone}` 을 요구한다"
+    assert "ai_category_guess" in body
+
+
+def test_rule_fallback_does_not_echo_user_input() -> None:
+    """룰 폴백이 사용자 입력을 되돌려주지 않는다.
+
+    예전엔 `suggested_title=raw_text[:10]` 으로 캡처 원문을 그대로 실었다 —
+    그게 fallback 이 금지어 필터를 우회하던 유일한 실 경로였다(#20 DoD 8).
+    """
+    from reaction_backend.api.routes.inbox import _rule_fallback_classify
+
+    raw = "실패한 프로젝트를 다시 살려보자"
+    got = _rule_fallback_classify(raw)
+
+    # 카테고리 하나뿐이고, 원문 조각이 어디에도 실리지 않는다.
+    assert set(got.model_dump()) == {"ai_category_guess"}
+    assert raw[:10] not in str(got.model_dump())

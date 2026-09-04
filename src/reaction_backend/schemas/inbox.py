@@ -79,12 +79,24 @@ class InboxClassification(CamelModel):
     """LLM Structured Output — `aiClient.run("inbox/classify")` 응답 schema (내부 사용).
 
     Tool Executor 가 강제 검증. fallback 룰도 같은 schema 로 반환.
+
+    ## ⚠️ 필드가 하나뿐인 이유 (#428)
+
+    원래 넷이었는데 **셋을 아무도 읽지 않았다.** 최초 구현(#40) 이후 지금까지
+    `ai_category_guess` 만 소비된다 — DB 에 컬럼이 없고, API 응답에도 안 나가고,
+    FE 도 `aiCategoryGuess` 만 본다.
+
+    | 필드 | 왜 뺐나 |
+    |---|---|
+    | `needs_user_override` | **`confidence < 0.5` 의 파생값**이다. LLM 이 자기 출력에서 유도되는 불리언을 스스로 계산했고, 어긋나도(예: confidence 0.3 인데 false) 아무도 못 잡았다 |
+    | `confidence` | 그 파생의 근거였을 뿐 읽는 곳이 없다 |
+    | `suggested_title` | 읽는 곳이 없다. **fallback 이 `raw_text[:10]` 로 사용자 입력을 되돌려주던 유일한 경로**이기도 했다(`test_banned_words` 참고) |
+
+    되살릴 거라면 **쓰는 쪽과 함께** 되살린다 — 안 그러면 LLM 이 매 호출 아무도 안 읽는
+    값을 만들고, 그 값이 틀려도 조용하다.
     """
 
     ai_category_guess: InboxCategory
-    confidence: float = Field(ge=0.0, le=1.0)
-    suggested_title: str
-    needs_user_override: bool
 
 
 class InboxResourceDetail(CamelModel):

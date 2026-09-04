@@ -141,8 +141,12 @@ async def test_fallback_value_is_also_sanitized() -> None:
 
     회귀: `_fallback` 은 `_resolve_fallback` 결과를 **필터 없이** 반환했다. 대부분의
     fallback 은 신뢰된 카탈로그 템플릿이라 무해했지만, 사용자 입력을 되돌려주는 경로가
-    있다 — inbox 의 `suggested_title=raw_text[:10]`. 사용자가 "실패한 프로젝트"를 캡처하면
+    있었다 — inbox 의 `suggested_title=raw_text[:10]`. 사용자가 "실패한 프로젝트"를 캡처하면
     LLM 이 죽은 순간(키 없음·timeout) 그 문구가 필터를 우회해 응답에 실렸다.
+
+    ⚠️ **그 경로는 지금 없다** — `suggested_title` 은 아무도 읽지 않아 제거됐다(#428).
+    그래도 이 가드는 남긴다: 사용자 입력을 되돌려주는 fallback 이 다시 생길 수 있고,
+    그때 필터가 없으면 같은 구멍이 조용히 열린다. 그래서 여기서는 그 모양을 **모사**한다.
 
     실제 `aiClient.run` 을 태운다(provider 미가용 → fallback 경로). 스텁이 아니다.
     """

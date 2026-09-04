@@ -82,19 +82,20 @@ _KEYWORD_MAP: tuple[tuple[str, InboxCategory], ...] = (
 
 
 def _rule_fallback_classify(raw_text: str) -> InboxClassification:
-    """LLM 실패 시 키워드 매칭. confidence=0 → 항상 사용자 override 권장."""
+    """LLM 실패 시 키워드 매칭 — 카테고리 하나만 돌려준다.
+
+    ⚠️ 예전엔 `suggested_title=raw_text[:10]` 로 **사용자 입력을 그대로 되돌려줬다.**
+    그게 fallback 이 금지어 필터를 우회하던 유일한 실 경로였다(#20 DoD 8).
+    지금은 그 필드 자체가 없다 — 필터는 그대로 두되(다른 경로가 생길 수 있다) 이 경로는
+    닫혔다.
+    """
     text_lower = raw_text.lower()
     category: InboxCategory = "other"
     for kw, cat in _KEYWORD_MAP:
         if kw in text_lower:
             category = cat
             break
-    return InboxClassification(
-        ai_category_guess=category,
-        confidence=0.0,
-        suggested_title=raw_text[:10],
-        needs_user_override=True,
-    )
+    return InboxClassification(ai_category_guess=category)
 
 
 def _to_schema(item: InboxItemModel) -> InboxItem:
