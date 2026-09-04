@@ -469,6 +469,24 @@ class FakeGoalRepo:
             n for n in self._nodes.get(goal_id, []) if getattr(n, "tree_kind", "plan") == tree_kind
         ]
 
+    async def goal_ids_with_plan(self, goal_ids: Any) -> set[UUID]:
+        """실 repo 와 **같은 판정**이어야 한다 — 계획 트리(plan, 미보관)의 존재.
+
+        가짜가 다른 규칙을 쓰면 라우트 테스트가 초록인 채로 프로덕션이 틀린다.
+        `list_nodes` 와 같은 필터를 쓰고, 보관된 노드는 뺀다.
+        """
+        ids = set(goal_ids)
+        return {
+            gid
+            for gid, nodes in self._nodes.items()
+            if gid in ids
+            and any(
+                getattr(n, "tree_kind", "plan") == "plan"
+                and getattr(n, "archived_at", None) is None
+                for n in nodes
+            )
+        }
+
     async def get_by_id(self, user_id: UUID, goal_id: UUID) -> Goal | None:
         g = self._items.get(goal_id)
         if g is None or g.user_id != user_id or g.archived_at is not None:

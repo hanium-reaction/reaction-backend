@@ -79,7 +79,12 @@ _TIER_LIMITS: dict[str, int] = {"focus": 3, "maintain": 5}  # parked 자유 (Dev
 _CATEGORIES = frozenset(GOAL_CATEGORY_VALUES)
 
 
-def _to_schema(goal: GoalModel, *, promoted_from_axis: str | None = None) -> Goal:
+def _to_schema(
+    goal: GoalModel, *, promoted_from_axis: str | None = None, has_plan: bool = True
+) -> Goal:
+    """`has_plan` 기본값이 `True` 인 이유: 단건 응답(create/update/park)은 계획 트리를
+    조회하지 않는다. 기본값을 `False` 로 두면 방금 만든 목표가 **미계획으로 잘못 칠해진다** —
+    목록 새로고침 전까지. 모르는 것을 "없다" 로 단정하지 않는다."""
     return Goal(
         goal_id=f"{_ID_PREFIX}{goal.id}",
         title=goal.title,
@@ -89,6 +94,7 @@ def _to_schema(goal: GoalModel, *, promoted_from_axis: str | None = None) -> Goa
         deadline=goal.deadline.isoformat() if goal.deadline is not None else None,
         estimated_minutes=goal.estimated_minutes,
         status=goal.status,
+        has_plan=has_plan,
         is_ultimate=goal.is_ultimate,
         promoted_from_axis=promoted_from_axis,
     )
@@ -168,11 +174,20 @@ async def list_goals(user: CurrentUser, repo: RepoDep, session: SessionDep) -> G
     `GET /goals/{id}/mandala` 를 따로 부르지 않도록 한 번에 조회.
     """
     items = await repo.list_active(user.id)
-    axis_titles = await mandala_adapter.fetch_promoted_axis_titles(session, [g.id for g in items])
+    goal_ids = [g.id for g in items]
+    axis_titles = await mandala_adapter.fetch_promoted_axis_titles(session, goal_ids)
+    # 계획 유무는 **한 번에** 묻는다 — 카드마다 조회하면 N+1 이다(축 배지와 같은 이유).
+    planned = await repo.goal_ids_with_plan(goal_ids)
     by_tier: dict[str, list[Goal]] = {"focus": [], "maintain": [], "parked": []}
     for g in items:
         if g.goal_tier in by_tier:
-            by_tier[g.goal_tier].append(_to_schema(g, promoted_from_axis=axis_titles.get(g.id)))
+            by_tier[g.goal_tier].append(
+                _to_schema(
+                    g,
+                    promoted_from_axis=axis_titles.get(g.id),
+                    has_plan=g.id in planned,
+                )
+            )
     return GoalsByTier(
         focus=by_tier["focus"],
         maintain=by_tier["maintain"],

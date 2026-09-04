@@ -21,7 +21,16 @@ class Goal(CamelModel):
     priority_level: int
     deadline: str | None  # YYYY-MM-DD
     estimated_minutes: int | None
-    status: str  # active | archived | completed
+    status: str  # active | archived | completed | proposed
+    # 이 목표에 **이번 주기 계획 트리가 있는가**. `GET /goals` 에서만 채운다(목록 조회 시점에
+    # 한 번에 묻는다 — `GoalRepo.goal_ids_with_plan`). 그 외 응답은 기본값 `True` 로 둬서
+    # 단건 응답이 카드를 **미계획으로 잘못 칠하지 않게** 한다(다음 목록 새로고침이 채운다).
+    #
+    # ⚠️ `status` 로 대신할 수 없다. 계획 승인은 인터뷰가 뽑은 목표를 **전부** `active` 로
+    # 승격하는데 계획은 heaviest **하나**에만 생긴다 — 실측으로 계획 없는 active 가 24건.
+    # "미계획" 배지는 이 값 하나로 판정한다: `proposed` 는 정의상 계획이 없으므로
+    # `hasPlan=false` 가 **두 경우를 모두 덮는다**(인터뷰만 한 목표 + 계획을 못 받은 목표).
+    has_plan: bool = True
     # PR7 additive — S26 이 parked 목표 카드에 만다라 진입점을, 승격 목표 카드에 축 배지를
     # 달 수 있게. `GET /goals/{id}/mandala` 를 매 카드마다 probe 하는 N+1 을 피한다.
     is_ultimate: bool = False

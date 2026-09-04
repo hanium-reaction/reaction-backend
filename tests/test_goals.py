@@ -321,3 +321,91 @@ def await_create_proposed(repo: FakeGoalRepo, *, tier: str) -> Any:
     g.archived_at = None
     repo._items[g.id] = g
     return g
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# hasPlan — "미계획" 배지의 근거 (#440)
+#
+# ⚠️ `status` 로는 판정할 수 없다. 계획 승인은 인터뷰가 뽑은 목표를 **전부** `active` 로
+# 승격하는데(`first_plan_adapter.materialize_goals`) 계획은 heaviest **하나**에만 생긴다 —
+# 로컬 실측으로 계획 없는 active 목표가 **24건**이었고, 그래서 배지가 사라졌다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _seed_goal_for_has_plan(
+    fake_goal_repo: FakeGoalRepo, *, title: str, status: str = "active"
+) -> GoalModel:
+    g = GoalModel()
+    g.id = uuid4()
+    g.user_id = DEMO_USER_UUID
+    g.title = title
+    g.category = "study"
+    g.goal_tier = "focus"
+    g.priority_level = 1
+    g.status = status
+    g.is_ultimate = False
+    g.archived_at = None
+    fake_goal_repo._items[g.id] = g
+    return g
+
+
+class _Node:
+    def __init__(self, *, tree_kind: str = "plan", archived_at: Any = None) -> None:
+        self.tree_kind = tree_kind
+        self.archived_at = archived_at
+
+
+def test_list_goals_marks_a_planned_goal(client: TestClient, fake_goal_repo: FakeGoalRepo) -> None:
+    g = _seed_goal_for_has_plan(fake_goal_repo, title="계획 있는 목표")
+    fake_goal_repo._nodes[g.id] = [_Node()]
+
+    body = client.get("/goals").json()
+    assert [x["hasPlan"] for x in body["focus"]] == [True]
+
+
+def test_list_goals_marks_an_active_goal_without_a_plan_as_unplanned(
+    client: TestClient, fake_goal_repo: FakeGoalRepo
+) -> None:
+    """⚠️ **이 케이스가 #440 의 전부다.** 승인이 계획 없는 목표까지 active 로 올린다."""
+    _seed_goal_for_has_plan(fake_goal_repo, title="계획 없는 active")
+
+    body = client.get("/goals").json()
+    assert [x["hasPlan"] for x in body["focus"]] == [False]
+
+
+def test_list_goals_marks_a_proposed_goal_as_unplanned(
+    client: TestClient, fake_goal_repo: FakeGoalRepo
+) -> None:
+    """`proposed` 는 정의상 계획이 없다 — 한 판정이 두 경우를 모두 덮는다."""
+    _seed_goal_for_has_plan(fake_goal_repo, title="인터뷰만 한 목표", status="proposed")
+
+    body = client.get("/goals").json()
+    assert [x["hasPlan"] for x in body["focus"]] == [False]
+
+
+def test_list_goals_ignores_archived_and_mandala_trees(
+    client: TestClient, fake_goal_repo: FakeGoalRepo
+) -> None:
+    """보관된 계획 트리와 만다라 73칸은 "계획" 이 아니다."""
+    from datetime import UTC, datetime
+
+    g1 = _seed_goal_for_has_plan(fake_goal_repo, title="보관된 트리만")
+    fake_goal_repo._nodes[g1.id] = [_Node(archived_at=datetime.now(UTC))]
+    g2 = _seed_goal_for_has_plan(fake_goal_repo, title="만다라 트리만")
+    fake_goal_repo._nodes[g2.id] = [_Node(tree_kind="mandala")]
+
+    body = client.get("/goals").json()
+    assert {x["title"]: x["hasPlan"] for x in body["focus"]} == {
+        "보관된 트리만": False,
+        "만다라 트리만": False,
+    }
+
+
+def test_single_goal_responses_do_not_claim_unplanned(client: TestClient) -> None:
+    """단건 응답(create)은 계획 트리를 조회하지 않는다 — 기본값이 `True` 여야 한다.
+
+    기본값을 `False` 로 두면 **방금 만든 목표가 미계획으로 잘못 칠해진다**(목록 새로고침
+    전까지). 모르는 것을 "없다" 로 단정하지 않는다.
+    """
+    body = _new_goal(client, title="새 목표")
+    assert body["hasPlan"] is True
