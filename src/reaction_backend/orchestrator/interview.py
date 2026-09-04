@@ -52,9 +52,11 @@ from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator import interview_adapter, ultimate_adapter
 from reaction_backend.orchestrator.interview_catalog import (
     CATALOGS,
+    GLOBAL_SCOPE_HINT,
     PLAN_CATALOG,
     InterviewSlot,
     canonical_chip_values,
+    is_goal_scoped,
 )
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.interview import (
@@ -420,8 +422,16 @@ async def ask_question(state: InterviewState, config: RunnableConfig) -> Intervi
             "statement": _answer_text(state["slot_answers"].get("ultimate.statement")),
         }
     else:
+        # ⚠️ **목표별 슬롯이 아니면 목표 이름을 아예 넘기지 않는다.**
+        # 예전엔 슬롯 종류와 무관하게 늘 넘기고 프롬프트가 "goals. 로 시작하지 않으면 절대
+        # 넣지 마라" 를 산문으로 가르쳤다 — 그 규칙 자체는 실측 회귀의 가드라 살아 있지만
+        # (#187 과교정: 실 LLM 3회에 8건), 규칙은 **어길 수 있고 어겨도 조용하다.**
+        # 이름을 안 주면 어길 이름이 없다. 룰 폴백은 이미 `default_questions` 의 `{goal}`
+        # 자리로 같은 분기를 하고 있었다 — LLM 경로만 안 하고 있던 것이다.
         variables = {
-            "goal_title": _heaviest_goal_hint(state),
+            "goal_title": (
+                _heaviest_goal_hint(state) if is_goal_scoped(slot_key) else GLOBAL_SCOPE_HINT
+            ),
             "answered_context": _answered_context(state),
             "ambiguous_slot": slot_key,
             "slot_label": slot_label,

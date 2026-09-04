@@ -569,10 +569,38 @@ def canonical_chip_values(
     return out
 
 
+GLOBAL_SCOPE_HINT = "(전역 설정 — 특정 목표가 아니다. 목표 이름을 문장에 넣지 마라.)"
+"""목표별이 **아닌** 슬롯을 물을 때 `{{goal_title}}` 자리에 넣는 값.
+
+⚠️ 여기에 **실제 목표 이름이 절대 들어가면 안 된다.** `identity.*` · `time.*` · `recovery.*`
+는 모든 목표에 공통으로 적용되는 전역 설정인데, 질문에 목표 이름이 붙으면 사용자는 그
+설정이 **그 목표에만 적용된다고 오해한다**(#187 과교정 실측: 실 LLM 3회에 8건).
+
+프롬프트에도 같은 규칙이 산문으로 있다. 그건 **측정된 회귀의 가드**라 지우지 않는다 —
+이 상수는 그 위에 **이름을 아예 주지 않는** 층을 하나 더 얹는 것이다. 규칙을 어기려 해도
+어길 이름이 없다.
+"""
+
+
+def is_goal_scoped(slot_key: str) -> bool:
+    """이 슬롯이 **특정 목표 하나**에 대한 질문인가.
+
+    `goals.list`(여러 목표를 모으는 자리)와 `goals.heaviest`(그중 하나를 고르는 자리)는
+    **제외**다 — 보기 중 하나를 질문의 대상 명사로 지목하면 나머지를 배제하게 된다.
+
+    ⚠️ 이 판정은 `default_questions` 의 `{goal}` 자리와 **같은 집합이어야 한다**(룰 폴백이
+    거기서 이름을 채운다). 두 경로가 갈리면 LLM 질문과 폴백 질문이 다른 대상을 가리킨다 —
+    `tests/test_interview_goal_scope.py` 가 그 일치를 못 박는다.
+    """
+    return slot_key.startswith("goals.") and slot_key not in {"goals.list", "goals.heaviest"}
+
+
 CATALOGS: dict[str, InterviewCatalog] = {"plan": PLAN_CATALOG, "ultimate": ULTIMATE_CATALOG}
 
 __all__ = [
     "CATALOGS",
+    "GLOBAL_SCOPE_HINT",
+    "is_goal_scoped",
     "canonical_chip",
     "canonical_chip_values",
     "PLAN_CATALOG",
