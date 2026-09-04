@@ -140,6 +140,29 @@ def approved_from_findings(
     return not any(f.severity >= threshold for f in findings)
 
 
+class ContinuationCard(BaseModel):
+    """`continuation_fill` 이 자리표시자 한 장에 채워 넣는 내용 (#454).
+
+    ⚠️ `action_id` 는 **LLM 이 받은 값을 그대로 되돌려 줘야** 짝이 맞는다. 스키마는 그게
+    실제로 보낸 id 인지 못 본다 — 호출부(`continuation_fill.fill_cards`)가 대조하고,
+    모르는 id 는 버린다. 지어낸 id 로 엉뚱한 카드를 덮어쓰면 사용자 데이터가 깨진다.
+    """
+
+    action_id: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=300)
+    first_step: str = Field(min_length=1, max_length=300)
+
+
+class ContinuationFill(BaseModel):
+    """`planning/continuation_fill` 출력 — 자리표시자들에 넣을 내용 묶음.
+
+    한 번에 묶어 받는 이유는 **자리표시자끼리 순서가 있기** 때문이다. 장당 따로 물으면
+    같은 말이 번호만 바뀌어 나오는데, 그게 애초에 고치려던 상태다.
+    """
+
+    cards: list[ContinuationCard] = Field(default_factory=list, max_length=40)
+
+
 class MilestoneDraft(CamelModel):
     """중간 목표(마일스톤) 한 개 — 사용자가 확인·편집하는 계획 뼈대 단위(#milestones Phase 2).
 

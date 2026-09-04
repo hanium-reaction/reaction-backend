@@ -120,6 +120,27 @@ class ActionItemRepo:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def recent_done_titles(
+        self, user_id: UUID, goal_id: UUID, *, limit: int = 12
+    ) -> list[str]:
+        """이 목표에서 **최근 끝낸** 카드 제목 (#454) — 자리표시자를 채울 진행 맥락.
+
+        `done`·`over_done` 만 본다. `partial_done` 을 넣으면 "여기까지 했다" 가 흐려지고,
+        `failed` 는 다음 단계의 근거가 아니다(실패 맥락은 별도 채널이다).
+        """
+        stmt = (
+            select(ActionItem.title)
+            .where(
+                ActionItem.user_id == user_id,
+                ActionItem.goal_id == goal_id,
+                ActionItem.archived_at.is_(None),
+                ActionItem.status.in_(("done", "over_done")),
+            )
+            .order_by(ActionItem.target_date.desc(), ActionItem.created_at.desc())
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def find_adopted_step(
         self,
         user_id: UUID,

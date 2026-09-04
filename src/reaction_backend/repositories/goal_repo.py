@@ -64,6 +64,36 @@ class GoalRepo:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def rule_filled_node_ids(self, node_ids: Sequence[UUID]) -> set[UUID]:
+        """주어진 노드 중 **규칙이 채운**(`source='rule'`) 것만 (#454).
+
+        자리표시자를 식별하는 유일한 단서다 — 초안 시절의 `tmp-continue` 접두사는 승인 때
+        실제 UUID 로 바뀌고 보존되지 않는다. 채우고 나면 `llm` 이 되므로 두 번 안 걸린다.
+        """
+        if not node_ids:
+            return set()
+        stmt = select(GoalNode.id).where(
+            GoalNode.id.in_(node_ids),
+            GoalNode.source == "rule",
+            GoalNode.archived_at.is_(None),
+        )
+        return set((await self._session.execute(stmt)).scalars().all())
+
+    async def mark_nodes_filled(self, node_ids: Sequence[UUID]) -> int:
+        """채워진 노드의 출처를 `llm` 로 바꾼다 — 컬럼의 뜻이 "누가 **채웠는가**" 다.
+
+        같은 카드가 다음 재계획에서 다시 후보가 되지 않게 하는 것이 이 갱신의 실질이다.
+        """
+        if not node_ids:
+            return 0
+        stmt = (
+            update(GoalNode)
+            .where(GoalNode.id.in_(node_ids), GoalNode.source == "rule")
+            .values(source="llm")
+        )
+        result = await self._session.execute(stmt)
+        return int(getattr(result, "rowcount", 0) or 0)
+
     async def get_mandala_node(self, user_id: UUID, node_id: UUID) -> GoalNode | None:
         """user 소유 goal 아래의 만다라 노드(U9/U10) — `goal_id` 로 join 해 소유권까지 확인.
 

@@ -14,6 +14,7 @@ ADR-0005 §7.3 패턴: LLM 미호출(룰 스케줄러) — HTTP 레벨 실배선
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
+from http import HTTPStatus
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -21,9 +22,15 @@ from fastapi.testclient import TestClient
 
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.fixed_schedule import FixedSchedule
+from reaction_backend.db.models.goal import Goal
+from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
+from reaction_backend.llm import aiClient
+from reaction_backend.llm.tool_executor import RunResult
+from reaction_backend.safety import endpoint_rate_limit
 from reaction_backend.schemas.common import KST, now_kst
+from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.interview import (
     AvailabilityProfile,
     GoalCandidate,
@@ -32,6 +39,7 @@ from reaction_backend.schemas.interview import (
     PreferenceProfile,
     TimeRange,
 )
+from reaction_backend.schemas.planning import ContinuationCard, ContinuationFill
 from tests.conftest import (
     DEMO_USER_UUID,
     FakeActionItemRepo,
@@ -1319,3 +1327,255 @@ def test_weekly_replan_approve_schema_name_does_not_collide_with_recovery() -> N
     qualified = [n for n in schemas if n.startswith("reaction_backend__schemas__")]
     assert not qualified, f"모델명 충돌로 full-qualify 된 컴포넌트가 있다: {qualified}"
     assert "ReplanApproveResponse" in schemas  # 회복 endpoint 의 이름이 그대로 유지된다
+
+
+# ── #454 자리표시자 채우기 ──────────────────────────────────────────────────
+
+
+def _seed_goal_for_fill(goal_repo: Any) -> Any:
+    g = Goal()
+    g.id = uuid4()
+    g.user_id = DEMO_USER_UUID
+    g.title = "정보처리기사 실기 합격"
+    g.category = "study"
+    g.status = "active"
+    g.deadline = date(2026, 11, 30)
+    g.archived_at = None
+    goal_repo._items[g.id] = g
+    return g
+
+
+def _seed_rule_node(goal_repo: Any, *, goal_id: UUID, title: str, source: str = "rule") -> Any:
+    """`source='rule'` 인 계획 트리 리프 — 규칙이 마감까지 채워 둔 자리표시자."""
+    n = GoalNode()
+    n.id = uuid4()
+    n.goal_id = goal_id
+    n.title = title
+    n.node_type = "subgoal"
+    n.tree_kind = "plan"
+    n.source = source
+    n.is_leaf = True
+    n.order_index = 0
+    n.depth = 1
+    n.archived_at = None
+    goal_repo._nodes.setdefault(goal_id, []).append(n)
+    return n
+
+
+def _fill_stub(calls: list[dict[str, Any]], *, cards: list[tuple[str, str, str]]):
+    """`continuation_fill` 만 가로채는 aiClient stub — 다른 호출은 폴백으로 둔다."""
+
+    async def stub_run(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        if kwargs.get("prompt_id") != "planning/continuation_fill":
+            return RunResult(
+                value=kwargs["fallback"](),
+                fell_back=True,
+                reason="timeout",
+                prompt_id="x",
+                prompt_version="1",
+            )
+        return RunResult(
+            value=ContinuationFill(
+                cards=[ContinuationCard(action_id=a, title=t, first_step=f) for a, t, f in cards]
+            ),
+            fell_back=False,
+            reason=None,
+            prompt_id="planning/continuation_fill",
+            prompt_version="1",
+        )
+
+    return stub_run
+
+
+def test_generate_fills_rule_placeholder_cards(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_goal_repo: Any,
+) -> None:
+    """⚠️ **이 파일의 #454 핵심.** 재계획이 자리표시자에 내용을 채워 초안에 싣는다.
+
+    예전엔 `title=c.title` 로 옛 제목을 그대로 옮겼다 — 그런데 제품은 사용자에게
+    "재계획에서 채워집니다" 라고 고지하고 있었다.
+    """
+    _freeze_now(monkeypatch)
+    goal = _seed_goal_for_fill(fake_goal_repo)
+    node = _seed_rule_node(fake_goal_repo, goal_id=goal.id, title="목표 21회차")
+    card = _seed_action(fake_action_item_repo, title="목표 21회차")
+    card.goal_id = goal.id
+    card.goal_node_id = node.id
+    card.first_step = "지난 회차에서 이어서 5분만 시작하기"
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        aiClient,
+        "run",
+        _fill_stub(calls, cards=[(str(card.id), "2회독 오답만 다시 풀기", "시험지 펴서 표시하기")]),
+    )
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+
+    fill_calls = [c for c in calls if c.get("prompt_id") == "planning/continuation_fill"]
+    assert len(fill_calls) == 1, "자리표시자가 있는데 채우기를 안 불렀다"
+
+    # 초안 블록 제목이 **채운 제목**이어야 한다 — 사용자가 승인하는 건 이 화면이다.
+    titles = [b["title"] for b in body["blocks"] if b["actionId"] == f"action_{card.id}"]
+    assert titles and all(t == "2회독 오답만 다시 풀기" for t in titles), titles
+
+
+def test_generate_skips_fill_when_no_rule_nodes(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_goal_repo: Any,
+) -> None:
+    """자리표시자가 없으면 **LLM 을 아예 안 부른다** — 재계획은 원래 결정적이다."""
+    _freeze_now(monkeypatch)
+    goal = _seed_goal_for_fill(fake_goal_repo)
+    node = _seed_rule_node(fake_goal_repo, goal_id=goal.id, title="LLM 이 쓴 카드", source="llm")
+    card = _seed_action(fake_action_item_repo, title="LLM 이 쓴 카드")
+    card.goal_id = goal.id
+    card.goal_node_id = node.id
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(aiClient, "run", _fill_stub(calls, cards=[]))
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    assert [c for c in calls if c.get("prompt_id") == "planning/continuation_fill"] == []
+
+
+def test_fill_failure_leaves_the_placeholder_alone(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_goal_repo: Any,
+) -> None:
+    """⚠️ LLM 이 실패하면 **자리표시자를 그대로 둔다.**
+
+    억지로 채우면 사용자가 정하지 않은 걸 정하는 것이라, 원래 상태가 폴백으로서 옳다.
+    """
+    _freeze_now(monkeypatch)
+    goal = _seed_goal_for_fill(fake_goal_repo)
+    node = _seed_rule_node(fake_goal_repo, goal_id=goal.id, title="목표 21회차")
+    card = _seed_action(fake_action_item_repo, title="목표 21회차")
+    card.goal_id = goal.id
+    card.goal_node_id = node.id
+
+    async def failing(**kwargs: Any) -> Any:
+        return RunResult(
+            value=kwargs["fallback"](),
+            fell_back=True,
+            reason="timeout",
+            prompt_id="x",
+            prompt_version="1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", failing)
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    titles = [b["title"] for b in body["blocks"] if b["actionId"] == f"action_{card.id}"]
+    assert titles and all(t == "목표 21회차" for t in titles), titles
+    assert body.get("blocks") is not None
+
+
+def test_approve_writes_the_filled_content_onto_the_card(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_plan_draft_repo: Any,
+    fake_goal_repo: Any,
+) -> None:
+    """⚠️ **약속을 지키는 지점.** 승인이 채운 내용을 실제 카드에 쓰고, 노드를 `llm` 로 넘긴다.
+
+    노드를 안 넘기면 같은 카드가 **다음 재계획에서 또 후보**가 되어 매번 다시 채워진다.
+    """
+    _freeze_now(monkeypatch)
+    goal = _seed_goal_for_fill(fake_goal_repo)
+    node = _seed_rule_node(fake_goal_repo, goal_id=goal.id, title="목표 21회차")
+    card = _seed_action(fake_action_item_repo, title="목표 21회차")
+    card.goal_id = goal.id
+    card.goal_node_id = node.id
+    card.first_step = "지난 회차에서 이어서 5분만 시작하기"
+
+    monkeypatch.setattr(
+        aiClient,
+        "run",
+        _fill_stub([], cards=[(str(card.id), "2회독 오답만 다시 풀기", "시험지 펴서 표시하기")]),
+    )
+    gen = client.post("/plans/replan")
+    assert gen.status_code == 201, gen.text
+    plan_id = gen.json()["planId"]
+
+    resp = client.post(
+        f"/plans/replan/{plan_id}/approve", headers={"Idempotency-Key": str(uuid4())}
+    )
+    assert resp.status_code == 200, resp.text
+
+    assert card.title == "2회독 오답만 다시 풀기"
+    assert card.first_step == "시험지 펴서 표시하기"
+    # 두 번 채우지 않게 — 이 노드는 더 이상 자리표시자가 아니다.
+    assert node.source == "llm"
+
+
+def test_approve_ignores_filled_cards_for_unknown_actions(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_goal_repo: Any,
+) -> None:
+    """초안에 실린 내용이라도 **그 액션이 사라졌으면** 아무것도 안 쓴다.
+
+    generate~approve 사이에 카드가 아카이브될 수 있다(#113 supersede). 좀비 쓰기 방지.
+    """
+    _freeze_now(monkeypatch)
+    goal = _seed_goal_for_fill(fake_goal_repo)
+    node = _seed_rule_node(fake_goal_repo, goal_id=goal.id, title="목표 21회차")
+    card = _seed_action(fake_action_item_repo, title="목표 21회차")
+    card.goal_id = goal.id
+    card.goal_node_id = node.id
+
+    monkeypatch.setattr(
+        aiClient, "run", _fill_stub([], cards=[(str(card.id), "채운 제목", "채운 첫걸음")])
+    )
+    gen = client.post("/plans/replan")
+    plan_id = gen.json()["planId"]
+
+    card.archived_at = datetime.now(UTC)  # 그새 사라졌다
+
+    resp = client.post(
+        f"/plans/replan/{plan_id}/approve", headers={"Idempotency-Key": str(uuid4())}
+    )
+    assert resp.status_code == 200, resp.text
+    assert card.title == "목표 21회차"  # 손대지 않았다
+    assert node.source == "rule"  # 채운 적 없으니 그대로
+
+
+def test_replan_is_under_the_daily_endpoint_limit(monkeypatch: Any, client: TestClient) -> None:
+    """⚠️ 재계획도 **사용자당 일일 호출 상한** 안에 있다 (#454).
+
+    재계획은 원래 결정적이라 상한 밖이었다(계획 쪽 4곳 중 유일하게 `enforce` 가 없었다).
+    자리표시자 채우기로 LLM 을 부르게 된 이상, 붙이지 않으면 **재계획만 상한 밖에서
+    비싸진다** — 눌러서 도는 엔드포인트라 반복 호출이 쉽다.
+    """
+    _freeze_now(monkeypatch)
+    seen: list[str] = []
+
+    async def blocked(_session: Any, *, user_id: Any, module: str) -> None:
+        seen.append(module)
+        raise ApiError(
+            ErrorCode.RATE_LIMIT_DAILY_CALLS_EXCEEDED,
+            "오늘은 여기까지예요.",
+            http_status=HTTPStatus.TOO_MANY_REQUESTS,
+        )
+
+    monkeypatch.setattr(endpoint_rate_limit, "enforce", blocked)
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == HTTPStatus.TOO_MANY_REQUESTS, resp.text
+    assert seen == ["planning"], seen
