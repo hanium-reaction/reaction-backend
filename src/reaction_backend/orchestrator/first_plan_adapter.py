@@ -1029,6 +1029,39 @@ _VOLUME_BELOW_HORIZON = "goal_volume_below_horizon"
 # 다시 자리표시자를 보게 된다 — 조용히, 아무 테스트도 안 깨지면서. 그래서 상수로 둔다.
 CONTINUATION_NODE_PREFIX = "tmp-continue"
 
+# 분해 LLM 이 아예 실패했을 때 `first_plan._rule_fallback` 이 만드는 노드의 접두사.
+# 확장과 달리 **계획 전체**가 이 자리표시자가 된다.
+FALLBACK_NODE_PREFIX = "tmp-leaf"
+
+# 두 룰 경로가 카드에 박는 **고정** first_step. 이게 그 카드가 자리표시자라는 유일한
+# 내용상 지문이라, 승인 뒤 DB 에서 뒤늦게 식별할 때도 쓴다(마이그레이션 c3a17f4d92be).
+# ⚠️ 바꾸면 그 마이그레이션의 목록과 갈린다 — tests/test_goal_node_source.py 가 대조한다.
+CONTINUATION_FIRST_STEP = "지난 회차에서 이어서 5분만 시작하기"
+FALLBACK_FIRST_STEP = "가장 쉬운 부분부터 5분만 시작하기"
+
+
+def node_source_for(node_id: str | None) -> str:
+    """이 노드를 **누가 채웠는가** — `goal_nodes.source` 에 그대로 들어간다 (#454).
+
+    컬럼은 처음부터 `llm | rule | user` 를 뜻했는데(CHECK 제약도 그렇다), 계획 트리에서는
+    **한 번도 채워진 적이 없다.** 마이그레이션 `1ee508b967ba` 가 기존 행을 전량 `llm` 로
+    백필했고("기존 행은 계획 LLM 이 만든 것이므로"), 그 뒤 행은 `_apply_once` 가 세팅을
+    안 해 서버 기본값 `user` 로 떨어졌다. 실측: 자리표시자 카드 77장이 llm 68 · user 9 —
+    **둘 다 거짓이다. 룰이 썼다.**
+
+    이게 단순한 라벨 문제가 아닌 이유는, 승인 시점에 `tmp-continue` 접두사가 사라지기
+    때문이다. 초안 node_id 를 보존하는 컬럼이 없어서, 이 값을 안 남기면 **DB 에 들어간 뒤로는
+    자리표시자를 식별할 방법이 없다.** 재계획이 내용을 채우려면(#454 방향 1) 여기서 남겨야 한다.
+    """
+    if is_continuation_node(node_id) or is_fallback_node(node_id):
+        return "rule"
+    return "llm"
+
+
+def is_fallback_node(node_id: str | None) -> bool:
+    """분해 LLM 실패 폴백이 만든 노드인가 — 확장(`tmp-continue`)과는 다른 사고다."""
+    return bool(node_id) and str(node_id).startswith(FALLBACK_NODE_PREFIX)
+
 
 def is_continuation_node(node_id: str | None) -> bool:
     """이 노드/카드가 규칙이 마감까지 채우려고 덧붙인 '이어가기' 산물인가 (#436).
@@ -1135,7 +1168,7 @@ def extend_action_plan_to_horizon(
                 title=label,
                 estimated_minutes=minutes,
                 category=heaviest.category,
-                first_step="지난 회차에서 이어서 5분만 시작하기",
+                first_step=CONTINUATION_FIRST_STEP,
             )
         )
     return goal_plan.model_copy(update={"goal_nodes": nodes, "action_items": items})
@@ -2876,6 +2909,10 @@ async def _apply_once(
             n.depth = depths.get(nd.node_id, 0)
             n.order_index = nd.order_index
             n.is_leaf = nd.is_leaf
+            # ⚠️ **여기서 안 남기면 영영 못 남긴다** — 아래에서 초안 node_id 가 실제 UUID 로
+            # 바뀌고, 초안 id 를 보존하는 컬럼은 없다. 재계획이 자리표시자를 찾아 내용을
+            # 채우려면(#454) 이 값이 유일한 단서다.
+            n.source = node_source_for(nd.node_id)
             session.add(n)
             node_by_temp[nd.node_id] = n
         for nd in goal_nodes:

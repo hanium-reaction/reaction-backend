@@ -207,7 +207,7 @@ def _rule_decomposition(state: FirstPlanState) -> GoalDecomposition:
     nodes = [root]
     actions: list[ActionItemDraft] = []
     for i in range(session_count):
-        leaf_id = f"tmp-leaf-{i}"
+        leaf_id = f"{first_plan_adapter.FALLBACK_NODE_PREFIX}-{i}"
         label = f"{heaviest.title} {i + 1}회차"
         nodes.append(
             GoalNodeDraft(
@@ -225,7 +225,7 @@ def _rule_decomposition(state: FirstPlanState) -> GoalDecomposition:
                 title=label,
                 estimated_minutes=session_len,
                 category=heaviest.category,
-                first_step="가장 쉬운 부분부터 5분만 시작하기",
+                first_step=first_plan_adapter.FALLBACK_FIRST_STEP,
             )
         )
     return GoalDecomposition(goal_nodes=nodes, action_items=actions, policy_violations=[])
