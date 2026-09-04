@@ -32,9 +32,9 @@ from reaction_backend.observability.correlation import (
 from reaction_backend.orchestrator import interview_catalog, interview_runner
 from reaction_backend.schemas.interview import (
     AmbiguityUpdate,
+    AnswerIntake,
     InterviewSummary,
     NextQuestionSchema,
-    SlotHarvest,
 )
 
 # ── 인터뷰 완주 드라이버 (tests/test_interview_runner.py 의 stub 패턴) ────────
@@ -74,8 +74,10 @@ def _counting_stub(calls: list[str]):
         calls.append(kwargs["prompt_id"])
         if schema is NextQuestionSchema:
             value: Any = NextQuestionSchema(question="다음 질문", empathy_one_liner="좋아요")
-        elif schema is AmbiguityUpdate:
-            value = AmbiguityUpdate(
+        elif schema in (AmbiguityUpdate, AnswerIntake):
+            # `AnswerIntake` 는 `AmbiguityUpdate` 의 상위집합이다(+ slots). 채점 전용 호출과
+            # 수확이 합쳐진 호출이 **같은 스키마**를 쓰므로 여기서 갈리지 않는다.
+            value = schema(
                 slot_key=kwargs["variables"]["slot_key"],
                 clarity_score=0.9,
                 new_ambiguity=0.1,
@@ -88,8 +90,6 @@ def _counting_stub(calls: list[str]):
                 preference_summary="선호",
                 confirm_question="이대로 계획을 세워볼까요?",
             )
-        elif schema is SlotHarvest:
-            value = SlotHarvest(slots=[])
         else:  # pragma: no cover
             raise AssertionError(f"unexpected schema {schema}")
         return RunResult(
@@ -276,3 +276,60 @@ async def test_trace_id_is_none_outside_a_request(_fake_llm: None) -> None:
         fallback=_Schema(),
     )
     assert result.fell_back is True
+
+
+async def test_no_turn_costs_three_llm_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⚠️ **한 턴이 LLM 3콜을 쓰면 안 된다** — 채점과 수확이 합쳐졌기 때문이다 (#431).
+
+    예전엔 자유서술 턴이 `ask_question` + `ambiguity_score` + `slot_extraction` 3콜이었다.
+    수확 여부는 LLM 을 부르기 전에 정해지므로(자유서술인가 · 20자 이상인가 · 열린 슬롯이
+    있는가), 수확할 때만 합친 프롬프트를 쓰면 **한 호출로** 끝난다.
+
+    ⚠️ **무조건 합치면 손해다.** 수확하지 않는 turn 까지 수확 규칙(약 856토큰)을 프롬프트에
+    짊어져 실측 토큰이 +35% 가 된다. 조건부라야 −5% 다. 이 테스트는 그 조건부 배선이
+    "합쳤는데 무조건이 됐다" 로 퇴화하지 않는지까지는 못 본다 — 그건 토큰 문제라
+    `test_merged_prompt_is_used_only_when_harvesting` 이 지킨다.
+    """
+    requests, llm_calls = await _drive_full_plan_interview(monkeypatch)
+
+    # 턴당 최대 2콜(질문 생성 + 답 처리). 세션 시작은 질문 1콜뿐이라 상한이 더 낮다.
+    assert llm_calls <= requests * 2, (
+        f"요청 {requests}건에 LLM {llm_calls}콜 — 턴당 2콜을 넘는다. "
+        "채점과 수확이 다시 갈라졌는지 확인해라."
+    )
+
+
+async def test_merged_prompt_is_used_only_when_harvesting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """수확하지 않는 턴은 **짧은 채점 프롬프트**를 써야 한다.
+
+    합친 프롬프트를 무조건 쓰면 요청 수는 같은데 토큰이 늘어난다(실측 +35%).
+    이 테스트가 그 퇴화를 잡는다 — 완주 중 채점 호출의 **일부만** 합친 프롬프트여야 한다.
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(aiClient, "run", _counting_stub(calls))
+
+    result = await interview_runner.start_interview(session_id=uuid4(), user_id=uuid4())
+    guard = 0
+    while not result.done and guard < 40:
+        slot = result.state["next_slot_key"]
+        assert slot is not None
+        result = await interview_runner.submit_and_advance(
+            state=result.state, slot_key=slot, answer_value=_answer_for(slot)
+        )
+        guard += 1
+
+    scoring = [c for c in calls if "ambiguity_score" in c or "answer_intake" in c]
+    merged = [c for c in scoring if "answer_intake" in c]
+    assert scoring, "채점 호출이 하나도 없다 — 드라이버가 깨졌다"
+    # ⚠️ **하한이 있어야 한다.** 상한만 두면 "수확을 아예 안 한다" 는 변이가 통과한다
+    # (merged=0 도 `< len(scoring)` 을 만족한다) — 실제로 그 변이가 안 잡혔다.
+    assert merged, (
+        "합친 프롬프트가 한 번도 안 쓰였다 — 수확이 통째로 꺼졌는지 확인해라. "
+        "완주 드라이버에는 20자를 넘는 자유서술 답이 들어 있다."
+    )
+    assert len(merged) < len(scoring), (
+        f"채점 호출 {len(scoring)}건이 **전부** 합친 프롬프트({len(merged)}건)다. "
+        "무조건 합치면 수확하지 않는 턴까지 수확 규칙을 짊어져 토큰이 늘어난다."
+    )

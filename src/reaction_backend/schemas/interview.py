@@ -182,12 +182,18 @@ class HarvestedSlot(CamelModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
-class SlotHarvest(CamelModel):
-    """LLM — `interview/slot_extraction` 응답. 한 답변에 섞여 들어온 다른 슬롯들을 미리 추출.
+class AnswerIntake(AmbiguityUpdate):
+    """LLM — 답 1개를 **한 번에** 채점·정규화하고, 같은 답에 섞인 다른 슬롯까지 추출한다.
 
-    사용자가 한 질문에 여러 항목을 함께 답할 수 있으므로(예: "3학년 방학이고 캡스톤 8월 마감"),
-    직전 자유서술 답에서 아직 안 물은 슬롯 정보를 뽑아 미리 채워 **불필요한 재질문을 줄인다**.
-    확신 있게 뽑은 것만 담고, 없으면 빈 배열(정상). 룰 fallback 도 빈 배열.
+    `AmbiguityUpdate` + 수확 결과를 합친 계약이다. 예전엔 두 프롬프트를 **각각 호출**해
+    같은 답을 두 번 읽었고, 그래서 자유서술 답 한 턴이 LLM **3콜**(질문 생성 + 채점 + 수확)이
+    됐다. 레포는 그 증가로 실제 사고를 겪었다:
+
+    > 더 붙이는 순간 같은 사고가 재발한다(실제로 `harvest_slots` 가 추가되며 2콜→3콜이 됐다).
+    > — `observability/correlation.py` · `safety/endpoint_rate_limit.py`
+
+    ⚠️ **`slots` 는 선택이다.** 궁극목표 인터뷰는 수확을 하지 않으므로(슬롯 9개가 서로 독립)
+    그 프롬프트는 이 필드를 내지 않는다 — 기본값 빈 배열로 같은 스키마를 공유한다.
     """
 
     slots: list[HarvestedSlot] = Field(default_factory=list)

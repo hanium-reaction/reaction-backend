@@ -59,6 +59,10 @@ class InterviewCatalog:
     prompt_next_question: str
     prompt_ambiguity: str
     prompt_summary: str
+    # 답 채점·정규화·수확을 **한 번에** 하는 프롬프트. `None` 이면 `prompt_ambiguity` 를
+    # 쓰고 수확을 하지 않는다(궁극목표 인터뷰 — 슬롯 9개가 서로 독립이라 교차 추출 이득이
+    # 없다). 이 분기가 곧 "이 카탈로그가 수확을 하는가" 다.
+    prompt_intake: str | None = None
     by_key: Mapping[str, InterviewSlot] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -338,6 +342,7 @@ PLAN_CATALOG = InterviewCatalog(
     prompt_next_question="interview/next_question",
     prompt_ambiguity="interview/ambiguity_score",
     prompt_summary="interview/summary",
+    prompt_intake="interview/answer_intake",
 )
 
 

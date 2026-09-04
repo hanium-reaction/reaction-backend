@@ -43,7 +43,16 @@ CODE_VARS: dict[str, set[str]] = {
         "retry",
     },
     "interview/ambiguity_score": {"slot_key", "answer", "answer_type", "options", "today"},
-    "interview/slot_extraction": {"answer", "answered_slot", "today", "open_slots"},
+    # 채점 + 수확을 한 번에 하는 프롬프트(#431). 채점 전용(`ambiguity_score`)의 변수에
+    # `open_slots` 하나가 더 붙는다 — 수확할 게 있을 때만 이쪽으로 간다.
+    "interview/answer_intake": {
+        "slot_key",
+        "answer",
+        "answer_type",
+        "options",
+        "today",
+        "open_slots",
+    },
     # 아래 집합은 _summary_var_keys() 로 대체된다 (파일 하단에서 갱신) — 참고용 원본.
     "interview/summary": {
         "identity",
@@ -105,7 +114,7 @@ CODE_VARS["interview/ultimate_summary"] = _ultimate_summary_var_keys()
 _FILES = {
     "interview/next_question": "next_question.v1.md",
     "interview/ambiguity_score": "ambiguity_score.v1.md",
-    "interview/slot_extraction": "slot_extraction.v1.md",
+    "interview/answer_intake": "answer_intake.v1.md",
     "interview/summary": "summary.v1.md",
     "interview/ultimate_next_question": "ultimate_next_question.v1.md",
     "interview/ultimate_ambiguity_score": "ultimate_ambiguity_score.v1.md",

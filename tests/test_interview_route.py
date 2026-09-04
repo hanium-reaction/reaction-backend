@@ -14,9 +14,9 @@ from fastapi.testclient import TestClient
 from reaction_backend.llm import RunResult, aiClient
 from reaction_backend.schemas.interview import (
     AmbiguityUpdate,
+    AnswerIntake,
     InterviewSummary,
     NextQuestionSchema,
-    SlotHarvest,
 )
 from tests.conftest import DEMO_USER_UUID, FakeGoalRepo, FakeInterviewRepo
 
@@ -44,8 +44,10 @@ def _stub(
                 empathy_one_liner="좋아요",
                 suggested_answers=list(suggested),
             )
-        elif schema is AmbiguityUpdate:
-            value = AmbiguityUpdate(
+        elif schema in (AmbiguityUpdate, AnswerIntake):
+            # `AnswerIntake` 는 `AmbiguityUpdate` 의 상위집합이다(+ slots). 채점 전용 호출과
+            # 수확이 합쳐진 호출이 **같은 스키마**를 쓰므로 여기서 갈리지 않는다.
+            value = schema(
                 slot_key=kwargs["variables"]["slot_key"],
                 clarity_score=clarity,
                 new_ambiguity=new_ambiguity,
@@ -59,9 +61,6 @@ def _stub(
                 preference_summary="선호 요약",
                 confirm_question="이대로 계획을 세워볼까요?",
             )
-        elif schema is SlotHarvest:
-            # 기본 stub 은 하베스팅 없음(빈 추출) — 기존 슬롯 진행 검증에 영향 없게.
-            value = SlotHarvest(slots=[])
         else:  # pragma: no cover
             raise AssertionError(f"unexpected schema {schema}")
         return RunResult(
@@ -334,8 +333,6 @@ def test_critical_slot_reask_persists_attempts_across_db(
         schema = kwargs["schema"]
         if schema is NextQuestionSchema:
             value: Any = NextQuestionSchema(question="다음 질문", empathy_one_liner="좋아요")
-        elif schema is SlotHarvest:
-            value = SlotHarvest(slots=[])  # 자유서술 답이라 하베스팅 호출됨 — 추출 없음으로 고정
         else:  # AmbiguityUpdate — goals.list 는 계속 애매(재질문), 나머지는 유효
             slot = kwargs["variables"]["slot_key"]
             value = AmbiguityUpdate(
