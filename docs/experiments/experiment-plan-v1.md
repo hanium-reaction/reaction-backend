@@ -1340,12 +1340,12 @@ M33(`verifier_lift_vs_none`)의 비교 대상이 사라진다. 삭제는 v4 에�
     신규 테스트 5건 — 순수함수 3건(`test_with_comeback_ack_*` — 미에스컬레이션 무변화,
     L1/L2 각각 프리픽스), 라우트 통합 2건(L1/L2 각각 선두 카드에 프리픽스 확인 + L1 은
     형제 카드에 안 붙음도 같이 확인 — `test_recovery.py`).
-27. ✅ **S3 에스컬레이션 L3 상태 판정 — 완료(재협상 3장 UX 는 스코프 밖).** 항목 25/26
-    직후 격차 조사에서 뽑힌 두 후보(지표 리포트·COMEBACK) 다음 순번. `escalation.py`
-    모듈 docstring 이 이미 "L3(재협상 3장)·L4(stand-down)는 뺐다"고 스코프 경계를
-    명시해 뒀던 그 항목 — 이번엔 L3 만 "상태 판정"(카운터 + 레벨 계산)까지 배선하고,
-    L4 는 여전히 손대지 않았다(진입 조건 `overwhelm≥4` 신호가 여전히 프로덕션에 없다,
-    `context_snapshots` 캡처 미완 — 항목 22 와 같은 사유).
+27. ✅ **S3 에스컬레이션 L3 상태 판정 — 완료(재협상 3장 UX 는 이 시점 스코프 밖 → 항목 28
+    에서 해소).** 항목 25/26 직후 격차 조사에서 뽑힌 두 후보(지표 리포트·COMEBACK) 다음
+    순번. `escalation.py` 모듈 docstring 이 이미 "L3(재협상 3장)·L4(stand-down)는 뺐다"고
+    스코프 경계를 명시해 뒀던 그 항목 — 이번엔 L3 만 "상태 판정"(카운터 + 레벨 계산)까지
+    배선하고, L4 는 여전히 손대지 않았다(진입 조건 `overwhelm≥4` 신호가 여전히 프로덕션에
+    없다, `context_snapshots` 캡처 미완 — 항목 22 와 같은 사유).
 
     - **`orchestrator/escalation.py`** — `EscalationLevel` 에 `"L3"` 추가.
       `same_goal_failure_count` 카운터 신설(§5.1 표엔 없던 다섯 번째 카운터 —
@@ -1372,13 +1372,15 @@ M33(`verifier_lift_vs_none`)의 비교 대상이 사라진다. 삭제는 v4 에�
       억지로 강제하면 §5.2 원문이 말한 개입과 다른 걸 내보내게 된다.
 
     **의도적으로 안 한 것(스코프 경계)**:
-    - **재협상 3장 UX 자체가 없다** — L3 에 진입해도 지금은 그냥 "L1 급 보호 장치가 붙은
-      평소 카드 선택"이 나간다(DOWNSCOPE_DEFAULT 만 빠짐). §5.2 가 요구한 "4그룹 통상
-      카드 대신 [목표 축소=DOWNSCOPE]/[기한 재설정=RESCHEDULE]/[일시 중단=PARK] 3장"은
-      FE #223(PARK 수락 플로우) 회신 전까지 화면·선택 로직 둘 다 없다.
+    - **재협상 3장 UX 자체가 없다** *(이 항목 시점의 기록 — **항목 28(#360, 2026-08-26)
+      에서 해소됨**)* — L3 에 진입해도 당시엔 그냥 "L1 급 보호 장치가 붙은 평소 카드 선택"이
+      나갔다(DOWNSCOPE_DEFAULT 만 빠짐). §5.2 가 요구한 "4그룹 통상 카드 대신 [목표
+      축소=DOWNSCOPE]/[기한 재설정=RESCHEDULE]/[일시 중단=PARK] 3장"은 FE #223(PARK 수락
+      플로우) 회신 전까지 화면·선택 로직 둘 다 없었다.
     - **L4(stand-down)는 여전히 미착수** — `overwhelm≥4` 신호가 없다.
     - **API 응답에 escalation_level 노출 안 함** — L1/L2 와 같은 기존 관례(순수 내부
-      신호, FE 계약 없음)를 그대로 따랐다.
+      신호, FE 계약 없음)를 그대로 따랐다. *(원값은 지금도 안 나간다 — 다만 항목 28 이 그
+      파생 신호인 `recoveryMode` 를 별도 필드로 낸다.)*
 
     신규/갱신 테스트 — 순수함수(`test_escalation.py`, L3 케이스 8건 추가 — 임계값
     경계·OR 조건 각각·"L3 가 L1/L2 동시 충족에도 이긴다"), 실 Postgres 쿼리 조립
@@ -1386,3 +1388,59 @@ M33(`verifier_lift_vs_none`)의 비교 대상이 사라진다. 삭제는 v4 에�
     신규 5건 + 기존 L1/L2 배선 확인 3건은 새 시그니처로 갱신), 라우트 통합
     (`test_recovery.py` 2건 — goal 트리거·rejected-streak 트리거를 각각 다른 카드/태그로
     L1/L2 신호와 격리해 검증).
+28. ✅ **목표 재협상 모드 — L3 3장(DOWNSCOPE/RESCHEDULE/PARK) + `recoveryMode` — 완료.**
+    항목 27 이 "상태 판정만" 남겨 둔 나머지 절반 — §5.2 가 요구한 "4그룹 통상 카드 대신
+    재협상 3장" 자체. [#328](https://github.com/hanium-reaction/reaction-backend/issues/328)
+    요구사항으로 [#360](https://github.com/hanium-reaction/reaction-backend/pull/360) 에서
+    머지됐다(2026-08-26). ⚠️ **이 원장 항목은 2026-09-01 에 소급 기록한 것이다** — 코드는
+    항목 27 바로 다음 날 들어갔는데 원장만 6일 비어 있었고, 그 사이 항목 27 의 "재협상 3장
+    UX 가 없다"가 사실과 어긋난 채 남아 있었다(위 항목 27 에 해소 표시를 달았다).
+
+    - **`orchestrator/recovery.py::select_renegotiation_strategies`** 신설 —
+      `_RENEGOTIATION_GROUPS`(DOWNSCOPE→RESCHEDULE→PARK) 순서로 각 그룹에서
+      `display_priority` 최솟값 활성 전략 1장씩. `select_strategies` 의 태그 매칭·점수·
+      패딩 로직을 **하나도 안 쓴다** — "이번엔 어떤 실패 태그가 왔나"가 아니라 "계획 자체를
+      어떻게 조정할까"를 묻는 국면이라서. `DOWNSCOPE_DEFAULT` 제외(규칙 7 과 같은 이유 —
+      "오늘은 절반만" 류 비율 축소는 목표 자체를 줄이는 재협상과 다르다), `CARRY_OVER`
+      제외("내일로 미루기"는 재협상 취지와 안 맞음). 그룹에 활성 전략이 없으면 **그 자리는
+      그냥 빠진다** — 규칙 4 의 패딩과 반대로, 여기는 "정확히 3방향"이 계약이라 다른 그룹으로
+      대체하면 의미가 깨진다. `select_strategies` 는 `escalation_level == "L3"` 이면 이
+      함수로 즉시 위임한다.
+    - **`schemas/recovery.py::RecoveryProposalsResponse.recovery_mode`** —
+      `"standard" | "goal_renegotiation"` 신설. FE 가 카드 개수·제목으로 모드를 **추론하지
+      않도록** 명시 필드로 낸다(#328 요구사항). 기본값이 `standard` 라 이 필드를 모르는 기존
+      클라이언트도 그대로 동작 — api-contract v1.87(추가만, 하위호환).
+    - **`routes/recovery.py::_determine_escalation_level`** 헬퍼 추출 — 신규 생성 경로와
+      멱등 재조회(pending 재반환) 경로가 **같은 판정 기준을 공유**하게 했다. 안 그러면 같은
+      실행을 다시 조회했을 때 `recoveryMode` 가 바뀔 수 있다. L3 에선 LLM personalize 를
+      건너뛴다(L2 와 같은 이유 — 개인화가 "이번엔 다를 거예요" 식 재설득이 되어 역효과).
+      L3 판정 근거(같은 goal 실패 수·거절 연속 수)는 내부 로그에만 남긴다(UUID·카운터만,
+      카드 문구 등 사용자 콘텐츠 없음).
+    - **이미 충족돼 있어 안 건드린 것** — PARK 수락 시 재관여 앵커(항목 20 / #327) 연결은
+      `_adopt` 가 `option_group` 만 보고 처리해서 **카드가 어떻게 선택됐는지와 무관**하다.
+      `/recovery/decisions`·replan 흐름도 카드 스키마가 그대로라 모드를 몰라도 동작한다.
+
+    **의도적으로 안 한 것(스코프 경계)**:
+    - **재협상 전용 화면은 없다** — FE 는 기존 회복 카드 목록·[수락/수정/거절] 3버튼을 그대로
+      재사용하고, `recoveryMode` 가 `goal_renegotiation` 일 때만 상단에 안내 문구 하나를
+      얹는다(FE `reaction-frontend#223` — 2026-08-29 CLOSED). 백엔드가 낸 것은 **카드 구성과
+      모드 신호**이지 새 UX 컴포넌트가 아니다.
+    - **L4(stand-down)는 여전히 미착수** — 진입 조건 `overwhelm≥4` 신호가 프로덕션에 없다
+      (항목 22·27 과 같은 사유 — `context_snapshots` 실제 캡처 미완, #19-B-2 유예).
+    - **sustain talk 가드(§5.3)도 미착수** — §5.3 스스로 근거 등급을 "설계자 판단 + 워크스루로
+      검증할 가설"로 격하한 항목이라 L3 뒤 순번으로 남겨 뒀다. `recovery_rejected_streak` 는
+      항목 27 이 L3 판정에 먼저 쓰기 시작했다.
+    - **`escalation_level` 원값은 여전히 응답에 없다** — 계약에 내보내는 건 파생 신호
+      (`recoveryMode`) 하나뿐이라는 항목 27 의 방침을 그대로 유지.
+    - **L3 에서도 acknowledgment 활성화는 보류** — 항목 17 과 같은 사유(프롬프트 template
+      변수 계약을 v1/v2/v3 가 함께 지켜야 해서 셋을 동시에 손대야 한다).
+
+    신규 테스트 6건(순수함수 — 그룹별 최솟값 선택 / `DOWNSCOPE_DEFAULT` 제외 / `CARRY_OVER`
+    제외 / 그룹 없음 처리 / 비활성 제외 / `select_strategies` 의 L3 위임 —
+    `test_recovery.py::test_select_renegotiation_strategies_*`) + 항목 27 이 만든 L3 라우트
+    테스트 2건에 `recoveryMode`·카드 구성·멱등 재조회 일관성 검증 추가 + 표준 모드 baseline 에
+    `recoveryMode="standard"` 검증 추가. PR 시점 전체 **1,974 passed**.
+
+    ⚠️ **검증 공백(정직 표기)**: 이 모드는 테스트·픽스처 위에서만 확인됐다. 라이브
+    `recovery_attempts` 가 여전히 0건(#258)이라 **L3 진입이 실데이터로 재현된 적은 없다** —
+    "동일 goal 4회 연속 실패"까지 가려면 최소 4일치 실패 이력이 필요하다.
