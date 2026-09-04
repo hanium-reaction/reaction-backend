@@ -205,8 +205,9 @@ def test_each_stratum_loads_its_own_cases(stratum: str, n: int) -> None:
 
 
 def test_output_paths_are_separate_per_stratum() -> None:
-    src = (_ROOT / "scripts" / "l1_7b_m33_run.py").read_text(encoding="utf-8")
-    assert 'f"l1_7b_m33_{args.stratum}.jsonl"' in src
+    assert M.run_dir("general") != M.run_dir("challenge")
+    assert M.run_dir("general").name == "general"
+    assert M.run_dir("challenge").name == "challenge"
 
 
 # ── 4. 사전등록 상수가 코드에 박혀 있다 ─────────────────────────────────────
@@ -287,3 +288,88 @@ def test_undetermined_sign_is_not_forced() -> None:
     src = (_ROOT / "scripts" / "l1_7b_m33_run.py").read_text(encoding="utf-8")
     assert "억지로 만들지 않는다" in src
     assert "이 층을 룰로 대체하거나 걷어내자" in src
+
+
+# ── 6. 재현성 — 기준일·run 파일·manifest ────────────────────────────────────
+
+
+def test_rows_carry_the_base_date() -> None:
+    """행이 **기준일을 들고 있어야** 재집계가 `date.today()` 를 안 쓴다."""
+    src = (_ROOT / "scripts" / "l1_7b_m33_run.py").read_text(encoding="utf-8")
+    assert '"target_date": today.isoformat()' in src
+
+
+def test_summarize_uses_the_stored_base_date_not_today() -> None:
+    """⚠️ D 에 만든 계획을 D+1 로 재채점하면 **같은 원자료의 M33 이 날짜마다 달라진다.**"""
+    rows = [{"target_date": "2026-09-03"}, {"target_date": "2026-09-03"}]
+    assert M.base_date_of(rows) == date(2026, 9, 3)
+
+
+def test_mixed_base_dates_are_rejected() -> None:
+    """한 실행의 행만 집계한다 — 섞이면 거부."""
+    with pytest.raises(SystemExit):
+        M.base_date_of([{"target_date": "2026-09-03"}, {"target_date": "2026-09-04"}])
+
+
+def test_rows_without_a_base_date_are_rejected() -> None:
+    """기준일을 저장하기 전 형식의 옛 원자료를 **오늘 날짜로 재집계하지 않는다.**"""
+    with pytest.raises(SystemExit):
+        M.base_date_of([{"case_id": "x"}])
+
+
+def test_summarize_does_not_call_today_for_scoring() -> None:
+    src = (_ROOT / "scripts" / "l1_7b_m33_run.py").read_text(encoding="utf-8")
+    body = src[src.index("def summarize(") :]
+    assert "date.today()" not in body, "재집계가 오늘 날짜로 다시 채점한다"
+
+
+def test_each_run_writes_a_new_file() -> None:
+    """덮어쓰면 이전 실행이 사라져 **문서가 인용한 수치를 다시 못 만든다.**"""
+    src = (_ROOT / "scripts" / "l1_7b_m33_run.py").read_text(encoding="utf-8")
+    assert "run_dir(args.stratum)" in src
+    assert "%Y%m%dT%H%M%S" in src
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "target_date",
+        "git_sha",
+        "golden_sha256",
+        "raw_sha256",
+        "started_at",
+        "repeats",
+        "bootstrap_seed",
+    ],
+)
+def test_manifest_records_provenance(field: str) -> None:
+    """원자료는 커밋 안 하므로 **manifest 가 그 실행을 지목하는 유일한 수단**이다."""
+    src = (_ROOT / "scripts" / "l1_7b_m33_run.py").read_text(encoding="utf-8")
+    assert f'"{field}"' in src, f"manifest 에 `{field}` 가 없다"
+
+
+# ── 7. 스모크 규약 — 사전등록 회차를 결과 보고 바꾸지 않는다 ────────────────
+
+
+def test_smoke_protocol_forbids_a_full_one_repeat_probe() -> None:
+    """전체를 1회로 먼저 돌려 반려율을 보고 3회 여부를 정하면 **사후 조정**이다."""
+    src = (_ROOT / "scripts" / "l1_7b_m33_run.py").read_text(encoding="utf-8")
+    assert "`--limit 2 --repeats 1` 로만 한다" in src
+    assert "결과를 보고 바꾸는 것" in src
+    assert "본 실험 표본에서 제외" in src
+
+
+def test_design_doc_carries_the_same_smoke_rule() -> None:
+    doc = (_ROOT / "docs" / "experiments" / "m33-3arm-design.md").read_text(encoding="utf-8")
+    assert "`--limit 2 --repeats 1` 로만 한다" in doc
+    assert "전체 실행 전에" in doc
+    # 재집계·run 파일 규칙도 설계에 있어야 한다.
+    assert "저장된 `target_date` 를 쓴다" in doc
+    assert "실행마다 새 원자료 파일" in doc
+
+
+def test_call_count_range_is_two_to_four_per_case() -> None:
+    """승인이면 2회(분해+검토), 반려면 4회(재분해 2 추가)."""
+    src = (_ROOT / "scripts" / "l1_7b_m33_run.py").read_text(encoding="utf-8")
+    assert "{2 * n}~{4 * n}" in src
+    assert "승인 2 / 반려 4" in src

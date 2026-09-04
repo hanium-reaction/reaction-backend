@@ -31,15 +31,24 @@ C      review.feedback 을 비우고 재분해 → _replan_feedback 이 "(첫 �
 
 ## 실행
 
-    uv run python scripts/l1_7b_m33_run.py --dry-run              # LLM 없이 구성 확인
-    uv run python scripts/l1_7b_m33_run.py --limit 2              # 스모크 (본 실행 전 필수)
-    uv run python scripts/l1_7b_m33_run.py --stratum general      # 일반 34건
-    uv run python scripts/l1_7b_m33_run.py --stratum challenge    # 도전 16건
-    uv run python scripts/l1_7b_m33_run.py --summarize-only
+    --stratum X --dry-run                    LLM 없이 구성 확인
+    --stratum X --limit 2 --repeats 1        **스모크 — 이 형태만 쓴다**
+    --stratum general   --repeats 3          본 실행 (사전등록: 케이스당 3회)
+    --stratum challenge --repeats 3          〃
+    --stratum X --summarize-only [--run 경로]  저장된 원자료 재집계
+
+⚠️ **스모크는 `--limit 2 --repeats 1` 로만 한다.** 전체를 `--repeats 1` 로 먼저 돌려
+반려율을 보고 3회 여부를 정하면, **이미 고정한 "케이스당 3회" 를 결과를 보고 바꾸는 것**이
+된다(설계 §4.3). 스모크 결과는 **본 실험 표본에서 제외**한다 — 별도 run 파일로 남는다.
+
+⚠️ 비용 때문에 회차를 줄이려면 **전체 실행 전에** 설계 변경으로 문서에 남긴다.
 
 ⚠️ **일반과 도전을 섞어 한 수치로 내지 않는다.** `--stratum` 이 필수인 이유다.
 
-원자료 `eval/l1_7b_m33_{stratum}.jsonl` (비결정적이라 `.gitignore`).
+원자료 `eval/m33/{stratum}/{run_id}.jsonl` + `{run_id}.meta.json` (비결정적이라 `.gitignore`).
+
+⚠️ **실행마다 새 파일**이다 — 덮어쓰면 문서가 인용한 수치를 다시 못 만든다. manifest 에
+기준일 · git SHA · 골든 파일 SHA-256 · 실행 시각 · repeats · 사전등록 상수를 남긴다.
 """
 
 from __future__ import annotations
@@ -77,6 +86,66 @@ BOOTSTRAP_SEED: Final = 42
 """설계 §4.2 가 **실행 전에** 고정한 값. 여기서 바꾸면 사전등록을 어긴다."""
 
 
+RUNS_DIR = _ROOT / "eval" / "m33"
+
+
+def run_dir(stratum: str) -> Path:
+    return RUNS_DIR / stratum
+
+
+def latest_run(stratum: str) -> Path | None:
+    """가장 최근 실행의 원자료. 없으면 `None`."""
+    d = run_dir(stratum)
+    files = sorted(d.glob("*.jsonl")) if d.exists() else []
+    return files[-1] if files else None
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_manifest(
+    out: Path, *, stratum: str, today: date, repeats: int, limit: int | None, n_rows: int
+) -> None:
+    """실행 provenance — **어느 실행의 수치인지 특정할 수 있어야 한다.**
+
+    원자료는 비결정적이라 커밋하지 않는다(`.gitignore`). 그래서 문서가 인용하는 **그 실행**을
+    지목할 수단이 manifest 뿐이다.
+    """
+    import subprocess
+    from datetime import datetime
+
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=_ROOT, timeout=10
+        ).stdout.strip()
+    except Exception:  # pragma: no cover - git 이 없어도 실행은 되어야 한다
+        sha = "(unknown)"
+    meta = {
+        "stratum": stratum,
+        "target_date": today.isoformat(),
+        "repeats": repeats,
+        "limit": limit,
+        "rows": n_rows,
+        "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "git_sha": sha,
+        "golden_path": str(STRATUM_PATHS[stratum].relative_to(_ROOT)),
+        "golden_sha256": _sha256(STRATUM_PATHS[stratum]),
+        "raw_sha256": _sha256(out),
+        "raw_bytes": out.stat().st_size,
+        # 사전등록 상수 — 실행 시점 값을 함께 남긴다(나중에 바뀌면 대조된다).
+        "primary_repeat": PRIMARY_REPEAT,
+        "bootstrap_n": BOOTSTRAP_N,
+        "bootstrap_seed": BOOTSTRAP_SEED,
+        "arms": list(ARMS),
+    }
+    out.with_suffix(".meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
 def load_stratum(stratum: str, limit: int | None = None) -> list[dict[str, Any]]:
     rows = [
         json.loads(line)
@@ -108,6 +177,9 @@ async def run_case(case: dict[str, Any], repeat: int, *, today: date) -> dict[st
         "block": case["block"],
         "repeat": repeat,
         "axes": case.get("axes"),
+        # ⚠️ **재집계는 이 값을 쓴다.** `date.today()` 로 다시 채점하면 D 에 만든 계획을
+        # D+1 의 마감·주기창으로 재구성하게 돼 **같은 원자료의 M33 이 날짜마다 달라진다.**
+        "target_date": today.isoformat(),
     }
 
     # ── 공통: 초기 분해 + 검토 (한 번만) ──────────────────────────────────
@@ -165,21 +237,22 @@ def _dump(plan: Any) -> dict[str, Any] | None:
 
 
 async def main_async(args: argparse.Namespace) -> None:
-    out_path = _ROOT / "eval" / f"l1_7b_m33_{args.stratum}.jsonl"
     if args.summarize_only:
-        rows = [
-            json.loads(x) for x in out_path.read_text(encoding="utf-8").splitlines() if x.strip()
-        ]
-        print(f"저장된 원자료 재집계: {out_path.relative_to(_ROOT)} ({len(rows)}행)")
+        src = Path(args.run) if args.run else latest_run(args.stratum)
+        if src is None:
+            raise SystemExit(f"[{args.stratum}] 실행 원자료가 없다 — 먼저 실행해라")
+        rows = [json.loads(x) for x in src.read_text(encoding="utf-8").splitlines() if x.strip()]
+        print(f"저장된 원자료 재집계: {src.relative_to(_ROOT)} ({len(rows)}행)")
         summarize(rows, stratum=args.stratum)
         return
 
     today = date.today()
     cases = load_stratum(args.stratum, args.limit)
-    calls = len(cases) * args.repeats * 3  # 최악: 분해1 + 검토1 + 재분해2
+    n = len(cases) * args.repeats
+    # 승인이면 분해1 + 검토1 = 2, 반려면 재분해 2회가 더 붙어 4.
     print(
         f"[{args.stratum}] 케이스 {len(cases)}건 × 반복 {args.repeats}회 "
-        f"→ 최대 {calls}~{calls + len(cases) * args.repeats} 호출"
+        f"→ 호출 {2 * n}~{4 * n} (승인 2 / 반려 4)"
         f"{' (dry-run)' if args.dry_run else ''}"
     )
     if args.dry_run:
@@ -198,10 +271,26 @@ async def main_async(args: argparse.Namespace) -> None:
                 flush=True,
             )
     print()
+    # ⚠️ **실행마다 새 파일이다.** 한 경로에 덮어쓰면 이전 실행이 사라지고, 문서가 인용한
+    # 수치를 다시 만들 수 없다.
+    from datetime import datetime as _dt
+
+    d = run_dir(args.stratum)
+    d.mkdir(parents=True, exist_ok=True)
+    out_path = d / f"{_dt.now().strftime('%Y%m%dT%H%M%S')}.jsonl"
     out_path.write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8"
     )
+    write_manifest(
+        out_path,
+        stratum=args.stratum,
+        today=today,
+        repeats=args.repeats,
+        limit=args.limit,
+        n_rows=len(rows),
+    )
     print(f"원자료: {out_path.relative_to(_ROOT)} ({len(rows)}행)")
+    print(f"manifest: {out_path.with_suffix('.meta.json').relative_to(_ROOT)}")
     summarize(rows, stratum=args.stratum)
 
 
@@ -309,6 +398,23 @@ def paired_bootstrap_ci(deltas: list[int]) -> tuple[float, float, float]:
     return point, lo, hi
 
 
+def base_date_of(rows: list[dict[str, Any]]) -> date:
+    """원자료의 **기준일**. 섞여 있으면 거부한다.
+
+    ⚠️ `date.today()` 로 재집계하면 실행일 D 에 만든 계획을 D+1 의 마감·주기창으로
+    재구성하게 돼 **같은 원자료의 M33 이 날짜마다 달라진다.** 저장된 값만 쓴다.
+    """
+    dates = {r["target_date"] for r in rows if r.get("target_date")}
+    if not dates:
+        raise SystemExit(
+            "원자료에 `target_date` 가 없다 — 이 파일은 기준일을 저장하기 전 형식이다. "
+            "다시 실행해서 새로 만들어라(옛 원자료를 오늘 날짜로 재집계하면 안 된다)."
+        )
+    if len(dates) > 1:
+        raise SystemExit(f"기준일이 섞여 있다: {sorted(dates)} — 한 실행의 행만 집계한다")
+    return date.fromisoformat(next(iter(dates)))
+
+
 def summarize(rows: list[dict[str, Any]], *, stratum: str) -> None:
     """arm 별 M26-core · M18 과 M33(ΔM26-core) 을 낸다.
 
@@ -322,7 +428,7 @@ def summarize(rows: list[dict[str, Any]], *, stratum: str) -> None:
     from scripts.l1_7_schedule_eval import _NotApplicable
 
     cases = {c["case_id"]: c for c in load_stratum(stratum)}
-    today = date.today()
+    today = base_date_of(rows)
     ok = [r for r in rows if not r.get("fell_back")]
     fb = [r for r in rows if r.get("fell_back")]
     primary = [r for r in ok if r["repeat"] == PRIMARY_REPEAT]
@@ -415,6 +521,7 @@ def main() -> None:
     p.add_argument("--repeats", type=int, default=1, help="케이스당 반복")
     p.add_argument("--dry-run", action="store_true", help="LLM 없이 구성만")
     p.add_argument("--summarize-only", action="store_true", help="저장된 원자료만 재집계")
+    p.add_argument("--run", default=None, help="재집계할 원자료 경로 (기본: 가장 최근 실행)")
     asyncio.run(main_async(p.parse_args()))
 
 
