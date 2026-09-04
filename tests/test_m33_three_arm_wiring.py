@@ -218,3 +218,72 @@ def test_bootstrap_constants_match_the_design() -> None:
     assert M.BOOTSTRAP_SEED == 42
     assert M.PRIMARY_REPEAT == 0
     assert M.ARMS == ("A_none", "B_feedback", "C_retry")
+
+
+# ── 5. 집계 — 페어링·부트스트랩·M18 분리 ────────────────────────────────────
+
+
+def test_bootstrap_is_deterministic_with_the_registered_seed() -> None:
+    """같은 입력이면 같은 구간 — 시드가 고정돼 있어야 재현된다."""
+    d = [1, 0, 0, 1, -1, 0, 1, 0]
+    assert M.paired_bootstrap_ci(d) == M.paired_bootstrap_ci(d)
+
+
+def test_bootstrap_point_estimate_is_the_mean_delta() -> None:
+    assert M.paired_bootstrap_ci([1, 1, 0, 0])[0] == pytest.approx(0.5)
+    assert M.paired_bootstrap_ci([-1, -1, -1, -1])[0] == pytest.approx(-1.0)
+
+
+def test_bootstrap_ci_brackets_the_point_estimate() -> None:
+    pt, lo, hi = M.paired_bootstrap_ci([1, 0, 1, 0, 1, 0, 1, 0, 1, 0])
+    assert lo <= pt <= hi
+
+
+def test_bootstrap_on_all_zero_deltas_gives_a_degenerate_interval() -> None:
+    """세 arm 이 같으면(전부 승인) Δ 가 0 이고 구간도 0 이다 — 설계 §1.1."""
+    assert M.paired_bootstrap_ci([0, 0, 0]) == (0.0, 0.0, 0.0)
+
+
+def test_empty_deltas_do_not_crash() -> None:
+    assert M.paired_bootstrap_ci([]) == (0.0, 0.0, 0.0)
+
+
+def test_pairing_drops_a_case_missing_in_any_arm() -> None:
+    """한 arm 에서만 계획이 없으면 **그 케이스를 뺀다** — 설계 §4.1.
+
+    안 빼면 ΔM26-core 가 **서로 다른 케이스 집합의 차**가 된다.
+    """
+    cases = {c["case_id"]: c for c in M.load_stratum("challenge")}
+    cid = next(iter(cases))
+    rows = [{"case_id": cid, "plans": {"A_none": None, "B_feedback": None, "C_retry": None}}]
+    deltas, dropped = M.paired_deltas(rows, cases, "A_none", "B_feedback", today=_TODAY)
+    assert deltas == []
+    assert dropped == [cid]
+
+
+def test_m18_is_computed_separately_from_the_core_and() -> None:
+    """M18 은 AND 에 없고 **나란히** 보고된다 — 별도 함수다."""
+    assert hasattr(M, "_arm_m18b")
+    src = (_ROOT / "scripts" / "l1_7b_m33_run.py").read_text(encoding="utf-8")
+    assert "M26-core 의 AND 에는 없고 나란히 보고한다" in src
+    assert "M18b (arm 별 분포)" in src
+
+
+def test_summary_records_the_scoring_basis_difference() -> None:
+    """**최종 계획 기준**이라 L1-7A 의 원안 기준 M26-core 와 절대값을 비교하면 안 된다."""
+    src = (_ROOT / "scripts" / "l1_7b_m33_run.py").read_text(encoding="utf-8")
+    assert "최종 계획" in src and "절대값을 비교" in src
+
+
+def test_metric_computation_is_reused_not_copied() -> None:
+    """지표 계산을 `l1_7_run` 에서 가져다 쓴다 — 옮겨 적으면 두 실험이 갈린다."""
+    src = (_ROOT / "scripts" / "l1_7b_m33_run.py").read_text(encoding="utf-8")
+    for fn in ("R.score_raw", "R.core_verdicts", "R.m26_core", "SE.evaluate_case"):
+        assert fn in src, f"`{fn}` 를 재사용하지 않고 있다"
+
+
+def test_undetermined_sign_is_not_forced() -> None:
+    """구간이 0 을 걸치면 **부호를 억지로 만들지 않는다** (설계 §5)."""
+    src = (_ROOT / "scripts" / "l1_7b_m33_run.py").read_text(encoding="utf-8")
+    assert "억지로 만들지 않는다" in src
+    assert "이 층을 룰로 대체하거나 걷어내자" in src
