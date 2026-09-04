@@ -7,7 +7,10 @@
   * chip 응답:  {"type": "chip", "values": ["학업", "건강"]}
   * 자유 입력:  {"type": "text", "raw": "캡스톤, 토익", "normalized": ["캡스톤", "토익"]}
   * 슬라이더:    {"type": "range", "start": "09:00", "end": "23:00"}
-- clarity_score: 0~1 (LLM 또는 룰 기반 채점)
+- clarity_score: 0~1 (LLM 또는 룰 기반 채점).
+  ⚠️ **프로덕션에서 한 번도 쓰이지 않는다.** `upsert_slot_answer` 의 세 호출부
+  (`routes/interview.py`·`routes/materials.py` ×2) 모두 이 인자를 넘기지 않아 항상
+  NULL 이다. 채점값은 `_decide_storage` 안에서만 쓰이고 저장되지 않는다(#448 감사).
 """
 
 from __future__ import annotations

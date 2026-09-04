@@ -186,7 +186,13 @@ async def test_constrained_answer_stored_despite_low_clarity(
     """chip/range 제약 입력은 LLM clarity 가 낮아도(0.1) 선택 자체로 저장된다.
 
     회귀: 실 Gemini 가 "1학년" 같은 유효 chip 을 0.3 으로 낮게 채점해도 영구 재질문에
-    빠지지 않고 다음 슬롯으로 진행해야 한다(명료성이 0% 에 갇히던 버그)."""
+    빠지지 않고 다음 슬롯으로 진행해야 한다(명료성이 0% 에 갇히던 버그).
+
+    ⚠️ **값을 뚝뚝히 단언해야 한다.** 예전엔 `first_slot in slot_answers` 만 봤고, 그건 이
+    테스트가 약속하는 것을 안 지켰다 — `_decide_storage` 의 `is_constrained` 단축을 지우면
+    답이 `_SKIP_MARKER`(`{"type":"text","raw":""}`)로 들어가는데, **키는 그대로 있고**
+    다음 슬롯으로도 넘어가서 둘 다 통과했다. 즉 사용자의 "1학년" 이 **통째로 버려지는**
+    회귀를 이 테스트가 놓치고 있었다(#448 감사에서 변이로 확인)."""
     monkeypatch.setattr(aiClient, "run", _stub(clarity=0.1))  # clarity 임계 미만
 
     result = await interview_runner.start_interview(session_id=uuid4(), user_id=uuid4())
@@ -198,7 +204,8 @@ async def test_constrained_answer_stored_despite_low_clarity(
         slot_key=first_slot,
         answer_value=["1학년"],  # chip
     )
-    assert first_slot in result.state["slot_answers"]  # 낮은 clarity 에도 저장됨
+    # 키 존재가 아니라 **고른 값 그대로** 들어가 있어야 한다.
+    assert result.state["slot_answers"][first_slot] == {"type": "chip", "values": ["1학년"]}
     assert result.state["next_slot_key"] != first_slot  # 다음 슬롯으로 진행
 
 

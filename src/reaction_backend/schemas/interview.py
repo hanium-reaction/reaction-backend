@@ -284,7 +284,10 @@ class GoalCandidate(CamelModel):
     # pointer('내 프로젝트')가 아니라 내용이 있어야 분해가 그 기능·목차대로 뼈대를 잡는다.
     materials_note: str | None = None
     tentative_tier: Literal["focus", "maintain", "parked"] = "maintain"
-    confidence: float = Field(ge=0.0, le=1.0)  # 해당 슬롯 clarity_score
+    # ⚠️ **`clarity_score` 와 무관하다.** `interview_adapter` 가 목표 출처에 따라 코드로
+    # 박는다 — 추론 목록이면 0.0, 사용자가 고른 heaviest 면 0.5. 예전 주석이 "해당 슬롯
+    # clarity_score" 라고 적어 둬서 채점값이 하류로 흐르는 것처럼 읽혔다(#448 감사).
+    confidence: float = Field(ge=0.0, le=1.0)
 
     @field_validator("deadline", mode="before")
     @classmethod
