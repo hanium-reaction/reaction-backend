@@ -119,6 +119,14 @@ class StartSessionRequest(CamelModel):
     """POST /interview/sessions 요청 — kind 생략 시 계획 인터뷰(하위호환, U0b)."""
 
     kind: Literal["plan", "ultimate"] = "plan"
+    # 이 목표 **하나**만 계획하려고 들어온 인터뷰. 목표 관리의 "미계획" 카드에서 진입한다.
+    #
+    # 주면 `goals.list`·`goals.heaviest` 를 **그 목표로 채운 채** 시작하므로 그 둘을 묻지
+    # 않는다 — 대상이 이미 정해졌는데 "지금 머릿속에 있는 일들을 적어주세요" 로 다시 묻는
+    # 것은 사용자가 누른 버튼의 약속을 어기는 것이다. 나머지 `goals.*` 속성만 묻는다.
+    #
+    # `kind="ultimate"` 와는 함께 쓸 수 없다 — 궁극목표 인터뷰엔 `goals.*` 슬롯이 없다.
+    goal_id: str | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

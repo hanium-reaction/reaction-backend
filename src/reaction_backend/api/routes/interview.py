@@ -58,6 +58,7 @@ from reaction_backend.orchestrator.interview import InterviewState
 from reaction_backend.orchestrator.interview_catalog import (
     CATALOGS,
 )
+from reaction_backend.repositories.goal_repo import GoalRepo, get_goal_repo
 from reaction_backend.repositories.interview_repo import InterviewRepo, get_interview_repo
 from reaction_backend.repositories.profile_repo import ProfileRepo, get_profile_repo
 from reaction_backend.safety import endpoint_rate_limit
@@ -106,6 +107,46 @@ SessionDep = Annotated[AsyncSession, Depends(get_db)]
 # ─────────────────────────────────────────────────────────────────────────────
 # helpers — 에러 / config / 재조립 / 매핑 / 영속화
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+_GOAL_ID_PREFIX = "goal_"
+
+
+async def _seed_for_single_goal(
+    goal_repo: GoalRepo, user_id: UUID, goal_id: str
+) -> dict[str, dict[str, Any]]:
+    """이 목표 하나만 계획하는 인터뷰의 시드 — `goals.list`·`goals.heaviest` 를 채운다.
+
+    대상이 이미 정해졌으므로 그 둘은 **묻지 않는다**(`open_required_keys` 가 채워진 슬롯을
+    건너뛴다). 목표 관리의 "미계획" 카드에서 들어온 사용자에게 "지금 머릿속에 있는 일들을
+    적어주세요" 로 다시 묻는 것은 그가 누른 버튼의 약속을 어기는 것이다.
+
+    값 모양은 **사용자가 직접 답했을 때 저장되는 것과 같다**(DB 실측) — 다르면 뒤의
+    정규화·추출 경로가 이 시드만 다르게 읽는다.
+    """
+    if not goal_id.startswith(_GOAL_ID_PREFIX):
+        raise _goal_not_found()
+    try:
+        parsed = UUID(goal_id[len(_GOAL_ID_PREFIX) :])
+    except ValueError as e:
+        raise _goal_not_found() from e
+    # `get_by_id` 가 소유자와 **보관 여부**를 이미 거른다 — 여기서 다시 보면 도달 불가능한
+    # 분기가 되고, 변이 테스트가 덮을 수 없는 죽은 코드가 남는다.
+    goal = await goal_repo.get_by_id(user_id, parsed)
+    if goal is None:
+        raise _goal_not_found()
+    return {
+        "goals.list": {"type": "text", "raw": goal.title, "normalized": [goal.title]},
+        "goals.heaviest": {"type": "chip", "values": [goal.title]},
+    }
+
+
+def _goal_not_found() -> ApiError:
+    return ApiError(
+        ErrorCode.GOAL_NOT_FOUND,
+        "해당 목표를 찾을 수 없어요.",
+        http_status=status.HTTP_404_NOT_FOUND,
+    )
 
 
 def _not_found() -> ApiError:
@@ -434,6 +475,7 @@ async def start_session(
     repo: RepoDep,
     profile_repo: ProfileRepoDep,
     session: SessionDep,
+    goal_repo: Annotated[GoalRepo, Depends(get_goal_repo)],
     body: StartSessionRequest | None = None,
 ) -> InterviewSession:
     """딥 인터뷰 세션 시작 — FSM 이 고른 첫 필수 슬롯 질문 1개 생성.
@@ -459,6 +501,17 @@ async def start_session(
                 ambiguity_final=float(stale.ambiguity_final or 0.0),
             )
         seed = await _carry_over_answers(repo, profile_repo, user, target_kind=kind)
+        if body is not None and body.goal_id:
+            if kind != "plan":
+                raise ApiError(
+                    ErrorCode.COMMON_VALIDATION_ERROR,
+                    "궁극목표 인터뷰에는 목표를 지정할 수 없어요.",
+                    http_status=status.HTTP_400_BAD_REQUEST,
+                )
+            # 이월 시드에는 `goals.*` 가 **없다**(`CARRY_OVER_SLOT_KEYS`) — 목표는 사용자가
+            # 직접 고르게 한다는 규칙이라서다. 그래도 뒤에 두는 것은 순서 의존을 만들지
+            # 않기 위해서다. 그 전제는 `test_carry_over_never_seeds_goal_slots` 가 지킨다.
+            seed.update(await _seed_for_single_goal(goal_repo, user.id, body.goal_id))
         row = await repo.create_session(user.id, get_settings().llm_model, kind=kind)
         result = await interview_runner.start_interview(
             session_id=row.id,
