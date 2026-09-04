@@ -18,7 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from reaction_backend.config import get_settings
 from reaction_backend.db.models.llm_run import LlmRun
 from reaction_backend.db.models.user import User
-from reaction_backend.safety.llm_budget import BudgetExceeded, check
+from reaction_backend.safety.llm_budget import (
+    BudgetExceeded,
+    _used_tokens_today_global,
+    check,
+)
 from reaction_backend.schemas.common import now_kst
 
 pytestmark = pytest.mark.usefixtures("real_db_session")
@@ -29,6 +33,25 @@ def _pin_budgets(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "llm_global_daily_token_budget", 1_000, raising=False)
     monkeypatch.setattr(settings, "llm_daily_token_budget", 10_000, raising=False)
+
+
+async def _baseline_and_pin(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch, *, headroom: int = 1_000
+) -> int:
+    """오늘 이미 쌓인 전역 사용량을 재고, 전역 상한을 **그 위로** 옮긴다. 기준선을 돌려준다.
+
+    ⚠️ 전역 예산은 **user_id 필터 없이 모든 행**을 더한다(그게 이 기능의 정의다).
+    그래서 절대값(`used == 1_100`)으로 단언하면 **깨끗한 CI DB 에서만 통과하고, 라이브
+    검증으로 `llm_runs` 가 쌓인 개발 DB 에서는 실패한다.** 실제로 브라우저로 인터뷰 한 번을
+    돌리자 이 파일 4건이 무너졌다(used=8733 vs 기대 1100).
+
+    기준선을 프로덕션과 **같은 함수**로 재는 것이 핵심이다 — "오늘" 의 정의(KST 자정)가
+    갈리면 이 헬퍼가 거짓말을 한다.
+    """
+    base = await _used_tokens_today_global(session)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "llm_global_daily_token_budget", base + headroom, raising=False)
+    return base
 
 
 def _run(user_id: uuid.UUID | None, *, tokens_in: int, tokens_out: int) -> LlmRun:
@@ -62,9 +85,10 @@ async def _seed(session: AsyncSession, *rows: LlmRun) -> None:
 
 
 async def test_global_cap_blocks_even_when_user_is_under_their_own_limit(
-    real_db_session: AsyncSession,
+    real_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """다른 사용자들 합산이 전역 상한(1000)을 넘으면, 오늘 한 번도 안 쓴 사용자도 막힌다."""
+    base = await _baseline_and_pin(real_db_session, monkeypatch)
     other_a = await _seed_user(real_db_session)
     other_b = await _seed_user(real_db_session)
     await _seed(
@@ -76,12 +100,15 @@ async def test_global_cap_blocks_even_when_user_is_under_their_own_limit(
     target = await _seed_user(real_db_session)
     with pytest.raises(BudgetExceeded) as exc:
         await check(real_db_session, user_id=target)
-    assert exc.value.used == 1_100
-    assert exc.value.limit == 1_000
+    assert exc.value.used == base + 1_100
+    assert exc.value.limit == base + 1_000
 
 
-async def test_global_cap_counts_all_users_not_just_caller(real_db_session: AsyncSession) -> None:
+async def test_global_cap_counts_all_users_not_just_caller(
+    real_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """전역 합산은 user_id 필터가 없다 — 호출자 자신의 사용량만 보면 안 된다."""
+    base = await _baseline_and_pin(real_db_session, monkeypatch)
     caller = await _seed_user(real_db_session)
     other = await _seed_user(real_db_session)
     await _seed(
@@ -92,13 +119,14 @@ async def test_global_cap_counts_all_users_not_just_caller(real_db_session: Asyn
 
     with pytest.raises(BudgetExceeded) as exc:
         await check(real_db_session, user_id=caller)
-    assert exc.value.used == 1_100
+    assert exc.value.used == base + 1_100
 
 
 async def test_under_global_cap_falls_through_to_per_user_check(
-    real_db_session: AsyncSession,
+    real_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """전역 상한 밑이면 기존 사용자별 로직으로 넘어간다 — 회귀 없음."""
+    await _baseline_and_pin(real_db_session, monkeypatch)
     user_id = await _seed_user(real_db_session)
     await _seed(real_db_session, _run(user_id, tokens_in=50, tokens_out=50))  # 전역 100, 개인 100
 
@@ -125,11 +153,17 @@ async def test_zero_global_limit_means_unlimited(real_db_session: AsyncSession) 
 
 
 async def test_global_used_ignores_day_boundary_from_yesterday(
-    real_db_session: AsyncSession,
+    real_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """어제치 토큰은 전역 합산에 안 들어간다 — KST 자정 경계."""
+    """어제치 토큰은 전역 합산에 안 들어간다 — KST 자정 경계.
+
+    ⚠️ 어제치로 **10,000** 을 심는다. 경계가 깨져 그게 합산되면 전역 상한
+    (기준선 + 1,000)을 훌쩍 넘어 `BudgetExceeded` 가 난다 — 그래서 이 테스트는
+    기준선을 옮겨도 여전히 날이 서 있다.
+    """
     from datetime import timedelta
 
+    await _baseline_and_pin(real_db_session, monkeypatch)
     other = await _seed_user(real_db_session)
     yesterday_row = _run(other, tokens_in=5_000, tokens_out=5_000)
     yesterday_row.created_at = now_kst() - timedelta(days=1)
@@ -137,4 +171,6 @@ async def test_global_used_ignores_day_boundary_from_yesterday(
 
     target = await _seed_user(real_db_session)
     status = await check(real_db_session, user_id=target)
+    # `status.used` 는 **사용자별** 사용량이다 — 이 사용자는 오늘 한 번도 안 썼다.
+    # 어제 5,000+5,000 을 심었어도 전역 합산에 안 들어가므로 전역 상한에 안 걸린다.
     assert status.used == 0

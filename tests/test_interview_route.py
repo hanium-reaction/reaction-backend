@@ -275,7 +275,7 @@ def test_finish_materializes_extracted_goals(client: TestClient, monkeypatch: An
         seen["status"] = status
         return [], None
 
-    async def _spy_supersede(session: Any, *, user_id: Any, keep: Any) -> int:
+    async def _spy_supersede(session: Any, *, user_id: Any, keep: Any, **kw: Any) -> int:
         seen["superseded"] = True
         return 0
 

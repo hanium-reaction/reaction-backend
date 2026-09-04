@@ -10,6 +10,8 @@ from datetime import date
 from typing import Any
 from uuid import uuid4
 
+import pytest
+
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.orchestrator.first_plan_adapter import (
@@ -232,11 +234,93 @@ async def test_supersede_archives_only_stale_proposed() -> None:
         sess,  # type: ignore[arg-type]
         user_id=uuid4(),
         keep=[keep],
+        onboarding_state="ONBOARDING_INTERVIEW",  # 온보딩 중 — restart-wins 가 맞다
     )
     assert n == 1
     assert stale.status == "archived" and stale.archived_at is not None  # 보관(soft)
     assert keep.status == "proposed" and keep.archived_at is None  # 이번에 살린 것
     assert real.status == "active" and real.archived_at is None  # 진짜 목표는 불변
+
+
+async def test_supersede_keeps_unplanned_goals_after_onboarding() -> None:
+    """⚠️ **온보딩을 마친 사용자의 재인터뷰는 미계획 목표를 지우지 않는다.**
+
+    실측(브라우저 재현): 목표 관리에서 "다시 인터뷰하기" 로 들어가 한 문항만 답하고
+    [충분해요] 로 끝냈는데, 이전 `proposed` 목표가 보관돼 화면에서 사라졌다.
+
+        전:  proposed | 내년 1월 중순까지 교환학생 파견 확정 받기   ← "미계획" 배지
+        후:  archived | 내년 1월 중순까지 교환학생 파견 확정 받기   ← 사라짐
+
+    온보딩 중에는 restart-wins 가 맞다(인터뷰를 여러 번 시도하며 나온 잔재를 정리).
+    그러나 앱을 쓰다 하는 재인터뷰에서 남은 `proposed` 는 **사용자가 나중에 계획하려고
+    남겨둔 미계획 목표**다. 재인터뷰 시트도 "이미 만들어진 목표와 일정은 그대로 남아요"
+    라고 약속한다.
+    """
+    stale = Goal()
+    stale.id = uuid4()
+    stale.title = "내년 1월 중순까지 교환학생 파견 확정 받기"
+    stale.status = "proposed"
+    stale.archived_at = None
+
+    sess = _FakeSession([stale])
+    n = await supersede_proposed_goals(
+        sess,  # type: ignore[arg-type]
+        user_id=uuid4(),
+        keep=[],  # 이번 인터뷰에서 이 목표를 다시 말하지 않았다
+        onboarding_state="ACTIVE",
+    )
+
+    assert n == 0
+    assert stale.status == "proposed" and stale.archived_at is None
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "WELCOME",
+        "ONBOARDING_INTERVIEW",
+        "ONBOARDING_CONFIRM",
+        "ONBOARDING_CALENDAR",
+        "ONBOARDING_MANUAL_SCHEDULE",
+        "ONBOARDING_POLICIES",
+        "ONBOARDING_FIRST_PLAN",
+        "ONBOARDING_NOTIFICATIONS",
+    ],
+)
+async def test_supersede_still_cleans_up_during_onboarding(state: str) -> None:
+    """온보딩 **전 단계**에서는 그대로 정리한다 — 인터뷰 재시도의 잔재가 쌓이면 안 된다."""
+    stale = Goal()
+    stale.id = uuid4()
+    stale.title = "재시도 중 나온 잔재"
+    stale.status = "proposed"
+    stale.archived_at = None
+
+    sess = _FakeSession([stale])
+    n = await supersede_proposed_goals(
+        sess,  # type: ignore[arg-type]
+        user_id=uuid4(),
+        keep=[],
+        onboarding_state=state,
+    )
+
+    assert n == 1
+    assert stale.status == "archived"
+
+
+def test_both_interview_completion_paths_pass_the_onboarding_state() -> None:
+    """호출부 **둘 다** 사용자 상태를 넘기는가.
+
+    인터뷰가 끝나는 경로는 둘이다(`submit_answer` 의 `result.done`, `finish_session`).
+    한쪽만 고치면 다른 쪽으로 끝낸 사용자만 목표를 잃는다 — 재현하기 어려운 버그가 된다.
+    """
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parent.parent / "src/reaction_backend/api/routes/interview.py"
+    ).read_text(encoding="utf-8")
+    # `supersede_proposed_goals(` 문자열은 주석(#186 함정 설명)에도 나온다 — **실제로 넘기는
+    # 인자**를 센다. 호출 경로가 둘이므로 둘 다여야 한다.
+    assert src.count("onboarding_state=user.onboarding_state") == 2
 
 
 # ───────────────────── 만다라 오염 격리 (W3, `1ee508b967ba`) ─────────────────────
@@ -286,6 +370,7 @@ async def test_supersede_proposed_goals_ignores_mandala_owned_goal() -> None:
         sess,  # type: ignore[arg-type]
         user_id=uid,
         keep=[],
+        onboarding_state="ONBOARDING_INTERVIEW",  # 온보딩 중이어야 정리 로직이 돈다
     )
 
     assert n == 0

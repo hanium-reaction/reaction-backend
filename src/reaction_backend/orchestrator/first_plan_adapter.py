@@ -2721,15 +2721,30 @@ async def supersede_proposed_goals(
     *,
     user_id: uuid.UUID,
     keep: Sequence[Goal],
+    onboarding_state: str,
 ) -> int:
     """이번 인터뷰가 살린 것 말고 남은 **잠정(proposed)** 목표를 보관 처리. 반환: 정리한 개수.
 
-    인터뷰 세션은 이미 restart-wins 로 이전 세션을 `abandoned` 로 닫는다. 목표에도 같은 규칙을
-    적용해, 지난 인터뷰에서 나왔지만 계획으로 이어지지 않은 잠정 목표가 계속 쌓이지 않게 한다.
+    인터뷰 세션은 이미 restart-wins 로 이전 세션을 `abandoned` 로 닫는다. **온보딩 중에는**
+    목표에도 같은 규칙을 적용해, 인터뷰를 여러 번 시도하며 나온 잠정 목표가 쌓이지 않게 한다.
 
     `active`/`completed` 는 건드리지 않는다 — 이미 사용자가 계획을 승인했거나 직접 만든
     진짜 목표라서. 보관(soft)이라 데이터는 남고 화면에서만 사라진다(hard delete 금지, AGENTS §2).
+
+    ## ⚠️ 온보딩을 마친 사용자(`ACTIVE`)에게는 하지 않는다
+
+    앱을 쓰다 하는 **재인터뷰**에서는 남은 `proposed` 목표가 "쌓인 쓰레기" 가 아니라
+    **사용자가 나중에 계획하려고 남겨둔 미계획 목표**다. 실측(브라우저 재현): 재인터뷰를
+    한 문항만 답하고 끝냈는데 이전 미계획 목표가 보관돼 화면에서 사라졌다.
+    재인터뷰 시트가 "이미 만들어진 목표와 일정은 **그대로 남아요**" 라고 말하는데
+    사실과 달랐다.
+
+    `onboarding_state` 를 **필수 인자**로 둔 이유: 호출부가 이 판단을 잊을 수 없게 하려는
+    것이다. 클라이언트가 보내는 값이 아니라 **서버가 가진 사용자 상태**로 가른다.
     """
+    # 온보딩을 마쳤으면 남은 잠정 목표는 사용자의 미계획 목표다 — 건드리지 않는다.
+    if onboarding_state == "ACTIVE":
+        return 0
     keep_ids = {g.id for g in keep if g.id is not None}
     stale = [
         g

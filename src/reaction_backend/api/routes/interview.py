@@ -586,7 +586,10 @@ async def submit_answer(
                 # 지난 인터뷰의 잠정 목표 중 이번에 다시 안 나온 것은 보관 — 세션 restart-wins 를
                 # 목표에도 적용해, 계획으로 이어지지 않은 목표가 계속 쌓이지 않게 한다.
                 await first_plan_adapter.supersede_proposed_goals(
-                    session, user_id=user.id, keep=goal_rows
+                    session,
+                    user_id=user.id,
+                    keep=goal_rows,
+                    onboarding_state=user.onboarding_state,
                 )
                 # 지속형 선호(에너지/톤/시간/회복)를 프로필 메모리에 영속 (#A-1) — 그동안 첫
                 # 계획에만 쓰이고 버려지던 Policy Snapshot 레이어를 채운다. 설정에서 편집(#A-2).
@@ -675,7 +678,10 @@ async def finish_session(
                 session, user_id=user.id, core_goals=result.outcome.core_goals
             )
             await first_plan_adapter.supersede_proposed_goals(
-                session, user_id=user.id, keep=goal_rows
+                session,
+                user_id=user.id,
+                keep=goal_rows,
+                onboarding_state=user.onboarding_state,
             )
             # 지속형 선호를 프로필 메모리에 영속 (#A-1, best-effort #130).
             await _persist_profile_best_effort(session, user=user, outcome=result.outcome)
