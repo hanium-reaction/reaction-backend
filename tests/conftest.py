@@ -1536,6 +1536,21 @@ class FakeExecutionRepo:
             if e.user_id == user_id and e.action_item_id in wanted
         }
 
+    async def latest_execution_ids(
+        self, user_id: UUID, action_item_ids: Sequence[UUID]
+    ) -> dict[UUID, UUID]:
+        """카드 id → 가장 최근 실행 id (실 repo 규칙 미러 — created_at 오름차순의 마지막)."""
+        wanted = set(action_item_ids)
+        rows = sorted(
+            (
+                e
+                for e in self._executions.values()
+                if e.user_id == user_id and e.action_item_id in wanted
+            ),
+            key=lambda e: getattr(e, "created_at", None) or datetime.min.replace(tzinfo=UTC),
+        )
+        return {e.action_item_id: e.id for e in rows}
+
     async def find_open_block(self, user_id: UUID, action_item_id: UUID) -> ScheduledBlock | None:
         candidates = [
             b

@@ -61,6 +61,7 @@ from reaction_backend.schemas.today import (
 router = APIRouter(prefix="/today", tags=["today"])
 
 _ACTION_PREFIX = "action_"
+_EXEC_PREFIX = "exec_"
 _WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
@@ -103,7 +104,9 @@ def _brief_schema(brief: DailyBrief | None) -> MorningBrief | None:
     )
 
 
-def _card_schema(a: ActionItem, *, has_execution_history: bool, missed: bool) -> AgendaCard:
+def _card_schema(
+    a: ActionItem, *, has_execution_history: bool, missed: bool, execution_id: UUID | None
+) -> AgendaCard:
     return AgendaCard(
         action_id=f"{_ACTION_PREFIX}{a.id}",
         title=a.title,
@@ -120,6 +123,7 @@ def _card_schema(a: ActionItem, *, has_execution_history: bool, missed: bool) ->
             has_execution_history=has_execution_history,
         ),
         missed_check_in=missed,
+        execution_id=f"{_EXEC_PREFIX}{execution_id}" if execution_id else None,
     )
 
 
@@ -169,6 +173,7 @@ async def today_agenda(
     action_ids = [c.id for c in cards]
     # 카드마다 묻지 않는다 — 한 번에 받아 `cancellable` 판정에 쓴다 (#214).
     with_history = await execution_repo.action_ids_with_history(user.id, action_ids)
+    latest_executions = await execution_repo.latest_execution_ids(user.id, action_ids)
     # T1 미체크 배지(근거 대장 §6.2) — 판정은 domain.missed_check_in, 재료만 여기서 배치 조회.
     now = now_kst()
     active_blocks = await execution_repo.list_active_blocks_for_actions(user.id, action_ids)
@@ -192,7 +197,12 @@ async def today_agenda(
         date=today.isoformat(),
         brief=_brief_schema(brief),
         cards=[
-            _card_schema(a, has_execution_history=a.id in with_history, missed=a.id in missed_ids)
+            _card_schema(
+                a,
+                has_execution_history=a.id in with_history,
+                missed=a.id in missed_ids,
+                execution_id=latest_executions.get(a.id),
+            )
             for a in cards
         ],
         habits=[_habit_schema(i) for i in habit_instances],
@@ -265,9 +275,6 @@ async def get_action_detail(
         first_step=action.first_step,
         goal_id=f"goal_{action.goal_id}" if action.goal_id is not None else None,
     )
-
-
-_EXEC_PREFIX = "exec_"
 
 
 def _parse_execution_id(execution_id: str) -> UUID:

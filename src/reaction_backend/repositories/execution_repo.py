@@ -97,6 +97,34 @@ class ExecutionRepo:
         result = await self._session.execute(stmt)
         return set(result.scalars().all())
 
+    async def latest_execution_ids(
+        self, user_id: UUID, action_item_ids: Sequence[UUID]
+    ) -> dict[UUID, UUID]:
+        """카드 id → **가장 최근 실행 id**.
+
+        FE 가 실패한 카드의 회복 화면에 다시 들어갈 때 필요하다. 예전엔 FE 가 메모리
+        맵(`executionIds`)만 보고, 새로고침으로 그게 비면 `POST /today/actions/{id}/start`
+        로 **새 실행을 만들어 버렸다** — 그리고 곧바로 failed 로 체크인했다. 그래서 회복
+        화면에 한 번 들어갈 때마다 **가짜 실패 기록이 하나씩 늘었다**(실측: 실제로는 두 번
+        실패한 카드에 실행 4건). 그 숫자가 주간 리뷰 준수율과 에스컬레이션 레벨을 함께
+        밀어 올린다.
+
+        카드마다 부르면 N+1 이므로 한 번에 묻는다. 빈 목록이면 쿼리하지 않는다.
+        """
+        if not action_item_ids:
+            return {}
+        stmt = (
+            select(ExecutionEvent.action_item_id, ExecutionEvent.id)
+            .where(
+                ExecutionEvent.user_id == user_id,
+                ExecutionEvent.action_item_id.in_(action_item_ids),
+            )
+            .order_by(ExecutionEvent.action_item_id, ExecutionEvent.created_at)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        # created_at 오름차순이라 같은 카드의 뒤 행이 앞 행을 덮어쓴다 → 마지막 것이 남는다.
+        return dict(rows)  # type: ignore[arg-type]
+
     async def list_active_blocks_for_actions(
         self, user_id: UUID, action_item_ids: Sequence[UUID]
     ) -> list[tuple[UUID, str, datetime, datetime]]:

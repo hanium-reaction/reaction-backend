@@ -47,6 +47,13 @@ class AgendaCard(CamelModel):
     # (`domain/missed_check_in.py`). push 가 아니라 인앱 배지용 신호다 — 배지를 몇 번
     # 보여줄지·언제 지울지는 FE 책임, 서버는 "지금 미체크인가"만 알려준다.
     missed_check_in: bool
+    # 이 카드의 **가장 최근 실행 id** (없으면 null).
+    #
+    # FE 가 실패한 카드의 회복 화면에 다시 들어갈 때 필요하다. 이 값이 없으면 FE 는
+    # 메모리 맵만 보고, 새로고침으로 그게 비면 `POST /today/actions/{id}/start` 로
+    # **새 실행을 만들어** 곧바로 failed 로 체크인했다 — 회복 화면에 들어갈 때마다
+    # 가짜 실패가 하나씩 늘고, 그 숫자가 주간 리뷰 준수율과 에스컬레이션을 밀어 올렸다.
+    execution_id: str | None = None
 
 
 class AgendaHabit(CamelModel):

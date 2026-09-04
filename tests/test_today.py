@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.daily_brief import DailyBrief
+from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.domain.missed_check_in import MISSED_CHECK_IN_DELAY
 from reaction_backend.schemas.common import now_kst
@@ -330,3 +331,76 @@ def test_action_detail_not_found(client: TestClient) -> None:
 def test_action_detail_bad_id(client: TestClient) -> None:
     resp = client.get("/today/actions/nonexistent")
     assert resp.status_code == 404
+
+
+# ── executionId — 회복 재진입이 가짜 실패를 만들지 않게 (#454 후속) ─────────
+
+
+def _seed_execution(
+    repo: FakeExecutionRepo,
+    action_item_id,  # noqa: ANN001
+    *,
+    status: str = "failed",
+    created_at: datetime | None = None,
+) -> ExecutionEvent:
+    e = ExecutionEvent()
+    e.id = uuid4()
+    e.user_id = DEMO_USER_UUID
+    e.action_item_id = action_item_id
+    e.scheduled_block_id = None
+    e.completion_status = status
+    e.plan_start_at = now_kst()
+    e.plan_end_at = now_kst() + timedelta(minutes=30)
+    e.actual_start_at = now_kst()
+    e.created_at = created_at or now_kst()
+    repo._executions[e.id] = e
+    return e
+
+
+def test_agenda_card_carries_its_latest_execution_id(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """⚠️ **회복 재진입이 가짜 실패를 만들던 구멍을 막는 값이다.**
+
+    FE 는 실패한 카드의 회복 화면에 다시 들어갈 때 executionId 가 필요하다. 이 값이
+    없으면 메모리 맵만 보고, 새로고침으로 그게 비면 `POST /today/actions/{id}/start` 로
+    **새 실행을 만들어** 곧바로 failed 로 체크인했다 — 회복 화면에 들어갈 때마다 가짜
+    실패가 하나씩 늘었다(실측: 두 번 실패한 카드에 실행 4건). 그 숫자가 주간 리뷰
+    준수율과 에스컬레이션 레벨을 함께 밀어 올린다.
+    """
+    card = _make_action(title="실패한 카드")
+    fake_action_item_repo.seed(card)
+    execution = _seed_execution(fake_execution_repo, card.id)
+
+    body = client.get("/today/agenda").json()
+
+    assert body["cards"][0]["executionId"] == f"exec_{execution.id}"
+
+
+def test_agenda_card_returns_the_most_recent_execution(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """여러 번 실행한 카드는 **마지막** 것을 준다 — 옛 실행을 주면 회복이 엉뚱한 실패에 붙는다."""
+    card = _make_action(title="여러 번 한 카드")
+    fake_action_item_repo.seed(card)
+    _seed_execution(fake_execution_repo, card.id, created_at=now_kst() - timedelta(hours=3))
+    latest = _seed_execution(fake_execution_repo, card.id, created_at=now_kst())
+
+    body = client.get("/today/agenda").json()
+
+    assert body["cards"][0]["executionId"] == f"exec_{latest.id}"
+
+
+def test_agenda_card_without_execution_has_none(
+    client: TestClient, fake_action_item_repo: FakeActionItemRepo
+) -> None:
+    """아직 시작 안 한 카드는 null — FE 가 이 값으로 '시작 필요'를 가른다."""
+    fake_action_item_repo.seed(_make_action(title="아직 안 한 카드"))
+
+    body = client.get("/today/agenda").json()
+
+    assert body["cards"][0]["executionId"] is None
