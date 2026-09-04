@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -108,6 +109,13 @@ async def _seed_attempt(
 async def test_fetch_recent_decisions_excludes_pending_and_out_of_window(
     real_db_session: AsyncSession,
 ) -> None:
+    """창 밖·미결정은 빼고, 창 안의 확정 결정만 센다.
+
+    ⚠️ 이 fetch 는 **전 사용자**를 집계하는 리포트 쿼리다(그게 정상이다). 결과 전체를
+    내 시드와 정확히 일치시키면 **깨끗한 CI DB 에서만 통과하고 데이터가 남은 개발 DB
+    에서는 실패한다.** 시드 **전후의 증분**만 본다.
+    """
+    before = Counter(await _fetch_recent_decisions(real_db_session, since=_SINCE))
     user_id = await _seed_user(real_db_session)
     in_window = await _seed_execution(real_db_session, user_id=user_id, plan_start_at=_NOW)
     await _seed_attempt(
@@ -140,7 +148,7 @@ async def test_fetch_recent_decisions_excludes_pending_and_out_of_window(
 
     decisions = await _fetch_recent_decisions(real_db_session, since=_SINCE)
 
-    assert decisions == ["rejected"]
+    assert Counter(decisions) - before == Counter(["rejected"])
 
 
 async def test_fetch_recent_reflectable_uses_reflectable_from_not_current_status(
@@ -152,6 +160,7 @@ async def test_fetch_recent_reflectable_uses_reflectable_from_not_current_status
     회고 창에 들어온 시각이지 지금 상태가 아니다 — 성공적으로 체크인된(=완료) 카드를
     현재 상태로 걸러내면 분모가 무응답 카드로만 쏠려 무응답률이 과대평가된다.
     """
+    before = Counter(await _fetch_recent_reflectable(real_db_session, since=_SINCE))
     user_id = await _seed_user(real_db_session)
     checked_in = await _seed_execution(
         real_db_session, user_id=user_id, plan_start_at=_NOW, completion_status="done"
@@ -165,16 +174,24 @@ async def test_fetch_recent_reflectable_uses_reflectable_from_not_current_status
     )
 
     reasons = await _fetch_recent_reflectable(real_db_session, since=_SINCE)
+    added = Counter(reasons) - before
 
-    assert len(reasons) == 2
-    assert reasons.count("reflection_skipped") == 1
-    assert reasons.count(None) == 1
+    assert sum(added.values()) == 2
+    assert added["reflection_skipped"] == 1
+    assert added[None] == 1
     assert checked_in and skipped  # 시드가 실제로 둘 다 만들어졌다는 참조(미사용 변수 방지)
 
 
 async def test_fetch_recent_reflectable_excludes_before_window(
     real_db_session: AsyncSession,
 ) -> None:
+    """창 이전의 실행은 분모에 들어오지 않는다.
+
+    ⚠️ 이 fetch 는 **전 사용자**를 집계하는 리포트 쿼리다(그게 정상이다). 결과 전체를
+    내 시드와 정확히 일치시키면 **깨끗한 CI DB 에서만 통과하고 데이터가 남은 개발 DB
+    에서는 실패한다.** 시드 **전후의 증분**만 본다.
+    """
+    before = Counter(await _fetch_recent_reflectable(real_db_session, since=_SINCE))
     user_id = await _seed_user(real_db_session)
     await _seed_execution(
         real_db_session,
@@ -185,4 +202,4 @@ async def test_fetch_recent_reflectable_excludes_before_window(
 
     reasons = await _fetch_recent_reflectable(real_db_session, since=_SINCE)
 
-    assert reasons == []
+    assert Counter(reasons) - before == Counter()

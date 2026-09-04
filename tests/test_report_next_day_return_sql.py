@@ -98,7 +98,13 @@ async def test_fetch_days_by_status_scopes_to_requested_statuses(
 async def test_fetch_days_by_status_deduplicates_same_user_same_day(
     real_db_session: AsyncSession,
 ) -> None:
-    """같은 (사용자, 날짜)에 실패가 2건이어도 집합엔 1개만 — 몇 건인지는 이 지표와 무관."""
+    """같은 (사용자, 날짜)에 실패가 2건이어도 집합엔 1개만 — 몇 건인지는 이 지표와 무관.
+
+    ⚠️ `_fetch_days_by_status` 는 **전 사용자**를 집계하는 리포트 쿼리다(그게 정상이다).
+    그래서 결과 전체를 내 시드와 정확히 일치시키면 **깨끗한 CI DB 에서만 통과하고
+    데이터가 남은 개발 DB 에서는 실패한다.** 시드 **전후의 증분**만 본다.
+    """
+    before = await _fetch_days_by_status(real_db_session, ("failed",))
     user_id = await _seed_user(real_db_session)
     await _seed_execution(
         real_db_session, user_id=user_id, completion_status="failed", plan_start_at=_BASE_AT
@@ -112,4 +118,4 @@ async def test_fetch_days_by_status_deduplicates_same_user_same_day(
 
     fail_days = await _fetch_days_by_status(real_db_session, ("failed",))
 
-    assert fail_days == {(user_id, _BASE_AT.date())}
+    assert fail_days - before == {(user_id, _BASE_AT.date())}
