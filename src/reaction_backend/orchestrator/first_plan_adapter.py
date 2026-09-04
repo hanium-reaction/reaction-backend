@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import (
     ACTION_CATEGORY_VALUES,
+    RECOVERY_SOURCE_VALUES,
     ActionItem,
 )
 from reaction_backend.db.models.goal import GOAL_CATEGORY_VALUES, GOAL_TIER_VALUES, Goal
@@ -2037,6 +2038,8 @@ def _replaceable_action(
     goal_id: uuid.UUID,
     *,
     mandala_node_ids: frozenset[uuid.UUID] = frozenset(),
+    include_mandala: bool = False,
+    include_recovery: bool = False,
 ) -> bool:
     """이전 AI 계획 산출물 중 '사용자가 손대지 않은' 교체 대상인지.
 
@@ -2058,13 +2061,25 @@ def _replaceable_action(
     (W2, `1ee508b967ba`). 만다라 셀에서 승격된 카드(`source='goal'` 로 저장될 수 있다)가
     같은 goal 아래 계획 카드와 섞여 있어도, 계획 재생성이 그 만다라 유래 카드까지 쓸어가면
     안 된다. 기본값은 빈 집합 — 호출부가 안 넘기면 기존 동작과 완전히 같다.
+
+    ⚠️ **위 두 제외 규칙은 승인 경로의 사정이다** (#367). 이 함수를 재사용하는 **목표 완료**
+    경로에는 그 사정이 없다 — 사용자가 "이 목표 끝났어요" 를 눌렀는데 만다라에서 온 카드나
+    회복 카드만 계속 뜨는 건 의도가 아니다. 그래서 규칙을 함수에 못 박지 않고 **호출부가
+    고르게** 한다:
+
+    - `include_mandala=True` — 만다라 유래 카드도 대상에 넣는다. 궁극목표는 카드가 **전부**
+      만다라 유래라, 이게 없으면 완료해도 한 장도 안 멈춘다(#367 실측: 증상 100% 잔존).
+    - `include_recovery=True` — `source='recovery_*'` 카드도 대상에 넣는다.
+
+    둘 다 기본값 `False` — 승인 경로는 아무것도 안 넘기므로 동작이 완전히 같다.
     """
+    allowed_sources = ("goal", *RECOVERY_SOURCE_VALUES) if include_recovery else ("goal",)
     return (
-        action.source == "goal"
+        action.source in allowed_sources
         and action.status == "planned"
         and action.archived_at is None
         and action.goal_id == goal_id
-        and action.goal_node_id not in mandala_node_ids
+        and (include_mandala or action.goal_node_id not in mandala_node_ids)
     )
 
 
@@ -2143,13 +2158,26 @@ async def superseded_card_ids(
 
 
 async def supersede_previous_plan(
-    session: AsyncSession, *, user_id: uuid.UUID, goal_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    goal_id: uuid.UUID,
+    include_mandala: bool = False,
+    include_recovery: bool = False,
 ) -> int:
     """**같은 목표**의 이전 First Plan 산출물을 정리(soft) — 승인 = "이 계획으로 교체".
 
     호출자는 둘이다: ① 계획 승인(교체), ② **목표 완료 확정**(ADR-0007 6b — 끝낸 목표의
     남은 카드가 계속 뜨지 않게). 이름은 ①에서 왔지만 하는 일은 "이 목표의 손대지 않은
     예정 카드와 그 블록을 soft 정리" 라 ②에도 그대로 맞다.
+
+    ⚠️ **두 호출자는 '무엇을 정리할지'가 다르다** (#367). ①은 만다라 유래 카드와 회복 카드를
+    남겨야 하고(계획 재생성이 그것까지 쓸어가면 안 된다), ②는 **끝낸 목표의 카드를 남길
+    이유가 없다.** 규칙을 함수 안에 못 박았더니 ②가 ①의 사정을 그대로 물려받아 틀린 답을
+    냈다 — 궁극목표는 카드가 전부 만다라 유래라 완료를 눌러도 **한 장도 안 멈췄다**.
+    그래서 축을 열어 호출부가 고른다 (`include_mandala` / `include_recovery`, 기본 `False`
+    = 승인 경로의 기존 동작). 완료 전용 함수를 따로 두지 않은 이유는 `protected_card_ids`
+    같은 **공유 보호 규칙이 두 벌로 갈리는 것**이 더 위험해서다.
 
     generate 는 기존 블록을 busy 로 보지 않고(후속: 스케줄러 DB busy 통합 이슈) approve 는
     무조건 INSERT 만 해서, 재생성→재승인을 반복하면 카드/블록이 계속 누적됐다
@@ -2163,9 +2191,9 @@ async def supersede_previous_plan(
     자세한 근거는 `_replaceable_action` 참고.
 
     "손대지 않은" 판정은 두 층이다:
-    - 카드 층: `_replaceable_action` (source=goal · status=planned · 미보관). ⚠️ **날짜는
-      조건이 아니다** — #223 이후 카드마다 블록 날짜가 4주에 흩어지므로, 날짜로 좁히면
-      뒷날짜 카드가 교체에서 빠져 재승인마다 누적된다(교체 단위는 goal 전체).
+    - 카드 층: `_replaceable_action` (source=goal[+recovery_*] · status=planned · 미보관).
+      ⚠️ **날짜는 조건이 아니다** — #223 이후 카드마다 블록 날짜가 4주에 흩어지므로, 날짜로
+      좁히면 뒷날짜 카드가 교체에서 빠져 재승인마다 누적된다(교체 단위는 goal 전체).
     - 블록 층: 카드의 블록 중 `source='user_edit'`(S15 직접 이동)가 하나라도 있으면
       그 카드는 **통째로 보존** — 사용자가 시간을 옮긴 계획을 승인이 지우면 안 된다.
 
@@ -2183,12 +2211,13 @@ async def supersede_previous_plan(
     로 재현됐다. 지금은 그쪽이 `ActionItemRepo.get_by_id_for_update` 를 쓴다. 카드를
     변경하는 경로를 새로 만들 때도 같은 잠금 읽기를 쓸 것.
     """
+    allowed_sources = ("goal", *RECOVERY_SOURCE_VALUES) if include_recovery else ("goal",)
     stmt = (
         select(ActionItem)
         .where(
             ActionItem.user_id == user_id,
             ActionItem.goal_id == goal_id,
-            ActionItem.source == "goal",
+            ActionItem.source.in_(allowed_sources),
             ActionItem.status == "planned",
             ActionItem.archived_at.is_(None),
         )
@@ -2196,9 +2225,20 @@ async def supersede_previous_plan(
     )
     rows = (await session.execute(stmt)).scalars().all()
     node_ids = {a.goal_node_id for a in rows if a.goal_node_id is not None}
-    mandala_node_ids = await _mandala_node_ids_among(session, node_ids)
+    # 만다라 판정 쿼리는 실제로 쓸 때만 — 완료 경로(include_mandala)는 결과를 안 보므로 건너뛴다.
+    mandala_node_ids = (
+        frozenset() if include_mandala else await _mandala_node_ids_among(session, node_ids)
+    )
     candidates = [
-        a for a in rows if _replaceable_action(a, goal_id, mandala_node_ids=mandala_node_ids)
+        a
+        for a in rows
+        if _replaceable_action(
+            a,
+            goal_id,
+            mandala_node_ids=mandala_node_ids,
+            include_mandala=include_mandala,
+            include_recovery=include_recovery,
+        )
     ]
     if not candidates:
         return 0

@@ -211,7 +211,14 @@ class ActionItemRepo:
 
         원본 카드의 status 는 변경하지 않고 `parent_action_item_id` 로 혈통만 기록한다
         (AGENTS.md §2 — Resilience 지표 전제).
+
+        **`goal_id` 는 부모 카드에서 물려받는다** (#367). 예전엔 안 채웠는데, 그러면 이
+        카드가 어느 목표에 속하는지 아무도 모른다 — 목표 스코프 조회에 안 걸려서 **어느
+        목표를 완료해도 회복 카드는 안 멈췄다.** 회복은 '그 목표를 계속하는 다른 방법'이지
+        목표 밖의 일이 아니다. 부모에 `goal_id` 가 없으면(inbox/manual 유래 실패 카드의
+        회복) 그대로 None — 지어내지 않는다.
         """
+        parent = await self._session.get(ActionItem, parent_action_item_id)
         action = ActionItem(
             user_id=user_id,
             title=title,
@@ -219,6 +226,7 @@ class ActionItemRepo:
             category=category,
             source=source,
             parent_action_item_id=parent_action_item_id,
+            goal_id=parent.goal_id if parent is not None else None,
             estimated_minutes=estimated_minutes,
         )
         self._session.add(action)

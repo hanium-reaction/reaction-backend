@@ -191,9 +191,18 @@ def test_completion_triggers_card_cleanup_but_undo_does_not(
     from reaction_backend.orchestrator import first_plan_adapter
 
     calls: list[Any] = []
+    axes: list[tuple[bool, bool]] = []
 
-    async def spy(session: Any, *, user_id: Any, goal_id: Any) -> int:
+    async def spy(
+        session: Any,
+        *,
+        user_id: Any,
+        goal_id: Any,
+        include_mandala: bool = False,
+        include_recovery: bool = False,
+    ) -> int:
         calls.append(goal_id)
+        axes.append((include_mandala, include_recovery))
         return 0
 
     monkeypatch.setattr(first_plan_adapter, "supersede_previous_plan", spy)
@@ -202,6 +211,10 @@ def test_completion_triggers_card_cleanup_but_undo_does_not(
     done = client.post(f"/goals/goal_{goal.id}/complete", json={"completed": True})
     assert done.status_code == 200
     assert calls == [goal.id]
+    # #367 — 두 축을 켜서 부르는지까지 본다. 기본값으로 부르면 만다라 유래 카드(궁극목표는
+    # 전부 이것)와 회복 카드가 안 멈추는데, 그 판정은 실 DB 테스트에서만 드러나 여기서
+    # 조용히 통과해 버린다.
+    assert axes == [(True, True)]
 
     undo = client.post(f"/goals/goal_{goal.id}/complete", json={"completed": False})
     assert undo.status_code == 200  # 응답도 본다 — 안 보면 되돌리기가 통째로 깨져도 초록이다

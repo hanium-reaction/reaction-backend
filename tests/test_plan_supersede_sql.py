@@ -72,10 +72,27 @@ async def test_supersede_select_scopes_to_goal() -> None:
     assert f"action_items.goal_id = '{GOAL}'" in where
     assert "target_date" not in where  # 교체 단위는 목표 전체 — 날짜 키 금지(#222)
     assert f"action_items.user_id = '{UID}'" in where
-    assert "action_items.source = 'goal'" in where
+    assert "action_items.source IN ('goal')" in where  # 기본(승인 경로)은 계획 산출물만
     assert "action_items.status = 'planned'" in where
     assert "action_items.archived_at IS NULL" in where
     assert "FOR UPDATE" in sql  # 동시 [시작] 요청과 직렬화
+
+
+async def test_supersede_select_widens_sources_for_completion() -> None:
+    """완료 경로(`include_recovery=True`)만 회복 카드까지 SELECT 범위에 넣는다 (#367).
+
+    SQL WHERE 가 안 넓어지면 파이썬 술어를 아무리 고쳐도 회복 카드는 **애초에 안 읽힌다** —
+    `_RecordingSession` 은 WHERE 를 평가하지 않아 술어 테스트만으로는 이게 안 잡힌다.
+    """
+    sess = _RecordingSession()
+    await supersede_previous_plan(  # type: ignore[arg-type]
+        sess, user_id=UID, goal_id=GOAL, include_mandala=True, include_recovery=True
+    )
+
+    where = _sql(sess.statements[0]).split(" WHERE ", 1)[1]
+    assert "action_items.source IN ('goal', 'recovery_downscope'" in where
+    assert "'recovery_park'" in where  # v0.7.1 에서 늘어난 4번째 그룹까지
+    assert f"action_items.goal_id = '{GOAL}'" in where  # 목표 스코프는 그대로
 
 
 async def test_superseded_card_ids_select_scopes_to_goal() -> None:

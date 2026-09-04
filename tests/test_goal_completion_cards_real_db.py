@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.goal import Goal
+from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.user import User
 from reaction_backend.orchestrator import first_plan_adapter
@@ -62,6 +63,27 @@ async def _seed_goal(session: AsyncSession, user_id: uuid.UUID | None = None) ->
     return goal
 
 
+async def _seed_mandala_node(session: AsyncSession, goal: Goal) -> GoalNode:
+    """만다라 셀 하나 (`tree_kind='mandala'`) — 궁극목표 카드가 달리는 자리.
+
+    승인 경로는 이 노드에 달린 카드를 **절대 교체하지 않는다**(W2, `1ee508b967ba`).
+    완료 경로는 반대로 멈춰야 한다 — 그 갈림이 #367 이다.
+    """
+    n = GoalNode()
+    n.id = uuid.uuid4()
+    n.goal_id = goal.id
+    n.title = "만다라 셀"
+    n.node_type = "leaf"
+    n.depth = 2
+    n.order_index = 0
+    n.is_leaf = True
+    n.tree_kind = "mandala"
+    n.source = "llm"
+    session.add(n)
+    await session.flush()
+    return n
+
+
 async def _seed_card(
     session: AsyncSession,
     goal: Goal,
@@ -70,11 +92,13 @@ async def _seed_card(
     status: str = "planned",
     source: str = "goal",
     block_source: str | None = "ai_plan",
+    goal_node_id: uuid.UUID | None = None,
 ) -> tuple[ActionItem, ScheduledBlock | None]:
     a = ActionItem()
     a.id = uuid.uuid4()
     a.user_id = goal.user_id
     a.goal_id = goal.id
+    a.goal_node_id = goal_node_id
     a.title = title
     a.target_date = now_kst().date() + timedelta(days=3)
     a.category = "study"
@@ -97,14 +121,29 @@ async def _seed_card(
     return a, b
 
 
+async def _complete_goal_cleanup(
+    session: AsyncSession, *, user_id: uuid.UUID, goal_id: uuid.UUID
+) -> int:
+    """완료 라우트(`PATCH /goals/{goalId}/complete`)가 부르는 것과 **같은 인자**로 호출한다.
+
+    두 축(`include_mandala`/`include_recovery`)을 이 파일에 한 번만 적어 둔다 — 테스트가
+    라우트와 다른 인자로 부르면 이 파일 전체가 실제로 도는 경로를 검증하지 않게 된다(#367).
+    """
+    return await first_plan_adapter.supersede_previous_plan(
+        session,
+        user_id=user_id,
+        goal_id=goal_id,
+        include_mandala=True,
+        include_recovery=True,
+    )
+
+
 async def test_completion_cancels_untouched_planned_cards(real_db_session: AsyncSession) -> None:
     """끝냈다고 확인하면 남은 예정 카드와 그 블록이 soft 정리된다."""
     goal = await _seed_goal(real_db_session)
     card, block = await _seed_card(real_db_session, goal, title="3주차 세션")
 
-    await first_plan_adapter.supersede_previous_plan(
-        real_db_session, user_id=goal.user_id, goal_id=goal.id
-    )
+    await _complete_goal_cleanup(real_db_session, user_id=goal.user_id, goal_id=goal.id)
     await real_db_session.flush()  # 이 함수는 flush 하지 않는다 — 안 하면 refresh 가 되돌린다
     await real_db_session.refresh(card)
     assert block is not None
@@ -122,9 +161,7 @@ async def test_completion_preserves_started_and_finished_cards(
     started, _ = await _seed_card(real_db_session, goal, title="진행 중", status="in_progress")
     done, _ = await _seed_card(real_db_session, goal, title="완료", status="done")
 
-    await first_plan_adapter.supersede_previous_plan(
-        real_db_session, user_id=goal.user_id, goal_id=goal.id
-    )
+    await _complete_goal_cleanup(real_db_session, user_id=goal.user_id, goal_id=goal.id)
     await real_db_session.flush()  # 이 함수는 flush 하지 않는다 — 안 하면 refresh 가 되돌린다
     for a in (started, done):
         await real_db_session.refresh(a)
@@ -143,9 +180,7 @@ async def test_completion_preserves_cards_the_user_moved(real_db_session: AsyncS
         real_db_session, goal, title="내가 옮긴 것", block_source="user_edit"
     )
 
-    await first_plan_adapter.supersede_previous_plan(
-        real_db_session, user_id=goal.user_id, goal_id=goal.id
-    )
+    await _complete_goal_cleanup(real_db_session, user_id=goal.user_id, goal_id=goal.id)
     await real_db_session.flush()  # 이 함수는 flush 하지 않는다 — 안 하면 refresh 가 되돌린다
     await real_db_session.refresh(moved)
     assert block is not None
@@ -166,9 +201,7 @@ async def test_completion_leaves_other_goals_alone(real_db_session: AsyncSession
     other = await _seed_goal(real_db_session, user_id)
     theirs, _ = await _seed_card(real_db_session, other, title="다른 목표의 카드")
 
-    await first_plan_adapter.supersede_previous_plan(
-        real_db_session, user_id=mine.user_id, goal_id=mine.id
-    )
+    await _complete_goal_cleanup(real_db_session, user_id=mine.user_id, goal_id=mine.id)
     await real_db_session.flush()
     await real_db_session.refresh(theirs)
 
@@ -182,10 +215,95 @@ async def test_completion_leaves_manual_and_inbox_cards_alone(
     goal = await _seed_goal(real_db_session)
     manual, _ = await _seed_card(real_db_session, goal, title="직접 추가", source="manual")
 
-    await first_plan_adapter.supersede_previous_plan(
-        real_db_session, user_id=goal.user_id, goal_id=goal.id
-    )
+    await _complete_goal_cleanup(real_db_session, user_id=goal.user_id, goal_id=goal.id)
     await real_db_session.flush()  # 이 함수는 flush 하지 않는다 — 안 하면 refresh 가 되돌린다
     await real_db_session.refresh(manual)
 
     assert manual.archived_at is None
+
+
+# ───────────────── #367 만다라 유래 카드 · 회복 카드 ─────────────────
+#
+# 이 두 묶음은 **같은 카드를 두 경로에 태워** 답이 갈리는지를 본다. 한쪽만 있으면
+# "규칙을 함수에 못 박아도 초록" 이라 #367 의 재발을 못 막는다.
+
+
+async def test_completion_stops_mandala_derived_cards(real_db_session: AsyncSession) -> None:
+    """만다라 셀에서 온 카드도 완료하면 멈춘다 (#367).
+
+    **궁극목표는 카드가 전부 이것이다.** 이게 안 되면 완료를 눌러도 한 장도 안 멈춰
+    증상이 100% 그대로 남는다 — 실제로 그랬다.
+    """
+    goal = await _seed_goal(real_db_session)
+    node = await _seed_mandala_node(real_db_session, goal)
+    card, block = await _seed_card(
+        real_db_session, goal, title="만다라 유래 카드", goal_node_id=node.id
+    )
+
+    await _complete_goal_cleanup(real_db_session, user_id=goal.user_id, goal_id=goal.id)
+    await real_db_session.flush()
+    await real_db_session.refresh(card)
+    assert block is not None
+    await real_db_session.refresh(block)
+
+    assert card.archived_at is not None
+    assert block.block_status == "cancelled"
+
+
+async def test_approval_still_preserves_mandala_derived_cards(
+    real_db_session: AsyncSession,
+) -> None:
+    """반대로 **승인 경로**(기본 인자)는 만다라 유래 카드를 그대로 둔다 (W2 회귀 가드).
+
+    #367 은 완료 경로만 고치는 것이다. 계획 재생성이 만다라 73칸을 쓸어가면 안 된다는
+    `1ee508b967ba` 의 이유는 그대로 유효하다.
+    """
+    goal = await _seed_goal(real_db_session)
+    node = await _seed_mandala_node(real_db_session, goal)
+    card, _ = await _seed_card(
+        real_db_session, goal, title="만다라 유래 카드", goal_node_id=node.id
+    )
+
+    replaced = await first_plan_adapter.supersede_previous_plan(
+        real_db_session, user_id=goal.user_id, goal_id=goal.id
+    )
+    await real_db_session.flush()
+    await real_db_session.refresh(card)
+
+    assert replaced == 0
+    assert card.archived_at is None
+
+
+async def test_completion_stops_recovery_cards(real_db_session: AsyncSession) -> None:
+    """수락한 회복 카드도 완료하면 멈춘다 (#367).
+
+    회복은 '그 목표를 계속하는 다른 방법' 이다 — 목표가 끝났으면 같이 끝난다.
+    `goal_id` 를 물려받게 된 뒤에야(`create_from_recovery`) 목표 스코프에 걸린다.
+    """
+    goal = await _seed_goal(real_db_session)
+    card, _ = await _seed_card(
+        real_db_session, goal, title="회복 카드", source="recovery_carryover"
+    )
+
+    await _complete_goal_cleanup(real_db_session, user_id=goal.user_id, goal_id=goal.id)
+    await real_db_session.flush()
+    await real_db_session.refresh(card)
+
+    assert card.archived_at is not None
+
+
+async def test_approval_still_preserves_recovery_cards(real_db_session: AsyncSession) -> None:
+    """반대로 **승인 경로**는 회복 카드를 남긴다 — 계획 재생성이 회복을 지우면 안 된다."""
+    goal = await _seed_goal(real_db_session)
+    card, _ = await _seed_card(
+        real_db_session, goal, title="회복 카드", source="recovery_downscope"
+    )
+
+    replaced = await first_plan_adapter.supersede_previous_plan(
+        real_db_session, user_id=goal.user_id, goal_id=goal.id
+    )
+    await real_db_session.flush()
+    await real_db_session.refresh(card)
+
+    assert replaced == 0
+    assert card.archived_at is None

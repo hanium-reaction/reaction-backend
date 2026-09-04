@@ -52,6 +52,10 @@ ACTION_SOURCE_VALUES = (
     "recovery_park",
 )
 
+# 회복 수락으로 만들어진 카드의 source (Issue #20-A). 위 목록에서 **파생**한다 — 회복 그룹이
+# 늘어날 때 한쪽만 고쳐 어긋나는 일이 없게 (v0.7.1 에서 `recovery_park` 가 늘었던 전례).
+RECOVERY_SOURCE_VALUES = tuple(v for v in ACTION_SOURCE_VALUES if v.startswith("recovery_"))
+
 # DB 설계서 v0.7.1 §5.9 — 카테고리 (Goal 카테고리와 동일 풀)
 ACTION_CATEGORY_VALUES = (
     "study",

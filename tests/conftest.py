@@ -991,7 +991,10 @@ class FakeActionItemRepo:
         a.estimated_minutes = estimated_minutes
         a.why_now = None
         a.first_step = None
-        a.goal_id = None
+        # 실 repo 와 같이 부모에서 물려받는다 (#367) — fake 가 None 으로 두면 "회복 카드는
+        # 어느 목표에도 안 걸린다" 는 옛 동작이 테스트 안에서만 계속 살아남는다.
+        parent = self._items.get(parent_action_item_id)
+        a.goal_id = parent.goal_id if parent is not None else None
         a.archived_at = None
         self._items[a.id] = a
         return a

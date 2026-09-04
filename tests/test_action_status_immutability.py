@@ -91,6 +91,7 @@ async def test_create_from_recovery_does_not_touch_parent_status() -> None:
     parent = ActionItem()
     parent.id = uuid4()
     parent.status = "failed"
+    parent.goal_id = uuid4()
 
     added: list[ActionItem] = []
 
@@ -103,6 +104,11 @@ async def test_create_from_recovery_does_not_touch_parent_status() -> None:
 
         async def refresh(self, obj: ActionItem) -> None:
             return None
+
+        async def get(self, model: type[ActionItem], pk: object) -> ActionItem | None:
+            # #367 — 회복 카드가 부모의 goal_id 를 물려받으므로 부모를 읽는다. **읽기만**
+            # 한다는 것이 이 테스트의 요지: 아래 단언이 부모 status 불변을 계속 지킨다.
+            return parent if pk == parent.id else None
 
     repo = ActionItemRepo(_Session())  # type: ignore[arg-type]
     created = await repo.create_from_recovery(
@@ -118,3 +124,6 @@ async def test_create_from_recovery_does_not_touch_parent_status() -> None:
     assert parent.status == "failed", "회복 생성이 원본 status 를 바꿨다 — Resilience 전제 파괴"
     assert created.parent_action_item_id == parent.id  # 혈통은 기록
     assert len(added) == 1  # 부모를 세션에 다시 add 하지 않는다
+    # #367 — 목표를 물려받는다. 없으면 이 카드는 어느 목표 스코프 조회에도 안 걸려서
+    # **어느 목표를 완료해도 안 멈춘다.**
+    assert created.goal_id == parent.goal_id
