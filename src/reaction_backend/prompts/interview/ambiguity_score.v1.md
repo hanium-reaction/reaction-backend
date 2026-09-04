@@ -16,6 +16,8 @@
 - answer_type 이 chip / select / time_range / date_picker (구조화 슬롯)이면, 답은 앱이 보기·형식으로
   이미 검증한다 → 값을 뽑을 수 있으면 clarity_score 를 0.9 로 주고(숙고 불필요) **normalized_value
   추출에 집중**하라. (이 슬롯들은 clarity 로 재질문하지 않는다.)
+  (이 값은 **코드가 무시한다** — `_decide_storage` 의 `is_constrained` 가 구조화 타입이면
+  clarity 게이트를 건너뛴다. 그러니 여기서 정확하려 애쓰지 마라. #448)
 - text 슬롯만 실제로 채점한다: 구체적이고 슬롯을 충족하면 높게(0.8~1.0), 비었거나 모호하면
   낮게(0.0~0.4) — 낮으면 같은 슬롯을 한 번 더 묻게 된다.
 - new_ambiguity 는 이 답까지 반영한 전체 남은 모호함(0.0~1.0, 낮을수록 명확)의 대략치면 된다
