@@ -1022,6 +1022,24 @@ _COVERAGE_FLOOR_RATIO = 0.9
 # LLM 이 '이 목표는 유한해서 더 못 채운다' 고 스스로 밝히는 사유 코드(프롬프트와 동기화).
 _VOLUME_BELOW_HORIZON = "goal_volume_below_horizon"
 
+# `extend_action_plan_to_horizon` 이 만든 노드·카드의 node_id 접두사.
+#
+# ⚠️ **생성부와 소비부가 갈리면 안 된다.** ④층 검토기는 이 접두사로 확장 구간을 **입력에서
+# 통째로 제외**하고(`first_plan._review_variables`), 그래서 이 문자열이 바뀌면 검토기가
+# 다시 자리표시자를 보게 된다 — 조용히, 아무 테스트도 안 깨지면서. 그래서 상수로 둔다.
+CONTINUATION_NODE_PREFIX = "tmp-continue"
+
+
+def is_continuation_node(node_id: str | None) -> bool:
+    """이 노드/카드가 규칙이 마감까지 채우려고 덧붙인 '이어가기' 산물인가 (#436).
+
+    분해 LLM 이 만드는 node_id 는 자유 형식이지만 실측 6,959장에서 `tmp-` 로 시작하는 것은
+    하나도 없었다 — `tmp-continue`(브랜치) · `tmp-continue-N`(리프) 는 전부 이 규칙 산물이다.
+    분해 실패 폴백은 `tmp-leaf-N` 이라 여기 걸리지 않는다(그건 계획 **전체**가 자리표시자라
+    검토기가 봐야 한다).
+    """
+    return bool(node_id) and str(node_id).startswith(CONTINUATION_NODE_PREFIX)
+
 
 def extend_action_plan_to_horizon(
     outcome: InterviewOutcome,
@@ -1087,7 +1105,7 @@ def extend_action_plan_to_horizon(
     nodes = list(goal_plan.goal_nodes)
     items = list(goal_plan.action_items)
     root = next((n for n in nodes if n.parent_id is None), None)
-    branch_id = "tmp-continue"
+    branch_id = CONTINUATION_NODE_PREFIX
     nodes.append(
         GoalNodeDraft(
             node_id=branch_id,
@@ -1099,7 +1117,7 @@ def extend_action_plan_to_horizon(
         )
     )
     for i in range(add_count):
-        leaf_id = f"tmp-continue-{i}"
+        leaf_id = f"{CONTINUATION_NODE_PREFIX}-{i}"
         label = f"{heaviest.title} {have + i + 1}회차"
         nodes.append(
             GoalNodeDraft(

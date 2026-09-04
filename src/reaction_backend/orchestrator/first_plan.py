@@ -953,11 +953,34 @@ def _review_variables(state: FirstPlanState) -> dict[str, str]:
     conflict_parts = [f"{v.node_id}: {v.reason}" for v in gp.policy_violations]
     conflict_parts.extend(state["schedule_warnings"])
     conflicts = "; ".join(conflict_parts) if conflict_parts else "충돌 없음"
+    # ⚠️ **'이어가기' 확장 구간은 검토기에게 아예 넘기지 않는다** (#436).
+    #
+    # `extend_action_plan_to_horizon` 이 마감까지 채우려고 덧붙이는 카드는 제목이
+    # "{목표} 21회차" 로 서로 같고 first_step 이 "지난 회차에서 이어서 5분만 시작하기" 로
+    # 여덟 장 모두 동일하다 — **규칙이 의도적으로 그렇게 만든다.** 내용을 지금 지어내면
+    # 사용자가 안 정한 걸 정해 버리기 때문이다(루브릭 §D1: "반려 금지").
+    #
+    # M33 3-arm 실측: 반려 9건이 **전부** 확장 구간을 가진 계획에서 나왔고, 확장이 없는
+    # 40케이스 120회에서는 0건이었다. 그중 8건은 피드백이 이 구간을 명시적으로 지목했다
+    # ("이어하기로 추가된 회차별 … 제목과 첫 시작 단계가 다소 추상적이에요").
+    # 검토기는 정체를 **알아보고도** 결함이라 말한다 — 혼동이 아니라 계약 충돌이다.
+    #
+    # ⚠️ **프롬프트에 "지적하지 마라"로 쓰지 않는 이유**는 루브릭 §1.2 다:
+    #
+    #     "프롬프트에 '검사하지 마라'가 아니라 **변수 자체를 넘기지 않는** 방식으로
+    #      강제한다 — 변수가 있으면 지시를 어긴다(실측 다수)."
+    #
+    # v4 가 `focus_capacity` 에 이미 쓴 수법과 같다. 면제 조항 자체는
+    # `plan_quality_eval.v4.md` 에 글자 그대로 있지만, 그건 오프라인 평가용 프롬프트라
+    # 프로덕션 경로(`planning/plan_quality` → v3)에는 없다.
+    #
+    # 분해가 통째로 비어 확장이 계획 전부를 채운 경우에는 검토기가 **빈 계획**을 보고
+    # 반려한다 — 그게 맞다. 그건 확장의 문제가 아니라 분해 실패다.
+    nodes = [n for n in gp.goal_nodes if not first_plan_adapter.is_continuation_node(n.node_id)]
+    items = [a for a in gp.action_items if not first_plan_adapter.is_continuation_node(a.node_id)]
     return {
-        "goal_nodes_json": json.dumps([n.model_dump() for n in gp.goal_nodes], ensure_ascii=False),
-        "action_items_json": json.dumps(
-            [a.model_dump() for a in gp.action_items], ensure_ascii=False
-        ),
+        "goal_nodes_json": json.dumps([n.model_dump() for n in nodes], ensure_ascii=False),
+        "action_items_json": json.dumps([a.model_dump() for a in items], ensure_ascii=False),
         "session_length": session_length,
         "focus_capacity": focus_capacity,
         "time_policy_summary": time_policy_summary,
