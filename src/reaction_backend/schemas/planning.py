@@ -181,6 +181,13 @@ class FirstPlanGenerateRequest(CamelModel):
 
     interview_session_id: str | None = None
     outcome: InterviewOutcome | None = None
+    # 이 계획이 다룰 목표를 **명시**한다 (#398, additive). `GET /reviews/weekly` 의
+    # `nextCycleProposals[].goalId` 를 그대로 넣으면 된다.
+    #
+    # 없으면 종전대로 최근 완료 인터뷰가 고른 heaviest 를 재투영한다 — 그런데 목표를 여러 개
+    # 굴리는 사용자에게는 그게 **다른 목표**일 수 있다: 제안 카드에서 목표 A 의 다음 주기를
+    # 열었는데 최근 인터뷰 목표 B 의 계획이 생성·승인되는 일이 실제로 가능했다.
+    goal_id: str | None = None
     # 사용자가 확인·편집해 확정한 중간 목표(#milestones Stage B). 있으면 분해가 이걸 branch 로
     # 고정하고 각 안에서만 세션을 만든다. 없으면 현행(자동 전체 분해) — 하위호환.
     milestones: list[MilestoneDraft] | None = None

@@ -23,7 +23,7 @@ from reaction_backend.db.models.behavioral_profile import BehavioralProfile
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.llm import aiClient
-from reaction_backend.orchestrator import interview_adapter, mandala_cycle
+from reaction_backend.orchestrator import goal_cycle, interview_adapter, mandala_cycle
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.interview import GoalCandidate
 from tests.conftest import (
@@ -121,14 +121,13 @@ def _seed_tree(repo: FakeGoalRepo, goal: Goal, *, cells_per_axis: int = 3) -> di
 def test_seed_outcome_replaces_core_goals_with_the_axis() -> None:
     """heaviest 가 축으로 갈아끼워진다 — 정체성·가용시간·선호는 사용자가 답한 값 그대로."""
     base = _outcome(focus_goals=2)
-    axis = _node(goal_id=uuid4(), parent_id=uuid4(), title="개발 실력", depth=1, order_index=0)
     promoted = Goal()
     promoted.id = uuid4()
     promoted.title = "개발 실력"
     promoted.category = "other"
     promoted.goal_tier = "focus"
 
-    seeded = mandala_cycle.seed_outcome(base=base, axis=axis, promoted=promoted)
+    seeded = goal_cycle.seed_outcome(base=base, goal=promoted)
 
     assert [g.title for g in seeded.core_goals] == ["개발 실력"]
     assert seeded.core_goals[0].is_heaviest is True
@@ -153,14 +152,13 @@ def test_seed_outcome_keeps_slots_the_user_already_answered_for_this_goal() -> N
             ]
         }
     )
-    axis = _node(goal_id=uuid4(), parent_id=uuid4(), title="개발 실력", depth=1, order_index=0)
     promoted = Goal()
     promoted.id = uuid4()
     promoted.title = "개발 실력"
     promoted.category = "other"
     promoted.goal_tier = "focus"
 
-    seeded = mandala_cycle.seed_outcome(base=base, axis=axis, promoted=promoted)
+    seeded = goal_cycle.seed_outcome(base=base, goal=promoted)
     got = seeded.core_goals[0]
 
     assert (got.weekly_hours, got.session_length_min, got.frequency_per_week) == (6, 90, 3)
@@ -385,13 +383,12 @@ async def test_axis_seeded_outcome_gets_the_two_week_cap() -> None:
     제목을 안 맞추면(예: 축 노드 제목을 그대로 쓰는데 사용자가 승격 후 목표명을 고친 경우)
     조용히 4주로 떨어진다 — 그래서 여기서 못을 박는다.
     """
-    axis = _node(goal_id=uuid4(), parent_id=uuid4(), title="개발 실력", depth=1, order_index=0)
     promoted = Goal()
     promoted.id = uuid4()
     promoted.title = "이번 학기 개발 실력"  # 승격 후 사용자가 목표명을 고친 상태
     promoted.category = "other"
     promoted.goal_tier = "focus"
-    seeded = mandala_cycle.seed_outcome(base=_outcome(), axis=axis, promoted=promoted)
+    seeded = goal_cycle.seed_outcome(base=_outcome(), goal=promoted)
     session = _PromotedTitleSession([promoted.title])
 
     weeks = await _max_plan_weeks(session, uuid4(), seeded)  # type: ignore[arg-type]

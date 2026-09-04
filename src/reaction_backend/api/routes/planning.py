@@ -53,6 +53,7 @@ from reaction_backend.orchestrator import (
     first_plan,
     first_plan_adapter,
     first_plan_milestones,
+    goal_cycle,
     inbox_resources,
     interview_adapter,
     interview_projection,
@@ -394,6 +395,7 @@ async def generate_plan(
     body: FirstPlanGenerateRequest,
     user: CurrentUser,
     repo: RepoDep,
+    goal_repo: GoalRepoDep,
     draft_repo: DraftRepoDep,
     session: SessionDep,
 ) -> FirstPlanResponse:
@@ -403,10 +405,23 @@ async def generate_plan(
     Focus≤3 / Maintain≤5 초과 시 LLM 분해 전에 422 `GOAL_TIER_LIMIT_EXCEEDED`.
     Draft 를 `plan_drafts`(72h 만료)에 저장하고 실제 `planId` 를 반환. 항상 `is_draft=true`.
 
+    **`goalId` 를 주면 그 목표로 계획을 세운다** (#398, additive). 안 주면 종전대로 최근 완료
+    인터뷰의 heaviest 를 재투영하는데, 목표를 여러 개 굴리는 사용자에게는 그게 **다른 목표**일
+    수 있었다 — 주간 리포트의 `nextCycleProposals` 는 `goalId` 를 주면서 승인은 목표를 못
+    지정하는 `POST /plans/generate` 로 안내해서, 목표 A 의 제안을 열었는데 최근 인터뷰 목표 B
+    의 계획이 생성·승인되는 일이 가능했다.
+
+    가용 시간·선호·정체성은 **인터뷰 답 그대로** 두고 `core_goals` 만 갈아끼운다
+    (`goal_cycle.seed_outcome`) — 지어내지 않는다. 만다라 승격 목표의 2주 지평도 그대로
+    걸린다: `_max_plan_weeks` 가 heaviest **제목**으로 판정하기 때문이다.
+
     동시성 lock(ADR-0005 §7.6): 다중 디바이스 동시 생성으로 인한 state race 방지.
     """
     await endpoint_rate_limit.enforce(session, user_id=user.id, module="planning")
     outcome = _apply_edited_availability(await _resolve_outcome(body, user.id, repo), user)
+    if body.goal_id is not None:
+        goal = await _load_plannable_goal(goal_repo, user.id, body.goal_id)
+        outcome = goal_cycle.seed_outcome(base=outcome, goal=goal)
     return await _run_first_plan(
         outcome=outcome,
         milestones=body.milestones,
@@ -985,6 +1000,31 @@ def _parse_goal_id(goal_id: str) -> UUID:
         raise _goal_not_found() from e
 
 
+async def _load_plannable_goal(repo: GoalRepo, user_id: UUID, goal_id: str) -> Goal:
+    """`POST /plans/generate` 의 `goalId` — 계획을 세워도 되는 목표만 통과시킨다 (#398).
+
+    - 없는 목표 · **남의 목표** · 보관된 목표 → 404 `GOAL_NOT_FOUND`.
+      `GoalRepo.get_by_id` 가 `user_id` 와 `archived_at IS NULL` 을 함께 걸어 세 경우가 한
+      갈래로 모인다 — 남의 목표에 "있지만 권한 없음" 을 돌려주면 존재 여부가 새어 나간다.
+    - **완료한 목표** → 422. 404 로 묶지 않는 이유: 목표는 실제로 있고 화면에도 보이므로
+      "없다" 는 거짓말이 된다. 되돌리면 다시 계획할 수 있다는 걸 문구로 알린다.
+
+    `proposed`(계획 미승인 잠정 목표)는 **막지 않는다** — 인터뷰가 목표를 proposed 로 먼저
+    저장하므로(#96) 첫 계획을 세우는 정상 경로가 그 상태다.
+    """
+    goal = await repo.get_by_id(user_id, _parse_goal_id(goal_id))
+    if goal is None:
+        raise _goal_not_found()
+    if goal.status == "completed":
+        raise ApiError(
+            ErrorCode.COMMON_VALIDATION_ERROR,
+            "완료한 목표예요. 다시 하려면 목표 화면에서 완료를 되돌린 뒤 계획을 세워 주세요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="goalId",
+        )
+    return goal
+
+
 async def _load_ultimate_goal(repo: GoalRepo, user_id: UUID, goal_id: str) -> Goal:
     """user 소유 + `is_ultimate=True` 인 목표만 통과시킨다 — 일반 목표를 만다라 대상으로 못 씀."""
     goal = await repo.get_by_id(user_id, _parse_goal_id(goal_id))
@@ -1410,7 +1450,7 @@ async def open_mandala_next_cycle(
     여기까지가 만다라트를 실행으로 잇는 마지막 조각이다. 지금까지는 축을 승격해도
     `POST /plans/generate` 의 heaviest 가 **인터뷰 당시** 고른 목표라, 만다라트를 다시 세워
     축이 바뀌어도 계획은 옛 목표를 분해했다. 이 endpoint 는 시드의 `core_goals` 를 이 축으로
-    갈아끼우고(`mandala_cycle.seed_outcome`) 축의 칸 8개를 계획 뼈대(마일스톤)로 넘긴다 —
+    갈아끼우고(`goal_cycle.seed_outcome`) 축의 칸 8개를 계획 뼈대(마일스톤)로 넘긴다 —
     사용자가 만다라트에서 확정한 분해를 계획이 그대로 따르게 하는 지점이다.
 
     ⚠️ **자동 적용이 아니다**(§1.4). 돌려주는 건 `POST /plans/generate` 와 **같은 Draft** 이고,
@@ -1444,7 +1484,7 @@ async def open_mandala_next_cycle(
     promoted, newly = await _promote_axis_for_cycle(
         session, goal_repo, node=node, user_id=user.id, goal_tier=body.goal_tier
     )
-    outcome = mandala_cycle.seed_outcome(base=base_outcome, axis=node, promoted=promoted)
+    outcome = goal_cycle.seed_outcome(base=base_outcome, goal=promoted)
 
     milestones: list[MilestoneDraft] | None = None
     if body.use_cells_as_milestones:

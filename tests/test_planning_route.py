@@ -24,6 +24,7 @@ from reaction_backend.db.models.llm_run import LlmRun
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.session import get_db
 from reaction_backend.llm import RunResult, aiClient
+from reaction_backend.orchestrator import goal_cycle
 from reaction_backend.orchestrator.interview_adapter import PLACEHOLDER_GOAL_TITLE
 from reaction_backend.schemas.common import KST, now_kst
 from reaction_backend.schemas.interview import (
@@ -43,6 +44,7 @@ from reaction_backend.schemas.planning import (
 )
 from tests.conftest import (
     DEMO_USER_UUID,
+    FakeGoalRepo,
     FakeInterviewRepo,
     FakePlanDraftRepo,
     _FakeSession,
@@ -1415,3 +1417,219 @@ def test_milestones_endpoint_commits_the_llm_run_row(client: TestClient, monkeyp
     runs = [o for o in cap.added if isinstance(o, LlmRun)]
     assert [r.prompt_id for r in runs] == ["planning/plan_milestones"]
     assert cap.committed, "llm_runs 행을 add 만 하고 커밋하지 않으면 요청 끝에 롤백된다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #398 — `goalId` 로 계획 대상 목표를 명시한다.
+#
+# `GET /reviews/weekly` 의 `nextCycleProposals` 는 `goalId` 를 주는데, 승인 경로로 안내된
+# `POST /plans/generate` 는 목표를 못 받고 **최근 완료 인터뷰**를 재투영했다. 목표를 여러 개
+# 굴리면 목표 A 의 제안을 열었는데 목표 B 의 계획이 생성·승인될 수 있었다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _seed_goal(
+    repo: FakeGoalRepo,
+    *,
+    title: str,
+    user_id: UUID = DEMO_USER_UUID,
+    status: str = "active",
+    tier: str = "focus",
+    deadline: date | None = None,
+) -> Goal:
+    g = Goal()
+    g.id = uuid4()
+    g.user_id = user_id
+    g.title = title
+    g.category = "study"
+    g.goal_tier = tier
+    g.status = status
+    g.deadline = deadline
+    g.archived_at = None
+    repo._items[g.id] = g
+    return g
+
+
+def _multi_goal_outcome() -> InterviewOutcome:
+    """heaviest 가 **B** 인 outcome — 가장 최근 인터뷰가 B 를 골랐다는 상황."""
+    base = _outcome()
+    return base.model_copy(
+        update={
+            "core_goals": [
+                GoalCandidate(
+                    title="목표B",
+                    category="study",
+                    is_heaviest=True,
+                    tentative_tier="focus",
+                    confidence=0.9,
+                ),
+                GoalCandidate(
+                    title="목표A",
+                    category="study",
+                    weekly_hours=6,
+                    session_length_min=50,
+                    tentative_tier="focus",
+                    confidence=0.8,
+                ),
+            ]
+        }
+    )
+
+
+def test_generate_with_goal_id_plans_that_goal_not_the_latest_interview_heaviest(
+    client: TestClient, fake_goal_repo: FakeGoalRepo, monkeypatch: Any
+) -> None:
+    """#398 회귀 — 최근 인터뷰는 B 를 골랐는데 `goalId=A` 를 주면 **A** 로 계획이 선다.
+
+    이게 이 이슈의 핵심 재현이다: 제안 카드가 A 의 `goalId` 를 주는데 계획은 B 가 서던 것.
+    """
+    goal_a = _seed_goal(fake_goal_repo, title="목표A")
+    captured: dict[str, Any] = {}
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        if kwargs["schema"] is GoalDecomposition:
+            captured["variables"] = kwargs.get("variables", {})
+        return await _stub()(**kwargs)
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+    body = _body(_multi_goal_outcome())
+    body["goalId"] = f"goal_{goal_a.id}"
+    res = client.post("/plans/generate", json=body)
+
+    assert res.status_code == 200
+    goal_title = captured["variables"]["goal_title"]
+    assert goal_title == "목표A", (
+        f"heaviest 가 갈아끼워지지 않았다 — 분해가 받은 목표: {goal_title}"
+    )
+
+
+def test_generate_with_goal_id_keeps_the_slots_the_user_answered_for_that_goal(
+    client: TestClient, fake_goal_repo: FakeGoalRepo, monkeypatch: Any
+) -> None:
+    """A 에 대해 이미 답해 둔 슬롯(주당 시간·세션 길이)은 버리지 않는다.
+
+    제목이 같은 `core_goals` 항목을 template 으로 삼는다 — 안 그러면 목표를 지정했다는
+    이유만으로 사용자가 인터뷰에서 답한 값이 사라진다.
+    """
+    goal_a = _seed_goal(fake_goal_repo, title="목표A")
+    captured: dict[str, Any] = {}
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        if kwargs["schema"] is GoalDecomposition:
+            captured["variables"] = kwargs.get("variables", {})
+        return await _stub()(**kwargs)
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+    body = _body(_multi_goal_outcome())
+    body["goalId"] = f"goal_{goal_a.id}"
+    res = client.post("/plans/generate", json=body)
+
+    assert res.status_code == 200
+    # 프롬프트 변수는 `first_plan_adapter` 가 heaviest 에서 파생한다 — template 을 안 쓰면
+    # A 에 대한 답이 사라져 "(미입력)" 이 된다.
+    assert captured["variables"]["weekly_hours"] == "6시간"
+
+
+def test_generate_without_goal_id_is_unchanged(
+    client: TestClient, fake_goal_repo: FakeGoalRepo, monkeypatch: Any
+) -> None:
+    """`goalId` 를 안 주면 종전 그대로 — 최근 인터뷰의 heaviest(B)를 재투영한다.
+
+    additive 임을 못 박는다. 이게 깨지면 FE 의 기존 빈 본문 호출이 전부 달라진다.
+    """
+    _seed_goal(fake_goal_repo, title="목표A")
+    captured: dict[str, Any] = {}
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        if kwargs["schema"] is GoalDecomposition:
+            captured["variables"] = kwargs.get("variables", {})
+        return await _stub()(**kwargs)
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+    res = client.post("/plans/generate", json=_body(_multi_goal_outcome()))
+
+    assert res.status_code == 200
+    assert captured["variables"]["goal_title"] == "목표B"
+
+
+def test_generate_rejects_another_users_goal(
+    client: TestClient, fake_goal_repo: FakeGoalRepo, monkeypatch: Any
+) -> None:
+    """남의 목표는 404 — "있지만 권한 없음" 을 돌려주면 존재 여부가 새어 나간다."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    theirs = _seed_goal(fake_goal_repo, title="남의 목표", user_id=uuid4())
+
+    body = _body(_outcome())
+    body["goalId"] = f"goal_{theirs.id}"
+    res = client.post("/plans/generate", json=body)
+
+    assert res.status_code == 404
+    assert res.json()["code"] == "GOAL_NOT_FOUND"
+
+
+def test_generate_rejects_archived_goal(
+    client: TestClient, fake_goal_repo: FakeGoalRepo, monkeypatch: Any
+) -> None:
+    """보관(soft delete)된 목표도 404 — `get_by_id` 가 `archived_at IS NULL` 을 함께 건다."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    archived = _seed_goal(fake_goal_repo, title="치운 목표")
+    archived.archived_at = now_kst()
+
+    body = _body(_outcome())
+    body["goalId"] = f"goal_{archived.id}"
+    res = client.post("/plans/generate", json=body)
+
+    assert res.status_code == 404
+
+
+def test_generate_rejects_completed_goal_with_422_not_404(
+    client: TestClient, fake_goal_repo: FakeGoalRepo, monkeypatch: Any
+) -> None:
+    """완료한 목표는 422 — 목표는 실제로 있고 화면에도 보이므로 "없다" 는 거짓말이 된다."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    done = _seed_goal(fake_goal_repo, title="끝낸 목표", status="completed")
+
+    body = _body(_outcome())
+    body["goalId"] = f"goal_{done.id}"
+    res = client.post("/plans/generate", json=body)
+
+    assert res.status_code == 422
+    assert res.json()["code"] == "COMMON_VALIDATION_ERROR"
+
+
+def test_generate_rejects_malformed_goal_id(client: TestClient, monkeypatch: Any) -> None:
+    """`goal_` 접두사 규약을 안 지킨 값은 404 — `routes/goals.py` 와 같은 규약."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+
+    body = _body(_outcome())
+    body["goalId"] = "not-a-goal-id"
+    res = client.post("/plans/generate", json=body)
+
+    assert res.status_code == 404
+
+
+async def test_goal_id_seed_still_gets_the_two_week_mandala_cap() -> None:
+    """만다라 승격 목표의 2주 지평이 그대로 걸린다 (#398 완료 조건).
+
+    `_max_plan_weeks` 는 heaviest **제목**으로 판정하므로, `goal_cycle.seed_outcome` 이
+    제목을 그 목표로 갈아끼우면 판정이 자동으로 따라온다 — 새 규칙을 넣지 않는다.
+    """
+    promoted = Goal()
+    promoted.id = uuid4()
+    promoted.title = "승격된 축"
+    promoted.category = "other"
+    promoted.goal_tier = "focus"
+    promoted.deadline = None
+
+    seeded = goal_cycle.seed_outcome(base=_outcome(), goal=promoted)
+    assert seeded.core_goals[0].title == "승격된 축"
+
+    weeks = await _max_plan_weeks(
+        _PromotedTitleSession(["승격된 축"]),  # type: ignore[arg-type]
+        uuid4(),
+        seeded,
+    )
+    assert weeks == 2

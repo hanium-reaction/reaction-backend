@@ -6,90 +6,27 @@
 목표를 분해한다. 축 제목이 `goals.heaviest` **보기**로 들어가는 배선(ADR-0008 §8 "B")은
 있지만 그건 *새 인터뷰를 다시 할 때* 얘기다.
 
-이 모듈이 그 사이를 잇는다 — 이미 답해 둔 인터뷰 outcome 에서 **`core_goals` 만** 이 축으로
-갈아끼우고, 그 축의 칸 8개를 마일스톤 뼈대로 넘긴다. 나머지(정체성·가용 시간·선호)는 사용자가
-실제로 답한 값 그대로다. **지어내지 않는다** — 인터뷰가 없으면 호출자가 422 로 안내한다
-(v2.01 의 교훈: 지어낸 답으로 슬롯을 닫느니 열어 두고 묻는 게 낫다).
+이 모듈이 그 사이를 잇는다 — 축의 칸 8개를 계획 뼈대(마일스톤)로 넘기고, 계획 인터뷰를 아직
+안 한 사용자를 위해 온보딩 프로필을 2순위 시드로 만든다. **지어내지 않는다** — 활동 시간대를
+어디서도 모르면 호출자가 422 로 안내한다(v2.01 의 교훈: 지어낸 답으로 슬롯을 닫느니 열어
+두고 묻는 게 낫다).
 
-지평 상한(2주)은 여기서 정하지 않는다. `core_goals[0].title` 이 승격된 목표 제목과 같으므로
-기존 `routes/planning.py::_max_plan_weeks` 판정이 그대로 걸린다 — 새 규칙을 만들면 만다라
-계획의 '2주'가 두 곳에서 따로 정의된다.
+⚠️ **`core_goals` 를 갈아끼우는 부분은 여기 없다** — [`goal_cycle`](goal_cycle.py) 로 옮겼다.
+축(`GoalNode`)은 #373 에서 `why_text` 읽기가 빠진 뒤로 그 규칙에 **아무 값도 기여하지 않고**
+승격된 `Goal` 만 쓰이고 있었다. 즉 처음부터 "축" 이 아니라 "목표" 단위 규칙이었고, 주간
+리포트의 다음 주기 제안(#398)도 같은 것을 필요로 한다. 한 벌만 둔다.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, cast
+from typing import Any
 
 from reaction_backend.db.models.behavioral_profile import BehavioralProfile
-from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.db.models.interaction_style import InteractionStyle
 from reaction_backend.orchestrator import profile_memory
-from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome
 from reaction_backend.schemas.planning import MilestoneDraft
-
-# 승격된 축은 이번 주기의 **유일한** 목표다 — 한 계획은 heaviest 하나만 분해·배치하므로
-# (api-contract §8) 나머지를 실어 봐야 세션이 안 생기고 tier 게이트만 흔든다.
-_AXIS_CATEGORY = "other"  # 만다라 축엔 category 개념이 없다(`promote_mandala_node` 와 동일)
-
-type _Tier = Literal["focus", "maintain", "parked"]
-
-
-def _tier(promoted: Goal) -> _Tier:
-    """`goals.goal_tier` 는 DB 에서 str 로 온다 — 경계 스키마의 Literal 로 좁힌다."""
-    return cast("_Tier", promoted.goal_tier)
-
-
-def axis_goal_candidate(
-    *, axis: GoalNode, promoted: Goal, template: GoalCandidate | None = None
-) -> GoalCandidate:
-    """축 + 승격된 Goal → 이번 주기의 heaviest 목표 후보.
-
-    `template` 은 사용자가 인터뷰에서 **이 목표에 대해** 이미 답해 둔 값이 있으면 그것
-    (제목이 같은 `core_goals` 항목) — 주당 시간·세션 길이·선호 시간대 같은 슬롯을 버리지
-    않으려는 것이다. 없으면 축이 가진 것만으로 만든다(나머지는 None → 분해가 전역 기본을 쓴다).
-
-    `deadline` 은 승격된 Goal 의 것을 그대로 쓴다 — 궁극목표 마감을 상속하지 않는다는 결정
-    (api-contract §6 `POST /goals/ultimate`)을 여기서 뒤집지 않는다. 없으면 None 이고,
-    그러면 지평이 상한(2주)으로 잡힌다.
-
-    `axis.why_text` 는 더 안 읽는다(#373) — `GoalCandidate.why_now` 가 어디에도 안 닿는
-    죽은 값이었다. 축의 why_text 는 승격 시점에 `promote_mandala_node`(routes/goals.py)가
-    이미 `Goal.why_now` 에 직접 쓴다 — 여기서 임시 후보에 실어도 그 값을 읽는 곳이 없었다.
-    """
-    base = template.model_copy(deep=True) if template is not None else None
-    if base is None:
-        return GoalCandidate(
-            title=promoted.title,
-            category=promoted.category or _AXIS_CATEGORY,
-            is_heaviest=True,
-            deadline=promoted.deadline.isoformat() if promoted.deadline is not None else None,
-            tentative_tier=_tier(promoted),
-            confidence=1.0,  # 사용자가 직접 고른 축이다 — 추정이 아니다
-        )
-    return base.model_copy(
-        update={
-            "title": promoted.title,
-            "is_heaviest": True,
-            "deadline": (
-                promoted.deadline.isoformat() if promoted.deadline is not None else base.deadline
-            ),
-            "tentative_tier": _tier(promoted),
-        }
-    )
-
-
-def seed_outcome(*, base: InterviewOutcome, axis: GoalNode, promoted: Goal) -> InterviewOutcome:
-    """인터뷰 outcome → 이 축 하나만 담은 시드. 정체성·가용 시간·선호는 원본 그대로.
-
-    `core_goals` 를 통째로 갈아끼우는 이유: 한 계획은 heaviest 하나만 다루므로(api-contract
-    §8) 다른 목표를 남겨 두면 세션도 안 생기면서 승인 시 `materialize_goals` 만 흔들고
-    tier 게이트에 잡힐 수 있다. 다른 목표의 기존 Goal 행은 이미 영속돼 있어 사라지지 않는다.
-    """
-    template = next((g for g in base.core_goals if g.title.strip() == promoted.title.strip()), None)
-    candidate = axis_goal_candidate(axis=axis, promoted=promoted, template=template)
-    return base.model_copy(update={"core_goals": [candidate], "horizon": candidate.deadline})
 
 
 def cells_as_milestones(cells: Sequence[GoalNode]) -> list[MilestoneDraft]:
@@ -158,9 +95,7 @@ def has_usable_profile(behavioral: BehavioralProfile | None) -> bool:
 
 
 __all__ = [
-    "axis_goal_candidate",
     "cells_as_milestones",
     "has_usable_profile",
-    "seed_outcome",
     "slots_from_profile",
 ]
