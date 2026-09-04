@@ -201,6 +201,31 @@ class Settings(BaseSettings):
     llm_cost_per_1k_input_cents: float = 0.0
     llm_cost_per_1k_output_cents: float = 0.0
 
+    # ── 자료 검색 (ADR-0010) ──
+    # 알라딘 Open API. 비어있으면 도서 검색이 항상 `no_key` 로 실패 처리된다
+    # (`integrations/aladin`). 발급: https://www.aladin.co.kr/ttb/wblog_manage.aspx
+    # (무료, 5,000회/일).
+    aladin_ttb_key: str = ""
+    # YouTube Data API v3. 비어있으면 영상 검색이 항상 `no_key` 로 실패 처리된다
+    # (`integrations/youtube`). 발급: GCP 콘솔 → API 및 서비스 → YouTube Data API v3
+    # 사용 설정 (무료, 10,000유닛/일).
+    #
+    # ⚠️ `search.list` 1회가 100유닛이다 — **앱 전체에서 하루 ~100회만 검색할 수 있다는
+    # 뜻**이다(L0 실측, `docs/experiments/l0-materials-source-results.md`). 사용자별 예산
+    # 가드는 아직 없다 — 초과하면 매 검색이 `quota_exceeded` 로 실패 응답을 낼 뿐이다
+    # (`orchestrator/materials_catalog.py`). 실사용 규모가 커지면 캐싱이나 쿼터 증액이
+    # 필요하다(ADR-0010 §4 밖의 알려진 제약).
+    youtube_api_key: str = ""
+    # 국립중앙도서관 seoji 서지정보 API. 비어있으면 도서 목차가 항상 `no_key` 로 실패
+    # 처리되고 페이지 수만으로 진행한다 (`integrations/nl_seoji`). 발급:
+    # https://seoji.nl.go.kr/landingPage → 오픈API → 인증키 신청 (무료).
+    #
+    # ⚠️ **best-effort 다.** L0 실측(도서 10권 전수)에서 목차가 채워진 건 1권(10%) 뿐이고,
+    # 같은 책의 다른 판(3rd/2nd Edition)은 비어 있었다 — 출판사가 납본 때 선택적으로
+    # 채우는 필드라 판별 규칙이 없다. 나머지 90% 는 페이지 수만으로 진행하는 게 정상
+    # 경로다(오류가 아니다).
+    nl_seoji_key: str = ""
+
     # ── 보안 (Issue #5 §3) ──
     # 32-byte AES-GCM 키 (urlsafe base64 인코딩). 비어있으면 암호화 함수가 명시 에러.
     column_encryption_key: str = ""

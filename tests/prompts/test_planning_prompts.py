@@ -109,6 +109,16 @@ CODE_VARS: dict[str, set[str]] = {
         "user_hint",
         "locked_cells",
     },
+    # study_method_agent.run() 이 넘기는 변수 (agents/study_method_agent.py)
+    "planning/study_method": {
+        "title",
+        "category",
+        "current_level",
+        "weekly_hours",
+        "session_length_min",
+        "approach_note",
+        "deadline",
+    },
 }
 
 

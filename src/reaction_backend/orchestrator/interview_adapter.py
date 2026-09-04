@@ -9,6 +9,11 @@ slot_answers 값 형식 (db/models/interview_slot_answer.py, value JSONB):
 - chip:  {"type": "chip",  "values": ["오전", "저녁"]}
 - text:  {"type": "text",  "raw": "...", "normalized": ["캡스톤", "토익"]}
 - range: {"type": "range", "start": "09:00", "end": "23:00"}
+- spec:  {"type": "spec", "items": [{"kind": "book"|"video", ...}, ...]} — `goals.materials`
+  전용(ADR-0010 §1 ③ `spec-confirm`). `items` 는 1~2건(책 1개·영상 1개까지). `_materials_note`
+  가 각 항목을 텍스트로 풀어 이어붙여 `materials_note` 에 싣는다 — 새 프롬프트 변수·새
+  인젝션 방어를 만들지 않고, `_text_raw`/`materials_for_prompt` 의 기존 경로를 그대로
+  통과시키기 위해서다.
 """
 
 from __future__ import annotations
@@ -132,6 +137,100 @@ def _text_raw(value: Mapping[str, Any] | None) -> str | None:
     return str(raw) if isinstance(raw, str) and raw.strip() else None
 
 
+def _materials_note(value: Mapping[str, Any] | None) -> str | None:
+    """`goals.materials` 슬롯 → `materials_note` 텍스트. `text` 는 원문 그대로(`_text_raw`
+    와 동일 규칙), `spec`(ADR-0010 §1 ③)은 구조화 데이터를 텍스트로 풀어낸다. `spec` 은
+    `items` 에 1~2건(책 1개·영상 1개까지, `MaterialsSpecConfirmRequest` 가 강제)을 담을 수
+    있다 — 두 건이면 빈 줄로 이어붙인다("이론은 책으로, 반복 트레이닝은 영상으로" 처럼
+    Method Agent 가 `both` 를 권했을 때).
+
+    텍스트로 푸는 이유: 이미 검증된 `first_plan_adapter.materials_for_prompt` 의 울타리
+    (injection fence)·"자료 미제공" 가드를 그대로 통과시키기 위해서다 — 새 프롬프트
+    변수도 새 방어 로직도 만들지 않는다. `goal_decompose` 는 이미 "참고 자료 원문에
+    목차·주차·챕터가 있으면 그대로 뼈대로 삼아라" 는 규칙을 갖고 있어서, 영상 커리큘럼
+    처럼 항목마다 분량(분)이 붙어 있으면 그 규칙이 세션 길이까지 잡아준다(L0 핵심 발견 —
+    "3. DFS & BFS [58분]" 형태로 이미 텍스트에 실려 있다).
+    """
+    if not value:
+        return None
+    kind = value.get("type")
+    if kind == "text":
+        return _text_raw(value)
+    if kind == "spec":
+        return _format_materials_spec(value)
+    return None
+
+
+def _format_materials_spec(value: Mapping[str, Any]) -> str | None:
+    items = value.get("items")
+    if not isinstance(items, list) or not items:
+        return None
+    notes = [n for n in (_format_one_spec_item(item) for item in items) if n]
+    return "\n\n".join(notes) if notes else None
+
+
+def _format_one_spec_item(item: Mapping[str, Any]) -> str | None:
+    if item.get("kind") == "video":
+        return _format_video_spec(item)
+    if item.get("kind") == "book":
+        return _format_book_spec(item)
+    return None
+
+
+def _format_book_spec(value: Mapping[str, Any]) -> str:
+    """도서 자료 → 텍스트. `pages_per_session`/`total_sessions` 가 있으면(항상, `page_count`
+    만으로 계산됨 — `materials_spec.compute_book_pace`) 세션당 권장 페이지를 명시적으로
+    적는다 — 이게 "책을 하루에 얼마나" 의 실질이다. `chapters` 항목에 `sessions` 가 있으면
+    (목차 전 챕터에 페이지가 있을 때만, best-effort) 균등 분할이 아니라 **그 챕터가 정확히
+    몇 세션에 끝나는지** 를 적는다 — 세션이 챕터 중간에서 끊기지 않는다는 뜻."""
+    title = str(value.get("title") or "")
+    author = str(value.get("author") or "")
+    lines = [f"[도서] {title}" + (f" ({author})" if author else "")]
+    page_count = value.get("page_count") or 0
+    if page_count:
+        lines.append(f"총 {page_count}쪽")
+
+    pages_per_session = value.get("pages_per_session")
+    total_sessions = value.get("total_sessions")
+    if pages_per_session and total_sessions:
+        lines.append(f"권장 진도: 세션당 약 {pages_per_session}쪽 (총 {total_sessions}세션 예상)")
+
+    chapters = value.get("chapters") or []
+    if chapters:
+        lines.append("목차:")
+        for c in chapters:
+            chapter_title = c.get("title", "")
+            end_page = c.get("end_page")
+            sessions = c.get("sessions")
+            if end_page and sessions:
+                lines.append(f"- {chapter_title} (~{end_page}쪽까지, 약 {sessions}세션)")
+            elif end_page:
+                lines.append(f"- {chapter_title} (~{end_page}쪽까지)")
+            else:
+                lines.append(f"- {chapter_title}")
+    return "\n".join(lines)
+
+
+def _format_video_spec(value: Mapping[str, Any]) -> str:
+    title = str(value.get("title") or "")
+    channel = str(value.get("channel_title") or "")
+    lines = [f"[영상 강의] {title}" + (f" ({channel})" if channel else "")]
+    video_count = value.get("video_count") or 0
+    total_minutes = value.get("total_minutes") or 0
+    if video_count or total_minutes:
+        lines.append(f"총 {video_count}편 · {total_minutes}분")
+    curriculum = value.get("curriculum") or []
+    if curriculum:
+        lines.append("커리큘럼:")
+        lines.extend(
+            f"{i}. {item.get('title', '')} ({item.get('minutes', 0)}분)"
+            for i, item in enumerate(curriculum, start=1)
+        )
+    if value.get("truncated"):
+        lines.append("(재생목록이 더 있어 앞부분까지만 담았어요)")
+    return "\n".join(lines)
+
+
 def _range(value: Mapping[str, Any] | None) -> TimeRange | None:
     if not value or value.get("type") != "range":
         return None
@@ -234,7 +333,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
     preferred_time = _first(_chip_values(slot_answers.get("goals.preferred_time")))
     frequency = _chip_frequency(slot_answers.get("goals.frequency"))
     approach_note = _text_raw(slot_answers.get("goals.approach"))
-    materials_note = _text_raw(slot_answers.get("goals.materials"))
+    materials_note = _materials_note(slot_answers.get("goals.materials"))
 
     if not titles:
         return [
