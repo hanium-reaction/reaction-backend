@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import hashlib
 import json
@@ -738,3 +739,46 @@ def test_approval_shares_one_plan_across_all_three_arms(monkeypatch: pytest.Monk
     assert plans["A_none"] == plans["B_feedback"] == plans["C_retry"], (
         "승인 케이스인데 세 arm 의 계획이 다르다 — Δ 에 0 이 아닌 값을 기여하게 된다"
     )
+
+
+def test_run_path_imports_resolve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """본 실행 경로의 **지연 임포트가 실제로 풀리는가.**
+
+    ⚠️ `main_async` 의 실행 분기는 실 LLM 을 부르므로 테스트가 안 탄다. 그 사각지대에서
+    `reaction_backend.core.config` (없는 모듈)를 임포트하는 코드가 스모크까지 살아남았다.
+    `--dry-run` 은 LLM 없이 그 분기를 **임포트 지점 너머까지** 통과한다.
+    """
+    args = argparse.Namespace(
+        stratum="challenge",
+        limit=2,
+        repeats=1,
+        dry_run=True,
+        summarize_only=False,
+        run=None,
+        allow_smoke=False,
+    )
+    asyncio.run(M.main_async(args))  # 예외 없이 끝나야 한다
+
+
+def test_lazy_imports_in_the_harness_all_resolve() -> None:
+    """하네스 안의 **모든 지연 임포트**를 실제로 불러본다 — 오타는 실행 때까지 안 잡힌다."""
+    import ast
+    import importlib
+
+    src = (_ROOT / "scripts" / "l1_7b_m33_run.py").read_text(encoding="utf-8")
+    mods = {
+        n.module
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.ImportFrom) and n.module and n.level == 0
+    }
+    names = {
+        (n.module, a.name)
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.ImportFrom) and n.module and n.level == 0
+        for a in n.names
+    }
+    for mod in sorted(mods):
+        importlib.import_module(mod)  # 없으면 ModuleNotFoundError
+    for mod, name in sorted(names):
+        # 모듈이 있어도 **이름이 없을 수 있다** — `settings` 가 실제로 그랬다.
+        assert hasattr(importlib.import_module(mod), name), f"{mod} 에 {name} 가 없다"

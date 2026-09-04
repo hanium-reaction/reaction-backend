@@ -327,7 +327,7 @@ async def main_async(args: argparse.Namespace) -> None:
         summarize(rows, stratum=args.stratum)
         return
 
-    from reaction_backend.core.config import settings
+    from reaction_backend.config import get_settings
 
     today = date.today()
     cases = load_stratum(args.stratum, args.limit)
@@ -336,7 +336,7 @@ async def main_async(args: argparse.Namespace) -> None:
     print(
         f"[{args.stratum}] 케이스 {len(cases)}건 × 반복 {args.repeats}회 "
         f"→ 노드 호출 {2 * n}~{4 * n} (승인 2 / 반려 4)"
-        f" · 재시도 포함 실제 API 최대 {4 * n * settings.llm_max_retries}"
+        f" · 재시도 포함 실제 API 최대 {4 * n * get_settings().llm_max_retries}"
         f"{' (dry-run)' if args.dry_run else ''}"
     )
     if args.dry_run:
