@@ -3816,3 +3816,104 @@ async def test_validate_answer_uses_the_short_prompt_when_nothing_to_harvest(
 
     assert seen["prompt_id"] == "interview/ambiguity_score"
     assert seen["has_open_slots"] is False, "채점 전용 호출에 수확 변수가 실렸다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 날짜·시각은 룰이 먼저 (#432)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def _validate_with_llm_value(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    slot_key: str,
+    answer_type: str,
+    raw: str,
+    llm_value: Any,
+) -> dict[str, Any]:
+    """LLM 이 `llm_value` 를 냈다고 두고 `validate_answer` 를 돌린 뒤 저장된 슬롯을 돌려준다."""
+    from datetime import datetime
+
+    from reaction_backend.schemas.common import KST
+
+    monkeypatch.setattr(interview, "now_kst", lambda: datetime(2026, 12, 10, 9, 0, tzinfo=KST))
+
+    async def fake_run(**kwargs: Any) -> RunResult[Any]:
+        return RunResult(
+            value=AnswerIntake(
+                slot_key=kwargs["variables"]["slot_key"],
+                clarity_score=0.9,
+                new_ambiguity=0.3,
+                normalized_value=llm_value,
+            ),
+            fell_back=False,
+            reason=None,
+            prompt_id=kwargs["prompt_id"],
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", fake_run)
+
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["last_slot_key"] = slot_key
+    state["last_answer"] = {"type": "text", "raw": raw}
+    config: Any = {"configurable": {"session": None, "answer_type": answer_type, "slot_meta": {}}}
+
+    new_state = await interview.validate_answer(state, config)
+    return new_state["slot_answers"].get(slot_key)
+
+
+async def test_rule_beats_the_llm_on_the_year_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⚠️ **이 배선이 #432 의 전부다.** 12월에 "3월 2일" 은 내년이다.
+
+    LLM 이 올해로 답해도 파서 값이 이긴다 — 규칙을 코드가 쥐면 그때그때 달라지지 않는다.
+    """
+    stored = await _validate_with_llm_value(
+        monkeypatch,
+        slot_key="goals.deadlines",
+        answer_type="date_picker",
+        raw="3월 2일까지요",
+        llm_value="2026-03-02",  # LLM 이 올해로 잘못 읽었다
+    )
+    assert stored == {"type": "text", "raw": "2027-03-02"}
+
+
+async def test_rule_beats_the_llm_on_midnight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """구간의 끝 자정은 `24:00` 이다 — `00:00` 이면 구간이 둘로 쪼개진다."""
+    stored = await _validate_with_llm_value(
+        monkeypatch,
+        slot_key="time.activity_window",
+        answer_type="time_range",
+        raw="밤 8시부터 자정까지",
+        llm_value={"start": "20:00", "end": "00:00"},  # 프롬프트 예전 예시대로
+    )
+    assert stored == {"type": "range", "start": "20:00", "end": "24:00"}
+
+
+async def test_llm_still_wins_where_the_rule_cannot_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⚠️ 룰이 못 뽑으면 **LLM 값을 그대로 쓴다** — 파서가 기능을 뺏으면 안 된다.
+
+    "이번 학기 말" 은 뜻을 알아야 날짜가 된다. 파서가 억지로 맞히는 대신 비켜선다.
+    """
+    stored = await _validate_with_llm_value(
+        monkeypatch,
+        slot_key="goals.deadlines",
+        answer_type="date_picker",
+        raw="이번 학기 말쯤이요",
+        llm_value="2026-12-20",
+    )
+    assert stored == {"type": "text", "raw": "2026-12-20"}
+
+
+async def test_rule_does_not_touch_other_answer_types(monkeypatch: pytest.MonkeyPatch) -> None:
+    """날짜·시각 슬롯이 아니면 파서가 관여하지 않는다 — 답에 숫자가 있어도 마찬가지."""
+    stored = await _validate_with_llm_value(
+        monkeypatch,
+        slot_key="goals.current_level",
+        answer_type="text",
+        raw="7월 15일에 시험 봤고 지금은 600점쯤이에요",
+        llm_value="600점 수준",
+    )
+    assert stored == {"type": "text", "raw": "600점 수준"}

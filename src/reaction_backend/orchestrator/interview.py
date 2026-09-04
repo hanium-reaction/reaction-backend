@@ -49,7 +49,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from reaction_backend.agents import ultimate_summary_agent
 from reaction_backend.llm import aiClient
-from reaction_backend.orchestrator import interview_adapter, ultimate_adapter
+from reaction_backend.orchestrator import datetime_parse, interview_adapter, ultimate_adapter
 from reaction_backend.orchestrator.interview_catalog import (
     CATALOGS,
     GLOBAL_SCOPE_HINT,
@@ -537,13 +537,23 @@ async def validate_answer(state: InterviewState, config: RunnableConfig) -> Inte
     )
     update = result.value
 
+    # ── 날짜·시각은 **룰이 먼저다** (#432) ──────────────────────────────────
+    # LLM 도 뽑지만 흔하고 확실한 표현에서까지 조용히 틀린다(연도 경계·자정). 파서가
+    # 확실히 이기는 표현만 덮어쓰고, 못 뽑으면(`None`) LLM 값을 그대로 쓴다 —
+    # "이번 학기 말" 같은 표현은 파서가 못 하고 LLM 이 해야 한다.
+    #
+    # ⚠️ **답한 슬롯에만** 적용한다. 수확된 슬롯은 한 답에 여러 날짜가 섞였을 때 어느 것이
+    # 어느 슬롯인지 골라야 하는데, 그건 파서가 할 수 없는 판단이다.
+    ruled = _rule_first_value(answer_type, answer_text, today=now_kst().date())
+    normalized = ruled if ruled is not None else update.normalized_value
+
     slot_answers = dict(state["slot_answers"])
     attempts = _pending_attempts(slot_answers.get(slot_key)) + 1  # 이번 시도 포함
     stored, filled_now = _decide_storage(
         slot_key,
         answer_type,
         state["last_answer"],
-        update.normalized_value,
+        normalized,
         update.clarity_score,
         attempts,
         now_kst().date(),
@@ -833,6 +843,21 @@ def _normalize_for_store(slot_key: str, answer: dict[str, Any]) -> dict[str, Any
 
 # 구조화 슬롯 — 추출값만 있으면 clarity 게이트 없이 저장(선택/구간/날짜는 재질문 대상 아님).
 _CONSTRAINED_TYPES = {"chip", "select", "time_range", "date_picker"}
+
+
+def _rule_first_value(answer_type: str | None, text: str, *, today: date) -> Any | None:
+    """날짜·시각 슬롯이면 룰 파서 값. 슬롯이 아니거나 못 뽑으면 `None`(= LLM 값을 쓴다).
+
+    ⚠️ **`None` 은 "값이 없다" 가 아니라 "룰이 판단하지 않았다" 는 뜻**이다. 호출부가
+    그때 LLM 값으로 떨어진다. 파서가 억지로 맞히면 사용자가 정정할 기회를 잃는다.
+    """
+    if not text.strip():
+        return None
+    if answer_type == "date_picker":
+        return datetime_parse.parse_date(text, today=today)
+    if answer_type == "time_range":
+        return datetime_parse.parse_time_range(text)
+    return None
 
 
 def _coerce_normalized(
