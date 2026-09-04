@@ -763,19 +763,94 @@ def test_generate_409_after_decision_is_final(
     assert len(recovery_actions) == 1
 
 
-def test_generate_409_after_skip_too(
+def test_skipping_does_not_lock_recovery_forever(
     client: TestClient,
     fake_recovery_repo: FakeRecoveryRepo,
     fake_action_item_repo: FakeActionItemRepo,
 ) -> None:
-    """'오늘은 쉬기'(skipped) 로 닫은 실행도 재생성 대상이 아니다 — 같은 상태 머신."""
+    """⚠️ '오늘은 쉬기'(skipped) 는 **결정이 아니다** — 다시 들어오면 새 제안을 받는다.
+
+    예전엔 이 자리에서 409 를 기대했다("같은 상태 머신"). 그 결과 화면에서 **'나중에'를
+    한 번 누르면 그 실패는 영영 회복할 수 없었다** — 그리고 재진입하면 이렇게 말했다:
+
+        "이미 회복 계획을 골랐어요
+         이 카드는 회복 방법이 정해져 있어요. 주간 계획에서 새로 잡힌 시간을 확인할 수 있어요."
+
+    고른 적도 없고 잡힌 시간도 없다. 회복은 이 제품의 핵심 기능이고 미루기는 정상 행동이라,
+    그 한 번의 탭이 기능을 잠그는 건 제품 결정으로 잘못됐다(2026-09-05 확인).
+
+    **채택**이 있는 실행은 여전히 409 다 — `test_generate_409_after_decision_is_final`.
+    """
     exec_id = _seed_failed_execution(fake_recovery_repo, fake_action_item_repo)
     _generate(client, exec_id)
     _decide(client, {"executionId": exec_id, "decision": "skipped"})
 
     resp = _generate(client, exec_id)
-    assert resp.status_code == 409
-    assert resp.json()["code"] == "RECOVERY_ALREADY_DECIDED"
+    assert resp.status_code == 201, resp.json()
+    assert resp.json()["cards"], "재진입했는데 제안이 비었다 — 고를 게 없다"
+
+
+def test_recovery_can_actually_be_accepted_after_a_skip(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """미룬 뒤 다시 와서 **끝까지 수락된다** — 제안만 다시 뜨고 결정이 막히면 의미가 없다.
+
+    `/recovery/decisions` 는 pending 이 없으면 409 를 낸다. 재생성이 pending 세트를 새로
+    만들지 못하면 여기서 막힌다.
+    """
+    exec_id = _seed_failed_execution(fake_recovery_repo, fake_action_item_repo)
+    _generate(client, exec_id)
+    _decide(client, {"executionId": exec_id, "decision": "skipped"})
+
+    again = _generate(client, exec_id)
+    assert again.status_code == 201, again.json()
+    attempt_id = again.json()["cards"][0]["attemptId"]
+
+    resp = _decide(
+        client,
+        {"executionId": exec_id, "decision": "accepted", "acceptedAttemptId": attempt_id},
+    )
+    assert resp.status_code == 200, resp.json()
+
+    # 그리고 이제는 잠긴다 — 채택이 생겼으므로.
+    locked = _generate(client, exec_id)
+    assert locked.status_code == 409, locked.json()
+    assert locked.json()["code"] == "RECOVERY_ALREADY_DECIDED"
+
+
+def test_edited_acceptance_also_locks_regeneration(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """⚠️ **`edited` 도 채택이다.** 문구만 고쳐 수락한 것이라 부수효과가 accepted 와 같다.
+
+    가드가 `ADOPTED_DECISION_VALUES` 대신 `== "accepted"` 로 좁혀지면 편집 수락한 실행에
+    **두 번째 카드 세트가 INSERT** 되고, `_accepted_replan_attempt` 가 created_at 순으로
+    옛 결정을 집어 replan 이 거기 고정된다 — 사용자가 다시 고른 회복은 블록이 안 생긴다.
+    (`recovery_attempt.py` 의 `ADOPTED_DECISION_VALUES` 주석이 경고하는 바로 그 사고다.)
+
+    변이 검증에서 이 경로를 덮는 테스트가 없다는 게 드러나 추가했다(2026-09-05).
+    """
+    exec_id = _seed_failed_execution(fake_recovery_repo, fake_action_item_repo)
+    cards = _generate(client, exec_id).json()["cards"]
+
+    resp = _decide(
+        client,
+        {
+            "executionId": exec_id,
+            "decision": "edited",
+            "acceptedAttemptId": cards[0]["attemptId"],
+            "editedActionText": "딱 5분만 열어볼까요",
+        },
+    )
+    assert resp.status_code == 200, resp.json()
+
+    locked = _generate(client, exec_id)
+    assert locked.status_code == 409, locked.json()
+    assert locked.json()["code"] == "RECOVERY_ALREADY_DECIDED"
 
 
 def test_generate_404_unknown_execution(client: TestClient) -> None:

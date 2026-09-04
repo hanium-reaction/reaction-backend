@@ -292,18 +292,32 @@ async def generate_recovery_proposals(
     # 멱등 — pending 카드가 이미 있으면 그대로 반환 (재호출/새로고침 안전)
     existing = await repo.list_attempts(user.id, execution.id)
     pending = [a for a in existing if a.user_decision == "pending"]
-    if existing and not pending:
-        # 결정이 끝난 실행 — pending 이 0건이라 위 가드를 그냥 통과해 **두 번째 카드 세트**가
-        # INSERT 되던 구멍. 그 결과 `/recovery/decisions` 의 409 가 무력화되고(같은 실패에
-        # 회복 ActionItem 2개), `_accepted_replan_attempt` 는 created_at 오름차순에서 처음
-        # 만난 채택 카드를 잡으므로 replan 은 **옛 결정**에 고정된다 — 사용자가 다시 고른
-        # 최신 회복은 화면에도 안 뜨고 블록도 영영 안 생긴다.
+    adopted = [a for a in existing if a.user_decision in ADOPTED_DECISION_VALUES]
+    if adopted:
+        # **채택**한 회복이 이미 있는 실행 — 여기서 두 번째 카드 세트를 INSERT 하면
+        # `/recovery/decisions` 의 409 가 무력화되고(같은 실패에 회복 ActionItem 2개),
+        # `_accepted_replan_attempt` 는 created_at 오름차순에서 처음 만난 채택 카드를
+        # 잡으므로 replan 이 **옛 결정**에 고정된다 — 사용자가 다시 고른 최신 회복은
+        # 화면에도 안 뜨고 블록도 영영 안 생긴다.
         # decisions 와 같은 에러 코드로 상태 머신을 한 곳에서 닫는다 (api-contract §12).
         raise ApiError(
             ErrorCode.RECOVERY_ALREADY_DECIDED,
             "이 실행의 회복 카드는 이미 결정됐어요.",
             http_status=HTTPStatus.CONFLICT,
         )
+    # ⚠️ **채택이 없으면 막지 않는다.** 예전엔 `existing and not pending` 이라
+    # "나중에"(= 전부 skipped)도 결정으로 쳐서, **한 번 미루면 그 실패는 영영 회복할 수
+    # 없었다.** 화면은 "이미 회복 계획을 골랐어요 · 주간 계획에서 새로 잡힌 시간을 확인할
+    # 수 있어요" 라고 말하는데, 고른 적도 잡힌 시간도 없다. 회복은 이 제품의 핵심이고
+    # 미루기는 정상 행동이라, 그 한 번의 탭이 기능을 잠그면 안 된다.
+    #
+    # 채택이 없을 때 새 세트를 만들어도 위 사고는 안 난다 — `_accepted_replan_attempt` 는
+    # `ADOPTED_DECISION_VALUES` 이고 `resulting_action_item_id` 가 있는 카드만 고르므로,
+    # 지나간 skipped/rejected 는 건너뛰고 이번에 채택한 것을 집는다.
+    #
+    # 무한 재생성은 이 아래 `endpoint_rate_limit.enforce` 가 막는다(사용자당 일 상한).
+    # skipped 이력은 지우지 않는다 — 에스컬레이션(`compute_escalation_state`)이 "몇 번
+    # 미뤘는지"를 읽는 실제 신호다.
 
     failure_tags = await repo.list_failure_tag_codes(execution.id)
     # 원본 카드 — escalation L3(동일 goal)의 goal_id 가 필요해 템플릿 변수 구성부보다
