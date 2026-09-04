@@ -48,7 +48,7 @@ def _settings(**kw: object) -> Settings:
     아니다.
 
     실제로 그렇게 깨졌다(2026-08-03): 2026-07 이전 `.env`(`LLM_MODEL=gemini-2.5-flash`)가
-    남은 로컬에서만 `test_defaults_are_pinned_to_3_5` 가 red 였고, `.env` 가 없는 CI 는 계속
+    남은 로컬에서만 모델 잠금 테스트가 red 였고, `.env` 가 없는 CI 는 계속
     green 이었다. 자기 오버라이드가 있는 `planning`/`recovery` 는 통과하고 base 를 따르는
     `interview`/`inbox` 만 깨져서, 설정이 빠진 것처럼 보이기까지 했다.
 
@@ -75,23 +75,42 @@ def test_no_latest_alias_in_defaults() -> None:
         assert "latest" not in model, f"{module} 이 alias 를 쓴다: {model}"
 
 
-def test_defaults_are_pinned_to_3_5() -> None:
-    """전 모듈이 `gemini-3.5-flash-lite` 하나로 통일돼 있다 (2026-08-03).
+def test_planning_and_recovery_stay_on_measured_lite() -> None:
+    """계획·회복은 `gemini-3.5-flash-lite` 에 고정돼 있다 — **실측으로 뒷받침된 유일한 값**.
 
     계획을 lite 로 내린 근거(2026-08-02, 동일 프롬프트 3회씩): 분해 계약(총 세션 수·사용자가
     말한 세션 길이)을 flash 와 동일하게 지키면서 회당 $0.0290 → $0.0073, 지연 9.9s → 7.4s.
 
-    회복도 lite 로 내려 통일했다 — 다만 **회복은 실측으로 뒷받침되지 않았다.** 원칙은
-    "if-then 코핑 문장 자체가 산출물이라 평가 없이 내리지 않는다" 였고 그 평가는 아직 없다.
-    품질 문제가 보이면 `llm_model_recovery` 만 `gemini-3.5-flash` 로 되돌리면 된다.
+    회복도 lite 로 내렸다 — 다만 **회복은 실측으로 뒷받침되지 않았다.** 원칙은 "if-then
+    코핑 문장 자체가 산출물이라 평가 없이 내리지 않는다" 였고 그 평가는 아직 없다. 품질
+    문제가 보이면 `llm_model_recovery` 만 `gemini-3.5-flash` 로 되돌리면 된다.
 
-    통일 대상으로 단가가 정확히 절반인 `gemini-2.5-flash` 를 고르지 않은 이유: 이 레포의
-    작업으로 품질을 측정한 적이 한 번도 없다. 절약액(인터뷰 1,095회 ≈ $0.3)보다 분해가
-    계약을 어겨 계획 전 구간이 룰 폴백 자리표시자가 되는 손해가 크다.
+    ⚠️ **이 둘이 base 를 따라가면 안 된다.** base 는 2026-09-04 비용 결정으로 미측정 모델
+    (`gemini-2.5-flash`)이 됐다 — 오버라이드를 비우거나 지우면 분해가 그리로 조용히 내려가고,
+    분해가 계약을 어기면 계획 전 구간이 룰 폴백 자리표시자가 된다. 그 사고를 여기서 막는다.
     """
     s = _settings()
-    for module in ("interview", "planning", "recovery", "inbox", "brief"):
-        assert s.model_for_module(module) == "gemini-3.5-flash-lite", f"{module} 만 다르다"
+    for module in ("planning", "recovery"):
+        assert s.model_for_module(module) == "gemini-3.5-flash-lite", f"{module} 가 내려갔다"
+
+
+def test_base_is_pinned_to_2_5_flash_for_cost() -> None:
+    """base 는 `gemini-2.5-flash` — interview/inbox/brief 만 여기 걸린다 (2026-09-04).
+
+    **비용 결정이다.** 단가가 정확히 절반이다(입력 $0.30 → $0.15, 출력 $2.50 → $1.25/1M).
+
+    ⚠️ 알려진 약점: 2.5-flash 는 이 레포의 작업으로 품질을 **측정한 적이 없다.** 2026-08-03
+    통일 때 lite 를 고른 이유가 정확히 그것이었고(절약액이 인터뷰 1,095회 ≈ $0.3 수준이라
+    미측정 리스크를 살 값이 아니라는 판단), 그 판단을 비용 쪽으로 뒤집은 것이다. 되돌리려면
+    `llm_model` 한 줄만 lite 로 바꾸면 된다.
+
+    이 테스트가 있는 이유는 값 자체보다 **결정이 레포에 남아 있게** 하려는 것이다. 예전엔
+    이 값이 라이브 인스턴스 `.env` 에만 있어서, 코드·테스트·`.env.example` 은 전부 lite 라고
+    말하는데 운영은 다르게 돌았고 `env-check` 가 그걸 매번 DRIFT(사고)로 신고했다.
+    """
+    s = _settings()
+    for module in ("interview", "inbox", "brief"):
+        assert s.model_for_module(module) == "gemini-2.5-flash", f"{module} 만 다르다"
 
 
 def test_empty_override_falls_back_to_base() -> None:
