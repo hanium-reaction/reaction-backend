@@ -7,7 +7,7 @@
 
 ---
 
-## v2.14 — 2026-09-02 (계획 승인이 Focus≤3/Maintain≤5 한도를 실제로 지킨다, #371)
+## v2.21 — 2026-09-04 (계획 승인이 Focus≤3/Maintain≤5 한도를 실제로 지킨다, #371)
 
 **동작 변경 — `POST /plans/{planId}/approve`.** 응답에 `warnings` 추가(additive). 기존 필드
 무변경.
@@ -42,6 +42,288 @@
 - 마이그레이션 없음. LLM 비용 영향 없음(순수 DB 판정).
 - 재승인(멱등, 저장 스냅샷 응답)은 `warnings=[]` 고정 — 그 경로는 저장된 카운트만 재현하고
   재영속화하지 않는다.
+
+---
+
+## v2.20 — 2026-09-04 (하루에 몇 쪽 — 챕터 경계를 존중한 도서 진도 계산)
+
+⚠️ **`BookDetailResponse.detail`/`MaterialsSpecConfirmRequest.details`(book) 호환 깨짐**:
+`toc: string[]` → `chapters: {title, endPage}[]`. `MaterialsSpecConfirmResponse.bookPace` 에
+`chapters: {title, endPage, sessions}[]` 추가(additive).
+
+### 무엇이 문제였나
+
+목차(`toc`)를 문자열 목록으로만 줬다 — "몇 쪽까지 어떤 챕터"인지, "하루에 몇 쪽 볼지"는
+사용자가 직접 셈해야 했다. 게다가 국중 seoji 목차 자체가 best-effort(L0 실측 10권 중
+1권)라 대부분의 책은 이 정보가 아예 없었다.
+
+첫 구현(같은 날 이전 커밋)은 `page_count` 균등 분할로만 세션당 쪽수를 냈다 — 목차가
+있어도 "챕터별 실제 페이지 체크포인트로 세션을 배정"하지는 않았다. 실측해 보니 41쪽짜리
+챕터를 20쪽씩 균등하게 자르면 챕터 중간에서 세션이 끊겼다.
+
+### 이제
+
+**`page_count` 하나만으로 항상 계산되는 진도**가 기본이다 — `spec-confirm` 이 책을 받으면
+`goals.deadlines`/`goals.weekly_time`/`goals.frequency` 를 `POST /plans/generate` 와
+**같은 함수**(`first_plan_adapter.target_sessions_per_week`)에 태워 시간 예산 기준 세션당
+쪽수를 정한다. 목차 유무와 무관하게(L0 10/10) 항상 나온다 — 마감이 없거나 지났을 때만
+`bookPace=null`(지어내지 않는다).
+
+**목차 전 챕터에 `endPage` 가 있으면(best-effort, L0 1/10)** 그 시간 예산 기준 쪽수는
+목표치로만 쓰고, `_chapter_session_plan` 이 챕터 경계를 존중해 다시 배정한다 — 각 챕터가
+`round(챕터 쪽수 ÷ 목표 쪽수)` 세션(최소 1)에 **정확히** 끝나도록, 세션이 챕터 중간에서
+안 끊기게. `bookPace.totalSessions` 는 이 챕터별 배정의 합이다(균등 분할 값이 아니다).
+목차가 커버하는 마지막 페이지가 `page_count` 보다 작으면(부록·연습문제 등, 흔하다) 그
+차이도 "(목차 이후 나머지 분량)" 이름 없는 항목으로 마저 배정한다 — 존재하는 페이지를
+없는 셈 치지 않는다. 챕터 중 하나라도 `endPage` 를 모르면(부분 목차) 챕터 배정 자체를
+포기하고 균등 분할로 폴백한다.
+
+seoji 원문은 개행 없이 점선(···)+페이지 번호로 항목이 이어붙은 한 덩어리 문자열이라,
+챕터 경계마다 **마지막** 페이지 마커만 취하면 실제 페이지 순서와 일치한다(실측 검증).
+페이지 번호가 거꾸로 가면(파싱 오류 신호) 그 책 전체의 `endPage` 를 버린다.
+
+계산 값은 **서버가 지금 막 계산한 값만** 슬롯에 싣는다 — 클라이언트가 진도 숫자를 보내도
+무시된다(계획 분량에 직접 영향을 주는 산술이라 클라이언트를 신뢰하지 않는다).
+
+라이브 검증(2026-09-04, 실 알라딘+seoji 호출): "Java의 정석 : 기초편"(1000쪽, 15챕터 목차
+확보, isbn13 `9788994492049`) + 목표 마감 2026-11-01 · 주 6시간 · 세션 60분 →
+균등 분할이었다면 50세션(세션당 20쪽)이었을 것이 **챕터 경계 배정으로 49세션**(챕터 1은
+41쪽을 2세션, 챕터 2는 26쪽을 1세션, ... 목차 밖 나머지 300쪽은 15세션)으로 나왔다 —
+`materialsNote` 에 "Chapter 1. 자바를 시작하기 전에 (~41쪽까지, 약 2세션)" 형태로 그대로
+실려 기존 `materials_for_prompt` 경로를 탄다(새 프롬프트 변수 없음).
+
+---
+
+## v2.19 — 2026-09-04 (materialMix — 책+영상 병행 확정)
+
+⚠️ **`POST /plans/materials/spec-confirm` 호환 깨짐**: 요청 `detail`(단일) → `details`(배열,
+1~2건). 응답 `kind`(단일) → `kinds`(배열). `POST /plans/materials/study-method` 응답에
+`materialMix` 추가(additive).
+
+### 무엇이 문제였나
+
+`goals.materials` 슬롯은 자료를 하나만 담았다 — 책을 확정하면 영상이 지워지고 그 반대도
+같았다("나중 확정이 이긴다"). 토익처럼 이론(문법서)과 반복 트레이닝(강의)이 둘 다 의미
+있는 목표에서, 사용자는 책 아니면 영상 중 하나만 계획에 반영할 수 있었다.
+
+### 이제
+
+`study-method` 가 셋 중 하나를 함께 추천한다 — `"book"`(목차 구조가 뚜렷한 단일 교재로
+충분) · `"video"`(설명·시연이 핵심) · `"both"`(이론+트레이닝이 둘 다 필요). 강제하지
+않는다 — 사용자가 다르게 골라도 `spec-confirm` 이 받아준다.
+
+`spec-confirm` 은 이제 `details` 배열(책 1개·영상 1개까지, 같은 종류 두 번은 422)을
+받아 `goals.materials` 슬롯에 `{"type":"spec","items":[...]}` 로 담는다.
+`interview_adapter._materials_note` 가 각 항목을 텍스트로 풀어 이어붙이므로, 두 건을
+확정해도 `materials_for_prompt` 의 기존 울타리·경로는 그대로다 — 새 프롬프트 변수도 새
+인젝션 방어도 만들지 않았다.
+
+라이브 검증(2026-09-04, 실 Gemini 호출): 토익 900점 목표에 `study-method` 를 물으니
+`materialMix="both"` 를 냈다. 해커스 실전 1000제(420쪽, 목차 없음) + 토빡남 재생목록
+(32편·1038분)을 같이 확정하고 분해를 돌리니, 세션이 두 소스를 섞어 나왔다 — "해커스 토익
+1000제 RC 파트 5 문제 50개 풀기"(책) 다음에 "김진태 토빡남 문법 30모음 영상 시청"(영상)
+처럼 이론과 트레이닝이 번갈아 배치됐다.
+
+자세한 설계 근거는 [ADR-0010](decisions/0010-materials-research-pipeline.md).
+
+---
+
+## v2.18 — 2026-09-03 (spec-confirm 이 계획 생성에 반영된다)
+
+**계약 변경 없음** — `POST /plans/materials/spec-confirm` 의 동작이 바뀐다(v2.09 가 남긴
+제약 해소). endpoint·요청/응답 스키마는 그대로다.
+
+### 무엇이 문제였나
+
+v2.09 는 `type="spec"` 을 슬롯에 저장만 했다. `interview_adapter._text_raw` 가
+`type=="text"` 만 읽어서, 확정해도 `materialsNote`/`goal_decompose` 는 `(없음)` 그대로였다.
+
+### 이제
+
+`interview_adapter._materials_note` 가 `type=="spec"` 값을 텍스트로 풀어(도서: 페이지
+수 + 목차, 영상: 커리큘럼 각 항목의 분량 포함) `materialsNote` 에 싣는다. 그 뒤로는
+붙여넣기 텍스트와 **완전히 같은 경로** — `first_plan_adapter.materials_for_prompt` 의
+기존 울타리(injection fence) → `goal_decompose`. **새 프롬프트 변수도 새 방어 로직도
+만들지 않았다** — 이미 검증된 경로를 재사용한다.
+
+라이브 검증(2026-09-03, 실 Gemini 호출): 3편짜리 영상 커리큘럼(1일차 시제 54분 · 2일차
+수동태&수일치 67분 · 3일차 to부정사&동명사 56분)을 확정하고 분해를 돌리면, 세션이 그
+순서·주제 그대로 나온다("시제 강의 수강 및 기본 개념 정리" → "수동태&수일치 강의 수강
+전반부" → …) — 일반론이 아니라 확정한 자료를 뼈대로 삼는다는 것을 실제 호출로 확인했다.
+
+`spec-confirm` 의 `notice` 도 그에 맞춰 "저장했다" 에서 기존 `/confirm`(③)과 같은
+"다음 계획 생성부터 반영된다" 문구로 바뀐다.
+
+자세한 설계 근거는 [ADR-0010](decisions/0010-materials-research-pipeline.md) §5.
+
+---
+
+## v2.17 — 2026-09-03 (자료 검색 파이프라인 3·4단계 — book/video-detail · spec-confirm)
+
+**`POST /plans/materials/book-detail`, `video-detail`, `spec-confirm` 신설**(additive,
+v2.08 의 study-method·catalog 를 잇는다).
+
+### 이제
+
+    POST /plans/materials/book-detail    isbn13 → 페이지 수(필수) + 목차(best-effort)
+    POST /plans/materials/video-detail   playlistId → 커리큘럼 + 분량(둘 다 필수)
+    POST /plans/materials/spec-confirm   확정한 detail → goals.materials 슬롯 저장
+
+- 도서 페이지 수는 알라딘에서 안정적으로 온다(L0 10/10). 목차는 국중 seoji
+  best-effort(L0 10권 중 1권, 판본마다 다르다) — 못 가져와도 실패가 아니다. 페이지
+  수만으로도 `detail` 이 채워진다.
+- 영상은 커리큘럼·분량이 이 소스의 핵심이라(L0 4/4) 못 가져오면 `detail` 자체가 없다.
+  `curriculum` 은 200편에서 잘리고 그때 `truncated=true` 로 밝힌다 — `videoCount` 는
+  잘려도 항상 실제 총 편수.
+- `spec-confirm` 은 기존 `goals.materials` 슬롯에 새 `type="spec"` 으로 쓴다(③
+  `/confirm` 의 `type="text"` 와 같은 자리) — 새 테이블·마이그레이션 없음. 나중 확정이
+  이긴다(③ 텍스트 확정을 spec 확정이 대체하거나 그 반대).
+- 계획 생성 반영은 v2.10 참고 — 이 버전 시점엔 저장만 하고 분해는 아직 `type=="text"`
+  만 읽었다.
+
+자세한 설계 근거는 [ADR-0010](decisions/0010-materials-research-pipeline.md).
+
+---
+
+## v2.16 — 2026-09-03 (자료 검색 파이프라인 신설 — study-method · catalog)
+
+**`POST /plans/materials/study-method`, `POST /plans/materials/catalog` 신설**(additive,
+기존 `materials/search-query`~`materials/confirm` 3단계는 그대로 — 교체 아님).
+
+### 무엇이 문제였나
+
+기존 자료 검색(`materials/search`)은 그라운딩 1회로 **이미 정해진** 자료의 목차를
+"확인" 하는 방식인데, 상업 교재는 `RECITATION` 으로 통째로 막힌다(3/4 실패, 인프런 강의는
+4/4 통과) — 사용자가 자료를 가장 필요로 하는 부류(토익·수험서)가 정확히 막힌다.
+
+L0 실측([`docs/experiments/l0-materials-source-results.md`](experiments/l0-materials-source-results.md))
+이 확인한 사실: 도서 목차는 API 로도 크롤링으로도 안정적으로 못 얻지만(알라딘 0/10, 국중
+seoji 1/10·판본별), **영상 강의는 재생목록 검색으로 커리큘럼(영상 제목)+분량(재생시간)이
+통째로 온다(4/4)**. 자세한 설계 근거는 [ADR-0010](decisions/0010-materials-research-pipeline.md).
+
+### 이제
+
+    POST /plans/materials/study-method   목표 → 추천 방식 + 도서/영상 검색어 2종
+                                          (LLM 구조화 호출 1회, 그라운딩 아님)
+    POST /plans/materials/catalog        확인된 검색어 → 알라딘/YouTube 후보 검색
+                                          (LLM 0회, API 만)
+
+- `study-method` 는 아직 아무것도 검색하지 않는다 — 검색어를 사용자가 확인·편집한 뒤에야
+  `catalog` 가 실제로 나간다(①의 프라이버시 원칙과 동일).
+- `catalog` 의 두 소스는 독립적으로 실패한다 — 한쪽이 안 되도 다른 쪽 후보는 그대로 온다.
+- 후보에는 목차·분량이 아직 없다 — 후보를 고른 뒤 그 한 건만 상세 조회하는 단계는 아직
+  배선하지 않았다(ADR-0010 §4·§5, 후속).
+- ⚠️ YouTube `search.list` 는 1회 100유닛/일일쿼터 10,000유닛 — **앱 전체 하루 ~100회가
+  상한**이고 사용자별 상한은 아직 없다. 초과하면 `videos=[]` + `videoNotice` 로 알릴 뿐
+  500 이 아니다.
+## v2.15 — 2026-09-02 (캘린더 일정이 계획에 반영된다 — freebusy busy 소스 배선, ADR-0009 D4)
+
+**동작 변경 — `POST /plans/generate` · `GET /calendar/freebusy`.** 응답 스키마 변경 없음.
+`generate` 의 `warnings` 에 항목이 하나 늘 수 있다.
+
+### 무엇이 바뀌었나
+
+v2.05 는 **연결까지**였다. 토큰은 저장했지만 그 캘린더를 아무도 읽지 않아 계획은 여전히
+남의 일정 위에 잡혔다. 이제 계획 생성이 캘린더를 읽어 **다섯 번째 busy 소스**로 넣는다:
+
+```
+time_policies(수면·점심) + fixed_schedules(수업) + existing_busy(승인된 내 카드)
++ calendar(구글 일정) + past
+```
+
+지평 전체를 **한 번에** 조회한다 — `busy_for_day` 안에서 부르면 날짜마다 API 왕복이 난다.
+`existing_busy` 와 같은 모양(날짜별 dict)이라 스케줄러 쪽 변경이 없다.
+
+⚠️ **두 배치 뷰 모두에 넣는다.** 1차 배치는 `roomy_busy_for_day`, 2차는 `busy_for_day` 라는
+서로 다른 뷰를 쓴다. 한쪽에만 넣으면 하루가 빡빡해지는 순간(=2차가 도는 순간) 캘린더 일정
+위에 카드가 잡힌다 — `pad_busy` 가 정확히 그 함정에 빠져 있다(ADR-0009 D4 ①이 경고한 것).
+테스트가 **두 뷰 각각을 빼면 빨간불이 되는지**까지 확인한다.
+
+캘린더 일정에는 **여백을 덧대지 않는다** — 고정일정(수업)과 같은 취급이다. 그건 '쉴 수 없는
+시간'이지 집중 작업이 아니고, 여백을 주면 일정 직후가 통째로 날아간다(v1.97 결정).
+
+### 실패는 계획을 죽이지 않는다
+
+연결이 없거나·토큰이 죽었거나·Google 이 느리면 캘린더 없이 예전처럼 진행한다.
+
+다만 **연결해 둔 사용자에게 조용히 실패하면 안 된다** — "연결했는데 수업 위에 계획이 잡혔다"
+는 사용자가 스스로 알아챌 수 없다. 그래서 세 경우를 가른다:
+
+| 상태 | 계획 | 사용자에게 |
+| --- | --- | --- |
+| 연결 안 함 (대다수) | 캘린더 없이 진행 | **아무 말 없음** — 매번 권유하면 알림 피로 |
+| 정상 | 반영 | — |
+| 연결됨 + 못 읽음 | 캘린더 없이 진행 | `warnings` 한 줄 |
+
+토큰 갱신이 `invalid_grant` 로 실패하면 사용자가 Google 에서 권한을 뺏은 것이라 `revoked_at`
+을 찍어 재연결을 안내한다. **일시적 실패(네트워크·5xx)는 연결을 끊지 않는다** — 그 구분이
+`OAuthError.retryable` 이다.
+
+### `GET /calendar/freebusy` 가 실제 조회가 된다
+
+예전엔 고정 데모 구간을 돌려주는 mock 이었다. 이제 실제 캘린더를 읽고, **연결이 없으면
+404 `CALENDAR_NOT_CONNECTED`** 다 — 빈 목록으로 주면 "일정 없음" 과 구분되지 않아 FE 가
+"캘린더가 되고 있다" 고 믿는다. `from`/`to` 는 KST 날짜, 최대 60일.
+
+### 아직 아닌 것
+
+**겹치기 회피까지다.** ADR-0009 D4 의 나머지 두 룰은 아직이다 —
+① **전이 버퍼**(외부 일정 앞뒤 이동 시간), ② **부하 감쇠**(직전 연속 일정이 길수록 그 뒤
+슬롯의 허용 카드 길이를 낮춘다 — 4시간 시험 직후에 3시간 딥워크를 넣지 않는다).
+그래서 지금은 **일정 끝나자마자 0분 간격으로 카드가 붙을 수 있다.**
+
+일정의 **제목·장소는 읽지 않는다**(freebusy 스코프). 앞뒤 일정의 '내용'을 보는 판단은 이
+설계로는 불가능하고, 길이·인접성으로 근사하는 것이 ①② 의 몫이다.
+
+---
+
+## v2.14 — 2026-09-02 (Google Calendar 연결 실구현 — OAuth 보류 해제, 읽기 전용)
+
+**신규 동작 — `/calendar/connect` (POST/DELETE).** 응답 스키마는 기존 정의 그대로
+(`CalendarConnection`). 마이그레이션 없음 — `calendar_connections` 테이블은 이미 있었다.
+
+### 무엇이 바뀌었나
+
+Issue #17 Alpha MVP 결정이 **Google Calendar OAuth 자체를 P1 로 미뤄** 두 엔드포인트가
+501 이었다. ADR-0009 D4 가 그 보류 해제를 제안했고(계획 단위가 분으로 바뀌면서 "외부 일정
+앞뒤"를 모르는 스케줄러가 못 지킬 계획을 만든다), 팀 합의로 해제한다.
+
+### 범위 — 읽기 전용, 스코프 하나
+
+스코프는 `https://www.googleapis.com/auth/calendar.freebusy` **하나**다. 스케줄러의 세 룰
+(전이 버퍼·부하 감쇠·자투리)에 필요한 건 **구간의 길이와 인접성뿐**이고 제목·장소는 필요
+없다. `calendar.readonly` 로 넓히면 남의 일정 제목이 우리 DB 근처로 오는데 그만한 값이 없다
+— 테스트가 스코프 문자열을 고정한다.
+
+`events.insert`(write-back)는 **P1 유지**. `sync-preview`/`approve-insert` 는 여전히 stub 이고,
+freebusy 조회를 스케줄러에 배선하는 것도 후속이다. 이 버전은 **연결까지**다.
+
+### 동작
+
+- `POST /calendar/connect` — authorization code → 토큰 교환 → `*_encrypted` 저장.
+  **멱등**: 재연결은 새 행이 아니라 기존 행 갱신(`user_id` 유니크 + soft delete 라 새 INSERT
+  는 제약에 걸린다). 실패는 422 `COMMON_VALIDATION_ERROR` — 새 에러 코드를 만들지 않았다.
+- `DELETE /calendar/connect` — **204, 멱등**. 연결이 없어도 204 다(두 번 눌렀다고 404 를 주면
+  "이미 끊긴 상태"가 실패로 보인다). `revoked_at` soft delete 를 **먼저 커밋**하고 Google 쪽
+  권한 회수는 그 뒤에 best-effort — 순서를 뒤집으면 Google 은 끊겼는데 우리는 연결됐다고
+  믿는 상태가 생기고, 회수 실패로 예외를 올리면 사용자가 연결을 **해제조차 못 하게** 된다.
+
+⚠️ **refresh token 은 최초 동의 때만 온다.** 갱신 응답에 없는 게 정상이라, 저장 계층이
+None 을 만나면 **기존 값을 유지**한다. 그대로 덮어쓰면 다음 갱신이 불가능해져 연결이
+하루 뒤에 조용히 죽는다. 같은 이유로 최초 연결에 refresh token 이 없으면(동의 URL 에
+`access_type=offline` 이 빠진 경우) 연결 자체를 실패로 본다 — 반쯤 된 연결을 저장하지 않는다.
+
+### 기능 스위치 — 기본 OFF
+
+`GOOGLE_CALENDAR_ENABLED=false`(기본)이거나 `GOOGLE_OAUTH_CLIENT_ID`/`_SECRET` 이 비어 있으면
+두 엔드포인트는 **예전처럼 501**. Cloud 콘솔 셋업(client_secret · 승인된 리디렉션 URI)은
+사람 손이 필요해서, 준비 전에 배포돼도 사용자가 깨진 동의 화면을 만나지 않게 하는 안전핀이다.
+
+### 새 의존성 없음
+
+`google-api-python-client` 는 동기이고 무겁다(discovery 캐싱·httplib2). 필요한 건 토큰
+엔드포인트 POST 하나뿐이라, 레포에 이미 있는 `requests` 를 `web_fetch`·`web_push` 와 같은
+방식으로 감쌌다 — `to_thread` + 이중 timeout. `uv add` 가 없다.
 
 ---
 

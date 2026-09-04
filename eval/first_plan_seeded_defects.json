@@ -1,0 +1,499 @@
+{
+  "_readme": [
+    "첫 계획 검토기(L1-7B) 평가용 결함 20건. **held-out fault design 산출물이다.**",
+    "루브릭(docs/experiments/rubric-first-plan-v1.md)을 쓴 주체가 결함 인스턴스를 쓰면",
+    "'자기가 만든 버그만 잡는 린터'를 측정하게 된다(계획서 L1-7B 순환성 항목).",
+    "그래서 결함 내용은 다른 모델이 D1~D5 의 한 줄 정의와 기준 계획 JSON 만 보고 작성했다.",
+    "적용은 scripts/build_golden_first_plan_cases.py 가 결정적으로 한다 — 이 파일은 데이터다.",
+    "손으로 고치지 말 것. 고치면 held-out 조건이 깨지고 provenance 가 거짓이 된다."
+  ],
+  "provenance": {
+    "author_model": "sonnet (Claude Code 하위 에이전트, model=sonnet)",
+    "rubric_author_model": "opus (claude-opus-5, 상위 세션 — 루브릭·지표·생성기 작성자)",
+    "authored_at": "2026-08-31",
+    "shown": [
+      "D1~D5 의 한 줄 정의 (앵커 표 없이 이름과 정의문만)",
+      "기준 계획 2종의 완전한 JSON (scripts/... --dump-base-plans 출력)",
+      "주입 연산 어휘 4종과 출력 스키마",
+      "easy / boundary 의 의미 — boundary 의 정답은 '통과'라는 것",
+      "`tmp-continue-N` 이 룰이 붙인 정상 산물이라는 사실"
+    ],
+    "withheld": [
+      "docs/experiments/rubric-first-plan-v1.md (§2 정상/경계/결함 앵커 표, §3 주입 레시피)",
+      "docs/experiments/experiment-plan-v1.md (§2 L1-7 전체)"
+    ],
+    "verified_by": [
+      "tests/test_golden_first_plan_cases.py — 격자 완전성 · 노드 존재 · 뮤테이션 가드 · ③층 불변식 보존"
+    ],
+    "limits": [
+      "분류 체계(D1~D5) 자체는 여전히 루브릭 작성자의 것이다. 완화이지 해소가 아니다.",
+      "작성자가 루브릭을 안 봤다는 것은 지시와 산출물 대조로만 확인했다(샌드박스 강제 아님)."
+    ],
+    "author_findings": [
+      "D3 의 하위 유형 '비인접 의존 위반'(개념 정리가 다 끝나기 전에 마지막 기출을 푸는 형태)은 주입 연산 어휘가 인접 쌍 교환만 다뤄 이번 골든셋에 표현되지 않았다.",
+      "D4 의 '물리적 동작이지만 과목 내용과 무관한 준비 의식'(예: 타이머 맞추기)이 결함인지 정상인지 정의만으로 갈리지 않아 boundary 에서 제외했다 — 루브릭에 없는 회색지대.",
+      "D5 boundary 는 '기여하지만 이 세션이 꼭 필요한가'라는 판단이 섞여 D2 와 경계가 흐릿했다."
+    ],
+    "audit": {
+      "audited_at": "2026-09-01",
+      "auditor_model": "sonnet (별도 하위 에이전트 — 결함 작성자와도 다른 인스턴스)",
+      "method": "verify 케이스 32건을 전부 펼쳐 사람이 읽는 형태로 검토 + 생성기를 worktree 에서 직접 실행해 재현",
+      "confirmed_ok": [
+        "defect_free_control 12건은 D1~D5 어디에도 걸리지 않는 정상 계획이다.",
+        "boundary 10건은 정답이 '통과'라는 주장이 각각 타당하다.",
+        "생성기에 난수·현재시각·환경 의존이 없고 두 번 실행해 바이트 단위로 같다.",
+        "swap_order 가 action_items 순서와 goal_nodes order_index 를 일관되게 뒤집는다."
+      ],
+      "fixed": [
+        "insert_item 이 뒤 형제의 order_index 를 안 밀어 4건에서 같은 부모 아래 중복이 났다(d1-easy-cert · d1-boundary-cert · d1-easy-portfolio · d5-boundary-cert). ③층은 그런 트리를 만들지 않으므로 '검토기가 운영에서 보는 것' 이라는 전제가 깨진 상태였다. 생성기를 고치고 tests/test_golden_first_plan_cases.py::test_sibling_order_index_is_unique_within_each_parent 로 고정했다."
+      ],
+      "open_limitations": [
+        "⚠️ **held-out 증거력이 D4·D5 에서 약하다.** 루브릭 §2 의 D5 앵커 표가 예시 목표로 쓴 '정보처리기사 실기 합격' 이 하필 결함 작성자에게 **보여준** 기준 계획(control-cert-standard)의 목표와 같다. 그래서 D5 boundary 의 실제 결함('실기 코드 입력 속도 높이려 타자연습 10분 하기')과 앵커 표의 경계 예시('타이핑 속도 연습')가 어휘까지 겹친다. D4 도 앵커 예시('집중해서 시작하기'·'마음 잡기')와 실제 결함('마음 잡고 집중하기')이 겹친다. 유출인지 수렴인지 **구별할 방법이 없고**, 구별할 수 없게 만든 것이 설계 잘못이다 — 앵커 표의 예시 목표와 기준 계획의 목표를 겹치게 골랐다. M27(D4 easy · D5 boundary)은 이 단서를 달아 보고한다.",
+        "⚠️ **D2 easy 는 title 만 바꾸고 first_step 이 단서를 남긴다.** 케이스당 연산 1개라는 제약이 원인이므로 결함 작성자 잘못이 아니라 이 생성기의 제약이다. d2-easy-cert 는 제목이 '실기 마저 준비하기'로 모호해졌지만 first_step '오답 노트 열기'가 남아 항목 전체로는 착수 가능할 수 있다. 검토기가 통과시켜도 'D2 를 못 잡았다' 인지 '실제로 착수 가능해 정상 판정' 인지 갈리지 않는다.",
+        "`control_properties` 가 빈 대조군 5건은 내용에 대한 자동 검증이 없다(구조와 expected 만 확인). 지금은 사람이 읽어 확인했지만, 나중에 누가 그 5건을 고치면서 결함을 심어도 테스트가 빨강이 되지 않는다."
+      ],
+      "next_iteration": [
+        "기준 계획의 목표를 루브릭 앵커 표에 등장하지 않는 것으로 고르고, D4·D5 를 다시 held-out 으로 받는다.",
+        "연산 어휘에 title+first_step 동시 치환을 더해 D2 easy 를 항목 전체 기준으로 만든다."
+      ]
+    },
+    "retired": {
+      "retired_at": "2026-09-02",
+      "why": "2026-09-02 독립 감사 2차가 두 가지 방법론 결함을 지적했다. 결함 판단이 틀려서가 아니라 데이터가 검토기에게 **의미 판단 없는 지름길**을 주거나 루브릭과 모순됐기 때문이다.",
+      "reauthored_by": "sonnet (Claude Code 하위 에이전트, 새 인스턴스 — 원 작성자와 같은 조건)",
+      "reauthor_protocol": "원 의뢰와 같은 shown 5종(한 줄 정의·기준 계획 JSON·op 어휘·easy/boundary 의미·tmp-continue-N 이 정상이라는 사실)만 주고 루브릭 파일은 열지 말라고 지시했다. **교체 사유는 알리지 않았다** — '왜 문제인지' 를 말하려면 감춘 앵커 표를 그대로 말해야 하기 때문이다. 루브릭에서 나오지 않는 제약 2개만 새로 걸었다: ① category 는 프로덕션 enum(goal_decompose.v2.md 스키마)만 ② 어떤 단일 필드로도 easy/boundary 가 갈리면 안 된다(방법론 규칙).",
+      "rubric_author_did_not_write_replacements": "교체본을 루브릭 작성자(opus)가 쓰면 held-out 성질이 사라지므로 쓰지 않았다. opus 는 채택 여부만 판정했고, 1차 제출본 중 d5-easy-portfolio 를 반려해 다시 받았다(사유: 프론트엔드 트렌드 기사 읽기는 포트폴리오 사이트와 같은 기술 도메인이라 '무관' 이 아니라 '간접 기여' 로 읽혀 easy 로 불공정).",
+      "entries": [
+        {
+          "defect_id": "d1-easy-cert",
+          "base_plan": "control-cert-standard",
+          "defect": "D1",
+          "level": "easy",
+          "operation": {
+            "op": "insert_item",
+            "after": "l1",
+            "node_id": "x1",
+            "title": "SQL 이론 복습하기",
+            "first_step": "교재 SQL 챕터 다시 펴기",
+            "estimated_minutes": 40,
+            "category": "career"
+          },
+          "target_node_ids": [
+            "l1",
+            "x1"
+          ],
+          "rationale": "l1과 사실상 같은 SQL 이론 학습을 다른 말로 반복하는 카드를 b1에 추가해 중복을 명백하게 만들었다."
+        },
+        {
+          "defect_id": "d5-easy-cert",
+          "base_plan": "control-cert-standard",
+          "defect": "D5",
+          "level": "easy",
+          "operation": {
+            "op": "insert_item",
+            "after": "l2",
+            "node_id": "x3",
+            "title": "집중력 향상 유튜브 영상 시청하기",
+            "first_step": "유튜브 앱 열기",
+            "estimated_minutes": 20,
+            "category": "life"
+          },
+          "target_node_ids": [
+            "x3"
+          ],
+          "rationale": "정보처리기사 실기 학습 내용과 무관한 일반 자기계발 영상 시청을 끼워 넣어 목표 무관을 명백하게 만들었다."
+        },
+        {
+          "defect_id": "d5-easy-portfolio",
+          "base_plan": "control-portfolio-long",
+          "defect": "D5",
+          "level": "easy",
+          "operation": {
+            "op": "insert_item",
+            "after": "l3",
+            "node_id": "x3",
+            "title": "최신 IT 뉴스 기사 읽기",
+            "first_step": "뉴스 사이트 열기",
+            "estimated_minutes": 30,
+            "category": "life"
+          },
+          "target_node_ids": [
+            "x3"
+          ],
+          "rationale": "포트폴리오 사이트 완성과 무관한 일반 뉴스 읽기를 끼워 넣어 목표 무관을 명백하게 만들었다."
+        }
+      ]
+    },
+    "reauthored_2026_09_02": {
+      "author_model": "sonnet (Claude Code 하위 에이전트, 새 인스턴스)",
+      "scope": "20건 중 **9건**을 다시 썼다 (D1×3 · D2×2 · D4×2 · D5×2). 바꾼 필드는 항목마다 다르다 — D1 3건은 operation·target_node_ids·rationale, D2/D4 4건은 operation·rationale, D5 2건은 operation·target_node_ids. 그리고 insert_item node_id 를 전역 유일화했다(원본이 x2·x4 를 서로 다른 항목에서 재사용). D3 4건과 나머지 7건은 이미 기준을 만족해 손대지 않았다.",
+      "why": "감사 3차가 지름차 신호 14건을 찾았다 — 검토기가 카드 내용을 한 글자도 안 읽고 easy/boundary 를 가를 수 있는 상태였다. 그러면 M27 은 '검토기가 의미를 판단했다' 는 뜻이 될 수 없다.",
+      "gate": "**사람이 아니라 스크립트가 통과를 판정했다** — `scripts/check_seeded_defect_shortcuts.py` 가 0 을 돌려줄 때까지 작성자가 스스로 반복했다. 앞선 라운드에서 루브릭 작성자가 눈으로 제출본을 반려·재요청한 것(rejection sampling)이 감춘 기준의 정보를 산출물로 흘려보냈기 때문이다.",
+      "leaked_on_purpose": [
+        "D1 에 한해 '다시/재-/복습/회독/한 번 더 를 쓰지 말라' 는 제약을 줬다. 이것은 **채점 기준에 대한 힌트가 맞다** — 감춘 루브릭의 D1 정상 앵커가 회독·복습을 중복이 아니라고 규정하기 때문이다. 이 힌트 없이는 같은 자리에 세 번째로 빠질 것이 확실해 전달했고, held-out 이 순수하다고 주장하지 않는다. M27(D1)은 이 단서를 달아 보고한다.",
+        "검사기의 규칙(어떤 필드가 easy/boundary 를 가르면 안 되는가) 자체는 작성자에게 공개했다. 이는 분류 체계가 아니라 방법론이므로 유출로 보지 않는다."
+      ],
+      "distortions_reported_by_author": [
+        "**D1 boundary-portfolio 는 시나리오가 통째로 바뀌었다.** 검사기가 같은 base_plan 안에서 easy 와 boundary 의 `after` 앵커까지 같기를 요구해서다. 원래(배포 후 다른 브라우저 교차 확인)가 '반복처럼 보이지만 아닌' 경계 사례로 더 선명했다. 새 것(프로젝트 1 소개에 기술 스택 표 추가)도 방어 가능하지만, **최선의 경계 예시라서가 아니라 앵커 일치 규칙 때문에 존재한다.**",
+        "**D2 boundary-cert 가 계획 자체의 어휘를 잃었다.** 기준 계획은 어디서나 'SQL 활용 단원' 이라고 부르는데, 영문·숫자 신호를 없애려고 '쿼리 단원' 으로 바꿨다. 그럴듯한 동의어지만 계획의 자기 어휘와 덜 맞는다.",
+        "**D4 boundary 2건이 구체성을 잃었다.** `first_step_len` 을 줄이고 숫자를 없애려고 '문제집 1페이지 펼치기' → '문제집 펼치기', '프로젝트 1 폴더에서 screenshots 폴더 열기' → '스크린샷 폴더 열기' 로 깎았다. 원래 것이 **최대한 구체적이라서** 좋은 D4 경계였는데, 깎인 쪽은 '통과가 정답' 이라는 성질이 조금 약해졌다. 작은 침식이지만 실재한다."
+      ],
+      "cost_of_this_approach": "기계적 게이트는 눈으로 거르는 유출을 없애는 대신 **내용 품질을 깎을 수 있다.** 위 3건이 그 비용이다. 셋 다 작성자가 스스로 보고했고(숨기지 말라고 지시했다), 숨겨진 왜곡보다 기록된 왜곡이 낫다고 판단해 그대로 채택했다.",
+      "corrections_2026_09_02": [
+        "앞선 기록이 \"20건 중 10건\" 이라 했으나 실제는 **9건**이다. 같은 문장의 내역(D1×3·D2×2·D4×2·D5×2)도 합하면 9다.",
+        "앞선 기록이 검사기의 cp949 버그를 \"종료 코드가 0 으로 남아 CI 가 성공으로 읽을 수 있었다\" 고 했으나 **거짓이고 방향도 반대다** — 직접 재현하니 종료 코드는 1 이었다(예외가 main() 안에서 나 sys.exit(main()) 이 실행되지 않는다). CI 는 실패로 읽는다. \"통과 경로 메시지에만 em dash 가 있다\" 도 거짓으로, 실패 경로 두 곳에도 있었다. 버그는 실재했지만 조용하지 않고 시끄러웠다.",
+        "지름길이 **다 사라진 것이 아니다.** 검사기가 세는 특징만 사라졌고, 세지 않던 것(마저·사이트·SQL·타깃 위치)이 남았다. 4차 재의뢰 대신 래칫으로 전환해 남은 것을 eval/README.md 「M27·M28 을 읽을 때」에 보고한다."
+      ]
+    }
+  },
+  "defects": [
+    {
+      "defect_id": "d1-easy-cert",
+      "base_plan": "control-cert-standard",
+      "defect": "D1",
+      "level": "easy",
+      "operation": {
+        "op": "insert_item",
+        "after": "l3",
+        "node_id": "x1",
+        "title": "SQL 활용 3회차 기출문제 풀이하기",
+        "first_step": "SQL 기출문제집 3회차 파일 열기",
+        "estimated_minutes": 50,
+        "category": "career"
+      },
+      "target_node_ids": [
+        "l3",
+        "x1"
+      ],
+      "rationale": "l3과 동일하게 SQL 활용 3회차 기출문제를 푸는 작업인데 '풀이하기'로 표현만 바꿔 넣어, 이미 끝난 3회차를 형태만 다르게 또 시키는 명백한 중복이다."
+    },
+    {
+      "defect_id": "d1-boundary-cert",
+      "base_plan": "control-cert-standard",
+      "defect": "D1",
+      "level": "boundary",
+      "operation": {
+        "op": "insert_item",
+        "after": "l3",
+        "node_id": "x2",
+        "title": "SQL 활용 기출 4회차 풀기",
+        "first_step": "기출 PDF 4회차 열기",
+        "estimated_minutes": 50,
+        "category": "career"
+      },
+      "target_node_ids": [
+        "l3",
+        "x2"
+      ],
+      "rationale": "제목이 l3과 거의 같아 보이지만 다른 회차(4회차) 기출을 푸는 정상적인 반복 학습이라 중복이 아니다."
+    },
+    {
+      "defect_id": "d1-easy-portfolio",
+      "base_plan": "control-portfolio-long",
+      "defect": "D1",
+      "level": "easy",
+      "operation": {
+        "op": "insert_item",
+        "after": "l2",
+        "node_id": "x3",
+        "title": "프로젝트 1 소개 문구와 캡처 이미지 넣기",
+        "first_step": "프로젝트 1 저장소 README 파일 열기",
+        "estimated_minutes": 60,
+        "category": "project"
+      },
+      "target_node_ids": [
+        "l2",
+        "x3"
+      ],
+      "rationale": "l2와 동일하게 프로젝트 1의 소개 문구와 화면 캡처를 넣는 작업을 표현만 바꿔 추가해 명백한 중복을 만들었다."
+    },
+    {
+      "defect_id": "d1-boundary-portfolio",
+      "base_plan": "control-portfolio-long",
+      "defect": "D1",
+      "level": "boundary",
+      "operation": {
+        "op": "insert_item",
+        "after": "l2",
+        "node_id": "x4",
+        "title": "프로젝트 1 소개에 사용 기술 스택 표 추가하기",
+        "first_step": "프로젝트 1 사용 기술 목록 정리하기",
+        "estimated_minutes": 60,
+        "category": "project"
+      },
+      "target_node_ids": [
+        "l2",
+        "x4"
+      ],
+      "rationale": "l2와 같은 '프로젝트 1' 절 아래 있어 반복처럼 보이지만, 소개 글과 스크린샷이 아니라 사용 기술 스택 표라는 별개의 콘텐츠를 추가하는 작업이라 중복이 아니다."
+    },
+    {
+      "defect_id": "d2-easy-cert",
+      "base_plan": "control-cert-standard",
+      "defect": "D2",
+      "level": "easy",
+      "operation": {
+        "op": "replace_title",
+        "node_id": "l4",
+        "value": "실기 마저 준비하기"
+      },
+      "target_node_ids": [
+        "l4"
+      ],
+      "rationale": "무엇을 어떻게 하라는 건지 전혀 알 수 없는 포괄적 제목으로 바꿔 착수 불가를 명백하게 만들었다."
+    },
+    {
+      "defect_id": "d2-boundary-cert",
+      "base_plan": "control-cert-standard",
+      "defect": "D2",
+      "level": "boundary",
+      "operation": {
+        "op": "replace_title",
+        "node_id": "l1",
+        "value": "쿼리 단원 완독하기"
+      },
+      "target_node_ids": [
+        "l1"
+      ],
+      "rationale": "낯설어 보이지만 '완독'은 단원 전체를 처음부터 끝까지 한 번 다 읽는다는 뜻의 통상적 학습 용어이고 first_step인 '교재 SQL 챕터 펴기'가 그대로 남아 있어 실제로는 착수 가능하다."
+    },
+    {
+      "defect_id": "d2-easy-portfolio",
+      "base_plan": "control-portfolio-long",
+      "defect": "D2",
+      "level": "easy",
+      "operation": {
+        "op": "replace_title",
+        "node_id": "l3",
+        "value": "남은 부분 마저 채우기"
+      },
+      "target_node_ids": [
+        "l3"
+      ],
+      "rationale": "어느 프로젝트의 어떤 내용을 채우라는 건지 전혀 특정할 수 없는 제목으로 바꿔 착수 불가를 명백하게 만들었다."
+    },
+    {
+      "defect_id": "d2-boundary-portfolio",
+      "base_plan": "control-portfolio-long",
+      "defect": "D2",
+      "level": "boundary",
+      "operation": {
+        "op": "replace_title",
+        "node_id": "l1",
+        "value": "라우팅 스캐폴딩"
+      },
+      "target_node_ids": [
+        "l1"
+      ],
+      "rationale": "비개발자에겐 낯설어 보이지만 개발자에게는 라우트 뼈대 파일부터 만든다는 뜻이 분명한 표준 용어라 실제로는 착수 가능하다."
+    },
+    {
+      "defect_id": "d3-easy-cert",
+      "base_plan": "control-cert-standard",
+      "defect": "D3",
+      "level": "easy",
+      "operation": {
+        "op": "swap_order",
+        "node_ids": [
+          "l3",
+          "l4"
+        ]
+      },
+      "target_node_ids": [
+        "l3",
+        "l4"
+      ],
+      "rationale": "틀린 문제를 다시 풀려면 먼저 기출을 풀어 오답이 나와야 하는데 그 산출물이 없는 상태에서 오답 복습이 먼저 오도록 순서를 뒤집었다."
+    },
+    {
+      "defect_id": "d3-boundary-cert",
+      "base_plan": "control-cert-standard",
+      "defect": "D3",
+      "level": "boundary",
+      "operation": {
+        "op": "swap_order",
+        "node_ids": [
+          "l1",
+          "l2"
+        ]
+      },
+      "target_node_ids": [
+        "l1",
+        "l2"
+      ],
+      "rationale": "SQL 개념과 프로그래밍 언어 개념은 서로 산출물을 주고받지 않는 독립된 단원이라 순서를 바꿔도 진행에 지장이 없다."
+    },
+    {
+      "defect_id": "d3-easy-portfolio",
+      "base_plan": "control-portfolio-long",
+      "defect": "D3",
+      "level": "easy",
+      "operation": {
+        "op": "swap_order",
+        "node_ids": [
+          "l3",
+          "l4"
+        ]
+      },
+      "target_node_ids": [
+        "l3",
+        "l4"
+      ],
+      "rationale": "프로젝트 2 콘텐츠가 들어가기 전에 배포와 링크 확인을 먼저 하도록 뒤집어 확인할 산출물이 없는 상태에서 검증 단계가 앞서게 만들었다."
+    },
+    {
+      "defect_id": "d3-boundary-portfolio",
+      "base_plan": "control-portfolio-long",
+      "defect": "D3",
+      "level": "boundary",
+      "operation": {
+        "op": "swap_order",
+        "node_ids": [
+          "l2",
+          "l3"
+        ]
+      },
+      "target_node_ids": [
+        "l2",
+        "l3"
+      ],
+      "rationale": "프로젝트 1과 프로젝트 2 소개 글은 서로 독립적인 콘텐츠 작업이라 어느 것을 먼저 해도 결과에 차이가 없다."
+    },
+    {
+      "defect_id": "d4-easy-cert",
+      "base_plan": "control-cert-standard",
+      "defect": "D4",
+      "level": "easy",
+      "operation": {
+        "op": "replace_first_step",
+        "node_id": "l1",
+        "value": "마음 잡고 집중하기"
+      },
+      "target_node_ids": [
+        "l1"
+      ],
+      "rationale": "물리적 동작이 아니라 마음가짐이라는 다짐·상태를 first_step으로 넣어 착수 단서 부재를 명백하게 만들었다."
+    },
+    {
+      "defect_id": "d4-boundary-cert",
+      "base_plan": "control-cert-standard",
+      "defect": "D4",
+      "level": "boundary",
+      "operation": {
+        "op": "replace_first_step",
+        "node_id": "l3",
+        "value": "SQL 기출문제집 펼치기"
+      },
+      "target_node_ids": [
+        "l3"
+      ],
+      "rationale": "제목과 어휘가 겹쳐 반복처럼 보이지만 실제로는 기출문제집을 펼치라는 구체적 물리 동작이라 착수 단서로 유효하다."
+    },
+    {
+      "defect_id": "d4-easy-portfolio",
+      "base_plan": "control-portfolio-long",
+      "defect": "D4",
+      "level": "easy",
+      "operation": {
+        "op": "replace_first_step",
+        "node_id": "l1",
+        "value": "잘 마무리하겠다고 다짐하기"
+      },
+      "target_node_ids": [
+        "l1"
+      ],
+      "rationale": "구체적 동작 대신 다짐이라는 심리 상태를 first_step으로 넣어 착수 단서 부재를 명백하게 만들었다."
+    },
+    {
+      "defect_id": "d4-boundary-portfolio",
+      "base_plan": "control-portfolio-long",
+      "defect": "D4",
+      "level": "boundary",
+      "operation": {
+        "op": "replace_first_step",
+        "node_id": "l2",
+        "value": "스크린샷 폴더 열기"
+      },
+      "target_node_ids": [
+        "l2"
+      ],
+      "rationale": "제목의 '스크린샷'이라는 어휘를 그대로 써서 반복처럼 보이지만 실제로는 특정 폴더를 여는 구체적 물리 동작이라 착수 단서로 유효하다."
+    },
+    {
+      "defect_id": "d5-easy-cert",
+      "base_plan": "control-cert-standard",
+      "defect": "D5",
+      "level": "easy",
+      "operation": {
+        "op": "insert_item",
+        "after": "l1",
+        "node_id": "x6",
+        "title": "취업 준비용 이력서 사진 새로 촬영하기",
+        "first_step": "정장 입고 거울 앞에 서기",
+        "estimated_minutes": 20,
+        "category": "career"
+      },
+      "target_node_ids": [
+        "x6"
+      ],
+      "rationale": "이력서 사진 촬영은 career 로 분류될 법해 보이지만, 이 세션은 정보처리기사 실기 합격이라는 목표의 학습 진행에 전혀 기여하지 않는 목표 무관 활동이다."
+    },
+    {
+      "defect_id": "d5-boundary-cert",
+      "base_plan": "control-cert-standard",
+      "defect": "D5",
+      "level": "boundary",
+      "operation": {
+        "op": "insert_item",
+        "after": "l1",
+        "node_id": "x9",
+        "title": "실기 코드 입력 속도 높이려 타자연습하기",
+        "first_step": "타자연습 사이트 열기",
+        "estimated_minutes": 20,
+        "category": "career"
+      },
+      "target_node_ids": [
+        "x9"
+      ],
+      "rationale": "언뜻 시험 내용과 무관한 잡일처럼 보이지만 실기 시험이 코드·SQL을 직접 타이핑하는 실기형이라 타자 속도 훈련은 실제로 합격에 기여한다."
+    },
+    {
+      "defect_id": "d5-easy-portfolio",
+      "base_plan": "control-portfolio-long",
+      "defect": "D5",
+      "level": "easy",
+      "operation": {
+        "op": "insert_item",
+        "after": "l3",
+        "node_id": "x7",
+        "title": "동아리 정기모임 홍보 포스터 시안 만들기",
+        "first_step": "포스터 디자인 프로그램 열기",
+        "estimated_minutes": 40,
+        "category": "project"
+      },
+      "target_node_ids": [
+        "x7"
+      ],
+      "rationale": "동아리 홍보 포스터 제작은 이 개발 포트폴리오 사이트와는 전혀 다른 별개 프로젝트의 작업이라, 페이지 구성·프로젝트 소개·배포 중 어디에도 기여하지 않는 목표 무관이 명백하다."
+    },
+    {
+      "defect_id": "d5-boundary-portfolio",
+      "base_plan": "control-portfolio-long",
+      "defect": "D5",
+      "level": "boundary",
+      "operation": {
+        "op": "insert_item",
+        "after": "l3",
+        "node_id": "x8",
+        "title": "웹사이트 도메인 이름 후보 정하고 가격 알아보기",
+        "first_step": "도메인 등록 사이트 접속하기",
+        "estimated_minutes": 40,
+        "category": "project"
+      },
+      "target_node_ids": [
+        "x8"
+      ],
+      "rationale": "언뜻 사이트 제작과 무관한 쇼핑성 조사처럼 보이지만 배포 전에 반드시 필요한 도메인 준비 단계라 목표에 직접 기여한다."
+    }
+  ]
+}

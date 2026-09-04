@@ -9,7 +9,8 @@ name: Env check (EC2, read-only)
 # 안전:
 # - workflow_dispatch 전용 · 읽기만 한다 (.env 를 고치는 스텝 없음)
 # - **비밀값은 절대 원문 출력 안 함**: GEMINI_API_KEY·COLUMN_ENCRYPTION_KEY·
-#   GOOGLE_OAUTH_CLIENT_ID 는 SET/UNSET(+길이)만, DATABASE_URL 은 호스트만 (자격증명 마스킹)
+#   GOOGLE_OAUTH_CLIENT_ID·ALADIN_TTB_KEY·YOUTUBE_API_KEY·NL_SEOJI_KEY 는 SET/UNSET(+길이)만,
+#   DATABASE_URL 은 호스트만 (자격증명 마스킹)
 # - 값이 있는지/레포 기본값과 같은지만 비교 — .env 를 고치는 건 이 워크플로의 책임이 아니다
 
 on:
@@ -120,6 +121,12 @@ jobs:
             echo "  GEMINI_API_KEY: $(presence "$(get_val GEMINI_API_KEY)")"
             echo "  GOOGLE_OAUTH_CLIENT_ID: $(presence "$(get_val GOOGLE_OAUTH_CLIENT_ID)")"
             echo "  COLUMN_ENCRYPTION_KEY: $(presence "$(get_val COLUMN_ENCRYPTION_KEY)")"
+
+            echo ""
+            echo "=== 자료 검색 (ADR-0010, #422) — SET/UNSET 만 ==="
+            echo "  ALADIN_TTB_KEY: $(presence "$(get_val ALADIN_TTB_KEY)")"
+            echo "  YOUTUBE_API_KEY: $(presence "$(get_val YOUTUBE_API_KEY)")"
+            echo "  NL_SEOJI_KEY: $(presence "$(get_val NL_SEOJI_KEY)")"
           } | tee /tmp/env-check-output.txt
 
           {

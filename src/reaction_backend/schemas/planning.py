@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from reaction_backend.schemas.common import CamelModel, DraftMixin, KstDatetime
 from reaction_backend.schemas.interview import InterviewOutcome
@@ -75,6 +75,69 @@ class PlanReview(CamelModel):
 
     approved: bool
     feedback: list[str] = Field(default_factory=list)  # 미승인 시 재계획 이슈 목록
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# `plan_quality_eval.v4` — **평가 후보** 검토기 출력 계약 (루브릭 §4).
+#
+# ⚠️ **프로덕션은 이것을 쓰지 않는다.** ④층 `review_plan` 은 여전히 `PlanReview`(v3)다.
+# 이 스키마는 `scripts/l1_7b_v4_run.py` 평가 하네스 전용이고, 승격 조건은
+# `docs/experiments/l1-7b-v4-results.md` 에 적혀 있다.
+#
+# `CamelModel` 이 아니라 순수 `BaseModel` 을 쓰는 이유 — 이 스키마는 **API 경계를 넘지
+# 않는다.** camelCase 변환(api-contract §1.9)은 응답 스키마의 규칙이고, 여기서 그걸 쓰면
+# 프롬프트가 요구하는 `node_id` 와 Gemini 에 넘어가는 `response_schema` 의 `nodeId` 가
+# 갈린다. 같은 이름 하나로 두는 편이 프롬프트·스키마·집계를 대조하기 쉽다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+DefectCode = Literal["D1", "D2", "D3", "D4", "D5"]
+"""루브릭 §2 의 결함 5종. 자유 문자열을 받으면 M28a(유형 지목)를 기계가 못 센다."""
+
+
+class PlanFinding(BaseModel):
+    """검토기가 지목한 결함 한 건.
+
+    v3 의 `feedback: list[str]` 이 자유 문장이라 **무엇을 왜 지적했는지 기계가 셀 수 없었다.**
+    M27b(옳은 유형)·M28a(유형 지목)·M28b(위치 지목)가 전부 이 구조를 요구한다.
+    """
+
+    defect: DefectCode
+    severity: int = Field(ge=1, le=3)
+    """1=경계·통과 권고 / 2=결함 / 3=명백. **반려 임계값은 프롬프트가 아니라 코드가 정한다**
+    (`approved_from_findings`) — 임계값을 바꿔가며 M27b/M29 를 다시 계산해 운영점을 고르기
+    위해서다. LLM 이 `approved` 를 직접 내면 그 곡선을 그릴 수 없다."""
+
+    node_id: str = Field(min_length=1)
+    """지목한 leaf 의 `node_id`. **입력 계획에 실제로 있는 값인지는 스키마가 못 본다** —
+    하네스가 `classify_findings` 로 대조하고, 없는 id 는 무효로 표시한다."""
+
+    message: str = Field(min_length=1)
+    """사용자 친화 제안 문장. 톤 규칙은 v3 와 동등하다(탓하지 않는 제안형, 금지어 동일)."""
+
+
+class PlanReviewV4(BaseModel):
+    """`plan_quality_eval.v4` 출력 — **`approved` 필드가 없다.**
+
+    LLM 이 승인/반려를 직접 결정하지 않는다. 코드가 `approved_from_findings` 로 정한다.
+    `findings` 가 비면 승인이다.
+    """
+
+    findings: list[PlanFinding] = Field(default_factory=list)
+
+
+REJECT_SEVERITY_THRESHOLD = 2
+"""이 값 이상인 finding 이 하나라도 있으면 반려. 운영점 탐색 시 바꿔가며 재집계한다."""
+
+
+def approved_from_findings(
+    findings: list[PlanFinding], *, threshold: int = REJECT_SEVERITY_THRESHOLD
+) -> bool:
+    """반려 판정 — **코드가 정한다.**
+
+    `findings` 가 비면 `True`. 그 외에는 `severity >= threshold` 인 것이 하나도 없을 때만
+    `True` 다. 순수 함수라 저장된 원자료에 임계값을 바꿔 다시 적용할 수 있다.
+    """
+    return not any(f.severity >= threshold for f in findings)
 
 
 class MilestoneDraft(CamelModel):

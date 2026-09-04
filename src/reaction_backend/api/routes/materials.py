@@ -17,6 +17,21 @@
 라이브 실측(2026-08-23)이 이 흐름의 안내 문구를 결정했다: 인프런 강의 커리큘럼은 4/4 로
 찾아지지만 상업 교재 목차는 provider 가 저작권으로 막는다(3/4). 그래서 `blocked_copyright`
 를 따로 두고 "다시 시도" 가 아니라 "직접 붙여넣어 주세요" 로 안내한다.
+
+**ADR-0010 이 별도 파이프라인을 추가한다** — 위 ①②③ 은 그대로 두고(교체하지 않는다,
+ADR-0010 §4), 이미 정해진 자료의 목차를 그라운딩으로 "확인" 하는 대신 무엇을 찾을지부터
+API 로 실제 검색한다:
+
+    POST /plans/materials/study-method   추천 방식 + 검색어 2종 — LLM 구조화 호출 1회
+    POST /plans/materials/catalog        알라딘/YouTube 후보 검색 — API 만, LLM 0회
+    POST /plans/materials/book-detail    후보 도서 1건 → 페이지 수 + 목차(best-effort)
+    POST /plans/materials/video-detail   후보 재생목록 1건 → 커리큘럼 + 분량
+    POST /plans/materials/spec-confirm   "이 자료 맞아요" → goals.materials 슬롯에 저장
+
+**spec-confirm 은 계획 생성에 반영된다(ADR-0010 §5)** — `interview_adapter._materials_note`
+가 `type == "spec"` 값을 텍스트로 풀어 `materials_note` 에 싣고, 그 뒤로는 붙여넣기
+텍스트와 완전히 같은 경로(`materials_for_prompt` → `goal_decompose`)를 탄다. 새 프롬프트
+변수도 새 인젝션 방어도 만들지 않았다 — 기존 울타리를 그대로 통과시킨다.
 """
 
 from __future__ import annotations
@@ -30,17 +45,20 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from reaction_backend.agents import study_method_agent
 from reaction_backend.api.deps import CurrentUser
 from reaction_backend.config import get_settings
 from reaction_backend.db.models.interview_session import InterviewSession
 from reaction_backend.db.session import get_db
 from reaction_backend.llm import aiClient
 from reaction_backend.llm.tool_executor import GroundedResult
+from reaction_backend.orchestrator import materials_catalog, materials_spec
 from reaction_backend.orchestrator._common import user_agent_lock
 from reaction_backend.orchestrator.interview_adapter import is_placeholder_goal
 from reaction_backend.orchestrator.interview_projection import project_session_outcome
 from reaction_backend.repositories.interview_repo import InterviewRepo, get_interview_repo
 from reaction_backend.safety.llm_budget import check_grounding
+from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome
 from reaction_backend.schemas.materials import (
@@ -53,6 +71,20 @@ from reaction_backend.schemas.materials import (
     MaterialsSearchResponse,
     MaterialsSearchStatus,
 )
+from reaction_backend.schemas.materials_catalog import (
+    MaterialsCatalogRequest,
+    MaterialsCatalogResponse,
+)
+from reaction_backend.schemas.materials_spec import (
+    BookDetailRequest,
+    BookDetailResponse,
+    BookSpecDetail,
+    MaterialsSpecConfirmRequest,
+    MaterialsSpecConfirmResponse,
+    VideoDetailRequest,
+    VideoDetailResponse,
+)
+from reaction_backend.schemas.study_method import StudyMethodRequest, StudyMethodResponse
 
 _log = logging.getLogger(__name__)
 
@@ -313,4 +345,139 @@ async def confirm_materials(
         goal_title=goal.title,
         saved_chars=len(text),
         notice="자료를 반영했어요. 다음 계획 생성부터 이 목차를 뼈대로 삼아요.",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADR-0010 — 자료 검색 파이프라인 (①②③ 과 독립. 배선 병행, 교체 아님 — ADR-0010 §4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.post("/study-method")
+async def propose_study_method(
+    body: StudyMethodRequest,
+    user: CurrentUser,
+    repo: RepoDep,
+    session: SessionDep,
+) -> StudyMethodResponse:
+    """목표에 맞는 학습 방식 + 도서/영상 검색어 2종을 추천한다.
+
+    LLM 구조화 호출 1회뿐 — 그라운딩도 검색도 아직 없다(ADR-0010 §2). 아무것도 외부로
+    나가지 않으므로 `/plans/materials/catalog` 이전에 사용자가 검색어를 확인·편집할 수
+    있다(#259 §4.1 ① 결정과 같은 원칙).
+    """
+    session_row = await _resolve_session(repo, user.id, body.interview_session_id)
+    outcome = await project_session_outcome(session_row, repo)
+    goal = _heaviest(outcome)
+
+    plan, fell_back = await study_method_agent.run(goal=goal, session=session, user_id=user.id)
+    await session.commit()
+
+    return StudyMethodResponse(
+        approach=plan.approach,
+        focus_points=plan.focus_points,
+        book_query=plan.book_query,
+        video_query=plan.video_query,
+        goal_title=goal.title,
+        notice=(
+            "이 검색어들이 그대로 도서/영상 검색에 쓰여요. 빼고 싶은 내용이 있으면 고쳐 "
+            "주세요. 고치기 전까지는 아무것도 나가지 않아요."
+        ),
+        ai_source="rule" if fell_back else "llm",
+    )
+
+
+@router.post("/catalog")
+async def search_catalog(
+    body: MaterialsCatalogRequest, user: CurrentUser
+) -> MaterialsCatalogResponse:
+    """사용자가 확인·편집한 검색어로 알라딘/YouTube 후보를 찾는다. 저장하지 않는다.
+
+    LLM 을 부르지 않으므로(ADR-0010 §1 ②) `llm_runs`/그라운딩 예산과 무관하다 — 대신
+    쿼터는 각 provider 가 관리한다. YouTube `search.list` 는 1회에 100유닛이라 앱 전체
+    일일 쿼터(10,000유닛)로 하루 ~100회가 상한이다(`config.youtube_api_key` 참고) — 지금은
+    사용자별 상한이 없고, 쿼터를 넘기면 `videos` 가 빈 배열로 오고 `videoNotice` 에 그
+    사유(다시 시도 안내)가 채워질 뿐이다(500 이 아니다).
+    """
+    return await materials_catalog.search(book_query=body.book_query, video_query=body.video_query)
+
+
+@router.post("/book-detail")
+async def get_book_detail(body: BookDetailRequest, user: CurrentUser) -> BookDetailResponse:
+    """후보 도서 1건의 페이지 수 + 목차(best-effort)를 조회한다. 저장하지 않는다.
+
+    페이지 수는 알라딘에서 안정적으로 온다(L0 실측 10/10). 목차는 국중 seoji 에서
+    best-effort 로만 온다(L0 실측 10권 중 1권, 판본마다 다르다) — 못 가져와도 `detail`
+    은 채워진다(페이지 수만으로 계획에 반영할 수 있으므로). `detail` 자체가 없으면 알라딘
+    조회가 실패한 것이다(`notice` 에 사유).
+    """
+    settings = get_settings()
+    return await materials_spec.book_detail(body.isbn13, settings=settings)
+
+
+@router.post("/video-detail")
+async def get_video_detail(body: VideoDetailRequest, user: CurrentUser) -> VideoDetailResponse:
+    """후보 재생목록 1건의 커리큘럼(영상 제목) + 분량(재생시간)을 조회한다. 저장하지 않는다.
+
+    이 소스는 커리큘럼·분량이 핵심이라(L0 실측 4/4) 못 가져오면 `detail` 자체가 없다
+    (`notice` 에 사유 — 쿼터 초과 포함).
+    """
+    settings = get_settings()
+    return await materials_spec.video_detail(body.playlist_id, settings=settings)
+
+
+@router.post("/spec-confirm")
+async def confirm_spec(
+    body: MaterialsSpecConfirmRequest,
+    user: CurrentUser,
+    repo: RepoDep,
+    session: SessionDep,
+) -> MaterialsSpecConfirmResponse:
+    """ "이 자료 맞아요" — book/video-detail 이 돌려준 `details`(1~2건)를 그대로 되받아
+    저장한다. 몇 건이 좋을지는 `study-method` 의 `materialMix` 가 권장하지만 강제하지
+    않는다 — 사용자가 책만, 영상만, 또는 둘 다 보낼 수 있다.
+
+    재조회하지 않는다 — 사용자가 화면에서 이미 확인한 값이고(②→③ 과 같은 HITL 왕복), 같은
+    isbn/재생목록을 또 부르면 API 호출만 늘어난다. `goals.materials` 슬롯에 새
+    `{"type": "spec", "items": [...]}` 로 쓰므로 기존 텍스트 확정(`/confirm`)이나 이전
+    spec 확정이 있었다면 그걸 대체한다(마지막 확정이 이긴다 — `/confirm` 과 같은 규칙).
+
+    다음 계획 생성부터 반영된다 — 이 파일 상단 독스트링 참고(`interview_adapter.
+    _materials_note` 가 각 항목을 텍스트로 풀어 이어붙여 기존 `materials_for_prompt`
+    경로를 그대로 탄다). 책이 있으면 **여기서** 세션당 권장 페이지(`book_pace`)를 계산해
+    응답에 싣고, 같은 값을 슬롯에도 저장해 분해 프롬프트에도 실린다 — 클라이언트가 보낸
+    값이 아니라 서버가 지금 막 계산한 값이다(`materials_spec._spec_item_dict` 참고). 목차
+    전 챕터에 페이지가 있으면(best-effort) 균등 분할이 아니라 **챕터 경계를 존중한** 세션
+    배정으로 계산된다(`materials_spec._chapter_session_plan`) — 세션이 챕터 중간에서 안
+    끊긴다.
+    """
+    session_row = await _resolve_session(repo, user.id, body.interview_session_id)
+    outcome = await project_session_outcome(session_row, repo)
+    goal = _heaviest(outcome)
+
+    book_detail_item = next((d for d in body.details if isinstance(d, BookSpecDetail)), None)
+    book_pace = (
+        materials_spec.compute_book_pace(
+            page_count=book_detail_item.page_count,
+            chapters=book_detail_item.chapters,
+            outcome=outcome,
+            target_date=now_kst().date(),
+        )
+        if book_detail_item is not None
+        else None
+    )
+
+    await repo.upsert_slot_answer(
+        session_row.id,
+        _MATERIALS_SLOT,
+        materials_spec.spec_slot_value(body.details, book_pace=book_pace),
+        is_required=True,
+    )
+    await session.commit()
+
+    return MaterialsSpecConfirmResponse(
+        goal_title=goal.title,
+        kinds=[d.kind for d in body.details],
+        notice="자료를 반영했어요. 다음 계획 생성부터 이 목차를 뼈대로 삼아요.",
+        book_pace=book_pace,
     )

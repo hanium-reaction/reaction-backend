@@ -50,9 +50,17 @@ eval/l1_2_*.jsonl
 # 결정적이라 커밋하지만 실행 결과는 매번 다르다. 요약은 docs/experiments/l1-6-results.md.
 eval/l1_6_*.jsonl
 
+# L1-7 실 LLM 호출 산출물 — 위와 같은 이유. 골든셋(eval/golden_first_plan_cases.jsonl)은
+# 결정적이라 커밋하지만 실행 결과는 매번 다르다. 요약은 docs/experiments/l1-7-results.md.
+eval/l1_7_*.jsonl
+eval/l1_7b_*.jsonl
+
 # Logs
 *.log
 logs/
 
 # Docker
 docker-data/
+
+# L1-7B v4 실 LLM 호출 산출물 — 위와 같은 이유.
+eval/l1_7b_v4_*.jsonl

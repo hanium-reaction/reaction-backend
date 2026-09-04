@@ -35,6 +35,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from reaction_backend.config import get_settings
+from reaction_backend.integrations.google_calendar import freebusy
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator import first_plan_adapter, materials_resolver
 from reaction_backend.orchestrator.goal_structuring import (
@@ -549,6 +550,29 @@ async def _existing_busy_by_day(
     return busy
 
 
+async def _calendar_busy_by_day(
+    config: RunnableConfig,
+    user_id: UUID,
+    start_day: date,
+    end_day: date,
+) -> tuple[dict[date, list[BusyBlock]], str]:
+    """Google 캘린더 일정을 날짜별 busy 로 (ADR-0009 D4). 실패해도 계획은 계속된다.
+
+    반환의 두 번째 값은 상태다 — `"ok"` / `"not_connected"` / `"failed"`.
+    **연결하지 않은 사용자는 조용히 넘어가지만**(대다수가 그렇다), 연결해 둔 사용자에게
+    조용히 실패하면 안 된다: "캘린더를 연결했는데 수업 위에 계획이 잡혔다" 는 사용자가
+    스스로 알아챌 수 없다. 그래서 `failed` 는 호출자가 경고로 surface 한다.
+
+    session 이 없으면(단위 테스트/시스템 경로) 조회하지 않는다.
+    """
+    session = _session(config)
+    if session is None:
+        return {}, "not_connected"
+    return await freebusy.fetch_busy_by_day(
+        session, user_id=user_id, start_day=start_day, end_day=end_day
+    )
+
+
 async def _db_time_policies(config: RunnableConfig, user_id: UUID) -> list[Any]:
     """활성 DB `time_policies`(S07, 온보딩 후 수정 포함) — outcome 스냅샷과 합쳐 busy 로.
 
@@ -658,6 +682,11 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         exclude_target_date=start_day,
         exclude_goal_id=exclude_goal_id,
     )
+    # 사용자의 Google 캘린더 일정 — 다섯 번째 busy 소스 (ADR-0009 D4).
+    # 지평 전체를 **한 번에** 조회한다(`busy_for_day` 안에서 부르면 날짜마다 API 왕복).
+    calendar_busy, calendar_status = await _calendar_busy_by_day(
+        config, user_id, start_day, schedule_end
+    )
 
     # 오늘 계획을 저녁에 만들어도 이미 지난 시간대(예: 18:40 생성 → 12:00)에 세션이 잡히지
     # 않도록, '오늘'의 [00:00, 지금(15분 올림)) 구간을 busy 로 넣어 과거 배치를 막는다.
@@ -673,6 +702,7 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
             *time_policies_to_busy(day, policies),
             *fixed_schedules_to_busy(day, fixed),
             *existing_busy.get(day, []),
+            *calendar_busy.get(day, []),
             *extra,
         ]
 
@@ -690,6 +720,11 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
             *time_policies_to_busy(day, policies),
             *fixed_schedules_to_busy(day, fixed),
             *pad_busy(existing_busy.get(day, []), break_min),
+            # 캘린더 일정에는 여백을 **덧대지 않는다** — 고정일정(수업)과 같은 취급이다.
+            # 그건 '쉴 수 없는 시간'이지 집중 작업이 아니라, 여백을 주면 일정 직후가
+            # 통째로 날아간다(v1.97 결정). 앞뒤 이동 시간을 두는 '전이 버퍼'는 성격이
+            # 다른 별개 룰이고(ADR-0009 D4 ①) 아직 구현하지 않았다.
+            *calendar_busy.get(day, []),
             *(
                 [BusyBlock(TimeInterval(day_zero, past_cutoff), "past", "지난 시간")]
                 if day == now.date() and past_cutoff > day_zero
@@ -725,6 +760,17 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         warnings = [
             narrow_window,
             *(w for w in warnings if _UNPLACED_MARKER not in w),
+        ]
+
+    # 캘린더를 연결해 뒀는데 못 읽은 경우만 알린다 (ADR-0009 D4). 연결하지 않은 사용자
+    # (대다수)에게는 아무 말도 하지 않는다 — 캘린더는 선택 기능이라 매번 권유가 되면
+    # 알림 피로가 된다. 반대로 연결한 사용자에게 조용히 넘어가면 "연결했는데 수업 위에
+    # 계획이 잡혔다" 를 스스로 알아챌 방법이 없다.
+    if calendar_status == "failed":
+        warnings = [
+            "캘린더 일정을 불러오지 못해서 이번 계획에는 반영하지 못했어요. "
+            "겹치는 일정이 있으면 시간을 옮겨 주세요.",
+            *warnings,
         ]
 
     blocks = [
@@ -877,6 +923,21 @@ def _review_variables(state: FirstPlanState) -> dict[str, str]:
     # 검토기가 **평균(session_length)과 상한(focus_capacity)을 구분**하게 한다 (ADR-0009 D2).
     # 길이가 작업 성격을 따라가면 개별 세션은 평균에서 벗어나는 게 정상이라, 평균 하나만 주면
     # 검토기가 정상적인 편차를 이탈로 읽고 반려한다 — 재분해가 다시 길이를 한 점으로 모은다.
+    #
+    # ⚠️ 위 120분 사고의 **구조적 원인이 2026-08-31 에 확정됐다** (L1-7B 선행 조사).
+    # `focus_capacity` 는 `first_plan_adapter.session_min_for` 이고, ③층
+    # `normalize_action_minutes` 의 클램프 상한이 **같은 함수**다. 그래서 검토기가 계획을
+    # 볼 시점에는 상한 초과 항목이 존재할 수 없다 — 슬롯 조합 1,620건 전수에서 **0건**.
+    # 즉 `plan_quality` 체크리스트 1번("세션 길이 상한")은 참인 반려가 원리적으로 불가능하고,
+    # 그 항목의 모든 반려는 정의상 오탐이다. 2번("15분 하한")도 90/1,620 에서만 남는데
+    # 전부 룰이 **의도적으로** 하한을 낮춘 조합이다(주당 시간 ÷ 빈도 < 15분).
+    #   근거: docs/experiments/rubric-first-plan-v1.md §1
+    #   핀:   tests/test_first_plan_verifier_invariants.py (불변식이 깨지면 거기서 먼저 터진다)
+    #
+    # ⚠️ **그렇다고 지금 v3 의 1·2번을 지우지 마라.** 그 두 항목이 있는 v3 가 L1-7B 의
+    # **측정 기준선**이다. 먼저 지우면 "검토기 층이 순이득인가"(M33)를 비교할 대상이 사라진다.
+    # 삭제는 v4 에서 하고, v4 는 `focus_capacity` 변수를 **아예 넘겨받지 않는다** — 변수를
+    # 주고 "보지 마라"고 쓰는 것으로는 지킨다는 보장이 없기 때문이다(루브릭 §1.2).
     focus_capacity = str(prompt_vars.get("focus_capacity", session_length))
     gp = state["goal_plan"]
     if gp is None:

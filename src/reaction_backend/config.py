@@ -201,6 +201,31 @@ class Settings(BaseSettings):
     llm_cost_per_1k_input_cents: float = 0.0
     llm_cost_per_1k_output_cents: float = 0.0
 
+    # ── 자료 검색 (ADR-0010) ──
+    # 알라딘 Open API. 비어있으면 도서 검색이 항상 `no_key` 로 실패 처리된다
+    # (`integrations/aladin`). 발급: https://www.aladin.co.kr/ttb/wblog_manage.aspx
+    # (무료, 5,000회/일).
+    aladin_ttb_key: str = ""
+    # YouTube Data API v3. 비어있으면 영상 검색이 항상 `no_key` 로 실패 처리된다
+    # (`integrations/youtube`). 발급: GCP 콘솔 → API 및 서비스 → YouTube Data API v3
+    # 사용 설정 (무료, 10,000유닛/일).
+    #
+    # ⚠️ `search.list` 1회가 100유닛이다 — **앱 전체에서 하루 ~100회만 검색할 수 있다는
+    # 뜻**이다(L0 실측, `docs/experiments/l0-materials-source-results.md`). 사용자별 예산
+    # 가드는 아직 없다 — 초과하면 매 검색이 `quota_exceeded` 로 실패 응답을 낼 뿐이다
+    # (`orchestrator/materials_catalog.py`). 실사용 규모가 커지면 캐싱이나 쿼터 증액이
+    # 필요하다(ADR-0010 §4 밖의 알려진 제약).
+    youtube_api_key: str = ""
+    # 국립중앙도서관 seoji 서지정보 API. 비어있으면 도서 목차가 항상 `no_key` 로 실패
+    # 처리되고 페이지 수만으로 진행한다 (`integrations/nl_seoji`). 발급:
+    # https://seoji.nl.go.kr/landingPage → 오픈API → 인증키 신청 (무료).
+    #
+    # ⚠️ **best-effort 다.** L0 실측(도서 10권 전수)에서 목차가 채워진 건 1권(10%) 뿐이고,
+    # 같은 책의 다른 판(3rd/2nd Edition)은 비어 있었다 — 출판사가 납본 때 선택적으로
+    # 채우는 필드라 판별 규칙이 없다. 나머지 90% 는 페이지 수만으로 진행하는 게 정상
+    # 경로다(오류가 아니다).
+    nl_seoji_key: str = ""
+
     # ── 보안 (Issue #5 §3) ──
     # 32-byte AES-GCM 키 (urlsafe base64 인코딩). 비어있으면 암호화 함수가 명시 에러.
     column_encryption_key: str = ""
@@ -214,8 +239,18 @@ class Settings(BaseSettings):
     # 선행 작업: Google Cloud 콘솔에서 패키지명(com.hanium.reaction) + SHA-1 3종(개발/업로드/
     # Play App Signing)으로 Android Client 등록 — 사람이 직접 해야 한다(FE #237 체크리스트).
     google_oauth_android_client_id: str = ""
-    # SPA + id_token 흐름에서는 BE가 사용하지 않음. server-side code flow 대비 자리만 둠.
+    # 로그인(id_token)에는 안 쓰이지만 **캘린더 연결에는 필수**다 — authorization code 를
+    # 토큰으로 바꾸려면 client_secret 이 있어야 한다 (#17 해제, integrations/google_calendar).
     google_oauth_client_secret: str = ""
+    # 캘린더 동의 후 Google 이 돌려보내는 곳. **Cloud 콘솔의 "승인된 리디렉션 URI" 와
+    # 문자 단위로 같아야** 한다 — 다르면 토큰 교환이 redirect_uri_mismatch 로 떨어진다.
+    # 클라이언트가 동의 URL 을 만들 때 쓴 값과도 같아야 하므로, 서버가 단일 진실로 들고
+    # 있다가 교환 시 그대로 넣는다.
+    google_oauth_redirect_uri: str = ""
+    # 캘린더 연결 기능 스위치. False 면 connect/disconnect 가 501 로 남는다 —
+    # client_id/secret/redirect_uri 가 준비되기 전에 배포돼도 사용자가 깨진 동의 화면을
+    # 만나지 않게 하는 안전핀이다 (외부자원 셋업은 사람 손이 필요하다).
+    google_calendar_enabled: bool = False
 
     # JWT — HS256. JWT_SECRET 은 32+ bytes 권장 (python -c "import secrets; print(secrets.token_hex(32))").
     jwt_secret: str = ""

@@ -265,7 +265,8 @@ class GoalCandidate(CamelModel):
     # goals.approach — 이 목표를 어떻게 해나가고 싶은지(방식·순서 서술). 분해가 일반적 방식이
     # 아니라 사용자가 밝힌 방향을 따르도록 하는 grounding.
     approach_note: str | None = None
-    # goals.materials — 참고 자료의 **실제 원문**(프로젝트 설명·README·강의계획서·요구사항 등).
+    # goals.materials — 참고 자료의 **실제 원문**(프로젝트 설명·README·강의계획서·요구사항 등)
+    # 또는 자료 검색 파이프라인(ADR-0010)이 확정한 도서/영상 상세를 텍스트로 풀어낸 요약.
     # pointer('내 프로젝트')가 아니라 내용이 있어야 분해가 그 기능·목차대로 뼈대를 잡는다.
     materials_note: str | None = None
     tentative_tier: Literal["focus", "maintain", "parked"] = "maintain"

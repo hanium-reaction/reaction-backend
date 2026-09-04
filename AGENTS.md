@@ -23,7 +23,7 @@
 - 톤: "Be on your side, not on your case". 금지어 후처리 필터 강제.
 - 알림: 주 ≤ 3건, 3 클래스만 (morning_brief / pre_card / evening_reflection).
 - 익명화: 90일 비활성 자동, 매일 04:00 KST cron.
-- 캘린더 MVP: read-only freebusy. write-back은 P1.
+- 캘린더 MVP: read-only freebusy (`calendar.freebusy` 스코프만 — 제목·장소 안 읽음). write-back(`events.insert`)은 P1.
 - 한국어 only (MVP). 다국어는 P3.
 - Focus 최대 3, Maintain 최대 5, Parked 자유.
 - 실패 사유 최대 2개 (13종 enum).

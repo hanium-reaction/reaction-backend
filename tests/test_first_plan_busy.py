@@ -875,3 +875,141 @@ def test_committed_minutes_by_day_sums_existing_blocks() -> None:
         ]
     }
     assert first_plan_adapter.committed_minutes_by_day(busy) == {day: 150}
+
+
+# ── 캘린더 (ADR-0009 D4 — 다섯 번째 busy 소스) ─────────────────────────
+
+
+async def test_schedule_blocks_avoids_calendar_events(monkeypatch: Any) -> None:
+    """Google 캘린더 일정이 스케줄러까지 도달해 회피된다.
+
+    이게 이 배선의 전부다 — freebusy 를 읽어도 `busy_for_day` 에 안 얹히면 계획은
+    남의 일정 위에 그대로 잡힌다.
+    """
+    from reaction_backend.integrations.google_calendar import freebusy as fb
+
+    async def _busy(session: Any, *, user_id: Any, start_day: date, end_day: date) -> Any:
+        # 화·목 14:00~18:00 — 위 세 소스가 안 막는 시간대를 일부러 고른다.
+        by_day: dict[date, list[BusyBlock]] = {}
+        day = start_day
+        while day <= end_day:
+            if day.weekday() in (1, 3):
+                by_day[day] = [
+                    BusyBlock(TimeInterval(_at(day, 14), _at(day, 18)), "calendar", "캘린더 일정")
+                ]
+            day += timedelta(days=1)
+        return by_day, "ok"
+
+    monkeypatch.setattr(fb, "fetch_busy_by_day", _busy)
+
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+
+    new_state = await first_plan.schedule_blocks(_state(), config)
+    blocks = new_state["scheduled_blocks"]
+    assert blocks, "블록이 하나는 배치돼야 한다"
+
+    for b in blocks:
+        bs = b.start.astimezone(KST)
+        be = b.end.astimezone(KST)
+        if bs.weekday() in (1, 3):
+            assert not _overlaps(bs, be, _at(bs.date(), 14), _at(bs.date(), 18)), (
+                f"캘린더 일정 위에 배치됨: {bs}~{be}"
+            )
+
+
+def _state_many(count: int) -> Any:
+    """카드를 많이 넣어 **2차 패스**(하루 상한 무시하고 남은 가용 시간 채우기)를 태운다."""
+    state = _state()
+    gp = state["goal_plan"]
+    return {
+        **state,
+        "goal_plan": GoalDecomposition(
+            goal_nodes=gp.goal_nodes,
+            action_items=[
+                ActionItemDraft(
+                    node_id="n1",
+                    title=f"작업{i}",
+                    estimated_minutes=50,
+                    category="study",
+                    first_step="시작",
+                )
+                for i in range(count)
+            ],
+            policy_violations=[],
+        ),
+    }
+
+
+async def test_calendar_is_avoided_by_the_second_pass_too(monkeypatch: Any) -> None:
+    """1차뿐 아니라 **2차 패스**도 캘린더를 피해야 한다.
+
+    1차는 `roomy_busy_for_day`, 2차는 `busy_for_day` 라는 **서로 다른 뷰**를 쓴다. 한쪽에만
+    넣으면 하루가 빡빡해지는 순간(=2차가 도는 순간) 캘린더 일정 위에 카드가 잡힌다 —
+    `pad_busy` 가 정확히 그 함정에 빠져 있다(ADR-0009 D4 ①). 카드를 잔뜩 넣어 1차를
+    상한으로 막고 2차를 태운 상태에서 확인한다.
+    """
+    from reaction_backend.integrations.google_calendar import freebusy as fb
+
+    async def _busy(session: Any, *, user_id: Any, start_day: date, end_day: date) -> Any:
+        by_day: dict[date, list[BusyBlock]] = {}
+        day = start_day
+        while day <= end_day:
+            by_day[day] = [
+                BusyBlock(TimeInterval(_at(day, 14), _at(day, 18)), "calendar", "캘린더 일정")
+            ]
+            day += timedelta(days=1)
+        return by_day, "ok"
+
+    monkeypatch.setattr(fb, "fetch_busy_by_day", _busy)
+
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+
+    new_state = await first_plan.schedule_blocks(_state_many(12), config)
+    blocks = new_state["scheduled_blocks"]
+    assert len(blocks) >= 6, f"2차 패스를 태우기에 배치가 너무 적다: {len(blocks)}"
+
+    for b in blocks:
+        bs = b.start.astimezone(KST)
+        be = b.end.astimezone(KST)
+        assert not _overlaps(bs, be, _at(bs.date(), 14), _at(bs.date(), 18)), (
+            f"캘린더 일정 위에 배치됨(2차 패스): {bs}~{be}"
+        )
+
+
+async def test_calendar_failure_does_not_break_planning(monkeypatch: Any) -> None:
+    """캘린더를 못 읽어도 계획은 나온다 — 다만 연결한 사용자에게는 경고로 알린다."""
+    from reaction_backend.integrations.google_calendar import freebusy as fb
+
+    async def _failed(session: Any, *, user_id: Any, start_day: date, end_day: date) -> Any:
+        return {}, "failed"
+
+    monkeypatch.setattr(fb, "fetch_busy_by_day", _failed)
+
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+
+    new_state = await first_plan.schedule_blocks(_state(), config)
+
+    assert new_state["scheduled_blocks"], "캘린더 실패가 계획을 죽였다"
+    assert any("캘린더" in w for w in new_state["schedule_warnings"]), (
+        "연결돼 있는데 못 읽었으면 사용자에게 알려야 한다"
+    )
+
+
+async def test_no_calendar_connection_is_silent(monkeypatch: Any) -> None:
+    """연결 안 한 사용자(대다수)에게는 아무 말도 하지 않는다 — 매번 권유는 알림 피로다."""
+    from reaction_backend.integrations.google_calendar import freebusy as fb
+
+    async def _none(session: Any, *, user_id: Any, start_day: date, end_day: date) -> Any:
+        return {}, "not_connected"
+
+    monkeypatch.setattr(fb, "fetch_busy_by_day", _none)
+
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+
+    new_state = await first_plan.schedule_blocks(_state(), config)
+
+    assert not any("캘린더" in w for w in new_state["schedule_warnings"])
