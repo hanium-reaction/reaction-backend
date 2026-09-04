@@ -56,6 +56,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 import uuid
 from datetime import date
@@ -93,11 +94,24 @@ def run_dir(stratum: str) -> Path:
     return RUNS_DIR / stratum
 
 
+RUN_NAME_RE = re.compile(r"^\d{8}T\d{6}(-\d+)?$")
+"""실행 파일명은 타임스탬프뿐이다. 이 필터가 없으면 누가 `smoke.jsonl` 을 놓았을 때
+문자열 정렬에서 그게 이겨 **기본 재집계 대상**이 된다."""
+
+
 def latest_run(stratum: str) -> Path | None:
     """가장 최근 실행의 원자료. 없으면 `None`."""
     d = run_dir(stratum)
-    files = sorted(d.glob("*.jsonl")) if d.exists() else []
+    files = sorted(f for f in d.glob("*.jsonl") if RUN_NAME_RE.match(f.stem)) if d.exists() else []
     return files[-1] if files else None
+
+
+def _rel(path: Path) -> str:
+    """표시용 상대 경로. 레포 밖이거나 상대 경로면 그대로 보여준다(`relative_to` 는 던진다)."""
+    try:
+        return str(path.resolve().relative_to(_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def _sha256(path: Path) -> str:
@@ -121,8 +135,19 @@ def write_manifest(
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=_ROOT, timeout=10
         ).stdout.strip()
+        # ⚠️ HEAD 만으로는 부족하다 — 커밋하지 않은 변경으로 돌리면 manifest 의 SHA 가
+        # **실행된 코드가 아니다.** 실제로 그런 원자료가 한 번 생겼다.
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                cwd=_ROOT,
+                timeout=10,
+            ).stdout.strip()
+        )
     except Exception:  # pragma: no cover - git 이 없어도 실행은 되어야 한다
-        sha = "(unknown)"
+        sha, dirty = "(unknown)", True
     meta = {
         "stratum": stratum,
         "target_date": today.isoformat(),
@@ -131,6 +156,7 @@ def write_manifest(
         "rows": n_rows,
         "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "git_sha": sha,
+        "git_dirty": dirty,
         "golden_path": str(STRATUM_PATHS[stratum].relative_to(_ROOT)),
         "golden_sha256": _sha256(STRATUM_PATHS[stratum]),
         "raw_sha256": _sha256(out),
@@ -144,6 +170,52 @@ def write_manifest(
     out.with_suffix(".meta.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+
+
+def check_manifest(src: Path, *, stratum: str, allow_smoke: bool) -> None:
+    """재집계 전 provenance 대조. **기준일 고정만으로는 절반밖에 못 막는다.**
+
+    `summarize` 는 골든셋을 **재집계 시점에 다시 읽어** 마감·주기창·채점 입력을 만든다.
+    그래서 원자료를 한 글자도 안 바꿔도 **골든이 바뀌면 M33 이 바뀐다** — 실측으로
+    `M33 = -0.0625` 가 `+0.0000` 이 됐다. 기준일 버그와 같은 종류이고, manifest 에
+    `golden_sha256` 을 적어놓고 **대조하지 않으면 적은 의미가 없다.**
+
+    스모크(`--limit`)는 설계 §4.3 이 **본 실험 표본에서 제외**한다고 고정했다. 문서로만
+    적어두면 `--summarize-only` 의 기본값이 스모크 파일을 골라 그대로 집계된다.
+    """
+    meta_path = src.with_suffix(".meta.json")
+    if not meta_path.exists():
+        raise SystemExit(
+            f"manifest 가 없다: {_rel(meta_path)} — 어느 골든·어느 커밋으로 만든 원자료인지 "
+            "특정할 수 없다. 재집계를 거부한다(다시 실행해서 새로 만들어라)."
+        )
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if meta.get("stratum") != stratum:
+        raise SystemExit(
+            f"층이 다르다: 원자료는 [{meta.get('stratum')}] 인데 --stratum {stratum} 로 불렀다"
+        )
+    now = _sha256(STRATUM_PATHS[stratum])
+    if meta.get("golden_sha256") != now:
+        raise SystemExit(
+            "\n".join(
+                [
+                    "골든셋이 실행 당시와 다르다 — 재집계는 **지금** 골든으로 채점하므로 "
+                    "같은 원자료의 M33 이 달라진다.",
+                    f"  실행 당시 {meta.get('golden_sha256', '(없음)')[:16]}",
+                    f"  현재      {now[:16]}",
+                    f"  → 그 커밋({meta.get('git_sha', '?')[:7]})의 골든으로 되돌리거나 "
+                    "다시 실행해라.",
+                ]
+            )
+        )
+    if meta.get("limit") is not None and not allow_smoke:
+        raise SystemExit(
+            f"이 원자료는 스모크다(limit={meta['limit']}, repeats={meta.get('repeats')}) — "
+            "설계 §4.3 이 **본 실험 표본에서 제외**한다고 고정했다. 본 실험 원자료를 "
+            "`--run` 으로 지정해라(정말 스모크를 보려면 `--allow-smoke`)."
+        )
+    if meta.get("git_dirty"):
+        print(f"⚠️ 이 실행은 커밋하지 않은 변경 위에서 돌았다 (git_sha={meta.get('git_sha')})")
 
 
 def load_stratum(stratum: str, limit: int | None = None) -> list[dict[str, Any]]:
@@ -192,14 +264,22 @@ async def run_case(case: dict[str, Any], repeat: int, *, today: date) -> dict[st
     initial = state["goal_plan"]
     state = await FP.review_plan(state, cfg)
     review = state["review"]
-    if review is None:
+    # ⚠️ `review` 는 **절대 None 이 아니다.** 검토 LLM 이 실패하면 `_rule_review` 가
+    # `PlanReview(approved=True, feedback=[])` 를 돌려주기 때문이다(무한 cycle 방지용
+    # 프로덕션 규칙). `review is None` 만 보면 **LLM 타임아웃이 "승인" 으로 집계돼**
+    # 반려 집합(= Δ 가 0 이 아닌 유일한 집합)이 조용히 줄고 M33 이 0 쪽으로 편향된다.
+    # `used_fallback` 을 봐야 한다 — 분해 폴백은 위에서 이미 걸러졌으므로 여기서 참이면
+    # 검토가 폴백한 것이다.
+    if review is None or state["used_fallback"]:
         row["fell_back"] = True
         row["stage"] = "review"
+        row["review_fell_back"] = True
         return row
 
     rejected = FP.should_replan(state) == "replan"
     row.update(
         fell_back=False,
+        review_fell_back=False,
         approved=review.approved,
         rejected=rejected,
         feedback=list(review.feedback),
@@ -241,10 +321,13 @@ async def main_async(args: argparse.Namespace) -> None:
         src = Path(args.run) if args.run else latest_run(args.stratum)
         if src is None:
             raise SystemExit(f"[{args.stratum}] 실행 원자료가 없다 — 먼저 실행해라")
+        check_manifest(src, stratum=args.stratum, allow_smoke=args.allow_smoke)
         rows = [json.loads(x) for x in src.read_text(encoding="utf-8").splitlines() if x.strip()]
-        print(f"저장된 원자료 재집계: {src.relative_to(_ROOT)} ({len(rows)}행)")
+        print(f"저장된 원자료 재집계: {_rel(src)} ({len(rows)}행)")
         summarize(rows, stratum=args.stratum)
         return
+
+    from reaction_backend.core.config import settings
 
     today = date.today()
     cases = load_stratum(args.stratum, args.limit)
@@ -252,7 +335,8 @@ async def main_async(args: argparse.Namespace) -> None:
     # 승인이면 분해1 + 검토1 = 2, 반려면 재분해 2회가 더 붙어 4.
     print(
         f"[{args.stratum}] 케이스 {len(cases)}건 × 반복 {args.repeats}회 "
-        f"→ 호출 {2 * n}~{4 * n} (승인 2 / 반려 4)"
+        f"→ 노드 호출 {2 * n}~{4 * n} (승인 2 / 반려 4)"
+        f" · 재시도 포함 실제 API 최대 {4 * n * settings.llm_max_retries}"
         f"{' (dry-run)' if args.dry_run else ''}"
     )
     if args.dry_run:
@@ -277,7 +361,12 @@ async def main_async(args: argparse.Namespace) -> None:
 
     d = run_dir(args.stratum)
     d.mkdir(parents=True, exist_ok=True)
-    out_path = d / f"{_dt.now().strftime('%Y%m%dT%H%M%S')}.jsonl"
+    stamp = _dt.now().strftime("%Y%m%dT%H%M%S")
+    out_path = d / f"{stamp}.jsonl"
+    seq = 1
+    while out_path.exists():  # 같은 초에 두 번 실행해도 덮어쓰지 않는다
+        out_path = d / f"{stamp}-{seq}.jsonl"
+        seq += 1
     out_path.write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8"
     )
@@ -289,8 +378,8 @@ async def main_async(args: argparse.Namespace) -> None:
         limit=args.limit,
         n_rows=len(rows),
     )
-    print(f"원자료: {out_path.relative_to(_ROOT)} ({len(rows)}행)")
-    print(f"manifest: {out_path.with_suffix('.meta.json').relative_to(_ROOT)}")
+    print(f"원자료: {_rel(out_path)} ({len(rows)}행)")
+    print(f"manifest: {_rel(out_path.with_suffix('.meta.json'))}")
     summarize(rows, stratum=args.stratum)
 
 
@@ -346,6 +435,15 @@ def paired_deltas(
     from scripts import l1_7_run as R
     from scripts.l1_7_schedule_eval import _NotApplicable
 
+    seen = [r["case_id"] for r in rows]
+    if len(seen) != len(set(seen)):
+        # docstring 이 "케이스가 표집 단위" 라고 말해도, 같은 케이스의 행이 둘 이상이면
+        # 부트스트랩이 **행**을 리샘플하게 돼 상관된 표본으로 구간이 거짓으로 좁아진다.
+        dup = sorted({c for c in seen if seen.count(c) > 1})
+        raise SystemExit(
+            f"케이스가 중복됐다: {dup[:6]} — 페어드 부트스트랩의 표집 단위는 **케이스**다. "
+            f"repeat {PRIMARY_REPEAT} 한 벌만 넘겨라(여러 실행을 이어붙이지 않는다)."
+        )
     deltas: list[int] = []
     dropped: list[str] = []
     for r in rows:
@@ -404,7 +502,14 @@ def base_date_of(rows: list[dict[str, Any]]) -> date:
     ⚠️ `date.today()` 로 재집계하면 실행일 D 에 만든 계획을 D+1 의 마감·주기창으로
     재구성하게 돼 **같은 원자료의 M33 이 날짜마다 달라진다.** 저장된 값만 쓴다.
     """
+    missing = [i for i, r in enumerate(rows) if not r.get("target_date")]
     dates = {r["target_date"] for r in rows if r.get("target_date")}
+    if missing and dates:
+        # 옛/새 원자료를 이어붙인 경우. 조용히 건너뛰면 **옛 행이 새 기준일로 채점된다.**
+        raise SystemExit(
+            f"{len(missing)}/{len(rows)}행에 `target_date` 가 없다 — 기준일을 저장하기 전 "
+            "형식의 행이 섞였다. 한 실행의 원자료만 집계해라."
+        )
     if not dates:
         raise SystemExit(
             "원자료에 `target_date` 가 없다 — 이 파일은 기준일을 저장하기 전 형식이다. "
@@ -522,6 +627,11 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true", help="LLM 없이 구성만")
     p.add_argument("--summarize-only", action="store_true", help="저장된 원자료만 재집계")
     p.add_argument("--run", default=None, help="재집계할 원자료 경로 (기본: 가장 최근 실행)")
+    p.add_argument(
+        "--allow-smoke",
+        action="store_true",
+        help="스모크(--limit) 원자료도 재집계 — **본 실험 표본이 아니다**(설계 §4.3)",
+    )
     asyncio.run(main_async(p.parse_args()))
 
 

@@ -243,3 +243,43 @@ def test_blockers_distinguish_m33_from_m34() -> None:
     assert "M33 은 v3 로도 나온다" in body
     assert "M34·M30·M31 은 v4 가 필요하다" in body
     assert "M34 를 안 낸 사실을 함께 적는다" in body
+
+
+# ── 7. 재집계 조건 · 검토기 폴백 (2026-09-04 추가) ──────────────────────────
+
+
+def test_reaggregation_guard_covers_more_than_the_base_date() -> None:
+    """**기준일 고정은 절반이다** — 재집계는 골든을 그 시점에 다시 읽는다."""
+    body = _body()
+    assert "기준일을 고정해도 **절반밖에 못 막는다.**" in body
+    assert "원자료를 한 글자도 안 바꿔도 골든이 바뀌면" in body
+    assert "`M33 = -0.0625` 에서 `+0.0000`" in body
+
+
+@pytest.mark.parametrize(
+    "clause",
+    [
+        "manifest 의 `golden_sha256` = 현재 골든 해시",
+        "모든 행에 `target_date` 가 있고 하나뿐이다",
+        "manifest 의 `limit` 이 비어 있다(= 스모크가 아니다)",
+        "케이스가 중복되지 않는다",
+    ],
+)
+def test_each_reaggregation_check_is_registered(clause: str) -> None:
+    """조항을 하나 빼는 것도 사후 조정이다."""
+    assert clause in _body(), f"재집계 확인 조항 '{clause}' 가 사라졌다"
+
+
+def test_case_is_the_sampling_unit_is_enforced_not_just_stated() -> None:
+    """문서가 "케이스 단위" 라고 적어도 **코드가 막지 않으면** 소용없다."""
+    body = _body()
+    assert "**코드가 막지 않으면**" in body
+    assert "`[-0.1875, 0]` → 32행 `[-0.1562, 0]`" in body
+
+
+def test_review_fallback_is_not_counted_as_approval() -> None:
+    """검토 LLM 타임아웃이 "승인" 으로 집계되면 **M33 이 0 쪽으로 편향**된다."""
+    body = _body()
+    assert "검토기 폴백은 **승인이 아니다**" in body
+    assert "Δ 가 0 이 아닌 **유일한** 집합" in body
+    assert "`review_fell_back`" in body
