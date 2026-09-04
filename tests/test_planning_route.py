@@ -884,6 +884,87 @@ def test_milestones_rule_fallback(client: TestClient, monkeypatch: Any) -> None:
     assert body["aiSource"] == "rule"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# llm_runs 가 **커밋되는가** — add 만 보면 못 잡는 계측 구멍 (#429)
+#
+# ⚠️ `llm_budget.record()` 는 `session.add` + `flush` 까지만 하고 **커밋은 호출자 책임**이다
+# (`safety/llm_budget.py:288`). Stage A 라우터는 "DB 쓰기가 없다" 고 보고 커밋하지 않아
+# 요청이 끝나며 행이 통째로 롤백됐다 — 라이브 실측(2026-08-29) 온보딩 4회에
+# `planning/plan_milestones` 행 **0개**. 78ca617 이 커밋을 넣어 고쳤지만 **그 고침을
+# 지키는 테스트가 없었다.**
+#
+# 기존 `test_generate_logs_each_llm_call_to_llm_runs` 도 `cap.added` 만 본다 —
+# **add 됐는지만 보고 commit 은 안 본다.** 그래서 이 버그 계열을 원리적으로 못 잡는다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_milestones_llm_run_is_committed_not_just_added(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """Stage A 가 LLM 을 불렀으면 `llm_runs` 행이 **커밋**돼야 한다.
+
+    커밋이 없으면 행은 `add` 는 되지만 요청 종료와 함께 롤백돼, 그 호출이 토큰 예산·
+    엔드포인트 호출 상한·원가 리포트 **어디에도 안 잡힌다.**
+    """
+    _force_provider_timeout(monkeypatch)
+    cap = _CapturingSession()
+    _use_session(client, cap)
+
+    res = client.post("/plans/milestones", json=_body(_outcome()))
+    assert res.status_code == 200
+
+    runs = [o for o in cap.added if isinstance(o, LlmRun)]
+    assert len(runs) == 1, "Stage A 는 LLM 1콜이다"
+    assert runs[0].prompt_id == "planning/plan_milestones"
+    assert runs[0].module == "planning"
+    # ⚠️ 이 줄이 이 테스트의 존재 이유다. 위 assert 들은 커밋이 없어도 전부 통과한다.
+    assert cap.committed, "llm_runs 행을 add 만 하고 커밋하지 않으면 요청 종료 시 롤백된다"
+
+
+def test_generate_llm_runs_are_committed(client: TestClient, monkeypatch: Any) -> None:
+    """`/plans/generate` 도 같다 — 분해·검토 2행이 **커밋**돼야 한다."""
+    _force_provider_timeout(monkeypatch)
+    cap = _CapturingSession()
+    _use_session(client, cap)
+
+    res = client.post("/plans/generate", json=_body(_outcome()))
+    assert res.status_code == 200
+    assert len([o for o in cap.added if isinstance(o, LlmRun)]) == 2
+    assert cap.committed, "분해·검토 호출이 llm_runs 에 남지 않는다"
+
+
+def test_milestones_saved_skeleton_records_no_llm_run(client: TestClient, monkeypatch: Any) -> None:
+    """저장된 뼈대를 돌려줄 때는 행이 **없는 것이 정상**이다 (ADR-0007 PR-2.5).
+
+    ⚠️ 이것이 `plan_milestones` 행 0개의 **두 번째 원인**이고, 버그가 아니다.
+    2주기 이후에는 LLM 을 아예 안 부르므로 이 endpoint 의 콜이 0 이 된다.
+    계측 구멍(위)과 이 정상 경로를 **구분하지 못하면 0 을 잘못 읽는다.**
+    """
+    from reaction_backend.orchestrator import first_plan_adapter
+    from reaction_backend.schemas.planning import MilestoneDraft
+
+    async def never(**kwargs: Any) -> RunResult[Any]:
+        raise AssertionError("저장된 뼈대가 있으면 LLM 을 부르면 안 된다")
+
+    async def fake_goal_id(*args: Any, **kwargs: Any) -> UUID:
+        return uuid4()
+
+    async def fake_saved(*args: Any, **kwargs: Any) -> list[MilestoneDraft]:
+        return [MilestoneDraft(title="기초 문법", summary="")]
+
+    monkeypatch.setattr(aiClient, "run", never)
+    monkeypatch.setattr(first_plan_adapter, "heaviest_goal_id", fake_goal_id)
+    monkeypatch.setattr(first_plan_adapter, "fetch_confirmed_milestones", fake_saved)
+    cap = _CapturingSession()
+    _use_session(client, cap)
+
+    res = client.post("/plans/milestones", json=_body(_outcome()))
+
+    assert res.status_code == 200
+    assert res.json()["aiSource"] == "saved"
+    assert [o for o in cap.added if isinstance(o, LlmRun)] == []
+
+
 def _link_only_outcome() -> InterviewOutcome:
     """참고 자료를 **링크로만** 준 목표 — materials_resolver 가 실제로 열어보는 조건."""
     outcome = _outcome()
