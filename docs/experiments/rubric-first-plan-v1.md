@@ -250,7 +250,13 @@ D1~D5 의 **한 줄 정의**와 기준 계획 JSON, 주입 연산 어휘, `bound
 > **룰 폴백으로 조용히 강등**된다(실측: 그 이름으로 두면 기존 테스트 3건이 함께 빨강).
 > 그래서 평가 후보는 **`planning/plan_quality_eval@v4`** 로 분리했고,
 > `tests/test_plan_quality_v4.py::test_production_review_still_resolves_to_v3` 가 그 분리를
-> 지킨다. 승격하려면 **먼저 프로덕션 호출을 `planning/plan_quality@v3` 로 핀해야 한다.**
+> 지킨다.
+>
+> ✅ **2026-09-06 — 핀 완료.** 이 문단이 요구한 "먼저 프로덕션 호출을
+> `planning/plan_quality@v3` 로 핀" 이 실제로 됐다(`orchestrator/first_plan.py`,
+> `tests/test_plan_quality_version_pin.py`). 이제 **파일 이름과 무관하게** 프로덕션이 안
+> 움직인다 — 이름 분리는 1차 방어로 남기고, 계약은 핀이 든다. 위 문단의 "만드는 것만으로
+> ④층이 v4 를 부르게 되고" 는 **핀 이전의 서술**이다.
 
 현행 `PlanReview` 는 `{approved: bool, feedback: list[str]}` 뿐이라 **PR curve 를 그릴 수
 없고 운영점을 고를 수 없다**(계획서 L1-7B "운영점 보고"). v4 는 유형별 판정을 요구한다.
