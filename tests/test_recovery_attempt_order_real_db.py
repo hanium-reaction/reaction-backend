@@ -30,8 +30,13 @@ from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.user import User
 from reaction_backend.repositories.recovery_repo import RecoveryRepo
 from reaction_backend.schemas.common import now_kst
+from tests.conftest import DB_AVAILABLE
 
-pytestmark = pytest.mark.anyio
+# ⚠️ `pytest.mark.anyio` 를 쓰면 안 된다 — pyproject 의 `asyncio_mode = "auto"` 가
+# 이미 async 테스트를 몰고, anyio 마커를 얹으면 테스트 본문만 anyio 의 새 루프에서
+# 돌아 `real_db_session` 이 만든 asyncpg 커넥션과 루프가 갈린다
+# ("attached to a different loop"). 다른 real_db 파일들과 같은 관행을 쓴다.
+pytestmark = pytest.mark.skipif(not DB_AVAILABLE, reason="DATABASE_URL not set")
 
 
 async def _seed(session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID]:
