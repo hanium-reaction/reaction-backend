@@ -998,7 +998,15 @@ async def review_plan(state: FirstPlanState, config: RunnableConfig) -> FirstPla
     result = await aiClient.run(
         module="planning",
         schema=PlanReview,
-        prompt_id="planning/plan_quality",
+        # ⚠️ **버전을 명시한다 — `latest()` 에 맡기지 않는다.**
+        # 버전을 생략하면 registry 가 최신 활성 버전으로 해석한다(`prompts/registry.py`
+        # 모듈 docstring). 그러면 누군가 `plan_quality.v4.md` 를 **파일로 만들기만 해도**
+        # 프로덕션 ④층이 그 순간 조용히 갈아탄다 — 평가용으로 쓴 프롬프트가 배포 없이
+        # 사용자에게 나가는 것이다. 오프라인 v4 후보를 `plan_quality_eval.v4.md` 라는
+        # **다른 이름**으로 둔 것도 같은 위험을 피하려던 것이고, 이 핀은 그 우회를
+        # 이름 규칙이 아니라 구조로 만든다. 승격은 이 줄을 고치는 **의도된 변경**이어야
+        # 한다. `tests/test_plan_quality_version_pin.py` 가 이 계약을 지킨다.
+        prompt_id="planning/plan_quality@v3",
         fallback=lambda: _rule_review(state),
         timeout=settings.llm_planning_timeout_seconds,
         variables=_review_variables(state),

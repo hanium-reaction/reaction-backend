@@ -2318,7 +2318,12 @@ async def test_planning_calls_enable_thinking_with_longer_timeout(
     state = await first_plan.decompose_goal(state, cfg)
     await first_plan.review_plan(state, cfg)
 
-    for pid in ("planning/goal_decompose", "planning/plan_quality"):
+    # ⚠️ 검토기는 **버전이 핀된 id** 로 불린다(`tests/test_plan_quality_version_pin.py`).
+    # 여기서 문자열을 또 박으면 승격 때 두 곳을 고쳐야 하므로, 실제로 불린 id 중
+    # 이름이 맞는 것을 골라 쓴다 — 이 테스트가 검사하려는 건 버전이 아니라
+    # thinking_budget·timeout 이다.
+    review_pid = next(p for p in calls if p.startswith("planning/plan_quality"))
+    for pid in ("planning/goal_decompose", review_pid):
         assert calls[pid]["thinking_budget"] == settings.llm_planning_thinking_budget
         assert calls[pid]["timeout"] == settings.llm_planning_timeout_seconds
 

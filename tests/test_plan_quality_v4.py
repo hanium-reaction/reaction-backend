@@ -9,8 +9,11 @@
 3. **프로덕션 격리** — v4 파일이 존재해도 ④층은 여전히 v3 를 부른다.
    ⚠️ 레지스트리의 `latest()` 는 **최고 버전을 자동 선택**한다. 그래서 프롬프트를
    `plan_quality.v4.md` 로 두면 파일이 있다는 것만으로 `planning/plan_quality` 가 v4 로
-   해석돼 프로덕션이 조용히 바뀐다. 이름을 `plan_quality_eval` 로 분리한 이유이고,
+   해석된다. 평가 후보 이름을 `plan_quality_eval` 로 분리한 것이 1차 방어이고,
    그 분리가 유지되는지를 여기서 지킨다.
+   ⚠️ **2026-09-06 갱신** — 이름 분리는 규율이지 구조가 아니었다(다른 사람이 다른
+   이름을 고르면 끝난다). 이제 **호출부가 `@v3` 로 핀돼 있어** 파일 이름과 무관하게
+   프로덕션이 안 움직인다. 그 계약은 `tests/test_plan_quality_version_pin.py` 가 든다.
 4. **없는 `node_id` 를 조용히 받지 않는다** — 지어낸 노드는 위치 지목 실패로 세고,
    분모에서 빼주지 않는다.
 """
@@ -152,13 +155,25 @@ def test_v4_prompt_carries_all_five_defect_anchors() -> None:
 
 
 def test_production_review_still_resolves_to_v3() -> None:
-    """v4 파일이 있어도 ④층이 부르는 `planning/plan_quality` 는 여전히 v3 다.
+    """④층이 **실제로 부르는** 프롬프트가 v3 로 해석된다.
 
-    ⚠️ 이 테스트가 빨강이면 **프로덕션 검토기가 조용히 바뀐 것**이다. 레지스트리는
-    버전을 안 붙이면 최고 버전을 고르므로, v4 를 `plan_quality.v4.md` 로 두는 순간
-    `first_plan.review_plan` 이 v4 를 부르게 된다.
+    ⚠️ **`registry.get("...@v3").version == "3"` 로 쓰면 안 된다** — 그건 v3 파일이
+    사라지지 않는 한 절대 실패하지 않는 항진명제이고, 호출부를 `@v4` 로 바꿔도 초록이다.
+    그래서 **호출부 소스에서 실제 `prompt_id` 를 뽑아** 해석한다.
+
+    ⚠️ **예전 서술 정정** — 초판은 "레지스트리가 버전을 안 붙이면 최고 버전을 고르므로
+    `plan_quality.v4.md` 를 두는 순간 프로덕션이 v4 를 부른다" 고 적었다. 그 위험은
+    실재했고, 이제 호출부가 `@v3` 로 핀돼 있다(`tests/test_plan_quality_version_pin.py`).
     """
-    assert registry.get("planning/plan_quality").version == "3"
+    src = (_ROOT / "src" / "reaction_backend" / "orchestrator" / "first_plan.py").read_text(
+        encoding="utf-8"
+    )
+    used = re.findall(r'prompt_id="(planning/plan_quality[^"]*)"', src)
+    assert len(used) == 1, f"④층 호출이 하나가 아니다: {used}"
+
+    assert registry.get(used[0]).version == "3", (
+        f"프로덕션 ④층이 부르는 {used[0]!r} 가 v3 가 아니다 — 검토기가 바뀌었다."
+    )
 
 
 def test_v4_prompt_is_not_referenced_from_production_code() -> None:
@@ -176,10 +191,16 @@ def test_v4_prompt_is_not_referenced_from_production_code() -> None:
 
 
 def test_production_orchestrator_still_calls_the_v3_prompt_id() -> None:
+    """⚠️ 초판은 **버전 없는** `"planning/plan_quality"` 가 있는지를 검사했다 — 즉
+    안전하지 않은 형태를 고정하고 있었다. 지금은 핀된 형태를 요구한다.
+
+    계약 자체는 `tests/test_plan_quality_version_pin.py` 가 들고 있고, 여기서는
+    v4 문서 맥락에서 같은 사실을 한 번 더 확인한다.
+    """
     src = (_ROOT / "src" / "reaction_backend" / "orchestrator" / "first_plan.py").read_text(
         encoding="utf-8"
     )
-    assert 'prompt_id="planning/plan_quality"' in src
+    assert 'prompt_id="planning/plan_quality@v3"' in src
 
 
 # ── 4. 없는 node_id 를 조용히 받지 않는다 ──────────────────────────────────

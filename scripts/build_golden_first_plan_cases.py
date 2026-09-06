@@ -1664,7 +1664,9 @@ def dump_base_plans() -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="첫 계획 골든셋 66건 생성 (쓰기 전용, DB 무관)")
+    parser = argparse.ArgumentParser(
+        description="첫 계획 골든셋 생성 (현재 84건) (쓰기 전용, DB 무관)"
+    )
     parser.add_argument("--stdout", action="store_true", help="파일 대신 표준출력으로")
     parser.add_argument(
         "--dump-base-plans",

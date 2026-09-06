@@ -243,7 +243,7 @@ held-out 완화책은 그대로 유효하다 — 결함 인스턴스는 루브�
 | 1 | **충돌 전달 통로** | v4 출력에는 D1~D5 코드가 붙은 finding 밖에 없다. 룰 스케줄러의 `conflict_report` 를 사용자에게 전할 자리가 없다(루브릭 §1.2 는 이것을 **전달 항목**으로 규정) |
 | 2 | **재분해 배선** | `feedback: list[str]` 를 먹는 `_replan_feedback` 경로가 `findings` 를 못 받는다. M30·M31 도 그래서 못 냈다 |
 | 3 | **M33 부호 결정** | ④층이 순이득인지 아직 모른다. 비교할 M26 통과 조건이 사전 고정돼 있지 않다 |
-| 4 | **프롬프트 이름 정리** | 지금은 `plan_quality_eval.v4` 다. `plan_quality.v4` 로 옮기려면 **먼저 프로덕션 호출을 `planning/plan_quality@v3` 로 핀해야 한다** — §9 |
+| ~~4~~ | ~~**프롬프트 이름 정리**~~ | ✅ **선행 조건 해소(2026-09-06).** 핀이 됐으므로 `plan_quality.v4` 로 옮겨도 프로덕션은 안 움직인다 — 대신 `test_pin_is_not_silently_the_same_as_latest` 가 빨개져 **승격 결정을 하라고 알린다**. 이름 이동 자체는 아직 안 했다 — §9 |
 | 5 | **룰 폴백 정의** | v4 실패 시 무엇으로 떨어질지 안 정했다. 하네스는 `findings=[]`(승인)로 두는데, 프로덕션에서 그건 "검토 없이 통과" 다 |
 | 6 | **`estimated_minutes` 제거의 부작용** | v4 는 분량을 안 본다. 프로덕션에서 분량 관련 사용자 문의가 생기면 ④층은 답할 근거가 없다 — ③층이 답해야 한다 |
 
@@ -287,8 +287,11 @@ held-out 완화책은 그대로 유효하다 — 결함 인스턴스는 루브�
 버전을 안 붙이고 부른다:
 
 ```python
-# orchestrator/first_plan.py
+# orchestrator/first_plan.py — ⚠️ 아래는 2026-09-06 **이전**의 코드다
 prompt_id="planning/plan_quality",   # ← 버전 없음 → latest
+
+# 현재
+prompt_id="planning/plan_quality@v3",   # ← 핀
 ```
 
 **따라서 `plan_quality.v4.md` 라는 파일을 만드는 것만으로 ④층이 v4 를 부르게 된다.**
@@ -301,9 +304,16 @@ latest 가 되어 프로덕션이 조용히 룰 폴백으로 강등된다."*
 **그래서 이름을 `plan_quality_eval` 로 분리했다** — 프로덕션 코드를 한 줄도 바꾸지 않고
 격리하는 유일한 방법이었다. `test_production_review_still_resolves_to_v3` 가 이 분리를 지킨다.
 
-> **권고 (이 작업 범위 밖):** 프로덕션 호출을 `planning/plan_quality@v3` 로 **핀**하는 것이
+> ~~**권고 (이 작업 범위 밖):** 프로덕션 호출을 `planning/plan_quality@v3` 로 **핀**하는 것이
 > 맞다. 지금은 프롬프트 파일을 추가하는 누구나 프로덕션 검토기를 바꿀 수 있다.
-> 핀은 현재 동작을 그대로 유지하는 1줄 변경이다.
+> 핀은 현재 동작을 그대로 유지하는 1줄 변경이다.~~
+>
+> ✅ **2026-09-06 이행됨.** 호출부가 `planning/plan_quality@v3` 로 핀됐고
+> (`orchestrator/first_plan.py`), `tests/test_plan_quality_version_pin.py` 가 계약을 든다.
+> 변이 검증: 핀을 지우면 빨강, `plan_quality.v4.md` 를 만들면 **프로덕션은 안 움직이고**
+> "승격 결정을 하라" 는 신호로 빨강. 따라서 이 절 본문의 **"지금은 누구나 바꿀 수 있다" 와
+> "파일을 만드는 것만으로 ④층이 v4 를 부른다" 는 이제 거짓**이다 — 위험이 실재했던 기록으로
+> 남긴다.
 
 ---
 
