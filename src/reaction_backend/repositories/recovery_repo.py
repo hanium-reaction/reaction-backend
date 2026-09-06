@@ -249,13 +249,41 @@ class RecoveryRepo:
         return list(result.scalars().all())
 
     async def list_attempts(self, user_id: UUID, execution_id: UUID) -> list[RecoveryAttempt]:
+        """이 실행의 회복 카드 — **순서가 고정돼야 한다.**
+
+        ⚠️ 예전엔 `ORDER BY created_at` 하나였다. 한 세트는 **같은 트랜잭션**에서 만들어져
+        `created_at` 이 마이크로초까지 같으므로(실측: 두 건 모두 `21:25:58.352381`) 동점이
+        되고, 그러면 Postgres 는 순서를 보장하지 않는다. 같은 요청이 매번 다른 순서로 왔다.
+
+        그게 화면에서 뜻하는 것: FE 는 **목록의 첫 카드**에 "추천" 배지를 붙인다
+        (`RecoveryScreen.tsx` — `recommended={i === 0}`). 즉 **새 정보 없이 새로고침만으로
+        추천이 뒤집혔다.** 추천은 제품이 내리는 판단이라, 흔들리면 그 판단을 못 믿게 된다.
+
+        정렬 기준은 룰이 이미 쓰는 것과 같게 뒀다:
+
+        1. `created_at` — 세트가 여러 번 생성됐으면 옛 세트가 먼저.
+        2. **`trigger_tag` 가 있는 것 먼저** — 실패 태그에 매칭된 전략이 `select_strategies`
+           의 1순위다(매칭 없이 패딩된 카드는 `trigger_tag` 가 비어 있다). "왜 실패했는지에
+           맞는 카드"가 추천이 되는 게 옳다.
+        3. `display_priority` — 카탈로그가 정한 순서. `select_strategies` 의 동점 처리와 같다.
+        4. `id` — 위가 다 같아도 결과가 흔들리지 않게 하는 최종 고정핀.
+        """
         stmt = (
             select(RecoveryAttempt)
+            .outerjoin(
+                RecoveryStrategyCatalog,
+                RecoveryStrategyCatalog.strategy_type == RecoveryAttempt.recovery_strategy_type,
+            )
             .where(
                 RecoveryAttempt.execution_id == execution_id,
                 RecoveryAttempt.user_id == user_id,
             )
-            .order_by(RecoveryAttempt.created_at)
+            .order_by(
+                RecoveryAttempt.created_at,
+                RecoveryAttempt.trigger_tag.is_(None),
+                RecoveryStrategyCatalog.display_priority,
+                RecoveryAttempt.id,
+            )
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
