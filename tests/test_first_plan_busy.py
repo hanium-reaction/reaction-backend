@@ -191,6 +191,26 @@ async def test_schedule_blocks_avoids_db_busy_all_three_sources() -> None:
             assert not _overlaps(bs, be, _at(TUE, 13), _at(TUE, 15)), f"기존 블록 겹침: {bs}"
 
 
+async def test_schedule_blocks_surfaces_the_density_damped_notice() -> None:
+    """분량을 낮췄으면 그 사실이 **사용자에게 도달한다**.
+
+    낮추는 판정(`validate_inputs`)과 고지 문구(`density_damped_notice`)가 각각 테스트돼
+    있어도, 둘을 잇는 이 줄이 빠지면 사용자는 자기가 고른 분량보다 적은 계획을 **이유
+    없이** 받는다 — 조용한 축소는 이 레포가 #190·#225 에서 이미 한 번 고친 문제다.
+    """
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+
+    damped = {**_state(), "density": "light", "density_damped_from": "intense"}
+    new_state = await first_plan.schedule_blocks(damped, config)
+    notice = next((w for w in new_state["schedule_warnings"] if "가볍게" in w), None)
+    assert notice is not None, "분량을 낮췄는데 아무 말도 안 했다"
+
+    # 안 낮춘 계획은 이 말을 안 한다 — 잔소리를 늘리지 않는다.
+    quiet = await first_plan.schedule_blocks(_state(), config)
+    assert not [w for w in quiet["schedule_warnings"] if "가볍게" in w]
+
+
 async def test_schedule_blocks_no_db_busy_uses_full_window() -> None:
     """DB busy 가 비면(빈 세션) outcome 활동창만으로 배치 — 회피 로직이 no-op."""
     session = _RoutingSession(blocks=[], fixed=[], policies=[])

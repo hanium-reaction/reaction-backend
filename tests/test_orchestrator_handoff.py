@@ -1109,25 +1109,34 @@ class _PlanningHistorySession:
         goal_failures: Sequence[Any] = (),
         user_failures: Sequence[Any] = (),
         recoveries: Sequence[Any] = (),
+        goal_outcomes: Sequence[str] = (),
     ) -> None:
         self.goals = goals
         self.goal_failures = goal_failures
         self.user_failures = user_failures
         self.recoveries = recoveries
+        self.goal_outcomes = goal_outcomes
 
     async def execute(self, stmt: Any, params: Any = None) -> Any:
+        from sqlalchemy.sql.elements import TextClause
+
         from tests.conftest import _FakeResult
 
         sql = str(stmt)
+        # 실패 집계 둘만 raw SQL(text) — 목표 단위인지 사용자 전체인지는 바인딩으로 가른다.
+        if isinstance(stmt, TextClause):
+            if params and "goal_id" in params:
+                return _FakeResult(list(self.goal_failures))
+            return _FakeResult(list(self.user_failures))
         if "goal_nodes" in sql:
             return _FakeResult([])  # 만다라 소유 목표 없음
         if "recovery_attempts" in sql:
             return _FakeResult(list(self.recoveries))
         if "FROM goals" in sql:
             return _FakeResult(list(self.goals))
-        if params and "goal_id" in params:
-            return _FakeResult(list(self.goal_failures))
-        return _FakeResult(list(self.user_failures))
+        if "execution_events" in sql:
+            return _FakeResult(list(self.goal_outcomes))  # 이 목표의 실행 결과(최신 먼저)
+        return _FakeResult([])
 
 
 def _tag_row(tag_code: str, label_ko: str, n: int) -> Any:
@@ -1214,6 +1223,124 @@ async def test_validating_falls_back_to_user_wide_when_this_goal_is_too_thin() -
     assert (
         state["planning_context"]["prompt_vars"]["failure_summary"] == "전체 목표: 시간 부족(9회)"
     )
+
+
+def test_dampened_density_steps_down_at_the_escalation_thresholds() -> None:
+    """분량 프리셋을 낮추는 문턱은 **에스컬레이션 상수 그대로** 쓴다.
+
+    회복이 "동일 goal 4회 연속 실패" 를 L3(재협상)로 보는데 계획이 다른 숫자로 "많이 줄임"
+    을 정의하면, 같은 사용자에게 두 기능이 서로 다른 판정을 내린다. 리터럴 대신 상수로
+    검증해 문턱이 한쪽만 움직이면 여기가 빨개지게 둔다.
+    """
+    from reaction_backend.orchestrator.escalation import (
+        L1_CONSECUTIVE_FAILURE_THRESHOLD,
+        L3_GOAL_FAILURE_THRESHOLD,
+    )
+
+    damp = first_plan_adapter.dampened_density
+    below = L1_CONSECUTIVE_FAILURE_THRESHOLD - 1
+
+    # 문턱 아래 — 손대지 않는다. 실패가 아직 성향이 아니다.
+    assert damp("intense", consecutive_goal_failures=0) == "intense"
+    assert damp("standard", consecutive_goal_failures=below) == "standard"
+
+    # 한 단계
+    assert damp("intense", consecutive_goal_failures=L1_CONSECUTIVE_FAILURE_THRESHOLD) == "standard"
+    assert damp("standard", consecutive_goal_failures=L1_CONSECUTIVE_FAILURE_THRESHOLD) == "light"
+
+    # 두 단계 — L3 는 "목표 자체를 조정하자" 는 신호다.
+    assert damp("intense", consecutive_goal_failures=L3_GOAL_FAILURE_THRESHOLD) == "light"
+    assert damp("standard", consecutive_goal_failures=L3_GOAL_FAILURE_THRESHOLD) == "light"
+
+    # 사다리 바닥은 더 안 내려간다. 계획을 0 으로 만들지 않는다.
+    assert damp("light", consecutive_goal_failures=L3_GOAL_FAILURE_THRESHOLD * 3) == "light"
+
+    # 모르는 값은 사다리 어디에 놓을지 알 수 없어 그대로 둔다.
+    assert damp("turbo", consecutive_goal_failures=L3_GOAL_FAILURE_THRESHOLD) == "turbo"
+
+
+def test_density_damped_notice_says_what_changed_and_how_to_undo() -> None:
+    """조용히 덜 주지 않는다 — 무엇이 바뀌었는지와 되돌리는 법을 같이 준다.
+
+    톤(DevBaseline §1.4 "not on your case"): 실패 횟수를 말하지 않고 탓하지 않는다.
+    """
+    notice = first_plan_adapter.density_damped_notice(damped_from="intense", density="light")
+    assert notice is not None
+    assert "집중" in notice and "가볍게" in notice  # 무엇에서 무엇으로
+    assert "다시 만들" in notice  # 되돌리는 법
+    for blame in ("또", "매번", "자꾸", "실패"):
+        assert blame not in notice
+
+    # 안 낮췄으면 할 말이 없다 — 빈 문자열이 아니라 None 이라야 호출부가 안 싣는다.
+    assert first_plan_adapter.density_damped_notice(damped_from=None, density="standard") is None
+    assert (
+        first_plan_adapter.density_damped_notice(damped_from="standard", density="standard") is None
+    )
+
+
+async def test_validating_lowers_plan_volume_when_this_goal_keeps_failing() -> None:
+    """이 목표가 연속으로 무너지고 있으면 분량 프리셋을 낮춘 채로 분해에 들어간다.
+
+    지금까지는 L3(재협상) 신호를 받고도 다음 계획이 **같은 분량**으로 다시 만들어졌다.
+    프리셋을 낮추면 프롬프트의 분량 숫자 넷이 함께 내려간다 — 여기서는 주당 세션 수로 확인한다.
+    """
+    from types import SimpleNamespace
+
+    outcome = _outcome_with("iv_density_damp")
+    heaviest = next(g for g in outcome.core_goals if g.is_heaviest)
+    session = _PlanningHistorySession(
+        goals=[SimpleNamespace(id=uuid4(), title=heaviest.title)],
+        goal_outcomes=["failed", "failed", "failed", "failed"],
+    )
+    cfg: Any = {"configurable": {"session": session}}
+    state = first_plan.initial_state(
+        user_id=uuid4(), outcome=outcome, target_date="2026-06-01", density="intense"
+    )
+    before = first_plan_adapter.context_from_outcome(outcome, density="intense")["prompt_vars"]
+    state = await first_plan.validate_inputs(state, cfg)
+
+    assert state["density"] == "light"
+    assert state["density_damped_from"] == "intense"
+    after = state["planning_context"]["prompt_vars"]
+    assert int(after["sessions_per_week"]) < int(before["sessions_per_week"])
+
+
+async def test_validating_leaves_density_alone_without_a_failure_streak() -> None:
+    """완주하고 있는 목표의 분량은 건드리지 않는다 — `done` 하나가 연속을 끊는다.
+
+    이 방향의 회귀가 더 위험하다. 잘 하고 있는 사용자의 계획을 조용히 반토막 내는 쪽이라,
+    '낮추는' 테스트만 있고 '안 낮추는' 테스트가 없으면 규칙이 새어도 아무도 모른다.
+    """
+    from types import SimpleNamespace
+
+    outcome = _outcome_with("iv_density_no_damp")
+    heaviest = next(g for g in outcome.core_goals if g.is_heaviest)
+    session = _PlanningHistorySession(
+        goals=[SimpleNamespace(id=uuid4(), title=heaviest.title)],
+        goal_outcomes=["done", "failed", "failed", "failed", "failed"],
+    )
+    cfg: Any = {"configurable": {"session": session}}
+    state = first_plan.initial_state(
+        user_id=uuid4(), outcome=outcome, target_date="2026-06-01", density="standard"
+    )
+    state = await first_plan.validate_inputs(state, cfg)
+
+    assert state["density"] == "standard"
+    assert state["density_damped_from"] is None
+
+
+async def test_validating_cannot_damp_without_a_persisted_goal() -> None:
+    """저장된 목표가 없으면(첫 계획) 이력도 없어 낮출 근거가 없다 — 조용히 원래 분량."""
+    outcome = _outcome_with("iv_density_no_goal")
+    session = _PlanningHistorySession(goal_outcomes=["failed", "failed", "failed", "failed"])
+    cfg: Any = {"configurable": {"session": session}}
+    state = first_plan.initial_state(
+        user_id=uuid4(), outcome=outcome, target_date="2026-06-01", density="standard"
+    )
+    state = await first_plan.validate_inputs(state, cfg)
+
+    assert state["density"] == "standard"
+    assert state["density_damped_from"] is None
 
 
 async def test_validating_loads_recovery_outcomes_into_prompt() -> None:
