@@ -379,9 +379,10 @@ async def generate_milestones(
         saved = await first_plan_adapter.fetch_confirmed_milestones(session, goal_id=goal_id)
         if saved:
             return MilestoneListResponse(milestones=saved, ai_source="saved")
+    # `body.density` 를 안 넘긴다 — 마일스톤 크기는 `total_capacity`(인터뷰 답)가 정하고
+    # density 파생 변수는 이 프롬프트에 등장하지 않는다(`generate_milestones` docstring).
     milestones, fell_back = await first_plan_milestones.generate_milestones(
         outcome=outcome,
-        density=body.density,
         session=session,
         tone_mode=user.tone_mode,
         user_id=user.id,
