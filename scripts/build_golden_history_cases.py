@@ -223,6 +223,20 @@ GOALS: tuple[Goal, ...] = (
         weekly_hours=3,
         deadline_offset_days=28,
     ),
+    # ⚠️ **유일한 유한 목표.** 나머지 여섯은 분량을 얼마든지 늘릴 수 있는 목표라
+    # `goal_volume_below_horizon`("이 목표는 유한해서 더 못 채운다")이 뜰 이유가 없다 —
+    # 그 상태에서 flag 0건을 보고 "죽은 조항" 이라고 읽으면 **옳게 안 뜬 것**을 고장으로
+    # 오독한다. 항목 수가 정해진 과제를 하나 넣어 그 조항이 살아 있는지 가른다.
+    Goal(
+        key="docs5",
+        title="교환학생 지원 서류 5종 제출하기",
+        category="schedule",
+        current_level="아직 하나도 안 썼고 목록만 받았어요.",
+        success_image="다섯 가지를 다 제출하면 끝이에요.",
+        session_length_minutes=45,
+        weekly_hours=4,
+        deadline_offset_days=42,
+    ),
 )
 
 
