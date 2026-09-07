@@ -138,6 +138,7 @@ async def generate_structured[T: BaseModel](
     prompt_text: str,
     timeout: float,
     thinking_budget: int | None = None,
+    temperature: float | None = None,
     model: str | None = None,
 ) -> tuple[T, ProviderResponse]:
     """Gemini 한 번 호출 → schema 인스턴스로 검증.
@@ -155,6 +156,13 @@ async def generate_structured[T: BaseModel](
         "response_mime_type": "application/json",
         "response_schema": schema,
     }
+    # 온도를 **명시하지 않으면 넘기지 않는다** — 지금까지의 동작(제공자 기본값)을 그대로
+    # 둔다. 호출별로만 낮출 수 있게 열어 둔 이유는 L1-8 2차 실행에서 같은 입력의 분해가
+    # 간헐적으로 요구 분량의 절반만 내는 일이 54케이스 중 13건(24%)에서 관측됐기 때문이다
+    # (출력 토큰 중앙값 1710 대 5498, 폴백 0 — 잘린 게 아니라 적게 생성한 것).
+    # ⚠️ 그 원인이 온도라는 건 **아직 가설**이다. 기본값을 바꾸지 않는 이유가 그것이다.
+    if temperature is not None:
+        config["temperature"] = temperature
     tcfg = _thinking_config(model_name, thinking_budget)
     if tcfg is not None:
         config["thinking_config"] = tcfg

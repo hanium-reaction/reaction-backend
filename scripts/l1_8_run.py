@@ -76,12 +76,15 @@ def results_path(stamp: str | None = None) -> Path:
     두 실행의 결론이 갈렸다(재현 실패). 원문을 남기는 이유가 재감사인데 덮어쓰면 그 이유가
     사라진다. `--summarize-only` 는 가장 최근 파일을 고른다.
     """
-    return RESULTS_DIR / f"l1_8_results_{stamp}.jsonl" if stamp else RESULTS_DIR / "l1_8_results.jsonl"
+    return (
+        RESULTS_DIR / f"l1_8_results_{stamp}.jsonl" if stamp else RESULTS_DIR / "l1_8_results.jsonl"
+    )
 
 
 def latest_results_path() -> Path | None:
     files = sorted(RESULTS_DIR.glob(RESULTS_GLOB))
     return files[-1] if files else None
+
 
 CONTROL_BLOCK = "no_history"
 
@@ -337,7 +340,12 @@ def _rate_num(hits: int, total: int) -> float | None:
 
 
 async def run_case(
-    case: dict[str, Any], repeat: int, *, today: date, dry_run: bool
+    case: dict[str, Any],
+    repeat: int,
+    *,
+    today: date,
+    dry_run: bool,
+    temperature: float | None = None,
 ) -> dict[str, Any]:
     from reaction_backend.config import get_settings
     from reaction_backend.llm import aiClient
@@ -354,6 +362,7 @@ async def run_case(
         "recovery_summary": prompt_vars["recovery_summary"],
         "total_minutes_asked": prompt_vars["total_minutes"],
         "case": case,
+        "temperature": temperature,
     }
     if dry_run:
         return row
@@ -368,6 +377,7 @@ async def run_case(
         ),
         timeout=settings.llm_planning_timeout_seconds,
         thinking_budget=settings.llm_planning_thinking_budget,
+        temperature=temperature,
         # 프로덕션(`decompose_goal`)이 넘기는 세 변수를 같은 함수로 만든다 — 손으로 쓰면
         # 렌더가 조용히 실패하거나 프로덕션이 안 내는 프롬프트를 재게 된다(L1-7 1차 전례).
         variables={
@@ -428,7 +438,9 @@ async def main_async(args: argparse.Namespace) -> None:
     rows: list[dict[str, Any]] = []
     for repeat in range(args.repeats):
         for case in cases:
-            row = await run_case(case, repeat, today=today, dry_run=args.dry_run)
+            row = await run_case(
+                case, repeat, today=today, dry_run=args.dry_run, temperature=args.temperature
+            )
             rows.append(row)
             mark = "dry" if args.dry_run else ("FB" if row.get("fell_back") else "ok")
             print(f"  [{mark}] {row['case_id']} r{repeat} density={row['density']}")
@@ -453,6 +465,12 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=1, help="케이스당 반복 횟수")
     parser.add_argument("--dry-run", action="store_true", help="LLM 호출 없이 구성만 확인")
     parser.add_argument("--blocks", nargs="*", default=None, help="블록 필터")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="샘플링 온도. 미지정이면 제공자 기본값(=프로덕션과 같은 조건)",
+    )
     parser.add_argument(
         "--summarize-only", action="store_true", help="저장된 원자료만 다시 채점 (LLM 0회)"
     )

@@ -45,6 +45,8 @@ def _patch_render(monkeypatch: pytest.MonkeyPatch, body: str = "원문 프롬프
         prompt_text: str,
         timeout: float,
         thinking_budget: int | None = None,
+        # 프로덕션 시그니처를 따라간다 — 인자가 늘면 이 fake 가 먼저 깨져서 알려준다.
+        temperature: float | None = None,
         model: str | None = None,
     ) -> Any:
         captured["prompt"] = prompt_text
