@@ -23,7 +23,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.execution_failure_tag import ExecutionFailureTag
-from reaction_backend.db.models.recovery_attempt import ADOPTED_DECISION_VALUES
+from reaction_backend.db.models.goal import Goal
+from reaction_backend.db.models.recovery_attempt import (
+    ADOPTED_DECISION_VALUES,
+    RecoveryAttempt,
+)
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.user import User
 from reaction_backend.schemas.common import KST
@@ -130,7 +134,13 @@ async def _seed_user_real(session: AsyncSession) -> UUID:
 
 
 async def _seed_tagged_failure_real(
-    session: AsyncSession, *, user_id: UUID, tag_code: str, day: date, hour: int
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    tag_code: str,
+    day: date,
+    hour: int,
+    goal_id: UUID | None = None,
 ) -> None:
     plan_start_at = datetime(day.year, day.month, day.day, hour, 0, tzinfo=KST)
     action_item_id = uuid4()
@@ -140,6 +150,7 @@ async def _seed_tagged_failure_real(
             user_id=user_id,
             title="top_failure_contexts 테스트 카드",
             target_date=plan_start_at.date(),
+            goal_id=goal_id,
         )
     )
     await session.flush()
@@ -240,3 +251,221 @@ def test_span_minutes_derives_planned_length_from_the_block_times() -> None:
     assert _span_minutes(None, start) is None
     assert _span_minutes(start, start) is None
     assert _span_minutes(start, start - timedelta(minutes=10)) is None
+
+
+# ═══════ 계획 분해가 쓰는 이력 — 목표 단위 실패 집계 · 전략별 회복 결과 (실 Postgres) ═══════
+#
+# 사용자 전체 집계(위)와 **다른 값을 내는지**가 핵심이라 실 DB 로 본다. fake 로는 "목표로
+# 좁혔다" 는 주장 자체를 fake 가 흉내내게 되므로 원리적으로 답이 안 나온다.
+
+
+async def _seed_goal_real(session: AsyncSession, *, user_id: UUID, title: str) -> UUID:
+    goal_id = uuid4()
+    session.add(
+        Goal(
+            id=goal_id,
+            user_id=user_id,
+            title=title,
+            category="study",
+            goal_tier="focus",
+        )
+    )
+    await session.flush()
+    return goal_id
+
+
+@pytest.mark.skipif(not DB_AVAILABLE, reason="DATABASE_URL not set")
+async def test_get_goal_failure_contexts_counts_only_this_goals_failures(
+    real_db_session: AsyncSession,
+) -> None:
+    """다른 목표에서 쌓인 태그가 이 목표의 분해 근거로 새어 들어오지 않는다.
+
+    이게 목표 단위 집계를 만든 이유 전부다 — 사용자 전체 집계(같은 유저, 같은 창)는 두
+    목표의 태그를 **함께** 세는데, 이 쿼리는 `action_items.goal_id` 로 갈라야 한다.
+    """
+    from reaction_backend.repositories.review_repo import ReviewRepo
+
+    user_id = await _seed_user_real(real_db_session)
+    mine = await _seed_goal_real(real_db_session, user_id=user_id, title="이 목표")
+    other = await _seed_goal_real(real_db_session, user_id=user_id, title="다른 목표")
+
+    for _ in range(2):
+        await _seed_tagged_failure_real(
+            real_db_session,
+            user_id=user_id,
+            tag_code="PLAN_TOO_BIG",
+            day=date(2026, 8, 1),
+            hour=9,
+            goal_id=mine,
+        )
+    for _ in range(5):
+        await _seed_tagged_failure_real(
+            real_db_session,
+            user_id=user_id,
+            tag_code="FATIGUE",
+            day=date(2026, 8, 1),
+            hour=10,
+            goal_id=other,
+        )
+
+    repo = ReviewRepo(real_db_session)
+    scoped = await repo.get_goal_failure_contexts(user_id, mine, date(2026, 8, 1), date(2026, 8, 1))
+    assert [(r.tag_code, r.count) for r in scoped] == [("PLAN_TOO_BIG", 2)]
+    assert all(r.label_ko for r in scoped)  # 마스터 조인이 살아 있는지 (빈 문자열이면 죽은 것)
+
+    # 대조군 — 같은 창의 사용자 전체 집계는 두 목표를 함께 센다. 두 쿼리가 같은 값을 내면
+    # goal_id 조건이 아무 일도 안 하고 있다는 뜻이라, 이 대조가 있어야 테스트가 의미를 갖는다.
+    overall = await repo.get_top_failure_contexts(user_id, date(2026, 8, 1), date(2026, 8, 1))
+    assert [(r.tag_code, r.count) for r in overall] == [("FATIGUE", 5), ("PLAN_TOO_BIG", 2)]
+
+
+@pytest.mark.skipif(not DB_AVAILABLE, reason="DATABASE_URL not set")
+async def test_get_goal_failure_contexts_ignores_untagged_and_out_of_window(
+    real_db_session: AsyncSession,
+) -> None:
+    """목표에 달린 실패라도 28일 창 밖이면 안 센다 — 창은 사용자 전체 집계와 같은 규약."""
+    from reaction_backend.repositories.review_repo import ReviewRepo
+
+    user_id = await _seed_user_real(real_db_session)
+    goal_id = await _seed_goal_real(real_db_session, user_id=user_id, title="창 테스트 목표")
+    await _seed_tagged_failure_real(
+        real_db_session,
+        user_id=user_id,
+        tag_code="OVERRUN",
+        day=date(2026, 6, 1),  # 기준일에서 28일보다 앞
+        hour=9,
+        goal_id=goal_id,
+    )
+
+    repo = ReviewRepo(real_db_session)
+    rows = await repo.get_goal_failure_contexts(
+        user_id, goal_id, date(2026, 8, 1), date(2026, 8, 1)
+    )
+    assert rows == []
+
+
+async def _seed_recovery_attempt_real(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    strategy_type: str,
+    decision: str,
+    result: str,
+    decided_on: date,
+) -> None:
+    """회복 시도 1건 — 실행(execution) 한 건에 매달아 둔다(FK not null)."""
+    plan_start_at = datetime(decided_on.year, decided_on.month, decided_on.day, 9, 0, tzinfo=KST)
+    action_item_id = uuid4()
+    session.add(
+        ActionItem(
+            id=action_item_id,
+            user_id=user_id,
+            title="회복 결과 테스트 카드",
+            target_date=plan_start_at.date(),
+        )
+    )
+    await session.flush()
+
+    block_id = uuid4()
+    session.add(
+        ScheduledBlock(
+            id=block_id,
+            user_id=user_id,
+            action_item_id=action_item_id,
+            start_at=plan_start_at,
+            end_at=plan_start_at + timedelta(minutes=30),
+        )
+    )
+    await session.flush()
+
+    execution_id = uuid4()
+    session.add(
+        ExecutionEvent(
+            id=execution_id,
+            action_item_id=action_item_id,
+            scheduled_block_id=block_id,
+            user_id=user_id,
+            plan_start_at=plan_start_at,
+            plan_end_at=plan_start_at + timedelta(minutes=30),
+            completion_status="failed",
+        )
+    )
+    await session.flush()
+
+    session.add(
+        RecoveryAttempt(
+            id=uuid4(),
+            user_id=user_id,
+            execution_id=execution_id,
+            recovery_option_group="DOWNSCOPE",
+            recovery_strategy_type=strategy_type,
+            user_decision=decision,
+            recovery_result=result,
+            recovery_decided_at=plan_start_at + timedelta(hours=12),
+        )
+    )
+    await session.flush()
+
+
+@pytest.mark.skipif(not DB_AVAILABLE, reason="DATABASE_URL not set")
+async def test_list_recovery_outcome_contexts_splits_worked_from_rejected(
+    real_db_session: AsyncSession,
+) -> None:
+    """수락+완주 / 수락+중도포기 / 거절이 서로 다른 버킷으로 갈린다.
+
+    'edited'(AI 문구를 고쳐 수락)도 'worked' 로 센다 — `ADOPTED_DECISION_VALUES` 를 안 쓰고
+    "accepted" 만 비교하면 편집 수락이 조용히 빠지는데, resilience 분자에서 이미 겪은 버그다.
+    """
+    from reaction_backend.repositories.recovery_repo import RecoveryRepo
+
+    user_id = await _seed_user_real(real_db_session)
+    day = date(2026, 8, 1)
+    for decision, result, strategy in (
+        ("accepted", "completed", "NANO_STEP"),
+        ("edited", "completed", "NANO_STEP"),
+        ("accepted", "abandoned", "DOWNSCOPE_DEFAULT"),
+        ("accepted", "abandoned", "DOWNSCOPE_DEFAULT"),
+        ("rejected", "pending", "ENVIRONMENT_SHIFT"),
+        ("rejected", "pending", "ENVIRONMENT_SHIFT"),
+        ("pending", "pending", "NANO_STEP"),  # 아직 결정 안 함 — 어느 버킷도 아니다
+    ):
+        await _seed_recovery_attempt_real(
+            real_db_session,
+            user_id=user_id,
+            strategy_type=strategy,
+            decision=decision,
+            result=result,
+            decided_on=day,
+        )
+
+    rows = await RecoveryRepo(real_db_session).list_recovery_outcome_contexts(user_id, day, day)
+    got = {(r.strategy_type, r.outcome): r.count for r in rows}
+    assert got == {
+        ("NANO_STEP", "worked"): 2,
+        ("DOWNSCOPE_DEFAULT", "abandoned"): 2,
+        ("ENVIRONMENT_SHIFT", "rejected"): 2,
+    }
+    assert all(r.label_ko for r in rows)  # 카탈로그 조인 (라벨 이중 관리 방지)
+
+
+@pytest.mark.skipif(not DB_AVAILABLE, reason="DATABASE_URL not set")
+async def test_list_recovery_outcome_contexts_respects_the_28_day_window(
+    real_db_session: AsyncSession,
+) -> None:
+    """창 밖의 회복 결정은 안 센다 — 실패 집계와 같은 28일이라야 프롬프트 한 줄이 한 뜻이 된다."""
+    from reaction_backend.repositories.recovery_repo import RecoveryRepo
+
+    user_id = await _seed_user_real(real_db_session)
+    await _seed_recovery_attempt_real(
+        real_db_session,
+        user_id=user_id,
+        strategy_type="NANO_STEP",
+        decision="accepted",
+        result="completed",
+        decided_on=date(2026, 6, 1),
+    )
+
+    rows = await RecoveryRepo(real_db_session).list_recovery_outcome_contexts(
+        user_id, date(2026, 8, 1), date(2026, 8, 1)
+    )
+    assert rows == []

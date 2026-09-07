@@ -8,18 +8,20 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Annotated, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import select, update
+from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.execution_failure_tag import ExecutionFailureTag
 from reaction_backend.db.models.recovery_attempt import (
+    ADOPTED_DECISION_VALUES,
     RECOVERY_SUCCESS_STATUSES,
     RecoveryAttempt,
 )
@@ -42,6 +44,49 @@ if TYPE_CHECKING:
         RecoveryDecisionOutcome,
         RecoveryResultOutcome,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryOutcomeContext:
+    """전략별 회복 결과 — "이 사용자에게 무엇이 통했나".
+
+    회복 이력은 지금까지 에스컬레이션 판정(L1/L2/L3)에만 쓰였다. 계획 분해는 사용자가
+    인터뷰에서 **말한** 선호만 보고, 실제로 **해 본** 조정이 통했는지는 몰랐다 — 같은 크기의
+    세션을 다시 만들고 사용자는 같은 자리에서 다시 걸린다.
+
+    `outcome` 세 값의 뜻이 서로 다르다는 점이 중요하다:
+    - `worked`   — 수락(편집 수락 포함)하고 **완주**했다. 그 방향이 이 사용자에게 통했다.
+    - `abandoned` — 수락은 했는데 못 끝냈다. 방향은 받아들여지지만 그대로는 무겁다.
+    - `rejected` — 제안 자체를 거절했다. 그 방향을 다시 들이밀 근거가 없다.
+    """
+
+    strategy_type: str
+    label_ko: str
+    outcome: Literal["worked", "abandoned", "rejected"]
+    count: int
+
+
+# "무엇이 통했나" 의 정의 — `ADOPTED_DECISION_VALUES` 를 직접 쓴다. 'edited'(AI 문구를 고쳐
+# 수락)를 빼고 "accepted" 만 세면 편집 수락이 조용히 사라지는데, 그건 resilience 분자에서
+# 이미 한 번 겪은 버그다(`db/models/recovery_attempt.py` 상수 주석).
+_RECOVERY_OUTCOME_BUCKET = case(
+    (
+        and_(
+            RecoveryAttempt.user_decision.in_(ADOPTED_DECISION_VALUES),
+            RecoveryAttempt.recovery_result == "completed",
+        ),
+        "worked",
+    ),
+    (
+        and_(
+            RecoveryAttempt.user_decision.in_(ADOPTED_DECISION_VALUES),
+            RecoveryAttempt.recovery_result == "abandoned",
+        ),
+        "abandoned",
+    ),
+    (RecoveryAttempt.user_decision == "rejected", "rejected"),
+    else_=None,
+)
 
 
 class RecoveryRepo:
@@ -238,6 +283,63 @@ class RecoveryRepo:
         )
         result = await self._session.execute(stmt)
         return cast("list[RecoveryDecisionOutcome]", list(result.scalars().all()))
+
+    async def list_recovery_outcome_contexts(
+        self,
+        user_id: UUID,
+        d0: date,
+        d1: date,
+        *,
+        limit: int = 6,
+    ) -> list[RecoveryOutcomeContext]:
+        """[d0-27, d1] 창의 전략별 회복 결과 — 계획 분해가 쓸 "무엇이 통했나".
+
+        창(28일)·경계 계산은 `ReviewRepo.get_top_failure_contexts` 와 **같게** 맞춘다 —
+        두 재료가 같은 프롬프트 한 줄에 나란히 들어가는데 창이 다르면 "최근 4주" 라는 같은
+        말이 두 뜻이 된다. 시각축은 `recovery_decided_at`(결정 시점) — `list_recovery_results`
+        가 이미 쓰는 축이고, `pending` 은 `_RECOVERY_OUTCOME_BUCKET` 이 NULL 로 떨궈 제외된다.
+
+        `limit` 은 (전략 × 결과) 조합 수 상한이다. 프롬프트에 실을 때 어댑터가 결과별로 한 번
+        더 자른다(`first_plan_adapter._recovery_summary`) — 여기 상한은 방어적 상한일 뿐.
+        """
+        start = datetime.combine(d0 - timedelta(days=27), time.min, tzinfo=KST)
+        end = datetime.combine(d1 + timedelta(days=1), time.min, tzinfo=KST)
+        bucket = _RECOVERY_OUTCOME_BUCKET.label("outcome")
+        stmt = (
+            select(
+                RecoveryAttempt.recovery_strategy_type.label("strategy_type"),
+                RecoveryStrategyCatalog.label_ko.label("label_ko"),
+                bucket,
+                func.count().label("n"),
+            )
+            .join(
+                RecoveryStrategyCatalog,
+                RecoveryStrategyCatalog.strategy_type == RecoveryAttempt.recovery_strategy_type,
+            )
+            .where(
+                RecoveryAttempt.user_id == user_id,
+                _RECOVERY_OUTCOME_BUCKET.is_not(None),
+                RecoveryAttempt.recovery_decided_at >= start,
+                RecoveryAttempt.recovery_decided_at < end,
+            )
+            .group_by(
+                RecoveryAttempt.recovery_strategy_type,
+                RecoveryStrategyCatalog.label_ko,
+                bucket,
+            )
+            .order_by(func.count().desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            RecoveryOutcomeContext(
+                strategy_type=row.strategy_type,
+                label_ko=row.label_ko,
+                outcome=cast('Literal["worked", "abandoned", "rejected"]', row.outcome),
+                count=row.n,
+            )
+            for row in rows
+        ]
 
     async def list_active_strategies(self) -> list[RecoveryStrategyCatalog]:
         stmt = (

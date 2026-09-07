@@ -68,6 +68,32 @@ _TOP_FAILURE_CONTEXTS_SQL = text("""
 """)
 
 
+# 같은 집계를 **한 목표로 좁힌** 것. 사용자 전체 창은 "이 사용자가 자주 걸리는 이유" 를
+# 주지만, 계획 분해는 **지금 세우는 그 목표**의 이력을 먼저 봐야 한다 — 목표 A 를 분해하면서
+# 목표 B 에서 쌓인 태그를 근거로 분량을 줄이면 근거 없는 축소가 된다.
+#
+# 창(28일)·정렬·LIMIT 은 위 SQL 과 **같게** 둔다. 목표 단위라 표본이 더 얇아지는데, 창을
+# 여기서만 넓히면 프롬프트가 말하는 "최근 4주" 가 두 뜻이 된다 — 표본이 모자랄 때는 창을
+# 늘리는 대신 호출자가 사용자 전체 집계로 되돌아간다(`first_plan._failure_contexts`).
+_GOAL_FAILURE_CONTEXTS_SQL = text("""
+    SELECT t.tag_code,
+           frt.label_ko                                        AS label_ko,
+           count(*)                                            AS n,
+           round(count(*)::numeric / sum(count(*)) OVER (), 4) AS share
+    FROM   execution_events       e
+    JOIN   action_items           a   ON a.id = e.action_item_id
+    JOIN   execution_failure_tags t   ON t.execution_id = e.id
+    JOIN   failure_reason_tags    frt ON frt.tag_code = t.tag_code
+    WHERE  e.user_id = :user_id
+      AND  a.goal_id = :goal_id
+      AND  e.completion_status IN ('failed','partial_done')
+      AND  (e.plan_start_at AT TIME ZONE 'Asia/Seoul')::date BETWEEN (:d0)::date - 27 AND :d1
+    GROUP  BY t.tag_code, frt.label_ko
+    ORDER  BY n DESC
+    LIMIT  3
+""")
+
+
 def _span_minutes(start: datetime | None, end: datetime | None) -> int | None:
     """[start, end) 길이(분). 어느 쪽이든 없거나 뒤집혀 있으면 None(모름)."""
     if start is None or end is None or end <= start:
@@ -221,6 +247,29 @@ class ReviewRepo:
         """
         result = await self._session.execute(
             _TOP_FAILURE_CONTEXTS_SQL, {"user_id": user_id, "d0": d0, "d1": d1}
+        )
+        return [
+            TopFailureContext(
+                tag_code=row.tag_code,
+                label_ko=row.label_ko,
+                count=row.n,
+                share=float(row.share),
+            )
+            for row in result.all()
+        ]
+
+    async def get_goal_failure_contexts(
+        self, user_id: UUID, goal_id: UUID, d0: date, d1: date
+    ) -> list[TopFailureContext]:
+        """`get_top_failure_contexts` 를 **한 목표로 좁힌** 것 — 계획 분해용.
+
+        같은 dataclass 를 돌려주므로 프롬프트 문자열화(`first_plan_adapter._failure_summary`)
+        가 두 집계를 구분하지 않는다 — 어느 쪽을 골랐는지는 호출자가 `scope` 로 전달한다.
+        `/reviews/weekly` 응답은 이 메서드를 쓰지 않는다(사용자 전체 창이 그 화면의 뜻).
+        """
+        result = await self._session.execute(
+            _GOAL_FAILURE_CONTEXTS_SQL,
+            {"user_id": user_id, "goal_id": goal_id, "d0": d0, "d1": d1},
         )
         return [
             TopFailureContext(
