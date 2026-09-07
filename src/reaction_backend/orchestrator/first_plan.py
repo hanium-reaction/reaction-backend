@@ -47,6 +47,7 @@ from reaction_backend.orchestrator.goal_structuring import (
 )
 from reaction_backend.orchestrator.plan_scheduler import schedule_actions_multiday
 from reaction_backend.repositories.fixed_schedule_repo import FixedScheduleRepo
+from reaction_backend.repositories.recovery_repo import RecoveryOutcomeContext, RecoveryRepo
 from reaction_backend.repositories.review_repo import ReviewRepo, TopFailureContext
 from reaction_backend.repositories.scheduled_block_repo import ScheduledBlockRepo
 from reaction_backend.repositories.time_policy_repo import TimePolicyRepo
@@ -287,21 +288,61 @@ def tier_violation_for(outcome: InterviewOutcome) -> str | None:
 
 
 async def _failure_contexts(
-    config: RunnableConfig, user_id: UUID, reference_date: date
-) -> list[TopFailureContext]:
-    """최근 28일 실패 사유 상위 3개(#345 2단계) — decompose 프롬프트 `failure_summary` 재료.
+    config: RunnableConfig, user_id: UUID, reference_date: date, outcome: InterviewOutcome
+) -> tuple[list[TopFailureContext], Literal["goal", "user"]]:
+    """최근 28일 실패 사유 상위 3개 — decompose 프롬프트 `failure_summary` 재료.
 
-    `ReviewRepo.get_top_failure_contexts`(#301, 근거 A5) 를 그대로 재사용한다 — 새 집계를
-    만들지 않는다. `d0=d1=reference_date` 로 넘겨 [reference_date-27, reference_date] 창을
-    만드는 건 `routes/review.py::_top_failure_contexts` 와 같은 관례.
+    **이 목표 먼저, 없으면 사용자 전체.** 처음(#345 2단계)에는 사용자 전체 집계만 실었는데,
+    그러면 목표 A 를 분해하면서 목표 B 에서 쌓인 태그를 근거로 분량을 줄인다. 지금 세우는
+    목표의 이력이 있으면 그게 훨씬 강한 근거라 먼저 본다.
+
+    되돌아가는 조건은 `has_enough_failure_sample` — 목표 단위가 표본 부족이면 어차피
+    `_failure_summary` 가 '(없음)' 으로 떨어뜨릴 값이라, 그럴 바엔 사용자 전체 집계를 준다
+    ("계획이 컸어요" 같은 성향은 목표를 건너 옮겨 다니는 편이다). 이 판정을 어댑터와 공유
+    하지 않으면 목표 단위가 조용히 비어도 폴백이 안 걸리는 사각이 생긴다.
+
+    `d0=d1=reference_date` 로 넘겨 [reference_date-27, reference_date] 창을 만드는 건
+    `routes/review.py::_top_failure_contexts` 와 같은 관례.
 
     session 이 없으면(단위 테스트/시스템) 빈 리스트 → `_failure_summary` 가 '(없음)' 으로 내림.
     """
     session = _session(config)
     if session is None:
+        return [], "user"
+    repo = ReviewRepo(session)
+    goal_id = await first_plan_adapter.heaviest_goal_id(session, user_id=user_id, outcome=outcome)
+    if goal_id is not None:
+        scoped = list(
+            await repo.get_goal_failure_contexts(user_id, goal_id, reference_date, reference_date)
+        )
+        if first_plan_adapter.has_enough_failure_sample(scoped):
+            return scoped, "goal"
+    return list(
+        await repo.get_top_failure_contexts(user_id, reference_date, reference_date)
+    ), "user"
+
+
+async def _recovery_contexts(
+    config: RunnableConfig, user_id: UUID, reference_date: date
+) -> list[RecoveryOutcomeContext]:
+    """최근 28일 전략별 회복 결과 — decompose 프롬프트 `recovery_summary` 재료.
+
+    회복 이력은 그동안 에스컬레이션 판정(L1/L2/L3)에서만 읽혔다. 계획은 사용자가 **말한**
+    선호만 보고 실제로 **해 본** 조정이 통했는지는 몰랐다 — 창·폴백 규약은 `_failure_contexts`
+    와 같다(같은 프롬프트 줄에 나란히 들어가는 재료라 창이 달라지면 안 된다).
+
+    목표 단위로 좁히지 않는다. `recovery_attempts` 는 실행(execution)에 매달려 있어 목표까지
+    두 단계를 더 조인해야 하는데, "어떤 조정이 이 사람에게 통하는가" 는 애초에 목표를 건너
+    옮겨 다니는 성향이라(`list_recovery_results` 가 카드·목표 무관으로 보는 것과 같은 이유)
+    좁혀서 얻을 게 없다.
+    """
+    session = _session(config)
+    if session is None:
         return []
     return list(
-        await ReviewRepo(session).get_top_failure_contexts(user_id, reference_date, reference_date)
+        await RecoveryRepo(session).list_recovery_outcome_contexts(
+            user_id, reference_date, reference_date
+        )
     )
 
 
@@ -323,7 +364,10 @@ async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> Firs
         outcome.core_goals[0] if outcome.core_goals else None,
     )
     materials = await materials_resolver.resolve(heaviest.materials_note if heaviest else None)
-    failure_contexts = await _failure_contexts(config, state["user_id"], target_date)
+    failure_contexts, failure_scope = await _failure_contexts(
+        config, state["user_id"], target_date, outcome
+    )
+    recovery_contexts = await _recovery_contexts(config, state["user_id"], target_date)
     return {
         **state,
         "missing_fields": list(outcome.unresolved_slots),
@@ -336,6 +380,8 @@ async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> Firs
             target_date=target_date,
             fetched_materials=materials.text,
             failure_contexts=failure_contexts,
+            failure_scope=failure_scope,
+            recovery_contexts=recovery_contexts,
             max_weeks=state["max_plan_weeks"],
         ),
     }
