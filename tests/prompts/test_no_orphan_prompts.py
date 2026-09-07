@@ -28,6 +28,11 @@ _INTENTIONALLY_UNWIRED = {
     # ⚠️ 이름이 `plan_quality` 가 아닌 것이 **프로덕션 자동 승격을 막는 유일한 장치**다 —
     # 레지스트리가 버전 없이 부르면 같은 이름 중 가장 높은 번호를 고르기 때문이다.
     "planning/plan_quality_eval",
+    # 평가 하네스 전용(`scripts/l1_8_run.py --prompt-id`). 프로덕션 ②층은
+    # `goal_decompose` 를 부른다 — 이름이 다른 것이 **자동 승격을 막는 유일한 장치**다
+    # (`goal_decompose` 는 버전 없이 호출돼 같은 이름 중 가장 높은 번호를 고른다).
+    # 분량 자기 점검 지시의 A/B 후보. 채택되면 `goal_decompose.v4.md` 로 옮긴다.
+    "planning/goal_decompose_eval",
 }
 
 

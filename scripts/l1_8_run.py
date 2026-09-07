@@ -346,6 +346,7 @@ async def run_case(
     today: date,
     dry_run: bool,
     temperature: float | None = None,
+    prompt_id: str = "planning/goal_decompose",
 ) -> dict[str, Any]:
     from reaction_backend.config import get_settings
     from reaction_backend.llm import aiClient
@@ -363,6 +364,7 @@ async def run_case(
         "total_minutes_asked": prompt_vars["total_minutes"],
         "case": case,
         "temperature": temperature,
+        "prompt_id": prompt_id,
     }
     if dry_run:
         return row
@@ -371,7 +373,7 @@ async def run_case(
     result = await aiClient.run(
         module="planning",
         schema=GoalDecomposition,
-        prompt_id="planning/goal_decompose",
+        prompt_id=prompt_id,
         fallback=lambda: GoalDecomposition(
             goal_nodes=[_FALLBACK_NODE], action_items=[], policy_violations=[]
         ),
@@ -400,6 +402,12 @@ async def run_case(
         plan = {
             "goal_nodes": [n.model_dump(mode="json") for n in result.value.goal_nodes],
             "action_items": [a.model_dump(mode="json") for a in result.value.action_items],
+            # ⚠️ 이걸 안 남겨서 "짧은 계획이 `goal_volume_below_horizon` 을 남겼는가" 를
+            # 물었을 때 **데이터가 없는 줄 모르고** "0건" 이라고 읽을 뻔했다. 프롬프트가
+            # 요구하는 계약의 절반이 여기 있다 — 분량을 못 채우면 사유를 남기라는 쪽.
+            "policy_violations": [
+                v.model_dump(mode="json") for v in (result.value.policy_violations or [])
+            ],
         }
         # 모델 출력을 그대로 남긴다 — 집계만 저장하면 재감사가 불가능하다(L1-7 1차 전례).
         row["plan"] = plan
@@ -439,7 +447,12 @@ async def main_async(args: argparse.Namespace) -> None:
     for repeat in range(args.repeats):
         for case in cases:
             row = await run_case(
-                case, repeat, today=today, dry_run=args.dry_run, temperature=args.temperature
+                case,
+                repeat,
+                today=today,
+                dry_run=args.dry_run,
+                temperature=args.temperature,
+                prompt_id=args.prompt_id,
             )
             rows.append(row)
             mark = "dry" if args.dry_run else ("FB" if row.get("fell_back") else "ok")
@@ -470,6 +483,11 @@ def main() -> None:
         type=float,
         default=None,
         help="샘플링 온도. 미지정이면 제공자 기본값(=프로덕션과 같은 조건)",
+    )
+    parser.add_argument(
+        "--prompt-id",
+        default="planning/goal_decompose",
+        help="분해 프롬프트 id. A/B 용 — 평가 전용 후보는 `planning/goal_decompose_eval@v4`",
     )
     parser.add_argument(
         "--summarize-only", action="store_true", help="저장된 원자료만 다시 채점 (LLM 0회)"

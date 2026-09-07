@@ -97,6 +97,10 @@ def _mandala_context_var_keys() -> set[str]:
 CODE_VARS: dict[str, set[str]] = {
     "planning/goal_decompose": _prompt_var_keys()
     | {"review_feedback", "milestones", "out_of_cycle"},
+    # 평가 전용 A/B 후보 — 프로덕션과 **같은 변수 계약**이어야 한다. 안 그러면 A/B 가
+    # 프롬프트 차이가 아니라 변수 차이를 재게 된다.
+    "planning/goal_decompose_eval": _prompt_var_keys()
+    | {"review_feedback", "milestones", "out_of_cycle"},
     "planning/plan_milestones": _prompt_var_keys(),
     "planning/plan_quality": _review_var_keys(),
     "planning/mandala_subgoals": _mandala_context_var_keys(),
