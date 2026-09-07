@@ -66,4 +66,7 @@ docker-data/
 eval/l1_7b_v4_*.jsonl
 
 # M33 3-arm 실 LLM 호출 산출물 — 위와 같은 이유.
+# L1-8 실 LLM 호출 산출물 — 위와 같은 이유. 골든셋(eval/golden_history_cases.jsonl)은
+# 결정적 생성기 산출물이라 커밋한다.
+eval/l1_8_*.jsonl
 eval/m33/
