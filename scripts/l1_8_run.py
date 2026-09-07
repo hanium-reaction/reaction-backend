@@ -65,7 +65,23 @@ from scripts.build_golden_history_cases import BLAME_MARKERS
 
 _ROOT = Path(__file__).resolve().parents[1]
 CASES_PATH = _ROOT / "eval" / "golden_history_cases.jsonl"
-RESULTS_PATH = _ROOT / "eval" / "l1_8_results.jsonl"
+RESULTS_DIR = _ROOT / "eval"
+RESULTS_GLOB = "l1_8_results*.jsonl"
+
+
+def results_path(stamp: str | None = None) -> Path:
+    """실행마다 **새 파일**에 쓴다.
+
+    2차 실행이 1차 원자료를 통째로 덮어써서 1차를 재감사할 수 없게 됐다 — 그런데 하필
+    두 실행의 결론이 갈렸다(재현 실패). 원문을 남기는 이유가 재감사인데 덮어쓰면 그 이유가
+    사라진다. `--summarize-only` 는 가장 최근 파일을 고른다.
+    """
+    return RESULTS_DIR / f"l1_8_results_{stamp}.jsonl" if stamp else RESULTS_DIR / "l1_8_results.jsonl"
+
+
+def latest_results_path() -> Path | None:
+    files = sorted(RESULTS_DIR.glob(RESULTS_GLOB))
+    return files[-1] if files else None
 
 CONTROL_BLOCK = "no_history"
 
@@ -421,12 +437,13 @@ async def main_async(args: argparse.Namespace) -> None:
         print(f"\n{len(rows)}건 구성 확인 — LLM 호출 없음")
         return
 
-    RESULTS_PATH.write_text(
+    out = results_path(datetime.now(tz=KST).strftime("%Y%m%dT%H%M%S"))
+    out.write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
         encoding="utf-8",
         newline="\n",
     )
-    print(f"\n원자료 → {RESULTS_PATH}")
+    print(f"\n원자료 → {out}")
     _print_summary(rows)
 
 
@@ -442,13 +459,15 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.summarize_only:
-        if not RESULTS_PATH.exists():
-            print(f"원자료가 없다: {RESULTS_PATH}", file=sys.stderr)
+        path = latest_results_path()
+        if path is None:
+            print(f"원자료가 없다: {RESULTS_DIR}/{RESULTS_GLOB}", file=sys.stderr)
             raise SystemExit(1)
+        print(f"원자료 ← {path}")
         rows = rescore(
             [
                 json.loads(line)
-                for line in RESULTS_PATH.read_text(encoding="utf-8").splitlines()
+                for line in path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
         )
