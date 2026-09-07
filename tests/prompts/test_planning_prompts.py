@@ -210,6 +210,38 @@ def test_decompose_prompt_keeps_milestone_and_grounding_contract() -> None:
         assert f"{{{{{var}}}}}" in body, f"{var} 가 분해 프롬프트에서 사라졌다."
 
 
+def test_milestone_prompt_does_not_depend_on_the_density_preset() -> None:
+    """마일스톤 크기는 **인터뷰 답**(`total_capacity`)이 정한다 — 분량 프리셋이 아니다.
+
+    density 파생 변수(`sessions_per_week`/`total_minutes`/`total_sessions`/
+    `session_count_rule`)는 decompose 전용이고 이 템플릿에는 등장하지 않는다. 그래서
+    라우터가 density 를 넘기든 말든 렌더 결과가 **한 글자도** 안 달라진다 — 넘기던 인자를
+    #468 에서 걷어낸 근거다.
+
+    ⚠️ **이 테스트가 빨개졌다면** 누군가 마일스톤 프롬프트에 density 파생 변수를 넣은 것이다.
+    그 자체는 정당한 변경일 수 있지만, 그 순간 **분량 감쇠**(`dampened_density`, #467)를
+    이 경로에도 태울지 정해야 한다 — 안 그러면 세션은 가벼워지는데 뼈대만 원래 크기로
+    남는다. 배선이 아니라 제품 결정이니 이슈에서 합의하고 이 테스트를 고쳐라.
+    """
+    outcome = interview_adapter.build_outcome(
+        session_id="iv_milestone_density",
+        slot_answers={},
+        ambiguity_final=0.1,
+        end_reason="completed",
+        analysis_source="rule",
+    )
+    rendered = {
+        density: registry.render(
+            "planning/plan_milestones",
+            context_from_outcome(outcome, density=density)["prompt_vars"],
+        )[0]
+        for density in ("light", "standard", "intense")
+    }
+    assert len(set(rendered.values())) == 1, (
+        "density 가 마일스톤 프롬프트를 바꾼다 — 분량 감쇠를 이 경로에도 태울지 정해야 한다"
+    )
+
+
 def test_milestone_prompt_is_bounded_by_total_capacity() -> None:
     """마일스톤 프롬프트가 **마감까지 쓸 수 있는 총 시간**을 받아서 그 안에 끊는다 (ADR-0007 §11).
 

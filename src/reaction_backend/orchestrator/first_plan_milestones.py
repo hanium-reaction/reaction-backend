@@ -43,7 +43,6 @@ def _rule_milestones(outcome: InterviewOutcome) -> MilestonePlan:
 async def generate_milestones(
     *,
     outcome: InterviewOutcome,
-    density: str = "standard",
     session: AsyncSession | None = None,
     tone_mode: str | None = None,
     user_id: UUID | None = None,
@@ -51,6 +50,19 @@ async def generate_milestones(
     """목표 컨텍스트 → 중간 목표 3~5개. 반환: (마일스톤 목록, 룰 폴백 여부).
 
     decompose 와 같은 prompt_vars(현재수준·성공이미지·접근·자료 등)를 재사용해 방향을 잡는다.
+
+    ⚠️ **분량 프리셋(density)을 받지 않는다 — 마일스톤은 density 로 크기가 정해지지 않는다.**
+    이 프롬프트가 쓰는 변수 10개 중 크기에 관한 것은 `total_capacity`(주당 가용 시간 ×
+    마감까지 주 수, ADR-0007 §11)와 `session_length` 뿐이고, 둘 다 인터뷰 답에서 나온다.
+    density 에서 파생되는 값들(`sessions_per_week`/`total_minutes`/`total_sessions`/
+    `session_count_rule`)은 decompose 전용이라 이 템플릿에 아예 등장하지 않는다.
+
+    예전에는 라우터가 `density=body.density` 를 넘겼는데, 그 값은 `context_from_outcome`
+    까지만 가고 렌더 결과에는 한 글자도 영향을 주지 못했다(`tests/prompts` 가 이제 그
+    사실을 고정한다). 받아 두면 "마일스톤도 분량을 따라간다" 는 **틀린 기대**가 생긴다 —
+    실제로 이 파라미터를 근거로 "뼈대는 큰데 세션만 가벼워진다" 는 없는 결함을 읽어낸
+    적이 있다. 실패가 쌓였을 때 **뼈대까지** 줄일지는 배선이 아니라 제품 결정이다(그건
+    목표 재협상에 가깝다 — 근거 대장 §5.2 의 L3).
 
     참고 자료가 링크뿐이면 `validate_inputs` 와 **같은 방식으로** 열어서 넣는다 (#226).
     계획의 뼈대를 정하는 건 이 단계라, 여기서 자료가 빠지면 사용자가 강의계획서를 붙여도
@@ -70,7 +82,6 @@ async def generate_milestones(
     # 프롬프트에 그건 치명적이라, 계획 시작일 기본값(오늘 KST)을 명시적으로 넘긴다.
     prompt_vars = context_from_outcome(
         outcome,
-        density=density,
         target_date=now_kst().date(),
         fetched_materials=materials.text,
     )["prompt_vars"]
