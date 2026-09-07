@@ -79,6 +79,51 @@ def test_m36_tracks_total_volume_not_session_length() -> None:
     assert result["M41_session_length_delta_min"]["recovery_worked"] == 0.0
 
 
+def test_m42_normalizes_the_headroom_each_goal_leaves() -> None:
+    """M42 는 **요구 예산 대비 채움율**이다 — 목표별 여유 차이를 흡수한다.
+
+    1차 실행에서 처치 델타가 목표별 여유와 r = 0.92 로 붙었다. 원 분량(M36)만 보면 여유가
+    큰 목표의 수치가 블록 평균을 끌고 간다. 요구 예산이 아예 다른 감쇠 블록에서는 이 축이
+    **유일하게 비교 가능한 축**이기도 하다.
+
+    여기서 두 목표는 요구 예산이 1000 과 500 으로 다르다. 둘 다 대조군이 절반을 채우고
+    처치군이 60% 를 채우므로 M42 는 양쪽 다 +10%p 여야 한다 — 원 분량 델타(+100 과 +50)를
+    평균 내는 M36 과 달리 목표 크기에 안 끌린다.
+    """
+    rows = [
+        {
+            **_row(_case(CONTROL_BLOCK, "big", must_not_contain=[]), _plan(("a", 500, "s"))),
+            "total_minutes_asked": 1000,
+        },
+        {
+            **_row(_case("recovery_worked", "big", must_not_contain=["x"]), _plan(("b", 600, "s"))),
+            "total_minutes_asked": 1000,
+        },
+        {
+            **_row(_case(CONTROL_BLOCK, "small", must_not_contain=[]), _plan(("c", 250, "s"))),
+            "total_minutes_asked": 500,
+        },
+        {
+            **_row(
+                _case("recovery_worked", "small", must_not_contain=["x"]), _plan(("d", 300, "s"))
+            ),
+            "total_minutes_asked": 500,
+        },
+    ]
+    result = summarize(rows)
+    assert result["M42_budget_fill_delta"]["recovery_worked"] == 0.1
+    assert result["M36_volume_delta_min"]["recovery_worked"] == 75.0  # (100 + 50) / 2
+
+
+def test_m42_is_absent_when_the_budget_is_unknown() -> None:
+    """요구 예산이 없는 옛 원자료에서는 M42 를 **지어내지 않는다** — 조용히 0 이 되면 안 된다."""
+    rows = [
+        _row(_case(CONTROL_BLOCK, "sqld", must_not_contain=[]), _plan(("a", 50, "s"))),
+        _row(_case("recovery_worked", "sqld", must_not_contain=["x"]), _plan(("b", 40, "s"))),
+    ]
+    assert summarize(rows)["M42_budget_fill_delta"] == {}
+
+
 def test_m39_does_not_count_a_tie_as_evidence() -> None:
     """동점은 승리가 아니다 — 조용히 사라지지도 않는다.
 

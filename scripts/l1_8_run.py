@@ -65,7 +65,26 @@ from scripts.build_golden_history_cases import BLAME_MARKERS
 
 _ROOT = Path(__file__).resolve().parents[1]
 CASES_PATH = _ROOT / "eval" / "golden_history_cases.jsonl"
-RESULTS_PATH = _ROOT / "eval" / "l1_8_results.jsonl"
+RESULTS_DIR = _ROOT / "eval"
+RESULTS_GLOB = "l1_8_results*.jsonl"
+
+
+def results_path(stamp: str | None = None) -> Path:
+    """실행마다 **새 파일**에 쓴다.
+
+    2차 실행이 1차 원자료를 통째로 덮어써서 1차를 재감사할 수 없게 됐다 — 그런데 하필
+    두 실행의 결론이 갈렸다(재현 실패). 원문을 남기는 이유가 재감사인데 덮어쓰면 그 이유가
+    사라진다. `--summarize-only` 는 가장 최근 파일을 고른다.
+    """
+    return (
+        RESULTS_DIR / f"l1_8_results_{stamp}.jsonl" if stamp else RESULTS_DIR / "l1_8_results.jsonl"
+    )
+
+
+def latest_results_path() -> Path | None:
+    files = sorted(RESULTS_DIR.glob(RESULTS_GLOB))
+    return files[-1] if files else None
+
 
 CONTROL_BLOCK = "no_history"
 
@@ -222,9 +241,13 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     표본이 아니므로 **분모는 케이스 수**다(M29 가 겪은 함정).
     """
     by_case: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    # 예산 대비 채움율(M42)의 재료 — 요구 분량은 계획이 아니라 **행**에 있다(케이스마다,
+    # 그리고 감쇠 블록에서는 블록마다 다르다).
     for row in rows:
         if row.get("score"):
-            by_case[(row["block"], row["pair_id"])].append(row["score"])
+            by_case[(row["block"], row["pair_id"])].append(
+                {**row["score"], "_asked": float(row.get("total_minutes_asked") or 0) or None}
+            )
 
     def _by_case(field: str) -> dict[tuple[str, str], float]:
         out: dict[tuple[str, str], float] = {}
@@ -246,8 +269,24 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     total_minutes = _by_case("total_minutes")
     mean_minutes = _by_case("mean_minutes")
+
+    # M42 — 요구 예산 대비 채움율. 목표마다 대조군이 남긴 **여유**가 다르고(3%~31%), 1차
+    # 실행에서 처치 델타가 그 여유와 r = 0.92 로 붙었다. 원 분량(M36)만 보면 여유가 큰
+    # 목표의 수치가 블록 평균을 끌고 간다. 감쇠 블록은 요구 예산 자체가 달라 **이 축이
+    # 유일하게 비교 가능한 축**이기도 하다.
+    fill: dict[tuple[str, str], float] = {}
+    for key, scores in by_case.items():
+        vals = [
+            s["total_minutes"] / s["_asked"]
+            for s in scores
+            if s.get("total_minutes") is not None and s.get("_asked")
+        ]
+        if vals:
+            fill[key] = statistics.fmean(vals)
+
     deltas = _deltas(total_minutes)
     length_deltas = _deltas(mean_minutes)
+    fill_deltas = _deltas(fill)
 
     treated = [r for r in rows if r.get("score") and r["block"] != CONTROL_BLOCK]
     with_history = [r for r in treated if r["case"]["assertions"]["must_not_contain"]]
@@ -275,6 +314,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "M36_volume_delta_min": {b: round(statistics.fmean(v), 1) for b, v in deltas.items()},
         "M36_pairs": {b: len(v) for b, v in deltas.items()},
+        "M42_budget_fill_delta": {b: round(statistics.fmean(v), 4) for b, v in fill_deltas.items()},
         "M41_session_length_delta_min": {
             b: round(statistics.fmean(v), 1) for b, v in length_deltas.items()
         },
@@ -300,7 +340,12 @@ def _rate_num(hits: int, total: int) -> float | None:
 
 
 async def run_case(
-    case: dict[str, Any], repeat: int, *, today: date, dry_run: bool
+    case: dict[str, Any],
+    repeat: int,
+    *,
+    today: date,
+    dry_run: bool,
+    temperature: float | None = None,
 ) -> dict[str, Any]:
     from reaction_backend.config import get_settings
     from reaction_backend.llm import aiClient
@@ -317,6 +362,7 @@ async def run_case(
         "recovery_summary": prompt_vars["recovery_summary"],
         "total_minutes_asked": prompt_vars["total_minutes"],
         "case": case,
+        "temperature": temperature,
     }
     if dry_run:
         return row
@@ -331,6 +377,7 @@ async def run_case(
         ),
         timeout=settings.llm_planning_timeout_seconds,
         thinking_budget=settings.llm_planning_thinking_budget,
+        temperature=temperature,
         # 프로덕션(`decompose_goal`)이 넘기는 세 변수를 같은 함수로 만든다 — 손으로 쓰면
         # 렌더가 조용히 실패하거나 프로덕션이 안 내는 프롬프트를 재게 된다(L1-7 1차 전례).
         variables={
@@ -362,11 +409,17 @@ async def run_case(
 
 def _print_summary(rows: list[dict[str, Any]]) -> None:
     result = summarize(rows)
-    print("\n[L1-8] M36 총 분량 델타 (분, 대조군 대비 — 짝 단위 평균) / M41 평균 세션 분 델타")
+    print(
+        "\n[L1-8] M36 총 분량 델타(분) / M41 평균 세션 분 / M42 예산 채움율 — 전부 대조군 대비 짝 단위"
+    )
     for block, delta in sorted(result["M36_volume_delta_min"].items()):
         pairs = result["M36_pairs"][block]
         length = result["M41_session_length_delta_min"].get(block, 0.0)
-        print(f"  {block:24s} {delta:+8.1f}  (짝 {pairs})   세션길이 {length:+6.1f}")
+        fill = result["M42_budget_fill_delta"].get(block, 0.0)
+        print(
+            f"  {block:24s} {delta:+8.1f}  (짝 {pairs})   "
+            f"세션길이 {length:+6.1f}   예산채움 {fill:+.1%}"
+        )
     print(f"\n[L1-8] M37 누출률 {result['M37_leak_rate']}  (기대 0)")
     if result["M37_leaks"]:
         print(f"        누출 문구: {result['M37_leaks']}")
@@ -385,7 +438,9 @@ async def main_async(args: argparse.Namespace) -> None:
     rows: list[dict[str, Any]] = []
     for repeat in range(args.repeats):
         for case in cases:
-            row = await run_case(case, repeat, today=today, dry_run=args.dry_run)
+            row = await run_case(
+                case, repeat, today=today, dry_run=args.dry_run, temperature=args.temperature
+            )
             rows.append(row)
             mark = "dry" if args.dry_run else ("FB" if row.get("fell_back") else "ok")
             print(f"  [{mark}] {row['case_id']} r{repeat} density={row['density']}")
@@ -394,12 +449,13 @@ async def main_async(args: argparse.Namespace) -> None:
         print(f"\n{len(rows)}건 구성 확인 — LLM 호출 없음")
         return
 
-    RESULTS_PATH.write_text(
+    out = results_path(datetime.now(tz=KST).strftime("%Y%m%dT%H%M%S"))
+    out.write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
         encoding="utf-8",
         newline="\n",
     )
-    print(f"\n원자료 → {RESULTS_PATH}")
+    print(f"\n원자료 → {out}")
     _print_summary(rows)
 
 
@@ -410,18 +466,26 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="LLM 호출 없이 구성만 확인")
     parser.add_argument("--blocks", nargs="*", default=None, help="블록 필터")
     parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="샘플링 온도. 미지정이면 제공자 기본값(=프로덕션과 같은 조건)",
+    )
+    parser.add_argument(
         "--summarize-only", action="store_true", help="저장된 원자료만 다시 채점 (LLM 0회)"
     )
     args = parser.parse_args()
 
     if args.summarize_only:
-        if not RESULTS_PATH.exists():
-            print(f"원자료가 없다: {RESULTS_PATH}", file=sys.stderr)
+        path = latest_results_path()
+        if path is None:
+            print(f"원자료가 없다: {RESULTS_DIR}/{RESULTS_GLOB}", file=sys.stderr)
             raise SystemExit(1)
+        print(f"원자료 ← {path}")
         rows = rescore(
             [
                 json.loads(line)
-                for line in RESULTS_PATH.read_text(encoding="utf-8").splitlines()
+                for line in path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
         )

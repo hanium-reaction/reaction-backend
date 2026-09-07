@@ -165,6 +165,7 @@ class LLMToolExecutor:
         log_payloads: bool = False,
         tone_mode: str | None = None,
         thinking_budget: int | None = None,
+        temperature: float | None = None,
     ) -> RunResult[T]:
         """ADR-0003 동결 시그니처 (+ #23 tone_mode addendum + thinking_budget addendum).
 
@@ -195,6 +196,9 @@ class LLMToolExecutor:
             호출별 Gemini thinking 예산(토큰). None(기본)이면 flash 계열 0(비활성) — 지연
             민감 호출(인터뷰 턴 등)용. 계획 분해·검토처럼 추론이 필요한 호출만 양수로 넘겨
             thinking 을 켠다 (provider._thinking_config). timeout 도 함께 상향 권장.
+        temperature:
+            호출별 샘플링 온도. None(기본)이면 **아무것도 넘기지 않아** 제공자 기본값을
+            쓴다 — 즉 기존 동작 그대로다. 분량 변동을 재는 실험(L1-8)이 이 손잡이를 쓴다.
         """
         # 호출자가 명시하지 않으면 현재 요청의 trace_id (#370). 한 요청 안의 모든 LLM
         # 호출이 같은 값을 달아야 `endpoint_rate_limit` 이 '실행 횟수'를 셀 수 있다.
@@ -266,6 +270,7 @@ class LLMToolExecutor:
                         prompt_text=prompt_text,
                         timeout=timeout,
                         thinking_budget=thinking_budget,
+                        temperature=temperature,
                         model=resolved_model,
                     ),
                     timeout=timeout,
