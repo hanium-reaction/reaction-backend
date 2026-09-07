@@ -69,6 +69,20 @@ class RecoveryOutcomeContext:
 # "무엇이 통했나" 의 정의 — `ADOPTED_DECISION_VALUES` 를 직접 쓴다. 'edited'(AI 문구를 고쳐
 # 수락)를 빼고 "accepted" 만 세면 편집 수락이 조용히 사라지는데, 그건 resilience 분자에서
 # 이미 한 번 겪은 버그다(`db/models/recovery_attempt.py` 상수 주석).
+#
+# ⚠️ **'skipped'("나중에")는 일부러 어느 버킷에도 안 넣는다.** `escalation` 은 같은 값을
+# `rejected` 와 **함께** 센다(`compute_recovery_rejected_streak`, 근거 대장 §5.1) — 어긋난
+# 게 아니라 **묻는 질문이 다르다**:
+#
+# - 에스컬레이션: "이 사용자가 회복 제안에 반응을 안 하고 있는가" → 결정을 미루는 것도
+#   개입 강도를 올릴 이유다. 관여도(engagement)에 관한 질문.
+# - 계획 분해: "이 방향으로 더 밀어도 되는가" → '나중에' 는 **그 방향에 대한 판단이 아니다.**
+#   그 순간에 처리할 여력이 없었다는 뜻이고, 제품도 그렇게 못박았다("미루기는 정상 행동",
+#   #457). 이걸 거절로 세면 사용자가 한 번도 평가한 적 없는 전략을 계획이 회피한다.
+#
+# 오분류 비용도 비대칭이다 — 잘못 세면 통할 수도 있는 방향을 계획에서 지우고, 안 세면
+# 약한 신호 하나를 잃을 뿐이다. `pending`(아직 결정 전) 도 같은 이유로 빠진다.
+# 새 `user_decision` 값이 생기면 `tests/test_review_repo_sql.py` 의 분류 테스트가 빨개진다.
 _RECOVERY_OUTCOME_BUCKET = case(
     (
         and_(
@@ -84,6 +98,8 @@ _RECOVERY_OUTCOME_BUCKET = case(
         ),
         "abandoned",
     ),
+    # 'skipped' 를 여기 넣지 마라 — 위 ⚠️ 참고. 거절은 방향에 대한 판단이지만
+    # '나중에' 는 그 순간의 여력에 대한 것이다.
     (RecoveryAttempt.user_decision == "rejected", "rejected"),
     else_=None,
 )

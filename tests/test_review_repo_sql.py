@@ -428,6 +428,11 @@ async def test_list_recovery_outcome_contexts_splits_worked_from_rejected(
         ("rejected", "pending", "ENVIRONMENT_SHIFT"),
         ("rejected", "pending", "ENVIRONMENT_SHIFT"),
         ("pending", "pending", "NANO_STEP"),  # 아직 결정 안 함 — 어느 버킷도 아니다
+        # '나중에' 2건 — 거절과 **같이 세면 안 된다**. 방향에 대한 판단이 아니라 그 순간의
+        # 여력에 대한 것이다("미루기는 정상 행동", #457). 실제 도그푸딩 데이터가 이 값이라
+        # 여기서 새면 프롬프트가 사용자가 평가한 적 없는 전략을 회피하기 시작한다.
+        ("skipped", "pending", "CONTEXT_REWARMING"),
+        ("skipped", "pending", "CONTEXT_REWARMING"),
     ):
         await _seed_recovery_attempt_real(
             real_db_session,
@@ -446,6 +451,31 @@ async def test_list_recovery_outcome_contexts_splits_worked_from_rejected(
         ("ENVIRONMENT_SHIFT", "rejected"): 2,
     }
     assert all(r.label_ko for r in rows)  # 카탈로그 조인 (라벨 이중 관리 방지)
+
+
+def test_every_decision_value_is_consciously_bucketed_for_planning() -> None:
+    """`user_decision` 의 **모든** 값이 계획 집계에서 셀지 말지 분류돼 있다.
+
+    `test_adopted_values_cover_every_decision_that_creates_a_card` 와 같은 장치다 — 미래에
+    값이 늘면, 그것이 "이 방향은 안 통한다" 의 근거인지 아닌지 **정하기 전까지** 여기가
+    실패한다. 안 그러면 새 값이 `else_=None` 으로 조용히 흘러 계획이 신호를 잃는다.
+
+    분류의 근거는 `recovery_repo._RECOVERY_OUTCOME_BUCKET` 주석에 있다. 요지: 'skipped'
+    ('나중에')는 방향에 대한 판단이 아니라 그 순간의 여력이라 **일부러** 뺀다 — 같은 값을
+    `rejected` 와 함께 세는 `escalation` 과 다른 건 묻는 질문이 다르기 때문이다.
+    """
+    from reaction_backend.db.models.recovery_attempt import USER_DECISION_VALUES
+
+    counted_as_worked_or_abandoned = set(ADOPTED_DECISION_VALUES)
+    counted_as_not_worked = {"rejected"}
+    deliberately_excluded = {"pending", "skipped"}
+
+    assert (counted_as_worked_or_abandoned | counted_as_not_worked | deliberately_excluded) == set(
+        USER_DECISION_VALUES
+    )
+    # 세 분류가 겹치지 않는다 — 겹치면 같은 행이 두 번 세어진다.
+    assert not (counted_as_worked_or_abandoned & counted_as_not_worked)
+    assert not (deliberately_excluded & (counted_as_worked_or_abandoned | counted_as_not_worked))
 
 
 @pytest.mark.skipif(not DB_AVAILABLE, reason="DATABASE_URL not set")
