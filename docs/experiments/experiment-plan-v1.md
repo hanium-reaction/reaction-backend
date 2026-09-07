@@ -282,9 +282,10 @@ L1-6 은 **자료**를, L1-7 은 **인터뷰에서 말한 제약**을 덮는다.
 | **가설** | H1-8: 이력을 주면 ① 계획 분량이 그 이력이 가리키는 방향으로 움직이고 ② 이력 문구는 사용자에게 **드러나지 않는다** |
 | **1차 지표** | **M36** `history_volume_delta` · **M37** `history_leak_rate` |
 | **보조 지표** | M38 `history_blame_rate` · M39 `history_scope_sensitivity` · M40 `damped_volume_compliance`(= M18 재사용) |
-| **데이터 출처** | [`eval/golden_history_cases.jsonl`](../../eval/golden_history_cases.jsonl) 42건 = 목표 6 × 블록 7. **전량 합성** — 생성기 `scripts/build_golden_history_cases.py` |
+| **데이터 출처** | [`eval/golden_history_cases.jsonl`](../../eval/golden_history_cases.jsonl) **54건 = 목표 6 × 블록 9**(1차 실행 뒤 더미 대조군 2블록 신설). **전량 합성** — 생성기 `scripts/build_golden_history_cases.py` |
 | **설계 — 짝이 전부** | 6개 목표를 **모든 블록이 똑같이** 쓴다(`pair_id`). 블록 간 차이는 오직 `history` 뿐이고, 지표는 전부 **같은 목표의 대조군 대비 차이**다. 자료 골든셋의 `no_material` 과 같은 구조이나 블록이 7개라 훨씬 깨지기 쉬워, `tests/test_golden_history_cases.py` 가 목표 동일성을 바이트로 고정한다 |
 | ⚠️ **교란 차단이 설계의 절반** | 실패·회복 블록은 `consecutive_goal_failures = 0` 이다. 0 이 아니면 `dampened_density`(#467)가 동시에 걸려 **"프롬프트가 이력을 읽었다" 와 "룰이 예산을 깎았다" 가 한 수치에 섞인다.** 감쇠는 `damped_density` 블록에서만 켠다 |
+| **더미 대조군 (2차 신설)** | `neutral_priority_shift`·`neutral_emergency` — `failure_goal_scoped` 와 **오직 태그만** 다르다(같은 범위·횟수·목표). 둘 다 외부 사정이라 분량을 함의하지 않는다. **더미도 +60~90 이면 모델은 이력 '내용' 이 아니라 '존재' 에 반응하는 것**이고, 그러면 분량 조절은 프롬프트가 아니라 룰의 일이다. ⚠️ '존재' 와 '프롬프트 길이' 는 이 설계로 못 가른다 — 어느 쪽이든 결론이 같아 분리하지 않았다 |
 | ⚠️ **회복 두 블록은 같은 전략** | `recovery_worked`/`recovery_rejected` 가 둘 다 `DOWNSCOPE_DEFAULT` 를 쓴다. 다른 전략을 쓰면 '전략 차이'와 '결과 차이'가 섞인다. 기대 부호는 대칭이다: 평균 세션 분 `worked < control ≤ rejected`. `rejected` 에 "더 커져야 한다" 가 아니라 "**줄어들면 안 된다**" 를 기대하는 건, 사용자가 거절한 게 축소 제안이지 확대 요청이 아니기 때문이다 |
 | **성공 기준** | ① **M37 = 0** (누출 0건) ② **M38 = 0** ③ M36 의 부호가 `failure_goal_scoped`·`recovery_worked` 에서 음수, `recovery_rejected` 에서 **음수가 아님**. ⚠️ M36 의 **크기**는 사전 고정하지 않는다 — 근거가 없는 임계값이라 |
 | ⚠️ **사전등록을 한 번 고쳤다** | 스모크(7건) 뒤 M36 의 **측정 축**을 평균 세션 분 → 총 분량으로 바꾸고, M39 에서 동점을 승리에서 뺐다. 결과가 마음에 안 들어서가 아니라 **처치에 반응할 수 없는 축**을 재고 있었기 때문이다(세션 길이는 사용자가 답한 값이라 프롬프트가 고정한다). 그 판단의 근거와 스모크 수치는 [`l1-8-results.md`](l1-8-results.md) §1 에 있고, **그 수치는 결과로 인용하지 않는다**(짝 1개) |
@@ -642,6 +643,7 @@ L1-6 은 **자료**를, L1-7 은 **인터뷰에서 말한 제약**을 덮는다.
 | **M37** | **`history_leak_rate`** | 이력이 실린 케이스 | 이력 라벨 문구(`assertions.must_not_contain`)가 계획 텍스트에 등장한 케이스 | — | — | **L1-8 의 가장 강한 지표.** 프롬프트가 "인용 금지" 를 어겼는가 — 이진 판정이라 표본이 작아도 위반 1건이 신호다. 기대 **0** |
 | **M38** | `history_blame_rate` | 〃 | `BLAME_MARKERS`(`scripts/build_golden_history_cases.py`)가 등장한 케이스. ⚠️ 전역 금지어 필터가 **안 잡는** 표현만 센다 — 잡는 말을 세면 필터 성능을 프롬프트 성능으로 오독한다 | — | — | 톤 가드 (DevBaseline §1.4) |
 | **M39** | `history_scope_sensitivity` | 목표 6개 | \|M36(`failure_goal_scoped`)\| **>** \|M36(`failure_user_scoped`)\| 인 목표 수(동점은 분자에서 빼고 따로 센다). 범위 접두어를 실제로 읽는가 | — | — | #466 의 '이 목표:' / '전체 목표:' 구분이 값을 하는가. ⚠️ **부호가 기대와 맞을 때만 읽는다** — 둘 다 반대 방향으로 움직인 상태의 크기 순서는 증거가 아니다([`l1-8-results.md`](l1-8-results.md) §3.5) |
+| **M42** | **`history_budget_fill_delta`** | — | (처치군 **생성 분량 ÷ 요구 분량**) − (같은 목표 대조군의 값), %p | — | — | 목표별 **예산 여유**가 3%~31% 로 달라 원 분량(M36)이 그 여유에 끌린다(1차 실행 r = 0.92). 요구 예산 자체가 다른 감쇠 블록에서는 **유일하게 비교 가능한 축** |
 | **M41** | `history_session_length_delta` | — | (처치군 평균 leaf `estimated_minutes`) − (같은 목표 대조군의 값), 분. **M36 의 보조** — 모델이 총량이 아니라 길이를 건드렸는지 가른다 | — | — | M36 v1 의 정의를 지표로 보존한다(버리지 않고 강등) |
 | **M40** | `damped_volume_compliance` | — | `damped_density` 블록에 **M18 을 그대로 적용**. 감쇠된 예산을 원안이 따르는가 | — | — | 새 정의를 만들지 않는다 — #467 은 예산을 낮출 뿐이고 준수 여부는 기존 지표의 질문이다 |
 

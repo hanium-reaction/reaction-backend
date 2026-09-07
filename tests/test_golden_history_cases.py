@@ -168,6 +168,39 @@ def test_recovery_blocks_differ_only_in_the_outcome_word(cases: list[dict]) -> N
         assert [r["outcome"] for r in rejected[pair_id]] == ["rejected"]
 
 
+def test_neutral_blocks_differ_from_the_size_relevant_one_only_by_the_tag(
+    cases: list[dict],
+) -> None:
+    """더미 대조군은 `failure_goal_scoped` 와 **오직 태그만** 달라야 한다.
+
+    이 블록의 존재 이유가 "이력 내용이 분량을 움직이는가" 를 가르는 것이라, 범위·횟수·목표
+    중 하나라도 다르면 그 차이가 태그의 효과로 둔갑한다. 1차 실행에서 다섯 이력 블록이
+    내용과 무관하게 +62~+93 으로 몰린 것을 확인하려고 만든 대조라, 여기가 새면 그 확인 자체가
+    무효가 된다.
+    """
+    by_block: dict[str, dict[str, dict]] = {}
+    for case in cases:
+        by_block.setdefault(case["block"], {})[case["pair_id"]] = case
+
+    reference = by_block["failure_goal_scoped"]
+    for block in ("neutral_priority_shift", "neutral_emergency"):
+        assert set(by_block[block]) == set(reference)
+        for pair, case in by_block[block].items():
+            ref = reference[pair]
+            assert case["goal"] == ref["goal"]
+            assert case["history"]["failure_scope"] == ref["history"]["failure_scope"]
+            assert case["history"]["recovery_contexts"] == []
+            assert (
+                case["history"]["consecutive_goal_failures"]
+                == ref["history"]["consecutive_goal_failures"]
+            )
+            rows, ref_rows = case["history"]["failure_contexts"], ref["history"]["failure_contexts"]
+            assert len(rows) == len(ref_rows) == 1
+            assert rows[0]["count"] == ref_rows[0]["count"]
+            # 딱 하나 달라야 하는 것.
+            assert rows[0]["tag_code"] != ref_rows[0]["tag_code"]
+
+
 def test_leak_assertions_actually_have_something_to_catch(cases: list[dict]) -> None:
     """`must_not_contain` == 그 케이스 이력의 라벨 전부.
 

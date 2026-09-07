@@ -222,9 +222,13 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     표본이 아니므로 **분모는 케이스 수**다(M29 가 겪은 함정).
     """
     by_case: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    # 예산 대비 채움율(M42)의 재료 — 요구 분량은 계획이 아니라 **행**에 있다(케이스마다,
+    # 그리고 감쇠 블록에서는 블록마다 다르다).
     for row in rows:
         if row.get("score"):
-            by_case[(row["block"], row["pair_id"])].append(row["score"])
+            by_case[(row["block"], row["pair_id"])].append(
+                {**row["score"], "_asked": float(row.get("total_minutes_asked") or 0) or None}
+            )
 
     def _by_case(field: str) -> dict[tuple[str, str], float]:
         out: dict[tuple[str, str], float] = {}
@@ -246,8 +250,24 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     total_minutes = _by_case("total_minutes")
     mean_minutes = _by_case("mean_minutes")
+
+    # M42 — 요구 예산 대비 채움율. 목표마다 대조군이 남긴 **여유**가 다르고(3%~31%), 1차
+    # 실행에서 처치 델타가 그 여유와 r = 0.92 로 붙었다. 원 분량(M36)만 보면 여유가 큰
+    # 목표의 수치가 블록 평균을 끌고 간다. 감쇠 블록은 요구 예산 자체가 달라 **이 축이
+    # 유일하게 비교 가능한 축**이기도 하다.
+    fill: dict[tuple[str, str], float] = {}
+    for key, scores in by_case.items():
+        vals = [
+            s["total_minutes"] / s["_asked"]
+            for s in scores
+            if s.get("total_minutes") is not None and s.get("_asked")
+        ]
+        if vals:
+            fill[key] = statistics.fmean(vals)
+
     deltas = _deltas(total_minutes)
     length_deltas = _deltas(mean_minutes)
+    fill_deltas = _deltas(fill)
 
     treated = [r for r in rows if r.get("score") and r["block"] != CONTROL_BLOCK]
     with_history = [r for r in treated if r["case"]["assertions"]["must_not_contain"]]
@@ -275,6 +295,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "M36_volume_delta_min": {b: round(statistics.fmean(v), 1) for b, v in deltas.items()},
         "M36_pairs": {b: len(v) for b, v in deltas.items()},
+        "M42_budget_fill_delta": {b: round(statistics.fmean(v), 4) for b, v in fill_deltas.items()},
         "M41_session_length_delta_min": {
             b: round(statistics.fmean(v), 1) for b, v in length_deltas.items()
         },
@@ -362,11 +383,17 @@ async def run_case(
 
 def _print_summary(rows: list[dict[str, Any]]) -> None:
     result = summarize(rows)
-    print("\n[L1-8] M36 총 분량 델타 (분, 대조군 대비 — 짝 단위 평균) / M41 평균 세션 분 델타")
+    print(
+        "\n[L1-8] M36 총 분량 델타(분) / M41 평균 세션 분 / M42 예산 채움율 — 전부 대조군 대비 짝 단위"
+    )
     for block, delta in sorted(result["M36_volume_delta_min"].items()):
         pairs = result["M36_pairs"][block]
         length = result["M41_session_length_delta_min"].get(block, 0.0)
-        print(f"  {block:24s} {delta:+8.1f}  (짝 {pairs})   세션길이 {length:+6.1f}")
+        fill = result["M42_budget_fill_delta"].get(block, 0.0)
+        print(
+            f"  {block:24s} {delta:+8.1f}  (짝 {pairs})   "
+            f"세션길이 {length:+6.1f}   예산채움 {fill:+.1%}"
+        )
     print(f"\n[L1-8] M37 누출률 {result['M37_leak_rate']}  (기대 0)")
     if result["M37_leaks"]:
         print(f"        누출 문구: {result['M37_leaks']}")

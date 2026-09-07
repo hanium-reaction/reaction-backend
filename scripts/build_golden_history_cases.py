@@ -26,6 +26,29 @@
 실패 4회인데 연속 0 은 모순이 아니다 — `compute_consecutive_failure_count` 는 `done` 을
 만나면 리셋하므로, 28일 창에 실패 4건이 흩어져 있고 그 사이에 완주가 있으면 정확히 이 상태다.
 
+## 더미 대조군은 왜 있나 (1차 실행 뒤 신설)
+
+1차 실행(126호출)에서 다섯 이력 블록의 평균 분량 델타가 **+62 · +68 · +84 · +93** 으로
+몰렸다. 그 이력들이 말하는 바는 정반대인데("계획이 컸다" / "축소가 통했다" / "축소를
+거절했다") 거의 같은 크기로 계획을 **키웠다.** 그리고 그 크기는 목표별 **예산 여유**와
+r = 0.92 로 붙어 있었다 — 여유가 3% 인 목표만 음수였다.
+
+가설: 모델이 이력 **내용**이 아니라 **이력 줄이 있다는 사실**에 반응해 예산 천장 쪽으로
+더 채운다. 이걸 가르려면 "이력은 있는데 분량과 무관한" 조건이 필요하다.
+
+`neutral_priority_shift` / `neutral_emergency` 는 `failure_goal_scoped` 와 **오직 태그만**
+다르다(같은 범위·같은 횟수·같은 목표). 둘 다 외부 사정이라 "계획을 줄여라" 를 함의하지
+않는다. 지어낸 문자열이 아니라 마스터 시드 실값을 쓰는 이유는, 가짜 라벨이면 모델이 다른
+이유로 이상하게 읽을 수 있어서다.
+
+읽는 법:
+- 더미도 +60~90 → **내용이 아니라 존재에 반응한다.** 분량 조절은 프롬프트가 아니라 룰의 일이다.
+- 더미는 0 근처, 분량 관련 사유만 움직임 → 내용을 읽긴 하는데 **방향이 반대**다. 프롬프트
+  문구 문제이므로 문구를 고쳐 다시 잰다.
+
+⚠️ 이 설계는 "존재" 와 "프롬프트 길이" 를 가르지 못한다 — 더미도 같은 길이의 한 줄을 더한다.
+둘 중 무엇이든 결론(분량은 룰이 조절해야 한다)은 같아서 이번 스코프에서 분리하지 않았다.
+
 ## 왜 목표가 **빈도를 말하지 않는가** — 안 그러면 감쇠 블록이 아무것도 안 잰다
 
 각 목표는 `weekly_hours`(주당 가용 시간)만 말하고 `frequency_per_week`(주 N회)는 말하지
@@ -104,6 +127,11 @@ BLAME_MARKERS: tuple[str, ...] = ("매번", "자꾸", "또다시")
 # 실패 사유 라벨 — `failure_reason_tags` 시드(d09c105520b5) 실값.
 _PLAN_TOO_BIG = ("PLAN_TOO_BIG", "계획이 너무 컸어요")
 _HARD_TO_START = ("HARD_TO_START", "시작이 어려웠어요")
+# 분량과 **무관한** 실제 사유 — 더미 대조군용. 외부 사정이라 "계획을 줄여라/늘려라" 를
+# 함의하지 않는다. 지어낸 문자열이 아니라 마스터 시드 실값이라 다른 이유로 이상하게
+# 읽힐 위험이 없다.
+_PRIORITY_SHIFT = ("PRIORITY_SHIFT", "더 중요한 일이 생겼어요")
+_EMERGENCY = ("EMERGENCY", "급한 일이 있었어요")
 # 회복 전략 라벨 — `recovery_strategy_catalog` 시드 실값.
 _DOWNSCOPE = ("DOWNSCOPE_DEFAULT", "범위 줄여서 진행")
 
@@ -112,6 +140,8 @@ BLOCKS: tuple[str, ...] = (
     "failure_goal_scoped",
     "failure_user_scoped",
     "failure_hard_to_start",
+    "neutral_priority_shift",
+    "neutral_emergency",
     "recovery_worked",
     "recovery_rejected",
     "damped_density",
@@ -307,6 +337,25 @@ def build_cases() -> list[dict[str, Any]]:
                 notes="착수 실패 — first_step 이 쉬워져야 한다. ⚠️ 사람 라벨 필요(탐색용).",
             )
         )
+        # ── 더미 대조군 2블록 (1차 실행 뒤 신설) ──
+        # `failure_goal_scoped` 와 **오직 태그만** 다르다: 같은 범위(goal), 같은 횟수(4),
+        # 같은 목표. 그래서 두 블록의 차이는 "그 사유가 분량과 관계있는가" 뿐이다.
+        for block, tag in (
+            ("neutral_priority_shift", _PRIORITY_SHIFT),
+            ("neutral_emergency", _EMERGENCY),
+        ):
+            cases.append(
+                _case(
+                    block=block,
+                    goal=goal,
+                    failure_contexts=[_failure(tag, 4)],
+                    failure_scope="goal",
+                    recovery_contexts=[],
+                    consecutive_goal_failures=0,
+                    direction="probe_no_expectation",
+                    notes="분량과 무관한 사유 — 이력 '내용' 이 아니라 '존재' 에 반응하는지 가른다.",
+                )
+            )
         cases.append(
             _case(
                 block="recovery_worked",
