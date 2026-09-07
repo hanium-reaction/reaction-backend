@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from scripts.l1_8_run import CONTROL_BLOCK, plan_text, score_case, summarize
+from scripts.l1_8_run import CONTROL_BLOCK, plan_text, rescore, score_case, summarize
 
 
 def _plan(*items: tuple[str, int, str]) -> dict[str, Any]:
@@ -55,11 +55,77 @@ def test_plan_text_covers_everything_the_user_reads() -> None:
     assert "루트" in text
 
 
+def test_m36_tracks_total_volume_not_session_length() -> None:
+    """M36 은 **총 분량**이다 — 평균 세션 분이 아니다.
+
+    처음엔 평균 세션 분으로 정의했는데, 세션 길이는 사용자가 말한 값이라 프롬프트가 고정하고
+    모델은 길이를 지키며 **개수**를 바꾼다. 그래서 그 정의는 처치에 구조적으로 반응할 수
+    없었다(스모크 실측: 평균 44.8~49.0 으로 붙어 있는데 총량은 450~980 으로 벌어졌다).
+
+    여기서 대조군은 50분 × 2 = 100분, 처치군은 50분 × 1 = 50분이다. **평균은 똑같이 50분**
+    이므로 옛 정의로는 0 이 나오고, 새 정의로는 −50 이 나온다. 두 축을 나란히 확인한다.
+    """
+    rows = [
+        _row(
+            _case(CONTROL_BLOCK, "sqld", must_not_contain=[]), _plan(("a", 50, "s"), ("b", 50, "s"))
+        ),
+        _row(
+            _case("recovery_worked", "sqld", must_not_contain=["범위 줄여서 진행"]),
+            _plan(("c", 50, "s")),
+        ),
+    ]
+    result = summarize(rows)
+    assert result["M36_volume_delta_min"]["recovery_worked"] == -50.0
+    assert result["M41_session_length_delta_min"]["recovery_worked"] == 0.0
+
+
+def test_m39_does_not_count_a_tie_as_evidence() -> None:
+    """동점은 승리가 아니다 — 조용히 사라지지도 않는다.
+
+    처음엔 `>=` 라 두 블록 델타가 똑같아도 만점이 나왔다(스모크에서 실제로 그랬다).
+    "범위 접두어를 읽었다" 는 증거가 0 인데 1.0 을 보고하던 자리다.
+    """
+    tied = [
+        _row(_case(CONTROL_BLOCK, "sqld", must_not_contain=[]), _plan(("a", 100, "s"))),
+        _row(_case("failure_goal_scoped", "sqld", must_not_contain=["x"]), _plan(("b", 90, "s"))),
+        _row(_case("failure_user_scoped", "sqld", must_not_contain=["x"]), _plan(("c", 90, "s"))),
+    ]
+    result = summarize(tied)
+    assert result["M39_scope_sensitivity"] == 0.0
+    assert result["M39_ties"] == 1
+
+
+def test_rescore_recomputes_from_the_saved_plan() -> None:
+    """저장된 옛 채점이 아니라 **계획 원문**으로 다시 채점한다.
+
+    이게 없으면 채점 코드를 고쳐도 옛 원자료에는 영원히 반영되지 않는다 — 원문을 남긴
+    이유(재감사)가 절반만 지켜진다. M36 정의를 바꿨을 때 실제로 집계가 통째로 비었다.
+    """
+    case = _case("recovery_worked", "sqld", must_not_contain=["범위 줄여서 진행"])
+    stale = {
+        "case_id": case["case_id"],
+        "block": case["block"],
+        "pair_id": case["pair_id"],
+        "case": case,
+        "plan": _plan(("a", 40, "s")),
+        "score": {"mean_minutes": 999.0, "sessions": 99, "leaked": [], "blamed": []},
+    }
+    fresh = rescore([stale])[0]["score"]
+    assert fresh["total_minutes"] == 40
+    assert fresh["mean_minutes"] == 40
+    assert fresh["sessions"] == 1
+
+    # 폴백 행(계획 없음)은 손대지 않는다.
+    fallback = {"case_id": "x", "block": "b", "pair_id": "p", "fell_back": True}
+    assert rescore([fallback])[0] == fallback
+
+
 def test_score_case_counts_minutes_and_catches_leaks() -> None:
     case = _case("failure_goal_scoped", "sqld", must_not_contain=["계획이 너무 컸어요"])
     leaked = _plan(("계획이 너무 컸어요 — 이번엔 작게", 30, "시작"))
     score = score_case(case, leaked)
     assert score["mean_minutes"] == 30
+    assert score["total_minutes"] == 30
     assert score["sessions"] == 1
     assert score["leaked"] == ["계획이 너무 컸어요"]
 
