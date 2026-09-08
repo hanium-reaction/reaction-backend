@@ -61,7 +61,10 @@ async def test_run_returns_llm_plan_and_passes_goal_context(
     assert plan.book_query == "해커스 토익 RC 문법 기본서"
     assert plan.video_query == "토익 RC 문법 강의"
     assert plan.material_mix == "both"
-    assert captured["prompt_id"] == "planning/study_method"
+    # ⚠️ 버전까지 박아 비교하지 않는다 — 이 테스트가 검사하려는 건 "어느 프롬프트를
+    # 부르는가"이지 "몇 번 버전인가"가 아니다. 버전 핀 계약은
+    # `tests/test_prompt_version_pins.py` 가 따로 든다.
+    assert captured["prompt_id"].split("@")[0] == "planning/study_method"
     assert captured["module"] == "planning"
     assert captured["variables"]["title"] == "토익 900점 달성"
     assert captured["variables"]["current_level"] == "700점대"

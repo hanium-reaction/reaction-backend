@@ -497,7 +497,14 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
     result = await aiClient.run(
         module="planning",
         schema=GoalDecomposition,
-        prompt_id="planning/goal_decompose",
+        # ⚠️ **버전을 명시한다 — `latest()` 에 맡기지 않는다.**
+        # 버전을 생략하면 registry 가 최신 활성 버전으로 해석한다. 그래서 `goal_decompose.v3.md`
+        # 를 **파일로 만든 것만으로** 프로덕션 분해가 배포 없이 v2 → v3 로 갈아탔다(#466).
+        # 의도된 승격이었지만 승격 자체가 리뷰 대상이 아니었고, 더 나쁘게는 **오프라인 하네스도
+        # 같이 옮겨가** L1-6·L1-7A·M33 의 기준선이 어느 버전에서 나온 값인지 알 수 없게 됐다.
+        # 승격은 이 줄을 고치는 **의도된 변경**이어야 한다.
+        # `tests/test_prompt_version_pins.py` 가 이 계약을 지킨다.
+        prompt_id="planning/goal_decompose@v3",
         fallback=lambda: _rule_decomposition(state),
         timeout=settings.llm_planning_timeout_seconds,
         variables={
