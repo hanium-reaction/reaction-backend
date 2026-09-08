@@ -377,6 +377,10 @@ async def run_case(
         user_id=None,
     )
     row.update(
+        # ⚠️ **어느 프롬프트로 잰 값인지 원자료에 남긴다.** 2026-09-07 에 `goal_decompose`
+        # 가 파일 추가만으로 v2 → v3 로 승격됐는데, 그때까지 원자료에 버전이 없어 기존
+        # 수치가 어느 버전에서 나온 것인지 판별할 수 없었다.
+        prompt_version=result.prompt_version,
         fell_back=result.fell_back,
         reason=result.reason,
         tokens_in=result.tokens_in,

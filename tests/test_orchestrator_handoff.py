@@ -2638,7 +2638,8 @@ async def test_planning_calls_enable_thinking_with_longer_timeout(
     # 이름이 맞는 것을 골라 쓴다 — 이 테스트가 검사하려는 건 버전이 아니라
     # thinking_budget·timeout 이다.
     review_pid = next(p for p in calls if p.startswith("planning/plan_quality"))
-    for pid in ("planning/goal_decompose", review_pid):
+    decompose_pid = next(p for p in calls if p.startswith("planning/goal_decompose"))
+    for pid in (decompose_pid, review_pid):
         assert calls[pid]["thinking_budget"] == settings.llm_planning_thinking_budget
         assert calls[pid]["timeout"] == settings.llm_planning_timeout_seconds
 
