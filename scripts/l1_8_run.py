@@ -76,12 +76,15 @@ def results_path(stamp: str | None = None) -> Path:
     두 실행의 결론이 갈렸다(재현 실패). 원문을 남기는 이유가 재감사인데 덮어쓰면 그 이유가
     사라진다. `--summarize-only` 는 가장 최근 파일을 고른다.
     """
-    return RESULTS_DIR / f"l1_8_results_{stamp}.jsonl" if stamp else RESULTS_DIR / "l1_8_results.jsonl"
+    return (
+        RESULTS_DIR / f"l1_8_results_{stamp}.jsonl" if stamp else RESULTS_DIR / "l1_8_results.jsonl"
+    )
 
 
 def latest_results_path() -> Path | None:
     files = sorted(RESULTS_DIR.glob(RESULTS_GLOB))
     return files[-1] if files else None
+
 
 CONTROL_BLOCK = "no_history"
 
