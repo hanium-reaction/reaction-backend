@@ -123,6 +123,13 @@ jobs:
             echo "  COLUMN_ENCRYPTION_KEY: $(presence "$(get_val COLUMN_ENCRYPTION_KEY)")"
 
             echo ""
+            echo "=== Google Calendar 연결 — 셋 다 있어야 /calendar/connect 가 501 을 벗어난다 ==="
+            # 스위치·redirect_uri 는 비밀이 아니라 원문, client_secret 은 SET/UNSET 만.
+            echo "  GOOGLE_CALENDAR_ENABLED: $(get_val GOOGLE_CALENDAR_ENABLED) (비어 있으면 false)"
+            echo "  GOOGLE_OAUTH_CLIENT_SECRET: $(presence "$(get_val GOOGLE_OAUTH_CLIENT_SECRET)")"
+            echo "  GOOGLE_OAUTH_REDIRECT_URI: $(get_val GOOGLE_OAUTH_REDIRECT_URI) (비어 있으면 postmessage)"
+
+            echo ""
             echo "=== 자료 검색 (ADR-0010, #422) — SET/UNSET 만 ==="
             echo "  ALADIN_TTB_KEY: $(presence "$(get_val ALADIN_TTB_KEY)")"
             echo "  YOUTUBE_API_KEY: $(presence "$(get_val YOUTUBE_API_KEY)")"

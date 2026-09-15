@@ -29,10 +29,26 @@ MVP 스코프: **read-only freebusy**. write-back(`events.insert`)은 P1.
 - **부하 감쇠**(직전 연속 일정 길이 → 그 뒤 슬롯 허용 카드 길이) — ADR-0009 D4 ②.
 - `events.py` — P1. 이 패키지는 아직 쓰기를 모른다.
 
+## 연결 흐름 (FE ↔ BE)
+
+1. FE 가 GIS `google.accounts.oauth2.initCodeClient({ scope: calendar.freebusy, ux_mode: 'popup' })`
+   로 동의 팝업을 띄워 authorization code 를 받는다.
+2. `POST /calendar/connect {code}` — BE 가 `redirect_uri=postmessage` 로 교환한다
+   (`GOOGLE_OAUTH_REDIRECT_URI` 가 비어 있을 때의 기본값). 콘솔에 리디렉션 URI 등록 불필요.
+3. `GET /calendar/connect` 로 상태를 다시 그린다.
+
+켜려면(사람 손): Cloud 콘솔에서 **Calendar API 사용 설정** + 동의 화면에 `calendar.freebusy`
+스코프 추가 + 웹 client 의 **승인된 JavaScript 원본**에 FE 도메인. 서버 `.env` 에
+`GOOGLE_CALENDAR_ENABLED=true` · `GOOGLE_OAUTH_CLIENT_SECRET`. 동의 화면이 **테스트** 상태면
+테스트 사용자만 연결할 수 있고 refresh token 이 7일 뒤 만료된다(그 뒤 재연결 안내로 떨어진다).
+
 ## 규약
 
 - **refresh token 은 최초 동의 때만 온다.** 갱신 응답의 None 을 저장하면 연결이 하루 뒤에
-  조용히 죽는다 — `token_store.save` 가 None 이면 기존 값을 유지한다.
+  조용히 죽는다 — `token_store.save` 가 None 이면 기존 값을 유지한다. 연결(`POST /connect`)
+  에서 안 오면: 살아 있는 연결이 있으면 그 값을 쓰고, 없으면 동의를 회수해 다음 시도가
+  refresh token 을 받게 한다.
+- 동의 화면에서 캘린더 체크를 풀면 교환은 성공하지만 스코프에서 빠진다 — 저장하지 않는다.
 - 권한 박탈 / refresh 실패 → `revoked_at` set + 다음 진입 시 재연결 안내
   (`CALENDAR_NOT_CONNECTED`).
 - 연결 해제는 **우리 DB 를 먼저 확정**하고 원격 회수는 그 뒤에 best-effort. 순서를 뒤집으면
