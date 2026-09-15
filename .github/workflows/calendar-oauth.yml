@@ -27,6 +27,10 @@ name: Google Calendar OAuth (EC2)
 #   확인할 수 없다 — 사용자 토큰이 있어야 드러난다.
 
 on:
+  # TEMP: 머지 전 check 1회 실행용 — 다음 커밋에서 제거한다 (MODE 는 입력이 없으면 check).
+  push:
+    branches: [ci/calendar-oauth-workflow]
+    paths: [.github/workflows/calendar-oauth.yml]
   workflow_dispatch:
     inputs:
       mode:
