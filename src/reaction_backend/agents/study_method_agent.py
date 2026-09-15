@@ -66,7 +66,9 @@ async def run(
     result = await aiClient.run(
         module="planning",
         schema=StudyMethodPlan,
-        prompt_id="planning/study_method",
+        # 버전 명시 — `latest()` 자동 승격을 막는다(`goal_decompose` 가 실제로 겪었다).
+        # `tests/test_prompt_version_pins.py` 참고.
+        prompt_id="planning/study_method@v2",
         fallback=lambda: _rule_plan(goal),
         timeout=settings.llm_timeout_seconds,
         variables=variables,
