@@ -262,10 +262,10 @@ class Settings(BaseSettings):
     # 로그인(id_token)에는 안 쓰이지만 **캘린더 연결에는 필수**다 — authorization code 를
     # 토큰으로 바꾸려면 client_secret 이 있어야 한다 (#17 해제, integrations/google_calendar).
     google_oauth_client_secret: str = ""
-    # 캘린더 동의 후 Google 이 돌려보내는 곳. **Cloud 콘솔의 "승인된 리디렉션 URI" 와
+    # 토큰 교환 때 보내는 redirect_uri. **비어 있으면 `postmessage`** — FE 가 GIS popup 코드
+    # 흐름(initCodeClient)으로 code 를 받을 때의 값이라 콘솔에 등록할 리디렉션 URI 가 없다.
+    # 리디렉션 흐름으로 바꿀 때만 채운다. 그때는 **Cloud 콘솔의 "승인된 리디렉션 URI" 와
     # 문자 단위로 같아야** 한다 — 다르면 토큰 교환이 redirect_uri_mismatch 로 떨어진다.
-    # 클라이언트가 동의 URL 을 만들 때 쓴 값과도 같아야 하므로, 서버가 단일 진실로 들고
-    # 있다가 교환 시 그대로 넣는다.
     google_oauth_redirect_uri: str = ""
     # 캘린더 연결 기능 스위치. False 면 connect/disconnect 가 501 로 남는다 —
     # client_id/secret/redirect_uri 가 준비되기 전에 배포돼도 사용자가 깨진 동의 화면을

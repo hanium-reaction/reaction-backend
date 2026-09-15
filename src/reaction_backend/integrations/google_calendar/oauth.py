@@ -39,6 +39,11 @@ CALENDAR_SCOPE: Final = "https://www.googleapis.com/auth/calendar.freebusy"
 _TOKEN_URL: Final = "https://oauth2.googleapis.com/token"
 _REVOKE_URL: Final = "https://oauth2.googleapis.com/revoke"
 
+#: FE 는 Google Identity Services 의 **popup 코드 흐름**(`initCodeClient`, `ux_mode: 'popup'`)
+#: 으로 code 를 받는다. 그 code 는 리디렉션을 거치지 않아서 교환할 때 redirect_uri 가 이
+#: 리터럴이어야 한다 — Cloud 콘솔에 등록할 리디렉션 URI 가 없다. 설정이 비어 있으면 이 값.
+POPUP_REDIRECT_URI: Final = "postmessage"
+
 # 사용자가 화면 앞에서 기다리는 왕복이라 짧게. 선례: web_fetch/fetcher.py
 _CONNECT_TIMEOUT: Final = 3.0
 _READ_TIMEOUT: Final = 5.0
@@ -57,6 +62,20 @@ class OAuthError(RuntimeError):
         self.reason = reason
         #: True 면 일시적(네트워크·5xx) — 사용자에게 재연결을 요구하지 않는다.
         self.retryable = retryable
+
+
+class MissingRefreshTokenError(OAuthError):
+    """교환은 됐는데 refresh_token 이 없다 — Google 이 이 앱에 대한 동의를 이미 갖고 있을 때.
+
+    Google 은 refresh token 을 **최초 동의 때만** 준다. 이미 연결한 사용자가 다시 연결하거나,
+    해제 때 원격 회수가 실패해 동의가 남아 있으면 이 응답이 온다. 그걸 실패로만 끝내면
+    사용자는 몇 번을 눌러도 같은 422 를 만난다 — 받은 토큰을 들고 올라가서 호출자가
+    "기존 refresh token 재사용" 과 "동의를 회수해 다음 시도를 살리기" 중에 고른다.
+    """
+
+    def __init__(self, bundle: TokenBundle) -> None:
+        super().__init__("no_refresh_token", retryable=False)
+        self.bundle = bundle
 
 
 @dataclass(frozen=True)
@@ -125,9 +144,11 @@ def _raise_for_error(response: requests.Response) -> dict[str, Any]:
 async def exchange_code(code: str, *, redirect_uri: str | None = None) -> TokenBundle:
     """authorization code → 토큰 (최초 연결).
 
-    `access_type=offline` 로 동의를 받아야 refresh_token 이 온다 — 그건 **동의 URL 을
-    만드는 클라이언트 책임**이다. 여기서 refresh_token 이 안 오면 다음 갱신이 불가능하니
-    연결 자체를 실패로 본다(반쯤 된 연결을 저장하면 하루 뒤에 조용히 죽는다).
+    refresh_token 이 안 오면 `MissingRefreshTokenError` 다 — 그대로 저장하면 다음 갱신이
+    불가능해 연결이 하루 뒤에 조용히 죽는다. 기존 연결의 refresh token 을 재사용할 수
+    있는지는 DB 를 아는 호출자가 판단한다.
+
+    redirect_uri 는 설정값, 비어 있으면 `POPUP_REDIRECT_URI` 다.
     """
     cfg = get_settings()
     if not cfg.google_oauth_client_id or not cfg.google_oauth_client_secret:
@@ -139,14 +160,24 @@ async def exchange_code(code: str, *, redirect_uri: str | None = None) -> TokenB
             "code": code,
             "client_id": cfg.google_oauth_client_id,
             "client_secret": cfg.google_oauth_client_secret,
-            "redirect_uri": redirect_uri or cfg.google_oauth_redirect_uri,
+            "redirect_uri": redirect_uri or cfg.google_oauth_redirect_uri or POPUP_REDIRECT_URI,
             "grant_type": "authorization_code",
         },
     )
     bundle = _bundle_from(_raise_for_error(response), fallback_scopes=CALENDAR_SCOPE)
     if bundle.refresh_token is None:
-        raise OAuthError("no_refresh_token", retryable=False)
+        raise MissingRefreshTokenError(bundle)
     return bundle
+
+
+def has_calendar_scope(scopes: str) -> bool:
+    """사용자가 동의 화면에서 캘린더 항목을 **체크했는가.**
+
+    Google 의 세분화 동의는 스코프별 체크박스를 준다 — 캘린더를 해제하고 '계속' 을 눌러도
+    교환은 성공한다. 그걸 연결로 저장하면 매 계획 생성마다 freebusy 가 403 으로 떨어져
+    "캘린더를 불러오지 못했어요" 경고만 반복된다.
+    """
+    return CALENDAR_SCOPE in scopes.split()
 
 
 async def refresh_access_token(refresh_token: str, *, known_scopes: str) -> TokenBundle:

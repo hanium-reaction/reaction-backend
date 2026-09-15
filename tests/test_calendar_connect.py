@@ -264,7 +264,8 @@ async def test_exchange_rejects_a_grant_without_a_refresh_token(
 ) -> None:
     """refresh_token 없이 저장하면 **하루 뒤에 조용히 죽는** 연결이 된다.
 
-    동의 URL 에 `access_type=offline` 이 빠졌을 때 실제로 이런 응답이 온다.
+    Google 이 이 앱에 대한 동의를 이미 갖고 있으면 실제로 이런 응답이 온다. 받은 토큰은
+    예외에 실려 올라간다 — 재사용할지·회수할지는 DB 를 아는 라우터가 고른다.
     """
     settings = get_settings()
     monkeypatch.setattr(settings, "google_oauth_client_id", "cid", raising=False)
@@ -275,9 +276,228 @@ async def test_exchange_rejects_a_grant_without_a_refresh_token(
 
     monkeypatch.setattr(oauth, "_post_async", _no_refresh)
 
-    with pytest.raises(oauth.OAuthError) as exc:
+    with pytest.raises(oauth.MissingRefreshTokenError) as exc:
         await oauth.exchange_code("code")
     assert exc.value.reason == "no_refresh_token"
+    assert exc.value.bundle.access_token == "a"
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [("", "postmessage"), ("https://app.example/callback", "https://app.example/callback")],
+)
+async def test_exchange_uses_the_popup_redirect_uri_unless_configured(
+    monkeypatch: pytest.MonkeyPatch, configured: str, expected: str
+) -> None:
+    """FE 의 GIS popup 코드 흐름은 교환 시 redirect_uri 가 `postmessage` 여야 한다.
+
+    예전엔 설정이 비면 빈 문자열을 그대로 보내 `redirect_uri_mismatch` 로 떨어졌다 —
+    배포에 값 하나를 빠뜨리면 연결 버튼이 영원히 422 였다.
+    """
+    settings = get_settings()
+    monkeypatch.setattr(settings, "google_oauth_client_id", "cid", raising=False)
+    monkeypatch.setattr(settings, "google_oauth_client_secret", "secret", raising=False)
+    monkeypatch.setattr(settings, "google_oauth_redirect_uri", configured, raising=False)
+    sent: dict[str, str] = {}
+
+    async def _capture(url: str, data: dict[str, str]) -> Any:
+        sent.update(data)
+        return _FakeResponse(200, {"access_token": "a", "refresh_token": "r", "expires_in": 60})
+
+    monkeypatch.setattr(oauth, "_post_async", _capture)
+
+    await oauth.exchange_code("code")
+
+    assert sent["redirect_uri"] == expected
+
+
+def test_calendar_scope_must_be_among_the_granted_scopes() -> None:
+    """세분화 동의에서 캘린더 체크를 풀면 교환은 성공하지만 스코프에서 빠진다."""
+    assert oauth.has_calendar_scope(f"openid {oauth.CALENDAR_SCOPE} email")
+    assert not oauth.has_calendar_scope("openid email profile")
+    assert not oauth.has_calendar_scope("")
+
+
+# ── 라우터: 상태 조회 · 재연결 ────────────────────────────────────────────
+
+
+class _LiveConn:
+    provider = "google"
+    revoked_at = None
+    scopes = oauth.CALENDAR_SCOPE
+
+
+def test_status_without_a_connection_is_not_connected(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """연결 안 함은 오류가 아니라 이 화면의 기본 상태다 — 404 가 아니라 `connected: false`."""
+    _enable(monkeypatch)
+
+    response = client.get("/calendar/connect")
+
+    assert response.status_code == 200
+    assert response.json() == {"provider": "google", "connected": False, "scopes": []}
+
+
+def test_status_reports_a_live_connection(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable(monkeypatch)
+
+    async def _active(session: Any, *, user_id: uuid.UUID) -> Any:
+        return _LiveConn()
+
+    monkeypatch.setattr(token_store, "get_active", _active)
+
+    response = client.get("/calendar/connect")
+
+    assert response.status_code == 200
+    assert response.json()["connected"] is True
+    assert response.json()["scopes"] == [oauth.CALENDAR_SCOPE]
+
+
+def _stub_missing_refresh(monkeypatch: pytest.MonkeyPatch, scopes: str | None = None) -> None:
+    async def _exchange(code: str, *, redirect_uri: str | None = None) -> oauth.TokenBundle:
+        raise oauth.MissingRefreshTokenError(
+            _bundle(access="fresh-access", refresh=None, scopes=scopes)
+        )
+
+    monkeypatch.setattr(oauth, "exchange_code", _exchange)
+
+
+def test_reconnect_without_a_refresh_token_keeps_the_live_connection(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """이미 연결한 사용자가 다시 누르면 Google 은 refresh token 을 안 준다.
+
+    예전엔 그게 곧 422 였다 — **연결돼 있는 사용자가 연결 버튼을 누르면 실패**했다.
+    살아 있는 연결이 있으면 그 refresh token 을 그대로 쓴다.
+    """
+    _enable(monkeypatch)
+    _stub_missing_refresh(monkeypatch)
+    saved: list[oauth.TokenBundle] = []
+    revoked: list[str] = []
+
+    async def _active(session: Any, *, user_id: uuid.UUID) -> Any:
+        return _LiveConn()
+
+    async def _save(session: Any, *, user_id: uuid.UUID, bundle: oauth.TokenBundle) -> Any:
+        saved.append(bundle)
+        return _LiveConn()
+
+    async def _revoke(token: str) -> None:
+        revoked.append(token)
+
+    monkeypatch.setattr(token_store, "get_active", _active)
+    monkeypatch.setattr(token_store, "save", _save)
+    monkeypatch.setattr(oauth, "revoke", _revoke)
+
+    response = client.post("/calendar/connect", json={"code": "again"})
+
+    assert response.status_code == 200
+    assert response.json()["connected"] is True
+    assert [b.access_token for b in saved] == ["fresh-access"]
+    assert saved[0].refresh_token is None  # token_store.save 가 기존 값을 유지한다
+    assert revoked == []
+
+
+def test_missing_refresh_token_without_a_connection_revokes_so_the_retry_succeeds(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """재사용할 refresh token 도 없으면 동의를 회수한다 — 다음 시도가 최초 동의가 되게.
+
+    회수하지 않으면 Google 은 계속 동의가 있다고 보고 refresh token 을 안 준다. 사용자는
+    몇 번을 눌러도 같은 422 를 만난다 (해제 때 원격 회수가 실패한 사용자가 이 경우다).
+    """
+    _enable(monkeypatch)
+    _stub_missing_refresh(monkeypatch)
+    saved: list[oauth.TokenBundle] = []
+    revoked: list[str] = []
+
+    async def _save(session: Any, *, user_id: uuid.UUID, bundle: oauth.TokenBundle) -> Any:
+        saved.append(bundle)
+        return _LiveConn()
+
+    async def _revoke(token: str) -> None:
+        revoked.append(token)
+
+    monkeypatch.setattr(token_store, "save", _save)
+    monkeypatch.setattr(oauth, "revoke", _revoke)
+
+    response = client.post("/calendar/connect", json={"code": "stale-grant"})
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "COMMON_VALIDATION_ERROR"
+    assert revoked == ["fresh-access"]
+    assert saved == [], "갱신할 수 없는 연결을 저장했다"
+
+
+def test_connect_refuses_when_the_calendar_box_was_unchecked(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """스코프 없이 저장하면 매 계획마다 403 → '캘린더를 불러오지 못했어요' 경고만 반복된다."""
+    _enable(monkeypatch)
+    saved: list[oauth.TokenBundle] = []
+
+    async def _exchange(code: str, *, redirect_uri: str | None = None) -> oauth.TokenBundle:
+        return _bundle(scopes="openid email profile")
+
+    async def _save(session: Any, *, user_id: uuid.UUID, bundle: oauth.TokenBundle) -> Any:
+        saved.append(bundle)
+        return _LiveConn()
+
+    monkeypatch.setattr(oauth, "exchange_code", _exchange)
+    monkeypatch.setattr(token_store, "save", _save)
+
+    response = client.post("/calendar/connect", json={"code": "unchecked"})
+
+    assert response.status_code == 422
+    assert "캘린더 권한" in response.json()["message"]
+    assert saved == []
+
+
+def test_unchecked_calendar_box_is_not_revoked_even_without_a_refresh_token(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """체크만 풀었던 사용자의 동의를 회수하면 안 된다 — 스코프 판정이 회수보다 먼저다."""
+    _enable(monkeypatch)
+    _stub_missing_refresh(monkeypatch, scopes="openid email profile")
+    revoked: list[str] = []
+
+    async def _revoke(token: str) -> None:
+        revoked.append(token)
+
+    monkeypatch.setattr(oauth, "revoke", _revoke)
+
+    response = client.post("/calendar/connect", json={"code": "unchecked-again"})
+
+    assert response.status_code == 422
+    assert "캘린더 권한" in response.json()["message"]
+    assert revoked == []
+
+
+def test_connect_stores_the_connection_and_commits(
+    client: Any, monkeypatch: pytest.MonkeyPatch, fake_sessions: list[Any]
+) -> None:
+    """happy path — 저장만 하고 commit 을 빠뜨리면 요청이 끝나며 연결이 사라진다."""
+    _enable(monkeypatch)
+
+    async def _exchange(code: str, *, redirect_uri: str | None = None) -> oauth.TokenBundle:
+        return _bundle()
+
+    async def _save(session: Any, *, user_id: uuid.UUID, bundle: oauth.TokenBundle) -> Any:
+        return _LiveConn()
+
+    monkeypatch.setattr(oauth, "exchange_code", _exchange)
+    monkeypatch.setattr(token_store, "save", _save)
+
+    response = client.post("/calendar/connect", json={"code": "fresh"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "provider": "google",
+        "connected": True,
+        "scopes": [oauth.CALENDAR_SCOPE],
+    }
+    assert sum(s.commit_count for s in fake_sessions) == 1
 
 
 async def test_revoke_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
