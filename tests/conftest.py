@@ -1333,15 +1333,29 @@ class FakeRecoveryRepo:
         return [e.completion_status for e in rows[:limit]]
 
     async def list_recovery_decisions(self, user_id: UUID, *, limit: int = 20) -> list[str]:
-        rows = [
-            a
-            for a in self._attempts.values()
-            if a.user_id == user_id and a.user_decision != "pending"
-        ]
-        rows.sort(
-            key=lambda a: a.recovery_decided_at or datetime.min.replace(tzinfo=UTC), reverse=True
+        """실 repo 와 같은 의미 — 카드 행이 아니라 `(execution_id, decided_at)` 결정 1회당 1건.
+
+        대표값 우선순위(채택 > skipped > rejected)도 실 SQL 과 같다(#479). fake 가 행을
+        그대로 세면 라우터 테스트가 버그 난 의미를 정답으로 굳힌다.
+        """
+        events: dict[tuple[UUID, datetime | None], str] = {}
+        precedence = {"accepted": 0, "edited": 0, "skipped": 1, "rejected": 2}
+        for a in self._attempts.values():
+            if a.user_id != user_id or a.user_decision == "pending":
+                continue
+            key = (a.execution_id, a.recovery_decided_at)
+            current = events.get(key)
+            if current is None or (precedence[a.user_decision], a.user_decision) < (
+                precedence[current],
+                current,
+            ):
+                events[key] = a.user_decision
+        ordered = sorted(
+            events.items(),
+            key=lambda item: (item[0][1] or datetime.min.replace(tzinfo=UTC), str(item[0][0])),
+            reverse=True,
         )
-        return [a.user_decision for a in rows[:limit]]
+        return [decision for _, decision in ordered[:limit]]
 
     async def list_active_strategies(self) -> list[RecoveryStrategyCatalog]:
         return sorted(

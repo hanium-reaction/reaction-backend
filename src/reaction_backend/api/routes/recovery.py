@@ -573,7 +573,12 @@ def _adopt(
 def _reject_siblings(
     pending: list[RecoveryAttempt], target: RecoveryAttempt, decided_at: datetime
 ) -> list[str]:
-    """수락 카드를 뺀 나머지 pending 을 rejected 로 — 같은 그룹 동시 노출 1카드 규칙의 뒷면."""
+    """수락 카드를 뺀 나머지 pending 을 rejected 로 — 같은 그룹 동시 노출 1카드 규칙의 뒷면.
+
+    ⚠️ 형제에게도 수락 카드와 **같은 `decided_at`** 을 쓴다 — 에스컬레이션은
+    `(execution_id, recovery_decided_at)` 을 결정 1회로 묶어 센다(`list_recovery_decisions`,
+    #479). 카드마다 다른 시각을 쓰면 수락 한 번이 거절 여러 번으로 읽힌다.
+    """
     rejected: list[str] = []
     for sibling in pending:
         if sibling.id == target.id:
@@ -587,7 +592,11 @@ def _reject_siblings(
 def _skip_all(
     pending: list[RecoveryAttempt], decision_reason: str | None, decided_at: datetime
 ) -> list[str]:
-    """'오늘은 쉬기' — 모든 pending 카드를 skipped 로."""
+    """'오늘은 쉬기' — 모든 pending 카드를 skipped 로.
+
+    카드가 몇 장이든 사용자의 「나중에」는 한 번이다 — 전부 같은 `decided_at` 을 써야
+    에스컬레이션이 1회로 센다(`_reject_siblings` 와 같은 이유, #479).
+    """
     skipped: list[str] = []
     for sibling in pending:
         sibling.user_decision = "skipped"
