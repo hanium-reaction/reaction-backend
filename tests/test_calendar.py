@@ -17,6 +17,13 @@ def test_connect_returns_501_while_disabled(client: TestClient) -> None:
     assert resp.json()["code"] == "COMMON_NOT_IMPLEMENTED"
 
 
+def test_connection_status_returns_501_while_disabled(client: TestClient) -> None:
+    """상태 조회도 같은 스위치 — FE 는 501 을 보고 '준비 중' 을 그린다."""
+    resp = client.get("/calendar/connect")
+    assert resp.status_code == 501
+    assert resp.json()["code"] == "COMMON_NOT_IMPLEMENTED"
+
+
 def test_connect_rejects_empty_code(client: TestClient) -> None:
     """Pydantic Field min_length=1 — 본문 검증이 라우터 진입 전에 422."""
     resp = client.post("/calendar/connect", json={"code": ""})

@@ -604,7 +604,8 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 
 | Method | Path | 설명 |
 | --- | --- | --- |
-| POST | `/calendar/connect` | OAuth code → 토큰 암호화 저장. **멱등** — 재연결은 새 행이 아니라 기존 연결 갱신. 응답 `{provider, connected, scopes}`. code 가 만료·재사용이면 422 `COMMON_VALIDATION_ERROR` |
+| GET | `/calendar/connect` | 연결 상태. 응답 `{provider, connected, scopes}` — 연결이 없으면 404 가 아니라 `connected: false`, `scopes: []`. 스위치가 꺼져 있으면 501(FE 는 '준비 중') |
+| POST | `/calendar/connect` | OAuth code → 토큰 암호화 저장. **멱등** — 재연결은 새 행이 아니라 기존 연결 갱신. 응답 `{provider, connected, scopes}`. code 는 GIS popup 코드 흐름(`initCodeClient`, 스코프 `calendar.freebusy`)으로 받는다 — 서버가 `redirect_uri=postmessage` 로 교환한다. code 가 만료·재사용이거나, 동의 화면에서 **캘린더 체크를 풀었으면** 422 `COMMON_VALIDATION_ERROR` |
 | DELETE | `/calendar/connect` | 연결 해제 — `revoked_at` soft delete + Google 권한 회수(best-effort). **204, 멱등** — 연결이 없어도 204 다 |
 | GET | `/calendar/freebusy?from=&to=` | read-only freebusy. `from`/`to` 는 **KST 날짜**(`YYYY-MM-DD`), 양끝 포함, 최대 60일. 연결 없으면 404 `CALENDAR_NOT_CONNECTED`(빈 목록이 **아니다** — "일정 없음" 과 구분돼야 한다), Google 실패는 502. 범위 오류는 422 |
 | POST | `/calendar/sync-preview` | 계획 → 캘린더 이벤트 미리보기 + 충돌 체크 |

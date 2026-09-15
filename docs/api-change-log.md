@@ -7,6 +7,47 @@
 
 ---
 
+## v2.24 — 2026-09-15 (캘린더 연결이 실제로 끝까지 이어진다)
+
+**additive — `GET /calendar/connect`(연결 상태) 신설. `POST /calendar/connect` 동작 보정.**
+응답 스키마 무변경. 마이그레이션 없음. 새 에러 코드 없음.
+
+### 무엇이 잘못됐었나
+
+v2.14 로 connect/freebusy 가 실구현이 됐지만 사용자 손에서는 연결이 끝나지 않았다.
+
+- **상태를 물을 곳이 없었다.** FE 는 '연결하기' 와 '연결됨 · 해제' 중 무엇을 그릴지 알 수 없었다.
+- **redirect_uri 가 비면 빈 문자열을 그대로 보냈다.** FE 가 쓸 수 있는 흐름(GIS popup 코드
+  흐름)은 교환 시 `postmessage` 여야 하는데, 설정이 비어 있으면 `redirect_uri_mismatch` 로
+  매번 422 였다.
+- **이미 동의한 사용자는 영원히 422 였다.** Google 은 refresh token 을 최초 동의 때만 준다.
+  연결된 사용자가 다시 누르거나, 해제 때 원격 회수가 실패해 동의가 남은 사용자가 다시
+  연결하면 refresh token 없는 응답이 오고, 서버는 그걸 무조건 실패로 봤다.
+- **캘린더 체크를 풀고 동의해도 연결로 저장했다.** Google 의 세분화 동의는 스코프별
+  체크박스를 준다. 그렇게 저장된 연결은 매 계획마다 freebusy 403 → "캘린더를 불러오지
+  못했어요" 경고만 반복한다.
+
+### 이제
+
+- `GET /calendar/connect` → `{provider, connected, scopes}`. 연결이 없으면 404 가 아니라
+  `connected: false` — "아직 연결 안 함" 은 이 화면의 기본 상태다. 스위치 OFF 면 501.
+- `GOOGLE_OAUTH_REDIRECT_URI` 가 비어 있으면 `postmessage` 로 교환한다. **콘솔에 리디렉션 URI
+  를 등록할 필요가 없다.**
+- refresh token 없는 응답:
+  - 살아 있는 연결이 있으면 → 그 refresh token 을 유지하고 **200**.
+  - 없으면 → 방금 받은 토큰으로 동의를 회수(best-effort)하고 **422**. 다음 시도는 최초 동의가
+    되어 refresh token 이 온다. 사용자는 한 번 더 누르면 된다.
+- 받은 스코프에 `calendar.freebusy` 가 없으면 저장하지 않고 **422**(체크해 달라는 안내).
+  이 경우엔 회수하지 않는다 — 사용자가 준 다른 권한까지 걷어낼 이유가 없다.
+
+### 배포에서 해야 할 일 (사람 손)
+
+스위치는 여전히 기본 OFF 다. 켜려면 인스턴스 `.env` 에 `GOOGLE_CALENDAR_ENABLED=true` +
+`GOOGLE_OAUTH_CLIENT_SECRET` 이 필요하고, Cloud 콘솔에서 Calendar API 사용 설정과 동의 화면
+스코프(`calendar.freebusy`) 추가가 필요하다. `env-check.yml` 이 세 값의 SET/UNSET 을 보여준다.
+
+---
+
 ## v2.23 — 2026-09-04 (계획을 세울 목표를 `goalId` 로 명시할 수 있다, #398)
 
 **additive — `POST /plans/generate` 에 `goalId`(선택).** 안 보내면 동작 무변경. 마이그레이션

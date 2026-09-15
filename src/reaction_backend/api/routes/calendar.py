@@ -74,6 +74,10 @@ def _connect_failed(reason: str) -> ApiError:
     )
 
 
+def _connection_response(connected: bool, scopes: str = "") -> CalendarConnection:
+    return CalendarConnection(provider="google", connected=connected, scopes=scopes.split())
+
+
 def _parse_range(from_: str, to: str) -> tuple[date, date]:
     """`from`/`to`(KST 날짜) 파싱 + 범위 검증.
 
@@ -104,6 +108,21 @@ def _parse_range(from_: str, to: str) -> tuple[date, date]:
     return start_day, end_day
 
 
+@router.get("/connect")
+async def get_calendar_connection(user: CurrentUser, session: SessionDep) -> CalendarConnection:
+    """연결 상태 — FE 가 '연결하기' 와 '연결됨 · 해제' 중 무엇을 그릴지 정한다.
+
+    연결이 없으면 404 가 아니라 `connected: false` 다. "아직 연결 안 함" 은 오류가 아니라
+    이 화면의 기본 상태다. 기능이 꺼져 있으면 connect 와 똑같이 501 — FE 는 그걸 보고
+    '준비 중' 을 그린다.
+    """
+    _require_enabled()
+    connection = await token_store.get_active(session, user_id=user.id)
+    if connection is None:
+        return _connection_response(False)
+    return _connection_response(True, connection.scopes)
+
+
 @router.post("/connect")
 async def connect_calendar(
     body: CalendarConnectRequest, user: CurrentUser, session: SessionDep
@@ -116,17 +135,38 @@ async def connect_calendar(
     _require_enabled()
     try:
         bundle = await oauth.exchange_code(body.code)
+    except oauth.MissingRefreshTokenError as exc:
+        # Google 이 동의를 이미 갖고 있어 refresh token 을 다시 주지 않았다 — 아래에서 판단.
+        bundle = exc.bundle
     except oauth.OAuthError as exc:
         logger.info("calendar_connect_failed", extra={"reason": exc.reason})
         raise _connect_failed(exc.reason) from exc
 
+    # 스코프를 먼저 본다 — 체크만 풀었던 사용자의 동의를 아래에서 회수하면 안 된다.
+    if not oauth.has_calendar_scope(bundle.scopes):
+        # 동의 화면에서 캘린더 체크를 풀었다. 저장하지 않는다 — 회수도 하지 않는다
+        # (사용자가 준 다른 권한까지 걷어낼 이유가 없다).
+        logger.info("calendar_connect_failed", extra={"reason": "scope_not_granted"})
+        raise ApiError(
+            ErrorCode.COMMON_VALIDATION_ERROR,
+            "캘린더 권한이 허용되지 않았어요. 연결할 때 캘린더 항목을 체크해 주세요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+        )
+
+    if bundle.refresh_token is None and (
+        await token_store.get_active(session, user_id=user.id) is None
+    ):
+        # 재사용할 refresh token 도 없다 — 이대로면 몇 번을 눌러도 같은 응답이 온다.
+        # 방금 받은 토큰으로 동의를 회수해 두면 **다음 시도**는 최초 동의가 되어
+        # refresh token 이 온다. 회수는 best-effort 라 여기서 던지지 않는다.
+        # (살아 있는 연결이 있으면 그 refresh token 을 쓴다 — `token_store.save` 가 유지한다.)
+        logger.info("calendar_connect_failed", extra={"reason": "no_refresh_token"})
+        await oauth.revoke(bundle.access_token)
+        raise _connect_failed("no_refresh_token")
+
     connection = await token_store.save(session, user_id=user.id, bundle=bundle)
     await session.commit()
-    return CalendarConnection(
-        provider=connection.provider,
-        connected=True,
-        scopes=connection.scopes.split(),
-    )
+    return _connection_response(True, connection.scopes)
 
 
 @router.delete("/connect", status_code=status.HTTP_204_NO_CONTENT)
