@@ -24,14 +24,15 @@ _PROMPTS = _SRC / "prompts"
 
 # 배선하지 않는 것이 **설계인** 프롬프트. 새로 넣을 때는 이유를 여기 적는다.
 _INTENTIONALLY_UNWIRED = {
-    # 평가 하네스 전용(`scripts/l1_7b_v4_run.py`). 프로덕션 ④층은 `plan_quality` 를 부른다.
-    # ⚠️ 이름이 `plan_quality` 가 아닌 것이 **프로덕션 자동 승격을 막는 유일한 장치**다 —
-    # 레지스트리가 버전 없이 부르면 같은 이름 중 가장 높은 번호를 고르기 때문이다.
+    # 평가 하네스 전용(`scripts/l1_7b_v4_run.py`). 프로덕션 ④층은 `plan_quality@v3` 을 부른다.
+    # 이름을 따로 두는 건 후보 파일이 **프로덕션 프롬프트 계열 자체에 섞이지 않게** 하는 방어다.
+    # 프로덕션 승격을 막는 건 호출부의 `@vN` 핀이고(`tests/test_prompt_version_pins.py` 가
+    # 지킨다), 승격하려면 그 핀을 의도적으로 고쳐야 한다.
     "planning/plan_quality_eval",
     # 평가 하네스 전용(`scripts/l1_8_run.py --prompt-id`). 프로덕션 ②층은
-    # `goal_decompose` 를 부른다 — 이름이 다른 것이 **자동 승격을 막는 유일한 장치**다
-    # (`goal_decompose` 는 버전 없이 호출돼 같은 이름 중 가장 높은 번호를 고른다).
-    # 분량 자기 점검 지시의 A/B 후보. 채택되면 `goal_decompose.v4.md` 로 옮긴다.
+    # `goal_decompose@v3` 을 부른다 — 위와 같다: 이름이 다른 건 후보가 프로덕션 계열에 섞이지
+    # 않게 하는 방어이고, 승격은 호출부 핀을 고치는 의도된 변경이다(#477).
+    # 분량 자기 점검 지시의 A/B 후보. 채택되면 `goal_decompose.v4.md` 로 옮기고 핀을 올린다.
     "planning/goal_decompose_eval",
 }
 
