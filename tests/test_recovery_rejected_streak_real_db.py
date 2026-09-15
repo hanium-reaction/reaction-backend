@@ -56,10 +56,11 @@ from tests.conftest import DB_AVAILABLE
 pytestmark = pytest.mark.skipif(not DB_AVAILABLE, reason="DATABASE_URL not set")
 
 # 마이그레이션이 시드한 실 카탈로그에서 세트 크기를 정하는 태그 조합 — 그룹당 1장이라 매칭된
-# 그룹 수가 곧 카드 수다(2장 미만이면 패딩으로 2장).
+# 그룹 수가 곧 카드 수다(2장 미만이면 패딩으로 2장). 실패 태그 API 가 최대 2개라 전부
+# 사용자가 실제로 만들 수 있는 조합으로 둔다.
 _TWO_CARDS = ["TIME_SHORTAGE"]  # RESCHEDULE + 패딩 DOWNSCOPE
 _THREE_CARDS = ["TIME_SHORTAGE", "PRIORITY_SHIFT"]  # RESCHEDULE · CARRY_OVER · PARK
-_FOUR_CARDS = ["AMBIGUITY", "TIME_SHORTAGE", "PRIORITY_SHIFT"]  # + DOWNSCOPE
+_FOUR_CARDS = ["FATIGUE", "PRIORITY_SHIFT"]  # DOWNSCOPE · RESCHEDULE · CARRY_OVER · PARK
 
 
 @pytest.fixture
