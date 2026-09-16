@@ -101,7 +101,12 @@ def compute_consecutive_failure_count(outcomes_most_recent_first: list[Execution
 def compute_recovery_rejected_streak(
     decisions_most_recent_first: list[RecoveryDecisionOutcome],
 ) -> int:
-    """§5.1: `rejected`/`skipped` 증가, `accepted`/`edited` 만나면 리셋(더 안 본다)."""
+    """§5.1: `rejected`/`skipped` 증가, `accepted`/`edited` 만나면 리셋(더 안 본다).
+
+    ⚠️ 입력 한 원소는 **카드 한 장이 아니라 회복 결정 한 번**이다. 한 세트의 카드는 한 번의
+    결정으로 함께 닫히므로, 카드 행을 그대로 넘기면 「나중에」 한 번이 카드 수만큼 센다(#479).
+    결정 단위로 접는 건 `RecoveryRepo.list_recovery_decisions` 의 몫이다.
+    """
     count = 0
     for decision in decisions_most_recent_first:
         if decision in ("accepted", "edited"):

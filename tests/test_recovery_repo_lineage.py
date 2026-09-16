@@ -793,6 +793,13 @@ async def test_recovery_decisions_ordered_most_recent_first_and_excludes_pending
 async def test_recovery_decisions_wires_into_escalation_state_as_l3_at_the_threshold(
     real_db_session: AsyncSession,
 ) -> None:
+    """결정 **서로 다른 두 번**이 문턱이다.
+
+    ⚠️ 예전 이 테스트는 같은 실행·같은 `recovery_decided_at` 의 rejected 행 2개로 L3 를
+    기대했다 — 그건 **한 번의 결정**이 카드 2장을 닫은 모양이고, 바로 그 해석이 첫 「나중에」
+    만으로 L3 에 들어가던 결함이었다(#479). 결정 1회 = 1건은
+    `tests/test_recovery_rejected_streak_real_db.py` 가 라우트까지 태워 고정한다.
+    """
     repo = RecoveryRepo(real_db_session)
     user_id = await _seed_user(real_db_session)
     action_item_id = await _seed_action_item(real_db_session, user_id=user_id)
@@ -803,13 +810,13 @@ async def test_recovery_decisions_wires_into_escalation_state_as_l3_at_the_thres
         completion_status="failed",
         plan_start_at=_BASE_AT,
     )
-    for _ in range(L3_REJECTED_STREAK_THRESHOLD):
+    for i in range(L3_REJECTED_STREAK_THRESHOLD):
         await _seed_recovery_attempt(
             real_db_session,
             user_id=user_id,
             execution_id=exec_id,
             recovery_result="pending",
-            recovery_decided_at=_BASE_AT,
+            recovery_decided_at=_BASE_AT + timedelta(hours=i),
             user_decision="rejected",
         )
 

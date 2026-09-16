@@ -287,14 +287,52 @@ class RecoveryRepo:
 
         `list_recovery_results`(abandoned_streak)와 같은 스코프 — 카드/goal 무관,
         이 사용자의 **회복 결정 전체**에서 본다. `pending`(아직 결정 안 됨)은 제외.
+
+        ⚠️ **카드 행이 아니라 결정 1회당 1건을 돌려준다** (#479). 결정 한 번은 그 실행의
+        pending 카드 **전부**를 같은 `recovery_decided_at` 으로 닫는다 — 「나중에」는 2~4장을
+        전부 `skipped` 로, 수락은 고른 카드 + 형제들을 `rejected` 로(`_skip_all`/
+        `_reject_siblings`/`expire_undecided`). 예전엔 행을 그대로 세서 2장 세트를 **한 번**
+        미룬 것이 streak 2 가 됐고, 첫 「나중에」 만으로 L3 재협상에 들어갔다. 수락도 같은
+        시각의 형제 `rejected` 와 동점이라, 정렬이 형제를 먼저 내놓으면 수락한 사용자가
+        rejected streak 로 읽힐 수 있었다.
+
+        결정 1회의 키는 `(execution_id, recovery_decided_at)` 이다 — 한 번의 결정 처리가
+        같은 `decided_at` 값을 모든 카드에 쓰므로 마이크로초까지 같고, 같은 실행의 **다음**
+        결정(재생성된 새 세트)은 다른 시각이다. `execution_id` 까지 묶는 이유는 만료 cron 이
+        여러 실행을 한 시각으로 한꺼번에 닫기 때문이다 — 그건 실행마다 따로 방치된 결정이다.
+        대표값은 `accepted`/`edited` > `skipped` > `rejected` — 채택이 있으면 형제의 자동
+        `rejected` 는 사용자의 거절이 아니다. 대표값·결과 순서는 DB 반환 순서와 무관하게 정해진다.
         """
-        stmt = (
-            select(RecoveryAttempt.user_decision)
+        precedence = case(
+            (RecoveryAttempt.user_decision.in_(ADOPTED_DECISION_VALUES), 0),
+            (RecoveryAttempt.user_decision == "skipped", 1),
+            else_=2,
+        )
+        events = (
+            select(
+                RecoveryAttempt.user_decision.label("decision"),
+                RecoveryAttempt.execution_id.label("execution_id"),
+                RecoveryAttempt.recovery_decided_at.label("decided_at"),
+                func.row_number()
+                .over(
+                    partition_by=(
+                        RecoveryAttempt.execution_id,
+                        RecoveryAttempt.recovery_decided_at,
+                    ),
+                    order_by=(precedence, RecoveryAttempt.user_decision),
+                )
+                .label("rank_in_event"),
+            )
             .where(
                 RecoveryAttempt.user_id == user_id,
                 RecoveryAttempt.user_decision != "pending",
             )
-            .order_by(RecoveryAttempt.recovery_decided_at.desc())
+            .subquery()
+        )
+        stmt = (
+            select(events.c.decision)
+            .where(events.c.rank_in_event == 1)
+            .order_by(events.c.decided_at.desc(), events.c.execution_id.desc())
             .limit(limit)
         )
         result = await self._session.execute(stmt)
