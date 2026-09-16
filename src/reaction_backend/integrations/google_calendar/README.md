@@ -39,7 +39,10 @@ MVP 스코프: **read-only freebusy**. write-back(`events.insert`)은 P1.
 
 켜려면(사람 손): Cloud 콘솔에서 **Calendar API 사용 설정** + 동의 화면에 `calendar.freebusy`
 스코프 추가 + 웹 client 의 **승인된 JavaScript 원본**에 FE 도메인. 서버 `.env` 에
-`GOOGLE_CALENDAR_ENABLED=true` · `GOOGLE_OAUTH_CLIENT_SECRET`. 동의 화면이 **테스트** 상태면
+`GOOGLE_CALENDAR_ENABLED=true` · `GOOGLE_OAUTH_CLIENT_SECRET` — 손으로 넣지 말고
+`calendar-oauth.yml` 을 쓴다: `mode=check` 가 GitHub secret(`STAGING_GOOGLE_OAUTH_CLIENT_SECRET`)
+을 값 노출 없이 라이브 client_id 와 대조하고(`invalid_grant`=짝 맞음 · `invalid_client`=틀림),
+`mode=enable` 이 통과 시에만 `.env` 에 기록·재기동, `mode=disable` 이 롤백. 동의 화면이 **테스트** 상태면
 테스트 사용자만 연결할 수 있고 refresh token 이 7일 뒤 만료된다(그 뒤 재연결 안내로 떨어진다).
 
 ## 규약
