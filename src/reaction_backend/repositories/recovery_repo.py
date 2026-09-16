@@ -119,6 +119,41 @@ class RecoveryRepo:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_execution_for_update(
+        self, user_id: UUID, execution_id: UUID
+    ) -> ExecutionEvent | None:
+        """회복 카드를 **만드는** 경로가 쓰는 잠금 읽기 — 같은 실행의 생성을 직렬화한다 (#481).
+
+        `generate` 는 "pending 이 있으면 그대로 반환" 이라는 멱등 계약을 갖지만, 그 계약이
+        **순차 호출에서만** 성립했다. 동시 요청 둘은 pending 조회를 나란히 통과한 뒤 각자
+        LLM 을 부르고 각자 세트를 INSERT 한다 — 실측(2026-09-16, main 358b231): 동시 2회 →
+        세트 2벌·LLM 2회, 동시 3회 → 3벌·3회. 오류는 안 난다(막을 제약이 없다).
+        브라우저에서도 dev StrictMode 재진입으로 pending 6행이 만들어졌고, prod 에서도
+        더블탭·여러 탭·재시도로 같은 교차가 난다.
+
+        그래서 **실행 행을 트랜잭션 동안 잠근다.** 뒤따르는 요청은 첫 트랜잭션이 커밋될
+        때까지 기다렸다가 pending 을 **다시 조회**해 그 세트를 그대로 반환한다
+        (serialize → re-check → reuse). 동시 요청에 새 409 를 만들지 않는 이유가 이것이다 —
+        사용자는 같은 세트를 받으면 되고, 회복 LLM 은 수 초가 걸려 짧은 타임아웃 잠금이면
+        정상 요청까지 실패로 만든다.
+
+        잠금 단위는 **실행 1건**이다. 같은 사용자의 다른 실패 실행은 서로 막지 않는다 —
+        `user_agent_lock`(user × agent, 짧은 타임아웃 후 409)을 그대로 쓰지 않는 이유다.
+
+        읽기 전용 조회(`get_execution`)에는 잠금을 붙이지 않는다 — 불필요한 잠금은 그 자체로
+        결함이다(`action_item_repo.get_by_id_for_update` 와 같은 관례, #368).
+        """
+        stmt = (
+            select(ExecutionEvent)
+            .where(
+                ExecutionEvent.id == execution_id,
+                ExecutionEvent.user_id == user_id,
+            )
+            .with_for_update()
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def list_failure_tag_codes(self, execution_id: UUID) -> list[str]:
         stmt = select(ExecutionFailureTag.tag_code).where(
             ExecutionFailureTag.execution_id == execution_id
