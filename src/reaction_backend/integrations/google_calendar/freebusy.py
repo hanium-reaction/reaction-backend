@@ -136,10 +136,7 @@ async def _access_token(session: AsyncSession, *, user_id: uuid.UUID) -> str | N
             token_store.refresh_token_of(connection), known_scopes=connection.scopes
         )
     except oauth.OAuthError as exc:
-        logger.info(
-            "calendar_refresh_failed",
-            extra={"reason": exc.reason, "retryable": exc.retryable},
-        )
+        logger.info("calendar_refresh_failed reason=%s retryable=%s", exc.reason, exc.retryable)
         if not exc.retryable:
             await token_store.mark_revoked(session, connection)
             await session.flush()
@@ -163,17 +160,17 @@ async def fetch_busy(
             asyncio.to_thread(_query, access_token, start, end), timeout=_HARD_TIMEOUT
         )
     except (TimeoutError, requests.RequestException) as exc:
-        logger.info("calendar_freebusy_failed", extra={"reason": type(exc).__name__})
+        logger.info("calendar_freebusy_failed reason=%s", type(exc).__name__)
         return FreeBusyResult("failed", [])
 
     if response.status_code != 200:
-        logger.info("calendar_freebusy_failed", extra={"reason": f"http_{response.status_code}"})
+        logger.info("calendar_freebusy_failed reason=http_%s", response.status_code)
         return FreeBusyResult("failed", [])
 
     try:
         return FreeBusyResult("ok", _parse(response.json()))
     except (ValueError, KeyError, TypeError) as exc:
-        logger.info("calendar_freebusy_unparsable", extra={"reason": str(exc)[:120]})
+        logger.info("calendar_freebusy_unparsable reason=%s", str(exc)[:120])
         return FreeBusyResult("failed", [])
 
 

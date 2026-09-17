@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -152,6 +153,20 @@ async def test_http_error_is_failed_not_empty(monkeypatch: pytest.MonkeyPatch) -
 
     assert result.status == "failed"
     assert result.connected_but_failed is True
+
+
+async def test_failure_reason_is_in_the_log_message(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """운영 로그 형식은 `%(message)s` 까지만 찍는다 — `extra=` 로 넘긴 사유는 사라졌다.
+
+    그래서 사유를 메시지 안에 둔다. 스테이징 journald 에서 이 한 줄이 유일한 단서다.
+    """
+    caplog.set_level(logging.INFO, logger="reaction_backend.integrations.google_calendar.freebusy")
+
+    await _fetch_with(monkeypatch, _FakeResponse(403, {}))
+
+    assert "calendar_freebusy_failed reason=http_403" in [r.getMessage() for r in caplog.records]
 
 
 async def test_timeout_is_failed(monkeypatch: pytest.MonkeyPatch) -> None:
