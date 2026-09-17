@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       grep:
-        description: "필터 정규식 (비우면 전체 tail). 예: expire_unreflected|notify:"
+        description: "필터 정규식 (비우면 전체 tail). 예: expire_unreflected|notify: · 로그인·캘린더 실패 사유: google_id_token_rejected|calendar_"
         type: string
         default: ""
       lines:

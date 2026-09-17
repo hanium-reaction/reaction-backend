@@ -212,4 +212,4 @@ async def revoke(token: str) -> None:
     try:
         await _post_async(_REVOKE_URL, {"token": token})
     except OAuthError as exc:
-        logger.info("calendar_revoke_failed", extra={"reason": exc.reason})
+        logger.info("calendar_revoke_failed reason=%s", exc.reason)

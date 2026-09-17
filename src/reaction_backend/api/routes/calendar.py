@@ -146,14 +146,14 @@ async def connect_calendar(
         # Google 이 동의를 이미 갖고 있어 refresh token 을 다시 주지 않았다 — 아래에서 판단.
         bundle = exc.bundle
     except oauth.OAuthError as exc:
-        logger.info("calendar_connect_failed", extra={"reason": exc.reason})
+        logger.info("calendar_connect_failed reason=%s", exc.reason)
         raise _connect_failed(exc.reason) from exc
 
     # 스코프를 먼저 본다 — 체크만 풀었던 사용자의 동의를 아래에서 회수하면 안 된다.
     if not oauth.has_calendar_scope(bundle.scopes):
         # 동의 화면에서 캘린더 체크를 풀었다. 저장하지 않는다 — 회수도 하지 않는다
         # (사용자가 준 다른 권한까지 걷어낼 이유가 없다).
-        logger.info("calendar_connect_failed", extra={"reason": "scope_not_granted"})
+        logger.info("calendar_connect_failed reason=scope_not_granted")
         raise ApiError(
             ErrorCode.COMMON_VALIDATION_ERROR,
             "캘린더 권한이 허용되지 않았어요. 연결할 때 캘린더 항목을 체크해 주세요.",
@@ -167,7 +167,7 @@ async def connect_calendar(
         # 방금 받은 토큰으로 동의를 회수해 두면 **다음 시도**는 최초 동의가 되어
         # refresh token 이 온다. 회수는 best-effort 라 여기서 던지지 않는다.
         # (살아 있는 연결이 있으면 그 refresh token 을 쓴다 — `token_store.save` 가 유지한다.)
-        logger.info("calendar_connect_failed", extra={"reason": "no_refresh_token"})
+        logger.info("calendar_connect_failed reason=no_refresh_token")
         await oauth.revoke(bundle.access_token)
         raise _connect_failed("no_refresh_token")
 
