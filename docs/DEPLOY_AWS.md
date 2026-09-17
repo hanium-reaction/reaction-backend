@@ -49,7 +49,7 @@ sudo systemctl reload caddy   # Caddyfile 갱신할 때마다
 **이것도 SSH/AWS 콘솔에서 사람이 해야 한다(코드로 못 함)**:
 - EC2 보안 그룹에 **인바운드 443 허용**(Caddy가 붙잡을 포트).
 - 완료 조건 "평문 http 포트는 리다이렉트하거나 닫는다" — 보안 그룹에서 **8000번 외부 인바운드를 닫거나** 사설 대역(VPC 내부/로컬호스트)으로 제한. Caddy는 로컬(`127.0.0.1:8000`)로만 붙으므로 앱 자체는 그대로 둬도 된다.
-- (확인 필요) `.env`의 `CORS_ALLOW_ORIGINS`에 네이티브 앱 origin(`capacitor://localhost`)이 이미 있는지 — 없으면 추가해야 앱이 이 도메인에 직접 붙었을 때 CORS를 통과한다. 웹(Vercel)은 origin이 그대로라 추가 불필요.
+- `.env`의 `CORS_ALLOW_ORIGINS`에 네이티브 앱 origin 이 둘 다 있어야 한다 — **iOS `capacitor://localhost`, Android `https://localhost`**(Capacitor 안드로이드 기본 scheme). 하나라도 빠지면 그 플랫폼의 API 호출이 preflight 에서 400 으로 막힌다(2026-09-17 Android 누락 발견). 손으로 고치지 말고 Actions **CORS origins (EC2)** (`cors-origins.yml`, show/add/remove)를 쓴다 — 적용 후 preflight 로 허용 여부까지 확인한다. 웹(Vercel)은 rewrite 로 same-origin 이라 추가 불필요.
 
 완료되면 FE `VITE_NATIVE_API_BASE_URL`을 `https://54-184-8-149.sslip.io`로 설정 — FE #244가
 이미 이 환경변수를 분리해 뒀다(코드 수정 없이 빌드 환경변수만 변경).
