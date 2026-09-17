@@ -18,10 +18,11 @@ Issue #323 — refresh token httpOnly 쿠키 (웹 새로고침 시 재로그인 
 
 Issue #324 — 신규 가입 게이트 (기존 사용자 로그인은 완전히 영향받지 않는다):
 - `SIGNUPS_ENABLED=false` — 긴급 차단, 재배포 없이 끌 수 있다(`toggle-signups.yml`).
-- 가입 인원 상한(`SIGNUP_CAPACITY`, 기본 30) 도달 시 차단.
-- 유효·미사용 초대코드 필수(`scripts/manage_invite_codes.py` 로 발급).
+- 가입 인원 상한(`SIGNUP_CAPACITY`) 도달 시 차단 — 미설정이면 상한 없음(v2.29 기본값).
+- `SIGNUP_INVITE_REQUIRED=true` 일 때만 유효·미사용 초대코드 필수(`scripts/manage_invite_codes.py`
+  로 발급). 기본은 꺼져 있다(v2.29) — Google 계정이면 누구나 가입한다.
 - 세 검사 + user 생성 + 코드 소진을 **전역 advisory lock** 으로 감싸 동시 가입 경합을
-  막는다(`_signup_lock`) — 30명 상한과 "코드 1회용"을 둘 다 지키려면 "카운트 확인 →
+  막는다(`_signup_lock`) — 인원 상한과 "코드 1회용"을 둘 다 지키려면 "카운트 확인 →
   insert" 사이에 다른 요청이 끼어들지 못해야 한다.
 """
 
@@ -115,13 +116,14 @@ async def _validate_new_signup(
     *,
     user_repo: UserRepo,
     invite_repo: InviteCodeRepo,
-) -> InviteCode:
+) -> InviteCode | None:
     """신규 가입 전 3중 검사 — 순수 검증, 부수효과 없음(코드를 아직 소비하지 않는다).
 
     순서: 긴급 스위치 → 인원 상한 → 초대코드. "지금 가입을 받고 있는가"가 코드 유효성
-    보다 근본적인 조건이라 앞에 둔다. 통과 시 미소진 상태의 코드 행을 반환한다 — 호출자가
-    `_signup_lock` 을 쥔 채 user 를 만든 뒤 그 id 로 `mark_used` 를 마저 부른다(코드
-    소비는 user 존재가 전제라 여기서 끝낼 수 없다).
+    보다 근본적인 조건이라 앞에 둔다. 인원 상한·초대코드는 설정이 켜졌을 때만 본다.
+    초대코드가 필요하면 미소진 상태의 코드 행을 반환한다 — 호출자가 `_signup_lock` 을
+    쥔 채 user 를 만든 뒤 그 id 로 `mark_used` 를 마저 부른다(코드 소비는 user 존재가
+    전제라 여기서 끝낼 수 없다). 필요 없으면 `None` — 보낸 코드도 소비하지 않는다.
     """
     settings = get_settings()
     if not settings.signups_enabled:
@@ -131,14 +133,17 @@ async def _validate_new_signup(
             http_status=HTTPStatus.FORBIDDEN,
         )
 
-    signed_up = await user_repo.count_signed_up()
-    if signed_up >= settings.signup_capacity:
-        raise ApiError(
-            ErrorCode.AUTH_SIGNUP_CAPACITY_REACHED,
-            "지금은 자리가 다 찼어요.",
-            http_status=HTTPStatus.FORBIDDEN,
-        )
+    if settings.signup_capacity is not None:
+        signed_up = await user_repo.count_signed_up()
+        if signed_up >= settings.signup_capacity:
+            raise ApiError(
+                ErrorCode.AUTH_SIGNUP_CAPACITY_REACHED,
+                "지금은 자리가 다 찼어요.",
+                http_status=HTTPStatus.FORBIDDEN,
+            )
 
+    if not settings.signup_invite_required:
+        return None
     if not body.invite_code:
         raise ApiError(
             ErrorCode.AUTH_INVALID_INVITE_CODE,
@@ -190,7 +195,7 @@ async def login_with_google(
     """Google id_token 검증 → user upsert → JWT 발급.
 
     기존 사용자(email 이미 존재)는 게이트를 전혀 거치지 않는다 — lock 도 신규 가입
-    판정 이후에만 잡는다(로그인은 이미 30명 안에 있던 사람이라 경합 대상이 아니다).
+    판정 이후에만 잡는다(로그인은 이미 가입한 사람이라 경합 대상이 아니다).
     """
     claims = verify_google_id_token(body.id_token)
     existing = await user_repo.get_by_email(claims.email)
@@ -207,7 +212,8 @@ async def login_with_google(
                 user = await user_repo.upsert_from_google(
                     GoogleProfile(email=claims.email, name=claims.name),
                 )
-                await invite_repo.mark_used(code_row, used_by_user_id=user.id)
+                if code_row is not None:
+                    await invite_repo.mark_used(code_row, used_by_user_id=user.id)
                 await session.commit()
             else:
                 user = existing
