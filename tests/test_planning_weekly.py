@@ -451,3 +451,21 @@ def test_get_weekly_reports_not_connected_by_default(client: TestClient) -> None
     body = client.get("/plans/weekly", params={"weekStart": MON.isoformat()}).json()
 
     assert body["calendar"] == {"status": "not_connected", "checkedAt": None}
+
+
+def test_block_edit_response_does_not_claim_a_calendar_state(
+    client: TestClient,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """편집 응답은 캘린더를 확인하지 않는다 — 확인 안 한 값을 `false` 로 주면 "겹침 없음" 이 된다."""
+    block = _block(_dt(1, 9, 0), _dt(1, 10, 0))
+    fake_scheduled_block_repo.seed(block, title="옮길 카드", category="study")
+
+    resp = client.patch(
+        f"/plans/plan_{MON.isoformat()}/blocks/block_{block.id}",
+        json={"startAt": _dt(1, 14, 0).isoformat()},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert "calendarConflict" not in resp.json()

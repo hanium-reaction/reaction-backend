@@ -339,8 +339,8 @@ class WeeklyReplanApproveResponse(CamelModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class WeeklyBlock(CamelModel):
-    """주간 그리드의 스케줄 블록 한 칸."""
+class _BlockFields(CamelModel):
+    """주간 블록의 공통 필드 — `WeeklyBlock`(조회)과 `BlockEditResponse`(편집 결과)가 공유."""
 
     block_id: str  # block_<uuid>
     action_id: str  # action_<uuid>
@@ -353,6 +353,11 @@ class WeeklyBlock(CamelModel):
     end_at: KstDatetime
     block_status: str
     source: str
+
+
+class WeeklyBlock(_BlockFields):
+    """주간 그리드의 스케줄 블록 한 칸."""
+
     # 아직 시작 안 한 이 블록이 **지금** Google 캘린더 일정과 겹치는가 (`domain/calendar_conflict`).
     calendar_conflict: bool = False
 
@@ -390,5 +395,10 @@ class BlockEditRequest(CamelModel):
     title: str | None = None  # 카드 제목 변경 — 없으면 유지
 
 
-class BlockEditResponse(WeeklyBlock):
-    """편집 결과 — 스냅 적용된 최종 블록."""
+class BlockEditResponse(_BlockFields):
+    """편집 결과 — 스냅 적용된 최종 블록.
+
+    `WeeklyBlock` 을 상속하지 않는다 — 상속하면 `calendarConflict` 가 **계산 없이 항상 false**
+    로 딸려 나가, 캘린더 일정 위로 옮긴 블록도 "겹침 없음" 이라고 말하게 된다(v2.27 에서
+    그렇게 나갔다). 겹침은 `GET /plans/weekly` 를 다시 읽어 확인한다.
+    """
