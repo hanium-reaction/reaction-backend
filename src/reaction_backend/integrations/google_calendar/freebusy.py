@@ -117,6 +117,12 @@ async def _access_token(session: AsyncSession, *, user_id: uuid.UUID) -> str | N
     갱신이 `invalid_grant` 로 실패하면 사용자가 Google 에서 권한을 뺏은 것이다 —
     `revoked_at` 을 찍어 다음 진입에 재연결을 안내한다. 일시적 실패(네트워크·5xx)는
     연결을 끊지 않는다. 그 구분이 `OAuthError.retryable` 이다.
+
+    ⚠️ **commit 하지 않는다 — flush 까지만.** 계획 생성·재계획은 트랜잭션 단위 advisory
+    lock(`user_agent_lock`, `pg_advisory_xact_lock`) 안에서 이걸 부른다. 여기서 commit 하면
+    그 lock 이 **계획 생성 도중에 풀린다**(토큰이 만료되는 한 시간마다 한 번). 갱신한 토큰·
+    회수 표시는 호출자의 마지막 commit 에 실린다. 호출자가 rollback 하면 사라지지만 다음
+    조회가 같은 판단을 다시 하므로 잃는 게 없다.
     """
     connection = await token_store.get_active(session, user_id=user_id)
     if connection is None:
@@ -136,18 +142,17 @@ async def _access_token(session: AsyncSession, *, user_id: uuid.UUID) -> str | N
         )
         if not exc.retryable:
             await token_store.mark_revoked(session, connection)
-            await session.commit()
+            await session.flush()
         return None
 
-    await token_store.save(session, user_id=user_id, bundle=bundle)
-    await session.commit()
+    await token_store.save(session, user_id=user_id, bundle=bundle)  # save 가 flush 한다
     return bundle.access_token
 
 
 async def fetch_busy(
     session: AsyncSession, *, user_id: uuid.UUID, start: datetime, end: datetime
 ) -> FreeBusyResult:
-    """[start, end) 의 busy 구간. 실패해도 예외를 올리지 않는다."""
+    """[start, end) 의 busy 구간. 실패해도 예외를 올리지 않는다. commit 은 호출자 몫."""
     access_token = await _access_token(session, user_id=user_id)
     if access_token is None:
         # 연결이 없거나, 갱신이 실패해 방금 회수됐다. 둘 다 '캘린더 없이 진행'이다.

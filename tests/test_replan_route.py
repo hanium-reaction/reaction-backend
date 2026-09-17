@@ -26,8 +26,11 @@ from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
+from reaction_backend.integrations.google_calendar import freebusy
 from reaction_backend.llm import aiClient
 from reaction_backend.llm.tool_executor import RunResult
+from reaction_backend.orchestrator import first_plan
+from reaction_backend.orchestrator.goal_structuring import BusyBlock, TimeInterval
 from reaction_backend.safety import endpoint_rate_limit
 from reaction_backend.schemas.common import KST, now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
@@ -401,6 +404,116 @@ def test_generate_avoids_committed_and_fixed_busy(
         assert not (start < _kst(2026, 7, 13, 13, 0) and end > _kst(2026, 7, 13, 8, 0))
         # 고정일정 구간(08~18, 매일)과 겹치지 않는다.
         assert not (start.time() < time(18, 0) and end.time() > time(8, 0))
+
+
+# ── 캘린더 (ADR-0009 D4 — 첫 계획과 같은 다섯 번째 busy 소스) ─────────────
+
+
+def _stub_calendar(
+    monkeypatch: Any, status: str, by_day: dict[date, list[BusyBlock]] | None = None
+) -> list[tuple[date, date]]:
+    """`freebusy.fetch_busy_by_day` 를 대신한다. 조회 범위를 기록해 돌려준다."""
+    calls: list[tuple[date, date]] = []
+
+    async def _fetch(session: Any, *, user_id: Any, start_day: date, end_day: date) -> Any:
+        calls.append((start_day, end_day))
+        return (by_day or {}), status
+
+    monkeypatch.setattr(freebusy, "fetch_busy_by_day", _fetch)
+    return calls
+
+
+def test_generate_avoids_calendar_events(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """재계획도 캘린더 일정을 피한다 — 예전엔 첫 계획만 읽고 재계획은 안 읽었다.
+
+    기본 활동 시간에서 30분 카드 하나는 창 첫날(07-13) 08:00 에 곧바로 놓인다. 그날
+    활동 시간 전체(08~23)를 캘린더 일정으로 막으면 **07-14 08:00** 이어야 한다 —
+    07-13 08:00 이 나오면 캘린더 배선이 빠진 것이다.
+    """
+    _freeze_now(monkeypatch)
+    _seed_action(fake_action_item_repo, title="백로그", target=date(2026, 7, 16))
+    busy_day = WINDOW_START
+    calls = _stub_calendar(
+        monkeypatch,
+        "ok",
+        {
+            busy_day: [
+                BusyBlock(
+                    TimeInterval(_kst(2026, 7, 13, 8, 0), _kst(2026, 7, 13, 23, 0)),
+                    "calendar",
+                    "캘린더 일정",
+                )
+            ]
+        },
+    )
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+
+    first = min(body["blocks"], key=lambda b: b["start"])
+    assert datetime.fromisoformat(first["start"]) == _kst(2026, 7, 14, 8, 0), (
+        f"캘린더로 막은 07-13 을 건너뛰어야 한다. 실제: {first['start']}"
+    )
+    # 지평 전체를 **한 번** 조회한다 — 날짜마다 부르면 Google 왕복이 지평 길이만큼 는다.
+    assert calls == [(WINDOW_START, date(2026, 7, 16))]
+    assert not any("캘린더" in w for w in body["warnings"])
+
+
+def test_generate_warns_when_the_calendar_could_not_be_read(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """연결해 뒀는데 못 읽었으면 재계획은 계속하되 알린다 — 첫 계획과 같은 문구."""
+    _freeze_now(monkeypatch)
+    _seed_action(fake_action_item_repo, title="백로그", target=date(2026, 7, 16))
+    _stub_calendar(monkeypatch, "failed")
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+
+    assert body["blocks"], "캘린더 실패가 재계획을 죽였다"
+    assert body["warnings"][0] == first_plan.CALENDAR_FAILED_WARNING
+
+
+def test_generate_is_silent_about_the_calendar_when_not_connected(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """연결 안 한 사용자(대다수)에게는 캘린더 얘기를 하지 않는다."""
+    _freeze_now(monkeypatch)
+    _seed_action(fake_action_item_repo, title="백로그", target=date(2026, 7, 16))
+    _stub_calendar(monkeypatch, "not_connected")
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    assert not any("캘린더" in w for w in resp.json()["warnings"])
+
+
+def test_generate_says_how_far_the_calendar_was_checked(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """재계획 지평은 1년까지 벌어지지만 캘린더 조회는 60일까지다.
+
+    그 뒤의 카드는 캘린더를 안 보고 놓인다 — 연결한 사용자는 그걸 모르면 '확인했겠지'
+    하고 믿는다. 몇 일까지 봤는지 알린다(07-13 + 60일 = 9월 11일).
+    """
+    _freeze_now(monkeypatch)
+    _seed_action(fake_action_item_repo, title="먼 마감", target=WINDOW_START + timedelta(days=120))
+    _stub_calendar(monkeypatch, "ok")
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    assert any("9월 11일까지만" in w for w in resp.json()["warnings"]), resp.json()["warnings"]
 
 
 # ── 승인 재조정(approve reconcile) ───────────────────────────────────────────

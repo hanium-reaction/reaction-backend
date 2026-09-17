@@ -645,6 +645,13 @@ async def _existing_busy_by_day(
     return busy
 
 
+#: 캘린더를 연결해 뒀는데 못 읽었을 때의 안내 — 첫 계획·재계획이 같은 문구를 쓴다.
+CALENDAR_FAILED_WARNING = (
+    "캘린더 일정을 불러오지 못해서 이번 계획에는 반영하지 못했어요. "
+    "겹치는 일정이 있으면 시간을 옮겨 주세요."
+)
+
+
 async def _calendar_busy_by_day(
     config: RunnableConfig,
     user_id: UUID,
@@ -862,11 +869,7 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
     # 알림 피로가 된다. 반대로 연결한 사용자에게 조용히 넘어가면 "연결했는데 수업 위에
     # 계획이 잡혔다" 를 스스로 알아챌 방법이 없다.
     if calendar_status == "failed":
-        warnings = [
-            "캘린더 일정을 불러오지 못해서 이번 계획에는 반영하지 못했어요. "
-            "겹치는 일정이 있으면 시간을 옮겨 주세요.",
-            *warnings,
-        ]
+        warnings = [CALENDAR_FAILED_WARNING, *warnings]
 
     blocks = [
         ScheduledBlockPreview(

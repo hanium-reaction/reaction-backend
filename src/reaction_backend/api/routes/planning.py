@@ -50,6 +50,7 @@ from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
+from reaction_backend.integrations.google_calendar import freebusy
 from reaction_backend.orchestrator import (
     continuation_fill,
     first_plan,
@@ -1720,7 +1721,8 @@ async def generate_replan(
 
     - 대상: 다음 주 이후 미착수 블록의 액션 + 활성 블록 없는 planned 백로그(수락한 회복 포함).
       과거·시작/완료·user_edit 블록은 불변. 실패 원본은 미래 블록이 없어 자동 제외.
-    - busy = 확정(시작/완료·user_edit) 블록 + DB 시간정책 + **고정일정(#112 정합)**.
+    - busy = 확정(시작/완료·user_edit) 블록 + DB 시간정책 + **고정일정(#112 정합)**
+      + **Google 캘린더 일정**(첫 계획과 같은 다섯 번째 소스, ADR-0009 D4).
     - 각 새 블록에 '교체할 옛 블록 id'(replacesBlockId)를 실어, 승인이 blanket-cancel 없이
       그 블록만 현재 상태로 재조정 취소하게 한다(#117). 산출물은 Draft — 자동 적용 금지.
     """
@@ -1864,6 +1866,17 @@ async def generate_replan(
             committed.extend(fixed_schedules_to_busy(day, fixed))
             day += timedelta(days=1)
 
+        # 캘린더 일정 — 예전엔 재계획만 이걸 안 읽어서, 캘린더를 연결해도 재배치한 카드가
+        # 수업·약속 위에 잡혔다. 첫 계획과 같은 호출이라 지평 전체를 **한 번** 조회한다
+        # (상한 `freebusy.MAX_RANGE_DAYS`). 출처가 `calendar` 라 `build_forward_replan` 의
+        # 여백·하루 상한 대상(확정 블록)에는 섞이지 않고 회피 대상에만 들어간다.
+        # freebusy 는 commit 하지 않는다 — 이 lock 은 트랜잭션 단위라 중간 commit 이 풀어 버린다.
+        calendar_busy, calendar_status = await freebusy.fetch_busy_by_day(
+            session, user_id=user.id, start_day=window_start, end_day=deadline
+        )
+        for day_blocks in calendar_busy.values():
+            committed.extend(day_blocks)
+
         blocks, warnings = replan.build_forward_replan(
             window_start=window_start,
             horizon_day=deadline,
@@ -1871,6 +1884,16 @@ async def generate_replan(
             committed_busy=committed,
             tuning=await _replan_tuning_for(user, repo),
         )
+        # 연결해 둔 사용자에게만 알린다 — 연결 안 한 사용자에게 매번 말하면 알림 피로다.
+        calendar_limit = window_start + timedelta(days=freebusy.MAX_RANGE_DAYS)
+        if calendar_status == "failed":
+            warnings = [first_plan.CALENDAR_FAILED_WARNING, *warnings]
+        elif calendar_status == "ok" and deadline > calendar_limit:
+            warnings = [
+                f"캘린더 일정은 {calendar_limit.month}월 {calendar_limit.day}일까지만 "
+                "반영했어요. 그 뒤에 잡힌 카드는 캘린더와 겹치는지 확인해 주세요.",
+                *warnings,
+            ]
 
         payload: dict[str, Any] = {
             "kind": "replan",
