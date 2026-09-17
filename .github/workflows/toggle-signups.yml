@@ -104,14 +104,29 @@ jobs:
 
             ~/.local/bin/uv run --no-dev python - <<'PY'
           import asyncio
+          from collections import Counter
+          from datetime import UTC, datetime, timedelta
           from zoneinfo import ZoneInfo
 
+          from sqlalchemy import select
+
           from reaction_backend.config import get_settings
+          from reaction_backend.db.models.user import User
           from reaction_backend.db.session import get_sessionmaker
           from reaction_backend.repositories.invite_code_repo import InviteCodeRepo
           from reaction_backend.repositories.user_repo import UserRepo
 
           KST = ZoneInfo("Asia/Seoul")
+          REAL = "실제 Google 계정"
+
+
+          def kind(email: str) -> str:
+              # stub 로그인(verifier._stub_claims)이 만드는 계정 — 실제 Google 계정이 아니다.
+              if email == "demo@reaction.local":
+                  return "데모 (고정 시드 계정)"
+              if email.endswith("@reaction.local"):
+                  return "데모 (브라우저별 demo+…)"
+              return REAL
 
 
           async def main() -> None:
@@ -119,17 +134,40 @@ jobs:
               async with get_sessionmaker()() as session:
                   signed_up = await UserRepo(session).count_signed_up()
                   codes = await InviteCodeRepo(session).list_all()
+                  users = (
+                      await session.execute(
+                          select(User.email, User.onboarding_state, User.last_active_at).where(
+                              User.archived_at.is_(None)
+                          )
+                      )
+                  ).all()
                   await session.rollback()
 
+              # 제한 해제(signup_capacity=None · signup_invite_required) 배포 전후 모두 동작하게.
               capacity = settings.signup_capacity
+              invite_required = getattr(settings, "signup_invite_required", True)
               unused = [c for c in codes if c.used_at is None]
 
               print("=== 가입 게이트 (새 프로세스가 읽은 설정) ===")
-              print(f"  signups_enabled : {settings.signups_enabled}")
-              print(f"  signup_capacity : {capacity}")
+              print(f"  signups_enabled        : {settings.signups_enabled}")
+              print(f"  signup_capacity        : {'무제한' if capacity is None else capacity}")
+              print(f"  signup_invite_required : {invite_required}")
               print("")
               print("=== 가입 인원 (archived 제외, 온보딩 미완료 포함) ===")
-              print(f"  {signed_up} / {capacity} — 남은 자리 {max(capacity - signed_up, 0)}")
+              if capacity is None:
+                  print(f"  {signed_up}명 (상한 없음)")
+              else:
+                  print(f"  {signed_up} / {capacity} — 남은 자리 {max(capacity - signed_up, 0)}")
+              # 이메일은 출력하지 않는다(공개 로그) — 분류별 개수만.
+              by_kind = Counter(kind(u.email) for u in users)
+              for k, n in sorted(by_kind.items()):
+                  print(f"  - {k}: {n}")
+              real = [u for u in users if kind(u.email) == REAL]
+              if real:
+                  recent = datetime.now(UTC) - timedelta(days=30)
+                  active = sum(1 for u in real if u.onboarding_state == "ACTIVE")
+                  seen = sum(1 for u in real if u.last_active_at >= recent)
+                  print(f"    └ 실제 계정 중 온보딩 완료 {active} · 최근 30일 접속 {seen}")
               print("")
               print("=== 초대코드 (공개 로그 — 앞 2자만) ===")
               print(f"  전체 {len(codes)} — 사용 {len(codes) - len(unused)} / 미사용 {len(unused)}")
@@ -145,15 +183,17 @@ jobs:
               blockers = []
               if not settings.signups_enabled:
                   blockers.append("SIGNUPS_ENABLED=false")
-              if signed_up >= capacity:
+              if capacity is not None and signed_up >= capacity:
                   blockers.append("인원 상한 도달")
-              if not unused:
+              if invite_required and not unused:
                   blockers.append("미사용 초대코드 없음")
               print("=== 판정 ===")
               if blockers:
                   print(f"  신규 가입 불가 — {', '.join(blockers)}")
-              else:
+              elif invite_required:
                   print("  신규 가입 가능 — 미사용 초대코드를 가진 사람만")
+              else:
+                  print("  신규 가입 가능 — Google 계정이면 누구나")
 
 
           asyncio.run(main())
