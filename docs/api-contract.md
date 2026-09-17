@@ -147,9 +147,14 @@ body 해시가 같아 mismatch 409 로도 안 걸러지고, 다른 사용자의 
 email)에만 순서대로 3중 검사가 적용된다:
 
 1. `SIGNUPS_ENABLED=false`(긴급 차단, 재배포 없이 토글) → 403 `AUTH_SIGNUPS_DISABLED`.
-2. 누적 가입 인원이 `SIGNUP_CAPACITY`(기본 30)에 도달 → 403 `AUTH_SIGNUP_CAPACITY_REACHED`.
-3. `inviteCode` 미제공/무효 → 422 `AUTH_INVALID_INVITE_CODE`. 이미 소진된 코드 →
-   409 `AUTH_INVITE_CODE_ALREADY_USED`.
+2. 누적 가입 인원이 `SIGNUP_CAPACITY` 에 도달 → 403 `AUTH_SIGNUP_CAPACITY_REACHED`.
+   **미설정이면 상한 없음(v2.29 기본값)**.
+3. `SIGNUP_INVITE_REQUIRED=true` 일 때만: `inviteCode` 미제공/무효 → 422
+   `AUTH_INVALID_INVITE_CODE`. 이미 소진된 코드 → 409 `AUTH_INVITE_CODE_ALREADY_USED`.
+   **기본은 꺼져 있다(v2.29)** — 이때 `inviteCode` 는 보내도 무시된다(검증·소비 안 함).
+
+즉 v2.29 기본 설정에서는 **Google 계정이면 누구나 가입된다**. 2·3번 에러 코드는 운영자가
+설정을 다시 켰을 때만 나온다.
 
 코드는 대소문자·앞뒤 공백 무관하게 정규화해 비교한다. 유효한 코드는 그 가입에서 **1회만**
 소비되며(재사용 불가), `scripts/manage_invite_codes.py` 로 운영자가 미리 발급한다(admin

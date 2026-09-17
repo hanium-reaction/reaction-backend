@@ -94,9 +94,10 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "=== .env 원문 (없으면 config.py 기본값: SIGNUPS_ENABLED=true, SIGNUP_CAPACITY=30) ==="
+            echo "=== .env 원문 (없으면 config.py 기본값 — 아래 '새 프로세스가 읽은 설정' 참고) ==="
             echo "  $(grep '^SIGNUPS_ENABLED=' .env | tail -n1 || echo 'SIGNUPS_ENABLED (설정 없음)')"
             echo "  $(grep '^SIGNUP_CAPACITY=' .env | tail -n1 || echo 'SIGNUP_CAPACITY (설정 없음)')"
+            echo "  $(grep '^SIGNUP_INVITE_REQUIRED=' .env | tail -n1 || echo 'SIGNUP_INVITE_REQUIRED (설정 없음)')"
             # 앱은 설정을 lru_cache 로 들고 있다 — .env 가 기동 이후에 바뀌었으면 아직 미반영이다.
             echo "  .env 수정 시각 : $(date -d "@$(stat -c %Y .env)" '+%F %T %Z')"
             echo "  앱 기동 시각   : $(systemctl show -p ActiveEnterTimestamp --value reaction-backend)"

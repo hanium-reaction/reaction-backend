@@ -3,14 +3,16 @@
 `auth_client` fixture: repo/session 만 override, 인증은 실제 JWT 흐름.
 stub 모드에서 verifier 가 고정 demo 클레임 반환 → FakeUserRepo 가 user 생성.
 
-신규 가입(email 이 처음 보이는 로그인)은 이제 유효한 초대코드가 있어야 한다 — 그래서
-"stub" id_token 을 재사용하는 기존 테스트들도 대부분 `_login` 헬퍼로 코드를 미리 심고
-호출한다. 기존 사용자 로그인(같은 email 두 번째 이후)은 게이트를 아예 안 거치므로
-코드 없이도 통과한다(`test_google_login_existing_user_*` 가 그 계약을 고정한다).
+초대코드는 `SIGNUP_INVITE_REQUIRED=true` 일 때만 필요하다(v2.29 부터 기본 꺼짐). 기존
+테스트들은 코드가 필수이던 시절 `_login` 헬퍼로 코드를 미리 심고 호출했는데, 꺼져 있어도
+보낸 코드는 무시되므로 그대로 둔다. 초대코드 동작을 검사하는 테스트는 `invite_required`
+fixture 로 켜고 돈다. 기존 사용자 로그인(같은 email 두 번째 이후)은 게이트를 아예 안
+거치므로 코드 없이도 통과한다(`test_google_login_existing_user_*` 가 그 계약을 고정한다).
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 from uuid import UUID
 
@@ -317,18 +319,64 @@ def test_me_with_refresh_token_rejected(
 # ───────────────────────── 가입 게이트 (#324, FE #237 §8) ─────────────────────────
 
 
+@pytest.fixture
+def invite_required(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """초대코드 필수 모드 — v2.29 부터 기본은 꺼져 있다."""
+    monkeypatch.setenv("SIGNUP_INVITE_REQUIRED", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def test_new_signup_open_by_default_without_invite_code(auth_client: TestClient) -> None:
+    """v2.29 — 기본 설정이면 Google 계정만으로 가입된다(초대코드·인원 상한 없음)."""
+    resp = auth_client.post("/auth/google", json={"idToken": "stub"})
+    assert resp.status_code == 200, resp.json()
+
+
+def test_new_signup_ignores_invite_code_when_not_required(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    """꺼져 있으면 보낸 코드는 검증도 소비도 안 한다 — 예전 화면이 코드를 보내도 막히지 않게."""
+    unknown = auth_client.post("/auth/google", json={"idToken": "demo:a", "inviteCode": "NO-SUCH"})
+    assert unknown.status_code == 200, unknown.json()
+
+    fake_invite_code_repo.seed("STILL-FRESH")
+    resp = auth_client.post("/auth/google", json={"idToken": "demo:b", "inviteCode": "STILL-FRESH"})
+    assert resp.status_code == 200, resp.json()
+    assert fake_invite_code_repo._by_code["STILL-FRESH"].used_at is None
+
+
+def test_new_signup_has_no_capacity_by_default(
+    auth_client: TestClient,
+    fake_user_repo: FakeUserRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`SIGNUP_CAPACITY` 미설정이면 가입 인원을 세지도 않는다."""
+
+    async def _crowded() -> int:
+        return 10_000
+
+    monkeypatch.setattr(fake_user_repo, "count_signed_up", _crowded)
+    resp = auth_client.post("/auth/google", json={"idToken": "stub"})
+    assert resp.status_code == 200, resp.json()
+
+
+@pytest.mark.usefixtures("invite_required")
 def test_new_signup_requires_invite_code(auth_client: TestClient) -> None:
     resp = auth_client.post("/auth/google", json={"idToken": "stub"})
     assert resp.status_code == 422
     assert resp.json()["code"] == "AUTH_INVALID_INVITE_CODE"
 
 
+@pytest.mark.usefixtures("invite_required")
 def test_new_signup_rejects_unknown_invite_code(auth_client: TestClient) -> None:
     resp = auth_client.post("/auth/google", json={"idToken": "stub", "inviteCode": "NO-SUCH-CODE"})
     assert resp.status_code == 422
     assert resp.json()["code"] == "AUTH_INVALID_INVITE_CODE"
 
 
+@pytest.mark.usefixtures("invite_required")
 def test_new_signup_rejects_already_used_invite_code(
     auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
 ) -> None:
@@ -338,6 +386,7 @@ def test_new_signup_rejects_already_used_invite_code(
     assert resp.json()["code"] == "AUTH_INVITE_CODE_ALREADY_USED"
 
 
+@pytest.mark.usefixtures("invite_required")
 def test_new_signup_invite_code_is_case_and_whitespace_insensitive(
     auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
 ) -> None:
@@ -346,8 +395,10 @@ def test_new_signup_invite_code_is_case_and_whitespace_insensitive(
         "/auth/google", json={"idToken": "stub", "inviteCode": " reaction-reviewer "}
     )
     assert resp.status_code == 200, resp.json()
+    assert fake_invite_code_repo._by_code["REACTION-REVIEWER"].used_at is not None
 
 
+@pytest.mark.usefixtures("invite_required")
 def test_new_signup_marks_invite_code_used_by_new_user(
     auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
 ) -> None:
@@ -364,6 +415,7 @@ def test_new_signup_marks_invite_code_used_by_new_user(
     assert again.json()["code"] == "AUTH_INVITE_CODE_ALREADY_USED"
 
 
+@pytest.mark.usefixtures("invite_required")
 def test_existing_user_login_ignores_missing_invite_code(
     auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
 ) -> None:

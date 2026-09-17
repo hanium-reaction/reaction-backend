@@ -295,9 +295,15 @@ class Settings(BaseSettings):
     # 폭주 시 재배포 없이 끄는 긴급 스위치(toggle-signups.yml, SCHEDULER_ENABLED 와 같은 관례).
     # 기존 사용자 로그인은 이 값과 무관하게 항상 통과한다.
     signups_enabled: bool = True
-    # 신규 가입 인원 상한(누적, 초대코드 유효와 별개 조건). Play 첫 공개 30명 원칙(#237).
+    # 신규 가입 인원 상한(누적, 초대코드 유효와 별개 조건). 미설정(None)이면 상한 없음 —
+    # Play 첫 공개 30명 원칙(#237)은 2026-09-17 해제했다(가입 76명 중 67명이 stub 데모
+    # 계정이라 실제 가입자 9명에서 이미 막혀 있었다). 다시 걸려면 `.env` 에 숫자를 넣는다.
     # soft-delete(archived_at) 된 사용자는 세지 않는다 — 나간 자리는 다시 채울 수 있어야 한다.
-    signup_capacity: int = 30
+    signup_capacity: int | None = None
+    # True 면 신규 가입에 유효·미사용 초대코드가 필요하다. 기본 False — Google 계정이면
+    # 누구나 가입한다(위와 같은 날 해제). False 일 때 `inviteCode` 는 보내도 무시된다
+    # (검증도 소비도 안 한다 — 예전 화면이 남은 코드를 보내도 가입이 막히지 않게).
+    signup_invite_required: bool = False
 
     # ── Web Push VAPID (#16/#20) ──
     # 비어있으면 발송이 unconfigured 로 조용히 skip (GEMINI_API_KEY 부재와 같은 degrade).
