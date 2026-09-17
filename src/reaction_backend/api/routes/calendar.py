@@ -25,6 +25,7 @@ from reaction_backend.api.deps import CurrentUser
 from reaction_backend.config import get_settings
 from reaction_backend.db.session import get_db
 from reaction_backend.integrations.google_calendar import freebusy, oauth, token_store
+from reaction_backend.safety import encryption
 from reaction_backend.schemas.calendar import (
     ApproveInsertResult,
     BusyInterval,
@@ -45,12 +46,18 @@ SessionDep = Annotated[AsyncSession, Depends(get_db)]
 
 
 def _require_enabled() -> None:
-    """기능 스위치 + 자격증명 확인. 어느 하나라도 없으면 예전처럼 501."""
+    """기능 스위치 + 자격증명 + 토큰 암호화 키 확인. 어느 하나라도 없으면 예전처럼 501.
+
+    암호화 키까지 보는 이유: 키가 없으면 사용자가 Google 동의를 **다 마친 뒤** 토큰 저장
+    단계에서 500 이 난다(로컬에서 실제로 겪었다). 500 은 CORS 헤더도 못 달아 FE 에는
+    원인 모를 네트워크 오류로만 보인다. 저장할 수 없으면 동의 화면을 열기 전에 닫는다.
+    """
     cfg = get_settings()
     if (
         cfg.google_calendar_enabled
         and cfg.google_oauth_client_id
         and cfg.google_oauth_client_secret
+        and encryption.is_configured()
     ):
         return
     raise ApiError(
