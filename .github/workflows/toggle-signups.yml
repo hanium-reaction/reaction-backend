@@ -9,21 +9,32 @@ name: Toggle SIGNUPS_ENABLED (EC2)
 # 요청마다 읽힌다(`get_settings()`, lru_cache 라 재기동 없이는 갱신되지 않는다 — 그래서
 # 이 워크플로도 재기동을 한다). 켜도/꺼도 기존 로그인엔 영향이 없다 — 신규 가입만 막힌다.
 #
+# mode
+# - show    : 읽기만. `.env` 도 앱도 건드리지 않고 가입 게이트 현황(스위치·인원 상한·가입 인원·
+#             초대코드 소진)만 출력한다. 게이트 세 조건이 한 곳(.env + DB)에 흩어져 있어
+#             "지금 신규 가입이 되는가"를 답할 창구가 없었다(2026-09-17).
+# - enable  : 가입 재개 → 재기동 → 현황 출력.
+# - disable : 긴급 차단 → 재기동 → 현황 출력.
+#
 # 안전:
 # - workflow_dispatch 전용 (push/PR 로는 절대 트리거되지 않음)
-# - `.env` 전체를 로그에 출력하지 않는다 — SIGNUPS_ENABLED 한 줄만
+# - `.env` 전체를 로그에 출력하지 않는다 — SIGNUPS_ENABLED·SIGNUP_CAPACITY 두 줄만
+# - 레포가 PUBLIC 이라 Actions 로그도 공개다 — 초대코드는 앞 2자만, 메모(note)·사용자 id 는
+#   출력하지 않는다. 원문이 필요하면 `scripts/manage_invite_codes.py list` 를 인스턴스에서.
+# - 현황 조회는 SELECT 뿐이고 끝에 rollback() — 배포된 앱 코드($APP_DIR)의 repo 를 그대로 쓴다
 # - 재기동 후 health check 실패 시 job 실패 → 이상을 즉시 알 수 있다
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "enable(가입 재개) 또는 disable(긴급 차단)"
+        description: "show(조회만) · enable(가입 재개) · disable(긴급 차단)"
         type: choice
         options:
+          - show
           - enable
           - disable
-        default: enable
+        default: show
 
 concurrency:
   # deploy/toggle-scheduler 와 같은 앱 디렉터리·서비스를 건드리므로 직렬화.
@@ -33,19 +44,21 @@ concurrency:
 
 jobs:
   toggle:
-    name: "toggle (${{ inputs.mode }})"
+    name: "signups (${{ inputs.mode }})"
     runs-on: [self-hosted, ec2, reaction-backend]
     timeout-minutes: 10
 
     env:
       APP_DIR: /home/ubuntu/reaction-backend
+      MODE: ${{ inputs.mode || 'show' }}
 
     steps:
       - name: Set SIGNUPS_ENABLED
+        if: env.MODE != 'show'
         working-directory: ${{ env.APP_DIR }}
         run: |
           set -euo pipefail
-          VALUE=$([ "${{ inputs.mode }}" = "enable" ] && echo true || echo false)
+          VALUE=$([ "${MODE}" = "enable" ] && echo true || echo false)
 
           # 이 파일만 grep 한다 — .env 전체를 절대 출력하지 않는다(비밀값 유출).
           echo "before: $(grep '^SIGNUPS_ENABLED=' .env || echo '(설정 없음 → 기본 true)')"
@@ -59,9 +72,11 @@ jobs:
           echo "after : $(grep '^SIGNUPS_ENABLED=' .env)"
 
       - name: Restart app
+        if: env.MODE != 'show'
         run: sudo systemctl restart reaction-backend
 
       - name: Health check
+        if: env.MODE != 'show'
         run: |
           for i in $(seq 1 15); do
             if curl -sf http://127.0.0.1:8000/health -o /tmp/health.json; then
@@ -74,15 +89,85 @@ jobs:
           echo "::error::health check failed after restart"
           exit 1
 
-      - name: Summary
-        if: always()
+      - name: Signup gate status (read-only)
         working-directory: ${{ env.APP_DIR }}
         run: |
+          set -euo pipefail
           {
-            echo "### Toggle SIGNUPS_ENABLED — ${{ inputs.mode }}"
+            echo "=== .env 원문 (없으면 config.py 기본값: SIGNUPS_ENABLED=true, SIGNUP_CAPACITY=30) ==="
+            echo "  $(grep '^SIGNUPS_ENABLED=' .env | tail -n1 || echo 'SIGNUPS_ENABLED (설정 없음)')"
+            echo "  $(grep '^SIGNUP_CAPACITY=' .env | tail -n1 || echo 'SIGNUP_CAPACITY (설정 없음)')"
+            # 앱은 설정을 lru_cache 로 들고 있다 — .env 가 기동 이후에 바뀌었으면 아직 미반영이다.
+            echo "  .env 수정 시각 : $(date -d "@$(stat -c %Y .env)" '+%F %T %Z')"
+            echo "  앱 기동 시각   : $(systemctl show -p ActiveEnterTimestamp --value reaction-backend)"
+            echo ""
+
+            ~/.local/bin/uv run --no-dev python - <<'PY'
+          import asyncio
+          from zoneinfo import ZoneInfo
+
+          from reaction_backend.config import get_settings
+          from reaction_backend.db.session import get_sessionmaker
+          from reaction_backend.repositories.invite_code_repo import InviteCodeRepo
+          from reaction_backend.repositories.user_repo import UserRepo
+
+          KST = ZoneInfo("Asia/Seoul")
+
+
+          async def main() -> None:
+              settings = get_settings()
+              async with get_sessionmaker()() as session:
+                  signed_up = await UserRepo(session).count_signed_up()
+                  codes = await InviteCodeRepo(session).list_all()
+                  await session.rollback()
+
+              capacity = settings.signup_capacity
+              unused = [c for c in codes if c.used_at is None]
+
+              print("=== 가입 게이트 (새 프로세스가 읽은 설정) ===")
+              print(f"  signups_enabled : {settings.signups_enabled}")
+              print(f"  signup_capacity : {capacity}")
+              print("")
+              print("=== 가입 인원 (archived 제외, 온보딩 미완료 포함) ===")
+              print(f"  {signed_up} / {capacity} — 남은 자리 {max(capacity - signed_up, 0)}")
+              print("")
+              print("=== 초대코드 (공개 로그 — 앞 2자만) ===")
+              print(f"  전체 {len(codes)} — 사용 {len(codes) - len(unused)} / 미사용 {len(unused)}")
+              for c in codes:
+                  issued = c.created_at.astimezone(KST).strftime("%Y-%m-%d")
+                  if c.used_at is None:
+                      state = "미사용"
+                  else:
+                      state = f"사용됨 {c.used_at.astimezone(KST):%Y-%m-%d %H:%M} KST"
+                  print(f"  {c.code[:2]}****** — {state} (발급 {issued})")
+              print("")
+
+              blockers = []
+              if not settings.signups_enabled:
+                  blockers.append("SIGNUPS_ENABLED=false")
+              if signed_up >= capacity:
+                  blockers.append("인원 상한 도달")
+              if not unused:
+                  blockers.append("미사용 초대코드 없음")
+              print("=== 판정 ===")
+              if blockers:
+                  print(f"  신규 가입 불가 — {', '.join(blockers)}")
+              else:
+                  print("  신규 가입 가능 — 미사용 초대코드를 가진 사람만")
+
+
+          asyncio.run(main())
+          PY
+          } | tee "${RUNNER_TEMP}/signup-gate-status.txt"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Signup gate — ${MODE}"
             echo '```'
-            grep '^SIGNUPS_ENABLED=' .env || echo '(설정 없음)'
+            cat "${RUNNER_TEMP}/signup-gate-status.txt" 2>/dev/null || echo '(현황 조회 실패 — 위 스텝 로그 확인)'
             echo '```'
-            echo "disable 이면 신규 가입만 403 AUTH_SIGNUPS_DISABLED 로 막힌다 — 기존 로그인은 영향 없음."
-            echo "롤백: 같은 워크플로를 mode=disable 로 재실행."
+            echo "enable/disable 은 신규 가입에만 영향 — 기존 로그인은 영향 없음."
+            echo "롤백: 같은 워크플로를 반대 mode 로 재실행."
           } >> "$GITHUB_STEP_SUMMARY"
