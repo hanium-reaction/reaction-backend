@@ -15,8 +15,22 @@ MVP 스코프: **read-only freebusy**. write-back(`events.insert`)은 P1.
   · `web_push/sender.py` 와 같은 관례이고 **새 의존성이 0** 이다.
 - `token_store.py` — `calendar_connections` 읽기/쓰기. 평문 토큰이 이 모듈 밖으로 나가지
   않게 저장은 전부 `encrypt_oauth_token` 경유.
-- `freebusy.py` — `freeBusy.query` + 날짜별 분해. `first_plan.busy_for_day` 의 다섯 번째
-  소스로 배선돼 있다 (ADR-0009 D4).
+- `freebusy.py` — `freeBusy.query` + 날짜별 분해. 첫 계획(`first_plan.busy_for_day`)과
+  주간 재계획(`POST /plans/replan` 의 `committed_busy`)의 다섯 번째 소스로 배선돼 있다
+  (ADR-0009 D4).
+
+## 캘린더를 언제 읽나
+
+**주기 동기화는 없다** — 일정을 DB 에 복사하지 않고, cron·webhook·캐시도 없다. 읽는 때는 셋뿐이다.
+
+| 시점 | 범위 |
+| --- | --- |
+| `POST /plans/generate` · `POST /plans/mandala/next-cycle` | 계획 지평 전체를 한 번 |
+| `POST /plans/replan` | 재배치 창 전체를 한 번 (60일 상한 — 넘으면 `warnings` 로 알림) |
+| `GET /calendar/freebusy` | 호출마다 |
+
+그래서 **이미 승인한 계획은 캘린더가 바뀌어도 그대로다.** 다음 생성·재계획 때 반영된다.
+access token(약 1시간)은 조회 시점에 만료 60초 전이면 그때 갱신한다.
 
 ⚠️ **60s TTL 캐시는 두지 않았다.** 계획 생성이 지평 전체를 `fetch_busy_by_day` 로 **한 번에**
 조회하므로 generate 한 번이 API 를 한 번만 친다 — 캐시가 막을 반복 호출이 구조적으로 없다.
@@ -54,6 +68,10 @@ MVP 스코프: **read-only freebusy**. write-back(`events.insert`)은 P1.
 - 동의 화면에서 캘린더 체크를 풀면 교환은 성공하지만 스코프에서 빠진다 — 저장하지 않는다.
 - 권한 박탈 / refresh 실패 → `revoked_at` set + 다음 진입 시 재연결 안내
   (`CALENDAR_NOT_CONNECTED`).
+- **`freebusy` 는 commit 하지 않는다(flush 까지).** 계획 생성·재계획이 트랜잭션 단위
+  advisory lock(`user_agent_lock`) 안에서 부르기 때문에, 여기서 commit 하면 lock 이 도중에
+  풀린다. 갱신 토큰·회수 표시는 호출자의 commit 에 실린다 — lock 없는 조회 라우트는 스스로
+  commit 한다.
 - 연결 해제는 **우리 DB 를 먼저 확정**하고 원격 회수는 그 뒤에 best-effort. 순서를 뒤집으면
   Google 은 끊겼는데 우리는 연결됐다고 믿는 상태가 생긴다.
 - hard delete 금지 — 해제는 `revoked_at` (AGENTS §2).

@@ -115,10 +115,16 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    """`_access_token` 만 우회하면 되므로 세션은 실제로 쓰이지 않는다."""
+    """commit/flush 호출을 기록한다 — freebusy 는 flush 까지만 해야 한다."""
 
-    async def commit(self) -> None:  # pragma: no cover
-        return None
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def commit(self) -> None:
+        self.calls.append("commit")
+
+    async def flush(self) -> None:
+        self.calls.append("flush")
 
 
 async def _fetch_with(monkeypatch: pytest.MonkeyPatch, response: Any) -> freebusy.FreeBusyResult:
@@ -205,10 +211,13 @@ async def test_permanent_refresh_failure_revokes_the_connection(
     monkeypatch.setattr(freebusy.token_store, "mark_revoked", _mark)
     monkeypatch.setattr(freebusy.oauth, "refresh_access_token", _refresh)
 
-    token = await freebusy._access_token(_FakeSession(), user_id=uuid.uuid4())  # type: ignore[arg-type]
+    session = _FakeSession()
+    token = await freebusy._access_token(session, user_id=uuid.uuid4())  # type: ignore[arg-type]
 
     assert token is None
     assert revoked == ["yes"]
+    # 회수 표시는 호출자의 commit 에 실린다 — 여기서 commit 하면 계획 생성의 lock 이 풀린다.
+    assert session.calls == ["flush"]
 
 
 async def test_temporary_refresh_failure_keeps_the_connection(
@@ -236,3 +245,65 @@ async def test_temporary_refresh_failure_keeps_the_connection(
 
     assert token is None
     assert revoked == [], "일시적 실패로 연결을 끊었다"
+
+
+async def test_successful_refresh_is_saved_without_committing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """갱신 성공 경로도 commit 하지 않는다.
+
+    계획 생성·재계획은 `pg_advisory_xact_lock` 을 쥔 채 이걸 부른다. 예전엔 여기서 commit
+    해서, 토큰이 만료되는 한 시간마다 한 번씩 **계획 생성 도중에 lock 이 풀렸다.**
+    """
+    connection = _Conn(datetime.now(UTC) - timedelta(minutes=5))
+    saved: list[str] = []
+
+    async def _active(session: Any, *, user_id: uuid.UUID) -> Any:
+        return connection
+
+    async def _refresh(token: str, *, known_scopes: str) -> Any:
+        return oauth.TokenBundle(
+            access_token="fresh",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+            refresh_token=None,
+            scopes=known_scopes,
+        )
+
+    async def _save(session: Any, *, user_id: uuid.UUID, bundle: Any) -> Any:
+        saved.append(bundle.access_token)
+        return connection
+
+    monkeypatch.setattr(freebusy.token_store, "get_active", _active)
+    monkeypatch.setattr(freebusy.token_store, "refresh_token_of", lambda c: "r")
+    monkeypatch.setattr(freebusy.token_store, "save", _save)
+    monkeypatch.setattr(freebusy.oauth, "refresh_access_token", _refresh)
+
+    session = _FakeSession()
+    token = await freebusy._access_token(session, user_id=uuid.uuid4())  # type: ignore[arg-type]
+
+    assert token == "fresh"
+    assert saved == ["fresh"]
+    assert "commit" not in session.calls
+
+
+def test_freebusy_route_commits_what_the_lookup_changed(
+    client: Any, monkeypatch: pytest.MonkeyPatch, fake_sessions: list[Any]
+) -> None:
+    """lock 이 없는 조회 라우트는 스스로 commit 한다 — 안 하면 갱신한 토큰이 요청과 함께 사라진다."""
+    from reaction_backend.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "google_calendar_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "google_oauth_client_id", "cid", raising=False)
+    monkeypatch.setattr(settings, "google_oauth_client_secret", "secret", raising=False)
+
+    async def _fetch(session: Any, *, user_id: uuid.UUID, start: datetime, end: datetime) -> Any:
+        return freebusy.FreeBusyResult("ok", [])
+
+    monkeypatch.setattr(freebusy, "fetch_busy", _fetch)
+
+    response = client.get("/calendar/freebusy", params={"from": "2026-09-14", "to": "2026-09-20"})
+
+    assert response.status_code == 200
+    assert response.json() == {"busy": []}
+    assert sum(s.commit_count for s in fake_sessions) == 1

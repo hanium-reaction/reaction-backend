@@ -222,6 +222,8 @@ async def get_freebusy(
         start=datetime.combine(start_day, time(0, 0), tzinfo=KST),
         end=datetime.combine(end_day + timedelta(days=1), time(0, 0), tzinfo=KST),
     )
+    # 갱신한 토큰·회수 표시를 확정한다 — freebusy 는 commit 하지 않는다(호출자 몫).
+    await session.commit()
     if result.status == "not_connected":
         raise ApiError(
             ErrorCode.CALENDAR_NOT_CONNECTED,
