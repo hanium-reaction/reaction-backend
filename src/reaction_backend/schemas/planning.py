@@ -18,6 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from reaction_backend.schemas.calendar import CalendarCheck
 from reaction_backend.schemas.common import CamelModel, DraftMixin, KstDatetime
 from reaction_backend.schemas.interview import InterviewOutcome
 
@@ -352,6 +353,8 @@ class WeeklyBlock(CamelModel):
     end_at: KstDatetime
     block_status: str
     source: str
+    # 아직 시작 안 한 이 블록이 **지금** Google 캘린더 일정과 겹치는가 (`domain/calendar_conflict`).
+    calendar_conflict: bool = False
 
 
 class WeeklyPlanDay(CamelModel):
@@ -369,6 +372,8 @@ class WeeklyPlanResponse(CamelModel):
     week_start: date
     week_end: date
     days: list[WeeklyPlanDay]
+    # 이 주 구간 캘린더 확인 결과 — `calendarConflict` 를 어떻게 읽을지 정한다.
+    calendar: CalendarCheck = Field(default_factory=CalendarCheck)
 
 
 class BlockEditRequest(CamelModel):

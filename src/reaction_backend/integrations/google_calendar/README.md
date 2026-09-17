@@ -21,20 +21,23 @@ MVP 스코프: **read-only freebusy**. write-back(`events.insert`)은 P1.
 
 ## 캘린더를 언제 읽나
 
-**주기 동기화는 없다** — 일정을 DB 에 복사하지 않고, cron·webhook·캐시도 없다. 읽는 때는 셋뿐이다.
+일정을 DB 에 복사하지 않는다 — **필요한 순간에 읽는다.** webhook 은 없다(`events.watch` 는 일정
+제목까지 읽는 스코프가 필요해 ADR-0009 D4 범위 밖).
 
-| 시점 | 범위 |
-| --- | --- |
-| `POST /plans/generate` · `POST /plans/mandala/next-cycle` | 계획 지평 전체를 한 번 |
-| `POST /plans/replan` | 재배치 창 전체를 한 번 (60일 상한 — 넘으면 `warnings` 로 알림) |
-| `GET /calendar/freebusy` | 호출마다 |
+| 시점 | 범위 | 하는 일 |
+| --- | --- | --- |
+| `POST /plans/generate` · `POST /plans/mandala/next-cycle` | 계획 지평 전체를 한 번 | 캘린더를 피해 배치 |
+| `POST /plans/replan` | 재배치 창 전체를 한 번 (60일 상한 — 넘으면 `warnings`) | 캘린더를 피해 재배치 |
+| `GET /today/agenda` · `GET /plans/weekly` | 오늘 / 그 주 — **5분 캐시 · 2초 상한** | 이미 승인한 블록의 겹침 표시(`calendarConflict`) |
+| 06:00 모닝 브리프 cron | 오늘 | 겹치는 카드를 `adjustment_hints` 맨 앞에 |
+| `GET /calendar/freebusy` | 요청 구간 | 그대로 반환 |
 
-그래서 **이미 승인한 계획은 캘린더가 바뀌어도 그대로다.** 다음 생성·재계획 때 반영된다.
-access token(약 1시간)은 조회 시점에 만료 60초 전이면 그때 갱신한다.
+겹쳐도 **옮기지 않는다**(자동 적용 금지) — 판정은 `domain/calendar_conflict.py` 하나.
+access token(약 1시간)은 조회 시점에 만료 60초 전이면 그때 갱신한다(별도 갱신 cron 없음).
 
-⚠️ **60s TTL 캐시는 두지 않았다.** 계획 생성이 지평 전체를 `fetch_busy_by_day` 로 **한 번에**
-조회하므로 generate 한 번이 API 를 한 번만 친다 — 캐시가 막을 반복 호출이 구조적으로 없다.
-날짜마다 부르는 구조로 바꾸면 그때 다시 판단할 것.
+캐시는 화면 조회(`fetch_busy_for_screen`)에만 있다 — 계획 생성은 지평 전체를 한 번 읽어 반복 호출이
+없다. 프로세스 메모리라 워커마다 따로이고(단일 인스턴스 전제), **실패는 캐시하지 않으며**,
+연결·해제 직후 `clear_screen_cache(user_id)` 로 비운다.
 
 ## 후속
 

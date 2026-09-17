@@ -79,6 +79,7 @@ async def _morning_brief_job() -> None:
             brief_repo=DailyBriefRepo(session),
             session=session,
             goal_repo=GoalRepo(session),
+            execution_repo=ExecutionRepo(session),
         )
 
 

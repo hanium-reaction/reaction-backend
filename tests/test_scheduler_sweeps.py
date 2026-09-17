@@ -7,6 +7,7 @@ sweep 이 활성 사용자만 골라 per-user job 을 호출하고, 한 사용�
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -291,3 +292,30 @@ def test_morning_brief_notify_job_is_wired_to_the_right_function_and_time() -> N
     assert fields["minute"] == "*/5", f"morning_brief 알림이 5분 폴이 아니다: {fields}"
     assert str(job.trigger.timezone) == "Asia/Seoul"
     assert job.misfire_grace_time == 60
+
+
+@pytest.mark.asyncio
+async def test_morning_brief_sweep_forwards_the_execution_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """캘린더 겹침 힌트는 execution_repo 가 있어야 계산된다 — sweep 이 빠뜨리면 조용히 꺼진다."""
+    seen: list[Any] = []
+
+    async def _capture(user_id: Any, now: Any, **kwargs: Any) -> None:
+        seen.append(kwargs.get("execution_repo"))
+
+    monkeypatch.setattr(sweeps, "run_morning_brief_for_user", _capture)
+    marker = object()
+    user_repo = FakeUserRepo()
+    _seed_users(user_repo, [_user()])
+
+    await sweeps.run_morning_brief_sweep(
+        NOW,
+        user_repo=user_repo,
+        action_repo=FakeActionItemRepo(),
+        brief_repo=FakeDailyBriefRepo(),
+        session=_FakeSession(),  # type: ignore[arg-type]
+        execution_repo=marker,  # type: ignore[arg-type]
+    )
+
+    assert seen and all(r is marker for r in seen)

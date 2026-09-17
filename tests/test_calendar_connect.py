@@ -565,3 +565,46 @@ def test_disconnect_revokes_remotely_after_committing_locally(
 
     assert response.status_code == 204
     assert calls == ["mark_revoked", "revoke:refresh-live"], calls
+
+
+def test_connect_and_disconnect_clear_the_screen_calendar_cache(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """화면 조회는 5분 캐시다 — 연결 직후에도 '연결 안 됨' 을 5분간 그리면 안 된다."""
+    from reaction_backend.integrations.google_calendar import freebusy
+    from tests.conftest import DEMO_USER_UUID
+
+    _enable(monkeypatch)
+    now = datetime.now(UTC)
+
+    def _prefill() -> None:
+        freebusy._screen_cache[(DEMO_USER_UUID, now, now + timedelta(days=1))] = (
+            freebusy._ScreenCacheEntry(freebusy.FreeBusyResult("not_connected", []), now)
+        )
+
+    async def _exchange(code: str, *, redirect_uri: str | None = None) -> oauth.TokenBundle:
+        return _bundle()
+
+    async def _save(session: Any, *, user_id: uuid.UUID, bundle: oauth.TokenBundle) -> Any:
+        return _LiveConn()
+
+    async def _active(session: Any, *, user_id: uuid.UUID) -> Any:
+        return _LiveConn()
+
+    async def _noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(oauth, "exchange_code", _exchange)
+    monkeypatch.setattr(token_store, "save", _save)
+
+    _prefill()
+    assert client.post("/calendar/connect", json={"code": "fresh"}).status_code == 200
+    assert not freebusy._screen_cache, "연결 뒤에도 옛 '연결 안 됨' 이 캐시에 남았다"
+
+    monkeypatch.setattr(token_store, "get_active", _active)
+    monkeypatch.setattr(token_store, "refresh_token_of", lambda c: "r")
+    monkeypatch.setattr(token_store, "mark_revoked", _noop)
+    monkeypatch.setattr(oauth, "revoke", _noop)
+    _prefill()
+    assert client.delete("/calendar/connect").status_code == 204
+    assert not freebusy._screen_cache, "해제 뒤에도 옛 결과가 캐시에 남았다"

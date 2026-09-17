@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
     from reaction_backend.repositories.action_item_repo import ActionItemRepo
     from reaction_backend.repositories.daily_brief_repo import DailyBriefRepo
+    from reaction_backend.repositories.execution_repo import ExecutionRepo
     from reaction_backend.repositories.goal_repo import GoalRepo
     from reaction_backend.repositories.review_repo import ReviewRepo
     from reaction_backend.repositories.user_repo import UserRepo
@@ -48,8 +49,12 @@ async def run_morning_brief_sweep(
     brief_repo: DailyBriefRepo,
     session: AsyncSession,
     goal_repo: GoalRepo | None = None,
+    execution_repo: ExecutionRepo | None = None,
 ) -> SweepResult:
-    """매일 06:00 — 활성 사용자별 Morning Brief 생성(idempotent). 사용자 톤 반영."""
+    """매일 06:00 — 활성 사용자별 Morning Brief 생성(idempotent). 사용자 톤 반영.
+
+    `execution_repo` 가 있으면 캘린더를 연결한 사용자의 오늘 블록 × 캘린더 겹침을 브리프에 싣는다.
+    """
     users = await user_repo.list_active()
     ok = failed = 0
     for user in users:
@@ -62,6 +67,7 @@ async def run_morning_brief_sweep(
                 session=session,
                 goal_repo=goal_repo,
                 tone_mode=user.tone_mode,
+                execution_repo=execution_repo,
             )
             ok += 1
         except Exception:  # noqa: BLE001 — 한 사용자 실패가 배치를 멈추지 않게

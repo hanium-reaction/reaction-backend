@@ -30,6 +30,7 @@ from typing import Any, Final
 import requests
 
 from reaction_backend.config import get_settings
+from reaction_backend.safety import encryption
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,21 @@ _HARD_TIMEOUT: Final = 10.0
 
 #: 만료 판정 여유 — 네트워크 왕복 중에 만료되는 경계를 피한다.
 REFRESH_SKEW: Final = timedelta(seconds=60)
+
+
+def is_enabled() -> bool:
+    """캘린더 기능이 이 서버에서 켜져 있는가 — 스위치 + client id/secret + 토큰 암호화 키.
+
+    하나라도 없으면 연결 엔드포인트는 501 이고, 화면·브리프는 캘린더를 **조회하지 않는다**.
+    암호화 키까지 보는 이유: 없으면 사용자가 Google 동의를 다 마친 뒤 저장에서 500 이 난다.
+    """
+    cfg = get_settings()
+    return bool(
+        cfg.google_calendar_enabled
+        and cfg.google_oauth_client_id
+        and cfg.google_oauth_client_secret
+        and encryption.is_configured()
+    )
 
 
 class OAuthError(RuntimeError):
@@ -152,7 +168,9 @@ async def exchange_code(code: str, *, redirect_uri: str | None = None) -> TokenB
     """
     cfg = get_settings()
     if not cfg.google_oauth_client_id or not cfg.google_oauth_client_secret:
-        raise OAuthError("not_configured", retryable=False)
+        # 서버 설정 문제지 사용자가 권한을 뺀 게 아니다 — retryable 로 둬야 갱신 실패가
+        # 사용자 연결을 회수하지 않는다(설정만 되돌리면 연결이 그대로 살아나야 한다).
+        raise OAuthError("not_configured", retryable=True)
 
     response = await _post_async(
         _TOKEN_URL,
@@ -188,7 +206,9 @@ async def refresh_access_token(refresh_token: str, *, known_scopes: str) -> Toke
     """
     cfg = get_settings()
     if not cfg.google_oauth_client_id or not cfg.google_oauth_client_secret:
-        raise OAuthError("not_configured", retryable=False)
+        # 서버 설정 문제지 사용자가 권한을 뺀 게 아니다 — retryable 로 둬야 갱신 실패가
+        # 사용자 연결을 회수하지 않는다(설정만 되돌리면 연결이 그대로 살아나야 한다).
+        raise OAuthError("not_configured", retryable=True)
 
     response = await _post_async(
         _TOKEN_URL,

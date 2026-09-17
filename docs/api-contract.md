@@ -480,7 +480,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 | PATCH | `/plans/{planId}/blocks/{blockId}` | 15분 snap 직접 편집 (S15) — `startAt`(필수)/`endAt` 이동 + 선택 `category`/`title` 로 목표(색·분류)·제목 수정(블록의 action_item 갱신, 같은 액션 세션 공유; 미지원 category→`other`; 정책 검사는 새 category 로). ✅ #21-B |
 | POST | `/plans/{planId}/ai-edit` | 자연어 수정 (S16, P1) — diff 반환만, apply는 별도 |
 | POST | `/plans/{planId}/ai-edit/apply` | diff 적용 (사용자 승인 후) |
-| GET | `/plans/weekly?weekStart=YYYY-MM-DD` | 주간 그리드 (S14) — cancelled 블록(계획 교체로 취소 등)은 제외 ✅ #21-B |
+| GET | `/plans/weekly?weekStart=YYYY-MM-DD` | 주간 그리드 (S14) — cancelled 블록(계획 교체로 취소 등)은 제외 ✅ #21-B. **v2.27**: 블록마다 `calendarConflict`(아직 시작 안 한 블록이 **지금** Google 캘린더 일정과 겹치는가) + 응답 최상단 `calendar: {status, checkedAt}` — §10 "캘린더 겹침" 과 같은 규칙 |
 
 > ⚠️ **블록은 날짜를 넘을 수 있다** (#252) — 활동 시간대가 자정을 넘는 사용자(예: 22:00~02:00)는
 > `22:00` 시작 → 다음 날 `01:00` 종료 같은 블록을 받는다. 주간 그리드에서는 `startAt` 기준 날짜에
@@ -576,7 +576,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 #21-B 구현 메모 (S14/S15 — 영속 `scheduled_blocks` 읽기/이동):
 - Plan 테이블 없음 — `planId` 는 주(週) 논리 식별자(`plan_<weekStart>`). 편집 권한은 `blockId`.
 - `GET /plans/weekly?weekStart=` — 그 주 월요일로 정규화(생략 시 이번 주). 7일 × `blocks[]`
-  (blockId/actionId/title/category/**goalId**/startAt/endAt/blockStatus/source), KST 직렬화.
+  (blockId/actionId/title/category/**goalId**/startAt/endAt/blockStatus/source/**calendarConflict**(v2.27)), KST 직렬화. 최상단 `calendar`(v2.27, §10 "캘린더 겹침").
   `goalId` = 블록이 매달린 action_item 의 goal FK(`goal_<uuid>`, 미연결이면 null) — FE 가
   블록을 목표 분류(집중/유지)·색상과 연결할 수 있게 한다 (마이그레이션 없음, 기존 컬럼 노출).
 - `PATCH /plans/{planId}/blocks/{blockId}` — `{ startAt, endAt? }`. **15분 snap**(가장 가까운 경계),
@@ -597,6 +597,8 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 > **읽기 전용이다.** 스코프는 `https://www.googleapis.com/auth/calendar.freebusy` **하나** — 구간의 길이와 인접성만 있으면 스케줄러의 세 룰(전이 버퍼·부하 감쇠·자투리)이 전부 성립하고 **제목·장소는 읽지 않는다**. `calendar.readonly` 확대는 ADR 을 먼저 고쳐야 한다.
 >
 > `events.insert`(write-back)는 **P1 유지** — `sync-preview`/`approve-insert` 는 아직 stub 이다.
+>
+> ✅ **이미 세운 계획에도 반영된다(v2.27).** `GET /today/agenda` · `GET /plans/weekly` 가 화면을 열 때마다 캘린더를 읽어 겹치는 블록에 `calendarConflict` 를 달고, 06:00 모닝 브리프가 오늘 겹침을 알린다(§10 "캘린더 겹침"). 주기 동기화·webhook 은 없다 — webhook(`events.watch`)은 일정 제목까지 읽는 스코프가 필요해 ADR-0009 D4 범위 밖이다.
 >
 > ✅ **freebusy 는 계획에 반영된다.** `POST /plans/generate` 와 **`POST /plans/replan`(v2.26)** 이 각자의 지평 전체 캘린더 일정을 **한 번** 조회해 스케줄러의 busy 소스로 넣는다(고정일정·시간정책·기존 블록과 나란히). 캘린더를 못 읽어도 계획 생성은 실패하지 않고, **연결해 둔 사용자에게만** `warnings` 한 줄로 알린다(연결 안 한 사용자에게는 아무 말도 하지 않는다). ⚠️ 지금은 **겹치기 회피까지**다 — 앞뒤 이동 시간(전이 버퍼)과 직전 일정 길이에 따른 부하 감쇠는 아직 없다(ADR-0009 D4 ①②).
 >
@@ -621,7 +623,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 
 | Method | Path | 설명 | 상태 |
 | --- | --- | --- | --- |
-| GET | `/today/agenda` | 어젠다 단일 조회 (`date` + `brief` + `cards` + `habits` + `fixedSchedules`) | ✅ #19-A |
+| GET | `/today/agenda` | 어젠다 단일 조회 (`date` + `brief` + `cards` + `habits` + `fixedSchedules` + `calendar`(v2.27)) | ✅ #19-A |
 | GET | `/today/actions/{actionItemId}` | 카드 상세 (S11) | ✅ #19-A |
 | POST | `/today/actions/{actionItemId}/start` | [▶ 시작] → `execution_events` 생성 | ✅ #19-B |
 | POST | `/today/actions/{actionItemId}/cancel` | 카드 취소 = soft delete (`archived_at`, **status 불변**) | ✅ #214 |
@@ -662,6 +664,26 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 - ⚠️ **최근 앱 세션·무응답 누적에 따른 억제는 아직 없다** — 그 신호(근거 대장 §6.2)는
   `app_sessions` 테이블 없이는 계산 불가능해 이번 범위 밖. 카드가 미체크 조건을
   만족하면 항상 `true` 다
+
+**캘린더 겹침 (v2.27)** — `GET /today/agenda` · `GET /plans/weekly` 공통:
+- 계획은 **만들 때** 캘린더를 피한다(§9). 그 뒤 캘린더에 생긴 약속은 이미 승인한 블록이 모른다 —
+  그래서 화면을 **열 때마다** 그 구간의 Google 캘린더를 읽어 표시한다. **옮기지는 않는다**
+  (AI 결과 자동 적용 금지). 옮기는 건 블록 편집(`PATCH /plans/{planId}/blocks/{blockId}`)·재계획으로.
+- `AgendaCard.calendarConflict` / `WeeklyBlock.calendarConflict` (파생 필드) — `blockStatus='scheduled'`
+  이고 **아직 끝나지 않은**(`endAt > now`) 블록이 캘린더 일정과 겹치면 `true`. 맞닿기만 한 건 겹침이
+  아니다(10:00 에 끝나는 수업 뒤 10:00 블록). 아젠다는 카드의 블록 중 하나라도 겹치면 `true`.
+  판정은 서버 하나(`domain/calendar_conflict.py`) — `missedCheckIn` 과 같은 원칙. **push 아님**(인앱 배지)
+- 응답 최상단 `calendar: {status, checkedAt}`
+  - `ok` — 읽었다. `checkedAt` 은 실제로 읽은 시각(KST) — **5분 캐시**라 최대 5분 전일 수 있다
+  - `failed` — 연결돼 있는데 못 읽었다(Google 지연·오류, **2초 상한**). 이때 `calendarConflict=false` 는
+    "겹침 없음" 이 **아니다** — FE 는 "캘린더를 확인하지 못했어요" 로 구분해 안내할 것. 화면 자체는 정상 응답
+  - `not_connected` — 연결 안 함, 또는 서버에서 기능이 꺼짐. 아무 안내도 하지 않는다
+  - `checkedAt` 은 `ok` 가 아니면 `null`
+- 연결·해제(`POST`/`DELETE /calendar/connect`) 직후에는 캐시를 비운다 — 바로 다음 화면부터 반영
+- **모닝 브리프**(06:00 cron)도 같은 판정으로 오늘 겹치는 카드를 `brief.adjustmentHints` **맨 앞**에
+  싣는다 — "오늘 14:00 'ERD 그려보기' 시간이 캘린더 일정과 겹쳐요. 시간을 옮겨 볼까요?" (카드당 한 번,
+  최대 2문장 + "그 밖에 N개 카드도…" 한 줄). 새 알림 클래스는 만들지 않는다. 브리프는 06:00 스냅샷이라
+  그 뒤 생긴 겹침은 위 `calendarConflict` 로만 보인다
 
 ---
 

@@ -92,6 +92,7 @@ from reaction_backend.repositories.time_policy_repo import TimePolicyRepo, get_t
 from reaction_backend.repositories.user_repo import UserRepo, get_user_repo
 from reaction_backend.safety import endpoint_rate_limit
 from reaction_backend.scheduler.weekly_review_precompute import run_weekly_review_for_user
+from reaction_backend.schemas.calendar import CalendarCheck
 from reaction_backend.schemas.common import KST, now_kst, to_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.goals import GoalTier
@@ -583,7 +584,12 @@ def _parse_block_dt(raw: str, field: str) -> datetime:
 
 
 def _block_view(
-    block: ScheduledBlock, title: str, category: str, goal_id: UUID | None
+    block: ScheduledBlock,
+    title: str,
+    category: str,
+    goal_id: UUID | None,
+    *,
+    calendar_conflict: bool = False,
 ) -> WeeklyBlock:
     return WeeklyBlock(
         block_id=f"{_BLOCK_PREFIX}{block.id}",
@@ -596,6 +602,7 @@ def _block_view(
         end_at=block.end_at,
         block_status=block.block_status,
         source=block.source,
+        calendar_conflict=calendar_conflict,
     )
 
 
@@ -603,12 +610,28 @@ def _block_view(
 async def get_weekly_plan(
     user: CurrentUser,
     repo: BlockRepoDep,
+    session: SessionDep,
     week_start: Annotated[str | None, Query(alias="weekStart")] = None,
 ) -> WeeklyPlanResponse:
-    """주간 블록 그리드 (S14). weekStart 생략 시 이번 주 월요일 기준."""
+    """주간 블록 그리드 (S14). weekStart 생략 시 이번 주 월요일 기준.
+
+    캘린더를 연결한 사용자는 그 주 구간의 Google 캘린더를 **열 때마다** 확인해, 아직 시작 안 한
+    블록이 그 뒤 생긴 약속과 겹치면 `calendarConflict` 를 단다(5분 캐시·2초 상한). 이미 끝난
+    블록은 표시하지 않는다 — 지난주 그리드에 배지가 차면 지금 볼 겹침이 묻힌다.
+    """
     monday = _parse_week_start(week_start)
     start_dt, end_dt = _week_bounds(monday)
     rows = await repo.list_week(user.id, start_dt, end_dt)
+    calendar = await freebusy.screen_conflicts(
+        session,
+        user_id=user.id,
+        start=start_dt,
+        end=end_dt,
+        blocks=[(block.id, block.block_status, block.start_at, block.end_at) for block, *_ in rows],
+        now=now_kst(),
+    )
+    # 조회가 토큰을 갱신·회수했으면 확정한다 — freebusy 는 commit 하지 않는다(호출자 몫).
+    await session.commit()
 
     days = [
         WeeklyPlanDay(date=monday + timedelta(days=offset), weekday=_WEEKDAY_NAMES[offset])
@@ -618,13 +641,22 @@ async def get_weekly_plan(
     for block, title, category, goal_id in rows:
         bucket = by_date.get(to_kst(block.start_at).date())
         if bucket is not None:
-            bucket.blocks.append(_block_view(block, title, category, goal_id))
+            bucket.blocks.append(
+                _block_view(
+                    block,
+                    title,
+                    category,
+                    goal_id,
+                    calendar_conflict=block.id in calendar.keys,
+                )
+            )
 
     return WeeklyPlanResponse(
         plan_id=f"plan_{monday.isoformat()}",
         week_start=monday,
         week_end=monday + timedelta(days=6),
         days=days,
+        calendar=CalendarCheck(status=calendar.status, checked_at=calendar.checked_at),
     )
 
 

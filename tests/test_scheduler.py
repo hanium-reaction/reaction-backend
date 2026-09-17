@@ -14,12 +14,16 @@ import pytest
 
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.interruption_event import InterruptionEvent
+from reaction_backend.db.models.scheduled_block import ScheduledBlock
+from reaction_backend.safety import banned_words
 from reaction_backend.scheduler.interruption_resolver import run_interruption_resolver
 from reaction_backend.scheduler.morning_brief import run_morning_brief_for_user
+from reaction_backend.schemas.common import KST
 from tests.conftest import (
     DEMO_USER_UUID,
     FakeActionItemRepo,
     FakeDailyBriefRepo,
+    FakeExecutionRepo,
     _FakeSession,
 )
 
@@ -324,3 +328,127 @@ async def test_interruption_resolver_idempotent() -> None:
     second = await run_interruption_resolver(now, repo=repo)
     assert first == 1
     assert second == 0
+
+
+# ── 모닝 브리프 × 캘린더 겹침 ─────────────────────────────────────────────
+
+
+_BRIEF_NOW = datetime(2026, 6, 2, 6, 0, tzinfo=KST)
+
+
+def _at_kst(hour: int, minute: int = 0) -> datetime:
+    return _BRIEF_NOW.replace(hour=hour, minute=minute)
+
+
+def _brief_block(
+    repo: FakeExecutionRepo, action: ActionItem, start: datetime, minutes: int = 30
+) -> None:
+    b = ScheduledBlock()
+    b.id = uuid4()
+    b.user_id = DEMO_USER_UUID
+    b.action_item_id = action.id
+    b.start_at = start
+    b.end_at = start + timedelta(minutes=minutes)
+    b.block_status = "scheduled"
+    b.source = "ai_plan"
+    repo._blocks[b.id] = b
+
+
+def _stub_calendar(
+    monkeypatch: pytest.MonkeyPatch, status: str, busy: list[tuple[datetime, datetime]]
+) -> list[str]:
+    from reaction_backend.integrations.google_calendar import freebusy, oauth
+    from reaction_backend.orchestrator.goal_structuring import TimeInterval
+
+    calls: list[str] = []
+    monkeypatch.setattr(oauth, "is_enabled", lambda: True)
+
+    async def _fetch(session: Any, *, user_id: Any, start: datetime, end: datetime) -> Any:
+        calls.append("fetch")
+        return freebusy.FreeBusyResult(status, [TimeInterval(s, e) for s, e in busy])  # type: ignore[arg-type]
+
+    monkeypatch.setattr(freebusy, "fetch_busy", _fetch)
+    return calls
+
+
+async def _brief(action_repo: FakeActionItemRepo, execution_repo: FakeExecutionRepo | None) -> Any:
+    return await run_morning_brief_for_user(
+        DEMO_USER_UUID,
+        _BRIEF_NOW,
+        action_repo=action_repo,
+        brief_repo=FakeDailyBriefRepo(),
+        session=_FakeSession(),
+        execution_repo=execution_repo,
+    )
+
+
+@pytest.mark.asyncio
+async def test_morning_brief_leads_with_calendar_conflicts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """계획 뒤에 생긴 약속과 겹치는 카드를 아침에 알린다 — 새 알림 없이 브리프 안에서."""
+    action_repo, execution_repo = FakeActionItemRepo(), FakeExecutionRepo()
+    clash = _action("ERD 그려보기", 1, _BRIEF_NOW.date())
+    calm = _action("토익", 2, _BRIEF_NOW.date())
+    action_repo.seed(clash)
+    action_repo.seed(calm)
+    _brief_block(execution_repo, clash, _at_kst(14))
+    _brief_block(execution_repo, calm, _at_kst(9))
+    _stub_calendar(monkeypatch, "ok", [(_at_kst(14, 15), _at_kst(15))])
+
+    brief = await _brief(action_repo, execution_repo)
+
+    first = brief.adjustment_hints[0]["text"]
+    assert first == "오늘 14:00 'ERD 그려보기' 시간이 캘린더 일정과 겹쳐요. 시간을 옮겨 볼까요?"
+    assert not any("토익" in h["text"] for h in brief.adjustment_hints)
+    # 톤 가드 — 규칙 문장도 금지어 필터를 그대로 통과해야 한다
+    assert banned_words.enforce(first).changed is False
+
+
+@pytest.mark.asyncio
+async def test_morning_brief_folds_the_rest_into_one_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """힌트가 겹침 목록이 되면 안 된다 — 두 개까지만 문장으로, 나머지는 한 줄. 카드당 한 번."""
+    action_repo, execution_repo = FakeActionItemRepo(), FakeExecutionRepo()
+    for i, hour in enumerate((9, 11, 13)):
+        card = _action(f"카드{i}", i + 1, _BRIEF_NOW.date())
+        action_repo.seed(card)
+        _brief_block(execution_repo, card, _at_kst(hour))
+        if i == 0:
+            _brief_block(execution_repo, card, _at_kst(hour, 30))  # 같은 카드의 두 번째 세션
+    _stub_calendar(monkeypatch, "ok", [(_at_kst(8), _at_kst(18))])
+
+    brief = await _brief(action_repo, execution_repo)
+
+    texts = [h["text"] for h in brief.adjustment_hints]
+    assert texts[0].startswith("오늘 09:00 '카드0'")
+    assert texts[1].startswith("오늘 11:00 '카드1'")
+    assert texts[2] == "그 밖에 1개 카드도 캘린더 일정과 겹쳐요."
+
+
+@pytest.mark.asyncio
+async def test_morning_brief_stays_quiet_when_the_calendar_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """못 읽었다고 브리프가 실패하거나, 겹침이 없다고 말하지 않는다 — 그냥 싣지 않는다."""
+    action_repo, execution_repo = FakeActionItemRepo(), FakeExecutionRepo()
+    card = _action("캡스톤", 1, _BRIEF_NOW.date())
+    action_repo.seed(card)
+    _brief_block(execution_repo, card, _at_kst(10))
+    _stub_calendar(monkeypatch, "failed", [])
+
+    brief = await _brief(action_repo, execution_repo)
+
+    assert brief.headline_text
+    assert not any("캘린더" in h["text"] for h in brief.adjustment_hints)
+
+
+@pytest.mark.asyncio
+async def test_morning_brief_without_execution_repo_never_reads_the_calendar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """기존 호출부(execution_repo 미전달)는 동작 무변경 — Google 을 부르지 않는다."""
+    action_repo = FakeActionItemRepo()
+    action_repo.seed(_action("캡스톤", 1, _BRIEF_NOW.date()))
+    calls = _stub_calendar(monkeypatch, "ok", [(_at_kst(0), _at_kst(23))])
+
+    await _brief(action_repo, None)
+
+    assert calls == []

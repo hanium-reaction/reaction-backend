@@ -16,14 +16,17 @@ LLM 이 "(데이터 없음)" 자리를 "어제는 조용히 잘 보냈어요" �
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.daily_brief import DailyBrief
+from reaction_backend.domain import calendar_conflict
+from reaction_backend.integrations.google_calendar import freebusy, oauth
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator import mandala_adapter
+from reaction_backend.schemas.common import KST, to_kst
 from reaction_backend.schemas.today import MorningBriefDraft
 
 if TYPE_CHECKING:
@@ -31,6 +34,7 @@ if TYPE_CHECKING:
 
     from reaction_backend.repositories.action_item_repo import ActionItemRepo
     from reaction_backend.repositories.daily_brief_repo import DailyBriefRepo
+    from reaction_backend.repositories.execution_repo import ExecutionRepo
     from reaction_backend.repositories.goal_repo import GoalRepo
 
 # 완료로 세는 상태. partial_done 은 별도 집계(했지만 다 못 함 — 뭉뚱그리면 회고와 어긋난다).
@@ -84,6 +88,58 @@ def _rule_brief(cards: list[ActionItem]) -> MorningBriefDraft:
     )
 
 
+#: 브리프에 싣는 겹침 문장 수 — 나머지는 한 줄로 묶는다(힌트가 겹침 목록이 되면 안 된다).
+_MAX_CONFLICT_HINTS = 2
+
+
+async def _calendar_conflict_hints(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    now_kst_dt: datetime,
+    cards: list[ActionItem],
+    execution_repo: ExecutionRepo | None,
+) -> list[str]:
+    """오늘 카드의 아직 시작 안 한 블록 중 Google 캘린더 일정과 겹치는 것 → 브리프 문장.
+
+    계획은 만들 때 캘린더를 피하지만 **그 뒤 생긴 약속**은 모른다. 아침에 한 번 확인해
+    알려준다 — 옮기지는 않는다(자동 적용 금지). 새 알림을 보내지도 않는다 — 알림 클래스는
+    3종 잠금이라(AGENTS §1) 이미 있는 브리프 안에서만 말한다.
+
+    연결이 없거나 못 읽으면 빈 목록이다 — 브리프가 캘린더 때문에 실패하면 안 된다.
+    """
+    if execution_repo is None or not cards or not oauth.is_enabled():
+        return []
+    today = to_kst(now_kst_dt).date()
+    day_start = datetime.combine(today, time(0, 0), tzinfo=KST)
+    result = await freebusy.fetch_busy(
+        session, user_id=user_id, start=day_start, end=day_start + timedelta(days=1)
+    )
+    if result.status != "ok" or not result.intervals:
+        return []
+
+    blocks = await execution_repo.list_active_blocks_for_actions(user_id, [c.id for c in cards])
+    keyed = [((aid, start), status, start, end) for aid, status, start, end in blocks]
+    hits = calendar_conflict.conflicting_keys(
+        keyed, [(iv.start, iv.end) for iv in result.intervals], now=now_kst_dt
+    )
+    # 카드당 한 번 — 한 카드가 세션 여러 개로 나뉘어도 문장은 가장 이른 블록 하나로.
+    first_hit: dict[UUID, datetime] = {}
+    for aid, start in hits:
+        if aid not in first_hit or start < first_hit[aid]:
+            first_hit[aid] = start
+    titles = {c.id: c.title for c in cards}
+    ordered = sorted(first_hit.items(), key=lambda item: item[1])
+    hints = [
+        f"오늘 {to_kst(start):%H:%M} '{titles.get(aid, '카드')}' 시간이 캘린더 일정과 겹쳐요. "
+        "시간을 옮겨 볼까요?"
+        for aid, start in ordered[:_MAX_CONFLICT_HINTS]
+    ]
+    if len(ordered) > _MAX_CONFLICT_HINTS:
+        hints.append(f"그 밖에 {len(ordered) - _MAX_CONFLICT_HINTS}개 카드도 캘린더 일정과 겹쳐요.")
+    return hints
+
+
 def _expires_next_day(brief_date_dt: datetime) -> datetime:
     """다음 날 새벽까지 유효 (브리프는 당일용)."""
     return brief_date_dt + timedelta(days=1)
@@ -98,13 +154,15 @@ async def run_morning_brief_for_user(
     session: AsyncSession,
     goal_repo: GoalRepo | None = None,
     tone_mode: str | None = None,
+    execution_repo: ExecutionRepo | None = None,
 ) -> DailyBrief:
     """사용자 1명의 오늘 Morning Brief 생성 (idempotent).
 
     이미 오늘 brief 가 있으면 그대로 반환 (재실행 안전). 없으면 LLM(+룰 fallback)으로 생성.
     `tone_mode` 는 LLM 시스템 프롬프트 톤 prefix 용 (#23) — #24 cron wrapper 가 사용자별로 전달.
     `goal_repo` 가 있으면 목표 tier 로 focus/maintain 카드를 가른다(없으면 전부 focus 취급 —
-    기존 호출부 하위호환).
+    기존 호출부 하위호환). `execution_repo` 가 있으면 오늘 블록과 Google 캘린더 겹침을
+    `adjustment_hints` 맨 앞에 싣는다(없으면 캘린더를 보지 않는다 — 하위호환).
     """
     brief_date = now_kst_dt.date()
     existing = await brief_repo.get_by_date(user_id, brief_date)
@@ -151,7 +209,15 @@ async def run_morning_brief_for_user(
         tone_mode=tone_mode,
     )
     draft = result.value
-    hints = [{"text": h} for h in draft.adjustment_hints]
+    # 캘린더 겹침은 LLM 힌트보다 앞에 둔다 — 사실이고, 아침에 바로 손쓸 수 있는 것이다.
+    calendar_hints = await _calendar_conflict_hints(
+        session,
+        user_id=user_id,
+        now_kst_dt=now_kst_dt,
+        cards=actionable,
+        execution_repo=execution_repo,
+    )
+    hints = [{"text": h} for h in (*calendar_hints, *draft.adjustment_hints)]
 
     big_rock = focus_cards[0] if focus_cards else (actionable[0] if actionable else None)
     return await brief_repo.create(
