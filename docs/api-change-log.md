@@ -7,6 +7,41 @@
 
 ---
 
+## v2.27 — 2026-09-17 (이미 세운 계획도 캘린더 변화를 안다 — 화면 겹침 표시 + 아침 브리프)
+
+**additive — `GET /today/agenda` · `GET /plans/weekly`.** 필드 추가만(기존 필드 무변경). 마이그레이션 없음.
+스코프 무변경(`calendar.freebusy`). 새 알림 클래스 없음.
+
+### 무엇이 비어 있었나
+
+캘린더는 **계획을 만들 때만** 읽었다(v2.15 생성, v2.26 재계획). 승인한 뒤 캘린더에 약속이 생기면 그 블록은
+모른 채 남았다 — 사용자는 수업 위에 잡힌 카드를 직접 발견해야 했다.
+
+### 이제
+
+- `AgendaCard.calendarConflict` · `WeeklyBlock.calendarConflict` (bool, 기본 `false`) — 아직 시작 안 했고
+  아직 안 끝난 블록이 **지금** 캘린더 일정과 겹치면 `true`
+- `TodayAgenda.calendar` · `WeeklyPlanResponse.calendar` — `{status: ok|failed|not_connected, checkedAt}`.
+  `failed` 일 때의 `calendarConflict=false` 는 "겹침 없음" 이 아니다
+- 화면 조회는 **사용자·구간별 5분 캐시 + 2초 상한**. 못 읽어도 화면은 정상 응답(`failed`). 연결·해제 직후 캐시 비움
+- 06:00 모닝 브리프가 오늘 겹치는 카드를 `adjustmentHints` 맨 앞에 싣는다(카드당 1문장, 최대 2 + 요약 1줄)
+- 옮기지 않는다 — 자동 적용 금지(AGENTS §1). 옮기는 건 블록 편집·재계획
+
+### 곁들여 고친 것
+
+- 서버에 client id/secret 이 빠진 상태에서 토큰 갱신이 돌면 `not_configured` 를 **사용자 권한 박탈로 오인해
+  연결을 회수**했다 — 설정을 되돌려도 사용자는 재연결해야 했다. 이제 일시적 실패로 보고 연결을 둔다.
+- 캘린더 기능 스위치 판정(스위치·id·secret·암호화 키)을 `oauth.is_enabled()` 한 곳으로 — 연결 라우트와
+  화면·브리프가 같은 기준을 쓴다.
+
+### 안 한 것 (현재 결정 범위 밖)
+
+- **webhook(실시간 푸시)** — Google `events.watch` 는 일정 제목까지 읽는 스코프가 필요하다(ADR-0009 D4 가 막음)
+- **겹치면 자동으로 옮기기** — AI 결과 자동 적용 금지
+- **겹침 알림 push** — 알림 3클래스·주 3건 잠금. 인앱 배지와 브리프 문장으로만 알린다
+
+---
+
 ## v2.26 — 2026-09-17 (주간 재계획도 캘린더 일정을 피한다)
 
 **동작 변경 — `POST /plans/replan`.** 응답 스키마 무변경(`warnings` 에 문구 추가 가능). 마이그레이션 없음.

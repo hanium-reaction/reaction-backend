@@ -6,7 +6,7 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 
 | 시각 | 작업 | 출력 |
 | --- | --- | --- |
-| 매일 06:00 | `daily_brief_precompute` — 헤드라인 + Big Rock 생성 (LLM 1회) | `daily_briefs` row |
+| 매일 06:00 | `daily_brief_precompute` — 헤드라인 + Big Rock 생성 (LLM 1회) + **오늘 블록 × Google 캘린더 겹침 힌트**(연결한 사용자만, freebusy 1회) | `daily_briefs` row |
 | 19~23시 5분 폴 | `evening_reflection_notify` — 사용자별 설정 시각 이후 회고 알림 (pending 있을 때만, 게이트 enforce) | (외부) Web Push + `notification_sends` row |
 | 종일 5분 폴 | `pre_card_notify` — 2~7분 뒤 시작 블록 사전 알림 (opt-in, 게이트 enforce) | (외부) Web Push + `notification_sends` row |
 | 06~10시 5분 폴 | `morning_brief_notify` — 오늘이 anchor 인 PARK/CARRY_OVER 재관여 대상에게만(T2, 근거 대장 §6.2), `morning_brief` 클래스 재사용 | (외부) Web Push + `notification_sends` row |
@@ -18,7 +18,7 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 | 매일 04:00 KST | `abandon_stale_recoveries` — 회고 창 밖 미완주 회복 → `recovery_result='abandoned'` (같은 job 안에서 만료 뒤 실행) | `recovery_attempts` UPDATE |
 | 매일 04:00 KST | `expire_stale_proposed_goals` — 잠정(proposed) 목표 중 14일 지나도 승격 안 된 것 → `archived` (#178) | `goals` UPDATE |
 | 매일 04:00 KST | `anonymize_inactive_users` — last_active_at < now()-90d → 익명화 | `users` UPDATE |
-| 1시간마다 | `oauth_token_refresher` — 만료 임박 토큰 갱신 | `calendar_connections` UPDATE |
+| ~~1시간마다~~ | ~~`oauth_token_refresher`~~ — **두지 않는다**: 캘린더를 읽는 순간(계획·화면·브리프) 만료 60초 전이면 그 자리에서 갱신한다(`google_calendar/freebusy._access_token`) | — |
 | ~~5분마다~~ | ~~`notification_dispatcher` — 예약된 알림 발송~~ — **발송 게이트로 대체** (`safety/push_gate.py`, ADR-0006 §1: 큐 없이 cron → 게이트 직접발송, enforce 지점은 게이트 단일) | — |
 
 규약: 모든 cron은 **idempotent** 해야 한다. 1회 실행 보장 X, 다회 실행 안전성 O.

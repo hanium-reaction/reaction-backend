@@ -13,7 +13,7 @@ agenda 데이터 출처: daily_briefs(Morning Brief, #19-C cron 이 채움) + ac
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from http import HTTPStatus
 from typing import Annotated
 from uuid import UUID
@@ -29,6 +29,7 @@ from reaction_backend.db.models.fixed_schedule import FixedSchedule
 from reaction_backend.db.models.habit_instance import HabitInstance
 from reaction_backend.db.session import get_db
 from reaction_backend.domain import action_cancel, missed_check_in
+from reaction_backend.integrations.google_calendar import freebusy
 from reaction_backend.repositories.action_item_repo import ActionItemRepo, get_action_item_repo
 from reaction_backend.repositories.daily_brief_repo import DailyBriefRepo, get_daily_brief_repo
 from reaction_backend.repositories.execution_repo import ExecutionRepo, get_execution_repo
@@ -43,7 +44,8 @@ from reaction_backend.repositories.habit_instance_repo import (
 from reaction_backend.repositories.habit_repo import current_week_start_kst
 from reaction_backend.repositories.recovery_repo import RecoveryRepo, get_recovery_repo
 from reaction_backend.safety.encryption import encrypt_memo
-from reaction_backend.schemas.common import now_kst
+from reaction_backend.schemas.calendar import CalendarCheck
+from reaction_backend.schemas.common import KST, now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.today import (
     ActionDetail,
@@ -105,7 +107,12 @@ def _brief_schema(brief: DailyBrief | None) -> MorningBrief | None:
 
 
 def _card_schema(
-    a: ActionItem, *, has_execution_history: bool, missed: bool, execution_id: UUID | None
+    a: ActionItem,
+    *,
+    has_execution_history: bool,
+    missed: bool,
+    execution_id: UUID | None,
+    calendar_conflict: bool = False,
 ) -> AgendaCard:
     return AgendaCard(
         action_id=f"{_ACTION_PREFIX}{a.id}",
@@ -124,6 +131,7 @@ def _card_schema(
         ),
         missed_check_in=missed,
         execution_id=f"{_EXEC_PREFIX}{execution_id}" if execution_id else None,
+        calendar_conflict=calendar_conflict,
     )
 
 
@@ -163,8 +171,14 @@ async def today_agenda(
     brief_repo: BriefRepoDep,
     habit_inst_repo: HabitInstRepoDep,
     fixed_repo: FixedRepoDep,
+    session: SessionDep,
 ) -> TodayAgenda:
-    """오늘 어젠다 단일 조회 — daily_brief + cards + habits + fixed (모두 read)."""
+    """오늘 어젠다 단일 조회 — daily_brief + cards + habits + fixed (모두 read).
+
+    캘린더를 연결한 사용자는 오늘 구간의 Google 캘린더를 **열 때마다** 확인해, 아직 시작 안 한
+    블록이 그 뒤 생긴 약속과 겹치면 카드에 `calendarConflict` 를 단다(5분 캐시·2초 상한 —
+    못 읽어도 어젠다는 뜬다, `calendar.status=failed`).
+    """
     today = _today_kst()
     weekday = _WEEKDAY_KEYS[today.weekday()]
 
@@ -193,6 +207,18 @@ async def today_agenda(
     fixed = await fixed_repo.list_active(user.id)
     todays_fixed = [s for s in fixed if weekday in (s.days_of_week or [])]
 
+    day_start = datetime.combine(today, time(0, 0), tzinfo=KST)
+    calendar = await freebusy.screen_conflicts(
+        session,
+        user_id=user.id,
+        start=day_start,
+        end=day_start + timedelta(days=1),
+        blocks=list(active_blocks),
+        now=now,
+    )
+    # 조회가 토큰을 갱신·회수했으면 확정한다 — freebusy 는 commit 하지 않는다(호출자 몫).
+    await session.commit()
+
     return TodayAgenda(
         date=today.isoformat(),
         brief=_brief_schema(brief),
@@ -202,11 +228,13 @@ async def today_agenda(
                 has_execution_history=a.id in with_history,
                 missed=a.id in missed_ids,
                 execution_id=latest_executions.get(a.id),
+                calendar_conflict=a.id in calendar.keys,
             )
             for a in cards
         ],
         habits=[_habit_schema(i) for i in habit_instances],
         fixed_schedules=[_fixed_schema(s) for s in todays_fixed],
+        calendar=CalendarCheck(status=calendar.status, checked_at=calendar.checked_at),
     )
 
 

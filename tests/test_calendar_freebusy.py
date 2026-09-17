@@ -132,7 +132,9 @@ async def _fetch_with(monkeypatch: pytest.MonkeyPatch, response: Any) -> freebus
     async def _token(session: Any, *, user_id: uuid.UUID) -> str:
         return "access"
 
-    def _query(access_token: str, start: datetime, end: datetime) -> Any:
+    def _query(
+        access_token: str, start: datetime, end: datetime, timeout: tuple[float, float]
+    ) -> Any:
         if isinstance(response, Exception):
             raise response
         return response
@@ -322,3 +324,178 @@ def test_freebusy_route_commits_what_the_lookup_changed(
     assert response.status_code == 200
     assert response.json() == {"busy": []}
     assert sum(s.commit_count for s in fake_sessions) == 1
+
+
+# ── 화면 조회 캐시 (오늘·주간) ─────────────────────────────────────────────
+
+
+def _range() -> tuple[datetime, datetime]:
+    start = datetime(2026, 9, 17, tzinfo=KST)
+    return start, start + timedelta(days=1)
+
+
+def _counting_fetch(
+    monkeypatch: pytest.MonkeyPatch, status: str, intervals: list[TimeInterval] | None = None
+) -> list[float]:
+    """`fetch_busy` 대역 — 부를 때마다 hard_timeout 을 기록한다."""
+    calls: list[float] = []
+
+    async def _fetch(
+        session: Any, *, user_id: uuid.UUID, start: datetime, end: datetime, hard_timeout: float
+    ) -> freebusy.FreeBusyResult:
+        calls.append(hard_timeout)
+        return freebusy.FreeBusyResult(status, intervals or [])  # type: ignore[arg-type]
+
+    monkeypatch.setattr(freebusy, "fetch_busy", _fetch)
+    return calls
+
+
+async def test_screen_lookup_is_cached_and_uses_the_short_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """화면 전환마다 Google 을 치지 않는다 — 그리고 사용자가 기다리니 2초 상한이다."""
+    calls = _counting_fetch(monkeypatch, "ok")
+    user_id = uuid.uuid4()
+    start, end = _range()
+
+    first, first_at = await freebusy.fetch_busy_for_screen(
+        _FakeSession(),  # type: ignore[arg-type]
+        user_id=user_id,
+        start=start,
+        end=end,
+    )
+    second, second_at = await freebusy.fetch_busy_for_screen(
+        _FakeSession(),  # type: ignore[arg-type]
+        user_id=user_id,
+        start=start,
+        end=end,
+    )
+
+    assert calls == [freebusy.SCREEN_HARD_TIMEOUT]
+    assert first is second and first_at == second_at  # 캐시 적중 — 확인 시각도 그때 것
+
+
+async def test_screen_cache_expires_and_can_be_cleared(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _counting_fetch(monkeypatch, "ok")
+    user_id = uuid.uuid4()
+    start, end = _range()
+    session: Any = _FakeSession()
+
+    await freebusy.fetch_busy_for_screen(session, user_id=user_id, start=start, end=end)
+    freebusy.clear_screen_cache(user_id)  # 연결·해제 직후 라우터가 하는 일
+    await freebusy.fetch_busy_for_screen(session, user_id=user_id, start=start, end=end)
+    monkeypatch.setattr(freebusy, "SCREEN_CACHE_TTL", timedelta(0))
+    await freebusy.fetch_busy_for_screen(session, user_id=user_id, start=start, end=end)
+
+    assert len(calls) == 3
+
+
+async def test_screen_failures_are_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Google 이 잠깐 느렸다고 5분 동안 캘린더 없는 화면을 보여줄 이유가 없다."""
+    calls = _counting_fetch(monkeypatch, "failed")
+    user_id = uuid.uuid4()
+    start, end = _range()
+    session: Any = _FakeSession()
+
+    await freebusy.fetch_busy_for_screen(session, user_id=user_id, start=start, end=end)
+    await freebusy.fetch_busy_for_screen(session, user_id=user_id, start=start, end=end)
+
+    assert len(calls) == 2
+
+
+async def test_short_budget_also_shrinks_the_http_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """코루틴만 2초에 포기하고 스레드가 8초씩 남으면 화면 조회가 몰릴 때 스레드 풀이 막힌다."""
+    seen: list[tuple[float, float]] = []
+
+    async def _token(session: Any, *, user_id: uuid.UUID) -> str:
+        return "access"
+
+    def _query(
+        access_token: str, start: datetime, end: datetime, timeout: tuple[float, float]
+    ) -> Any:
+        seen.append(timeout)
+        return _FakeResponse(200, {"calendars": {"primary": {"busy": []}}})
+
+    monkeypatch.setattr(freebusy, "_access_token", _token)
+    monkeypatch.setattr(freebusy, "_query", _query)
+    start, end = _range()
+
+    await freebusy.fetch_busy(
+        _FakeSession(),  # type: ignore[arg-type]
+        user_id=uuid.uuid4(),
+        start=start,
+        end=end,
+        hard_timeout=2.0,
+    )
+
+    assert seen == [(2.0, 2.0)]
+
+
+async def test_screen_conflicts_do_not_call_google_while_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _counting_fetch(monkeypatch, "ok")
+    monkeypatch.setattr(freebusy.oauth, "is_enabled", lambda: False)
+    start, end = _range()
+
+    result = await freebusy.screen_conflicts(
+        _FakeSession(),  # type: ignore[arg-type]
+        user_id=uuid.uuid4(),
+        start=start,
+        end=end,
+        blocks=[("a", "scheduled", start, end)],
+        now=start,
+    )
+
+    assert (result.status, result.checked_at, result.keys) == ("not_connected", None, set())
+    assert calls == []
+
+
+async def test_screen_conflicts_report_overlapping_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    start, end = _range()
+    busy = TimeInterval(start + timedelta(hours=10), start + timedelta(hours=11))
+    _counting_fetch(monkeypatch, "ok", [busy])
+    monkeypatch.setattr(freebusy.oauth, "is_enabled", lambda: True)
+    blocks = [
+        ("hit", "scheduled", start + timedelta(hours=10, minutes=30), start + timedelta(hours=12)),
+        ("miss", "scheduled", start + timedelta(hours=13), start + timedelta(hours=14)),
+    ]
+
+    result = await freebusy.screen_conflicts(
+        _FakeSession(),  # type: ignore[arg-type]
+        user_id=uuid.uuid4(),
+        start=start,
+        end=end,
+        blocks=blocks,
+        now=start,
+    )
+
+    assert result.status == "ok"
+    assert result.checked_at is not None
+    assert result.keys == {"hit"}
+
+
+async def test_missing_server_credentials_never_revoke_a_user_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """secret 이 빠진 배포는 서버 문제다 — 그걸로 사용자 연결을 끊으면 설정을 되돌려도 복구 안 된다."""
+    from reaction_backend.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "google_oauth_client_secret", "", raising=False)
+    connection = _Conn(datetime.now(UTC) - timedelta(minutes=5))
+    revoked: list[str] = []
+
+    async def _active(session: Any, *, user_id: uuid.UUID) -> Any:
+        return connection
+
+    async def _mark(session: Any, conn: Any) -> None:
+        revoked.append("yes")
+
+    monkeypatch.setattr(freebusy.token_store, "get_active", _active)
+    monkeypatch.setattr(freebusy.token_store, "refresh_token_of", lambda c: "r")
+    monkeypatch.setattr(freebusy.token_store, "mark_revoked", _mark)
+
+    token = await freebusy._access_token(_FakeSession(), user_id=uuid.uuid4())  # type: ignore[arg-type]
+
+    assert token is None
+    assert revoked == []

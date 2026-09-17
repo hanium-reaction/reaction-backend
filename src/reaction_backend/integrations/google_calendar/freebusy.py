@@ -13,13 +13,15 @@ Google 이 느리면 `None` 을 돌려주고, 호출자는 캘린더 없이 예�
 잡혔다" 는 사용자가 알아챌 수 없는 배신이다. 그래서 반환을 세 가지로 가른다 —
 `not_connected`(정상, 조용히) / `ok` / `failed`(연결돼 있는데 못 읽음 → 호출자가 경고).
 
-## 왜 캐시를 안 두나
+## 캐시는 화면 조회에만
 
-`integrations/google_calendar/README.md` 는 60s TTL 캐시를 예고했지만 두지 않았다.
-계획 생성은 **지평 전체를 한 번에** 조회하고(`fetch_busy_by_day`), 그 결과를 날짜별
-dict 로 들고 스케줄러에 넘긴다 — `existing_busy` 와 같은 모양이다. 하루마다 부르는
-구조가 아니라서 한 번의 generate 가 API 를 한 번만 친다. 캐시가 막을 반복 호출이
-구조적으로 없다.
+계획 생성은 **지평 전체를 한 번에** 조회하고(`fetch_busy_by_day`) 그 결과를 날짜별 dict 로
+스케줄러에 넘긴다 — 한 번의 generate 가 API 를 한 번만 치므로 캐시가 막을 반복 호출이 없다.
+
+화면(`GET /today/agenda`·`GET /plans/weekly`)은 다르다 — 이미 승인한 블록이 **나중에 생긴**
+캘린더 일정과 겹치는지 보려고 화면을 열 때마다 읽는데, 화면 전환마다 Google 을 치면
+느리고 낭비다. 그래서 `fetch_busy_for_screen` 만 사용자·구간별 5분 캐시와 2초 상한을 둔다.
+프로세스 메모리 캐시라 워커마다 따로다(단일 인스턴스 배포 전제, scheduler 와 같다).
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from typing import Any, Final, Literal
 import requests
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from reaction_backend.domain import calendar_conflict
 from reaction_backend.integrations.google_calendar import oauth, token_store
 from reaction_backend.orchestrator.goal_structuring import BusyBlock, TimeInterval
 from reaction_backend.schemas.common import KST, to_kst
@@ -50,6 +53,11 @@ _HARD_TIMEOUT: Final = 10.0
 
 #: 조회 상한 — Google 이 한 번에 돌려주는 범위. 4주 계획 지평보다 넉넉하다.
 MAX_RANGE_DAYS: Final = 60
+
+#: 화면 조회는 사용자가 기다린다 — 계획 생성(10s)보다 훨씬 짧게. 넘으면 캘린더 없이 그린다.
+SCREEN_HARD_TIMEOUT: Final = 2.0
+#: 화면 조회 캐시 수명 — 캘린더에 새 약속을 넣고 5분 안에는 화면에 반영된다.
+SCREEN_CACHE_TTL: Final = timedelta(minutes=5)
 
 Status = Literal["ok", "not_connected", "failed"]
 
@@ -67,7 +75,12 @@ class FreeBusyResult:
         return self.status == "failed"
 
 
-def _query(access_token: str, start: datetime, end: datetime) -> requests.Response:
+def _query(
+    access_token: str,
+    start: datetime,
+    end: datetime,
+    timeout: tuple[float, float] = (_CONNECT_TIMEOUT, _READ_TIMEOUT),
+) -> requests.Response:
     return requests.post(
         _FREEBUSY_URL,
         json={
@@ -78,7 +91,7 @@ def _query(access_token: str, start: datetime, end: datetime) -> requests.Respon
             "items": [{"id": "primary"}],
         },
         headers={"Authorization": f"Bearer {access_token}"},
-        timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT),
+        timeout=timeout,
     )
 
 
@@ -147,17 +160,29 @@ async def _access_token(session: AsyncSession, *, user_id: uuid.UUID) -> str | N
 
 
 async def fetch_busy(
-    session: AsyncSession, *, user_id: uuid.UUID, start: datetime, end: datetime
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    start: datetime,
+    end: datetime,
+    hard_timeout: float = _HARD_TIMEOUT,
 ) -> FreeBusyResult:
-    """[start, end) 의 busy 구간. 실패해도 예외를 올리지 않는다. commit 은 호출자 몫."""
+    """[start, end) 의 busy 구간. 실패해도 예외를 올리지 않는다. commit 은 호출자 몫.
+
+    `hard_timeout` 은 Google freebusy 왕복의 상한이다(토큰 갱신 왕복은 따로 `oauth` 의 상한).
+    """
     access_token = await _access_token(session, user_id=user_id)
     if access_token is None:
         # 연결이 없거나, 갱신이 실패해 방금 회수됐다. 둘 다 '캘린더 없이 진행'이다.
         return FreeBusyResult("not_connected", [])
 
+    # 스레드 쪽 timeout 도 상한 안으로 줄인다 — 코루틴만 포기하고 스레드가 8초씩 남으면
+    # 화면 조회가 몰릴 때 스레드 풀이 막힌다.
+    http_timeout = (min(_CONNECT_TIMEOUT, hard_timeout), min(_READ_TIMEOUT, hard_timeout))
     try:
         response = await asyncio.wait_for(
-            asyncio.to_thread(_query, access_token, start, end), timeout=_HARD_TIMEOUT
+            asyncio.to_thread(_query, access_token, start, end, http_timeout),
+            timeout=hard_timeout,
         )
     except (TimeoutError, requests.RequestException) as exc:
         logger.info("calendar_freebusy_failed reason=%s", type(exc).__name__)
@@ -209,3 +234,81 @@ async def fetch_busy_by_day(
 
     result = await fetch_busy(session, user_id=user_id, start=start, end=end)
     return split_by_day(result.intervals), result.status
+
+
+# ── 화면 조회 (오늘·주간) ─────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class _ScreenCacheEntry:
+    result: FreeBusyResult
+    checked_at: datetime
+
+
+_screen_cache: dict[tuple[uuid.UUID, datetime, datetime], _ScreenCacheEntry] = {}
+
+
+def clear_screen_cache(user_id: uuid.UUID | None = None) -> None:
+    """화면 캐시 비우기 — 연결·해제 직후 호출한다(안 비우면 5분간 옛 상태를 그린다)."""
+    if user_id is None:
+        _screen_cache.clear()
+        return
+    for key in [k for k in _screen_cache if k[0] == user_id]:
+        del _screen_cache[key]
+
+
+async def fetch_busy_for_screen(
+    session: AsyncSession, *, user_id: uuid.UUID, start: datetime, end: datetime
+) -> tuple[FreeBusyResult, datetime]:
+    """화면용 조회 — 5분 캐시 + 2초 상한. `(결과, 확인 시각)` 을 돌려준다.
+
+    **실패는 캐시하지 않는다** — Google 이 잠깐 느렸던 것 때문에 5분 동안 캘린더 없는
+    화면을 보여줄 이유가 없다. 다음 화면 진입에서 다시 시도한다.
+    """
+    now = datetime.now(UTC)
+    key = (user_id, start, end)
+    hit = _screen_cache.get(key)
+    if hit is not None and now - hit.checked_at < SCREEN_CACHE_TTL:
+        return hit.result, hit.checked_at
+
+    result = await fetch_busy(
+        session, user_id=user_id, start=start, end=end, hard_timeout=SCREEN_HARD_TIMEOUT
+    )
+    if result.status != "failed":
+        # 만료된 항목도 같이 치운다 — 주간 화면을 여러 주 넘겨 보면 키가 계속 쌓인다.
+        for stale in [
+            k for k, v in _screen_cache.items() if now - v.checked_at >= SCREEN_CACHE_TTL
+        ]:
+            del _screen_cache[stale]
+        _screen_cache[key] = _ScreenCacheEntry(result, now)
+    return result, now
+
+
+@dataclass(frozen=True)
+class ScreenConflicts[K]:
+    """화면에 실을 캘린더 상태 + 겹치는 블록 key."""
+
+    status: Status
+    checked_at: datetime | None
+    keys: set[K]
+
+
+async def screen_conflicts[K](
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    start: datetime,
+    end: datetime,
+    blocks: list[tuple[K, str, datetime, datetime]],
+    now: datetime,
+) -> ScreenConflicts[K]:
+    """화면 구간의 캘린더 일정과 겹치는 블록. 기능이 꺼져 있으면 Google 을 부르지 않는다."""
+    if not oauth.is_enabled():
+        return ScreenConflicts("not_connected", None, set())
+    result, checked_at = await fetch_busy_for_screen(session, user_id=user_id, start=start, end=end)
+    if result.status != "ok":
+        return ScreenConflicts(result.status, None, set())
+    keys = calendar_conflict.conflicting_keys(
+        blocks, [(iv.start, iv.end) for iv in result.intervals], now=now
+    )
+    return ScreenConflicts("ok", checked_at, keys)

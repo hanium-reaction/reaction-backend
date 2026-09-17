@@ -122,10 +122,13 @@ def _ensure_test_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("GEMINI_API_KEY", "")
 
     from reaction_backend.config import get_settings
+    from reaction_backend.integrations.google_calendar import freebusy
     from reaction_backend.safety.encryption import get_cipher
 
     get_settings.cache_clear()
     get_cipher.cache_clear()
+    # 화면용 캘린더 조회 캐시는 프로세스 전역이다 — 테스트 사이에 결과가 새지 않게.
+    freebusy.clear_screen_cache()
     yield
     get_settings.cache_clear()
     get_cipher.cache_clear()

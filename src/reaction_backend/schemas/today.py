@@ -10,6 +10,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from reaction_backend.schemas.calendar import CalendarCheck
 from reaction_backend.schemas.common import CamelModel, KstDatetime
 
 # Quick Check-in 4칩 (S13) — execution_events.completion_status 의 종결값 4종
@@ -54,6 +55,10 @@ class AgendaCard(CamelModel):
     # **새 실행을 만들어** 곧바로 failed 로 체크인했다 — 회복 화면에 들어갈 때마다
     # 가짜 실패가 하나씩 늘고, 그 숫자가 주간 리뷰 준수율과 에스컬레이션을 밀어 올렸다.
     execution_id: str | None = None
+    # 이 카드의 아직 시작 안 한 블록이 **지금** Google 캘린더 일정과 겹치는가.
+    # **파생 필드** — 계획은 만들 때 캘린더를 피하지만, 그 뒤 생긴 약속은 모른다.
+    # 판정은 `domain/calendar_conflict.py`. 옮기지는 않는다(자동 적용 금지) — 배지만.
+    calendar_conflict: bool = False
 
 
 class AgendaHabit(CamelModel):
@@ -83,6 +88,8 @@ class TodayAgenda(CamelModel):
     cards: list[AgendaCard]
     habits: list[AgendaHabit]
     fixed_schedules: list[AgendaFixedSchedule]
+    # 오늘 구간 캘린더 확인 결과 — `calendarConflict` 를 어떻게 읽을지 정한다.
+    calendar: CalendarCheck = Field(default_factory=CalendarCheck)
 
 
 class MorningBriefDraft(CamelModel):
