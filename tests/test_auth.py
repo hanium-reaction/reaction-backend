@@ -486,15 +486,76 @@ def test_login_sets_refresh_cookie(
     assert resp.status_code == 200
 
     set_cookie_headers = resp.headers.get_list("set-cookie")
-    refresh_cookie = next(h for h in set_cookie_headers if h.startswith("reaction_refresh="))
-    assert "HttpOnly" in refresh_cookie
-    assert "Path=/auth" in refresh_cookie
-    assert "samesite=lax" in refresh_cookie.lower()
-    # app_env=local(테스트 기본값) 이라 Secure 는 안 붙는다 — https 없는 로컬 개발 대응.
-    assert "Secure" not in refresh_cookie
+    refresh_cookies = [h for h in set_cookie_headers if h.startswith("reaction_refresh=")]
+    # 직접 접속(/auth)과 Vercel rewrite 경유(/api/auth) 두 경로에 각각 심는다.
+    assert sorted(_cookie_path(h) for h in refresh_cookies) == ["/api/auth", "/auth"]
+    for refresh_cookie in refresh_cookies:
+        assert "HttpOnly" in refresh_cookie
+        assert "samesite=lax" in refresh_cookie.lower()
+        # app_env=local(테스트 기본값) 이라 Secure 는 안 붙는다 — https 없는 로컬 개발 대응.
+        assert "Secure" not in refresh_cookie
 
     # 이행 기간 — 본문에도 여전히 refreshToken 이 실린다(네이티브·기존 클라이언트용).
     assert resp.json()["refreshToken"]
+
+
+def _cookie_path(set_cookie: str) -> str:
+    return next(
+        part.split("=", 1)[1]
+        for part in (p.strip() for p in set_cookie.split(";"))
+        if part.lower().startswith("path=")
+    )
+
+
+def _jar_paths(client: TestClient, name: str) -> list[str]:
+    return sorted(c.path for c in client.cookies.jar if c.name == name)
+
+
+def _behind_api_prefix(app: Any) -> Any:
+    """Vercel rewrite(`/api/:path*` → 백엔드 `/:path*`) 흉내 — 브라우저는 `/api/...` 를 본다."""
+
+    async def proxied(scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and scope["path"].startswith("/api/"):
+            scope = {**scope, "path": scope["path"][4:], "raw_path": scope["raw_path"][4:]}
+        await app(scope, receive, send)
+
+    return proxied
+
+
+def test_cookie_refresh_works_through_the_vercel_api_prefix(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    """웹은 `/api/auth/refresh` 를 부른다 — 쿠키가 그 경로에도 있어야 실린다.
+
+    예전엔 `Path=/auth` 하나라 브라우저가 `/api/auth/refresh` 에 쿠키를 싣지 않았다.
+    쿠키 폴백이 배포 환경에서 **한 번도** 동작할 수 없었다(스테이징 로그: refresh 호출 0건).
+    """
+    fake_invite_code_repo.seed("TESTCODE")
+    with TestClient(_behind_api_prefix(auth_client.app)) as browser:
+        login = browser.post("/api/auth/google", json={"idToken": "stub", "inviteCode": "TESTCODE"})
+        assert login.status_code == 200
+
+        resp = browser.post("/api/auth/refresh", json={})  # 본문 없이 — 쿠키만
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["accessToken"]
+
+
+def test_single_auth_path_cookie_is_not_sent_through_the_prefix(
+    auth_client: TestClient,
+    fake_invite_code_repo: FakeInviteCodeRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """대조군 — 경로를 `/auth` 하나로 되돌리면 프록시 경유 refresh 가 401 이다(고친 버그)."""
+    monkeypatch.setenv("REFRESH_COOKIE_PATHS", '["/auth"]')
+    get_settings.cache_clear()
+    fake_invite_code_repo.seed("TESTCODE")
+    with TestClient(_behind_api_prefix(auth_client.app)) as browser:
+        browser.post("/api/auth/google", json={"idToken": "stub", "inviteCode": "TESTCODE"})
+        resp = browser.post("/api/auth/refresh", json={})
+    get_settings.cache_clear()
+
+    assert resp.status_code == 401
 
 
 def test_refresh_works_with_cookie_only(
@@ -527,14 +588,18 @@ def test_logout_clears_cookie(
     auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
 ) -> None:
     _login(auth_client, fake_invite_code_repo)
-    assert "reaction_refresh" in auth_client.cookies
+    # 같은 이름이 경로별로 둘이라 `in cookies` 는 httpx 가 CookieConflict 를 낸다 — jar 로 본다.
+    assert _jar_paths(auth_client, "reaction_refresh") == ["/api/auth", "/auth"]
 
     resp = auth_client.post("/auth/logout", json={})
     assert resp.status_code == 204
     set_cookie_headers = resp.headers.get_list("set-cookie")
-    cleared = next(h for h in set_cookie_headers if h.startswith("reaction_refresh="))
-    assert 'reaction_refresh=""' in cleared or "reaction_refresh=;" in cleared
-    assert "reaction_refresh" not in auth_client.cookies
+    cleared = [h for h in set_cookie_headers if h.startswith("reaction_refresh=")]
+    # 쿠키는 (이름, 경로) 쌍으로 따로 저장된다 — 심은 경로마다 지워야 남지 않는다.
+    assert sorted(_cookie_path(h) for h in cleared) == ["/api/auth", "/auth"]
+    for h in cleared:
+        assert 'reaction_refresh=""' in h or "reaction_refresh=;" in h
+    assert _jar_paths(auth_client, "reaction_refresh") == []
 
 
 def test_logout_works_with_cookie_only_and_revokes_it(
@@ -555,3 +620,15 @@ def test_logout_works_with_cookie_only_and_revokes_it(
 def test_logout_without_body_or_cookie_is_still_idempotent(auth_client: TestClient) -> None:
     resp = auth_client.post("/auth/logout", json={})
     assert resp.status_code == 204
+
+
+@pytest.mark.parametrize("raw", ['["/auth; Domain=evil.example"]', "[]", '["auth"]', '["/a b"]'])
+def test_invalid_refresh_cookie_paths_stop_the_app(
+    raw: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`;` 가 섞이면 Set-Cookie 에 속성을 끼워 넣을 수 있고, 빈 목록이면 웹 세션 유지가 조용히 꺼진다."""
+    from reaction_backend.config import Settings
+
+    monkeypatch.setenv("REFRESH_COOKIE_PATHS", raw)
+    with pytest.raises(ValueError, match="REFRESH_COOKIE_PATHS"):
+        Settings()

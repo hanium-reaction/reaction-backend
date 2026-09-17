@@ -8,7 +8,9 @@ Issue #16 실구현:
 
 Issue #323 — refresh token httpOnly 쿠키 (웹 새로고침 시 재로그인 문제):
 - `/auth/google` 이 `refreshToken` 을 응답 본문(그대로 유지, 네이티브·이행기간용)과
-  `reaction_refresh` httpOnly 쿠키(`Path=/auth`, `SameSite=Lax`) 로 **둘 다** 내려준다.
+  `reaction_refresh` httpOnly 쿠키(`SameSite=Lax`) 로 **둘 다** 내려준다. 쿠키는
+  `settings.refresh_cookie_paths`(기본 `/auth`·`/api/auth`) **각각**에 심는다 — 웹은 Vercel
+  rewrite 로 `/api/auth/...` 를 부르기 때문이다.
 - `/auth/refresh`·`/auth/logout` 은 본문에 토큰이 없으면 쿠키로 폴백 — 어느 쪽이든
   하나만 있으면 동작한다.
 - 네이티브(capacitor://localhost)는 크로스오리진이라 쿠키를 안 쓰고 지금처럼 본문만
@@ -72,15 +74,15 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # `_common.user_agent_lock` 의 "5s 대기 후 409" 복잡도가 필요 없다 — 그냥 블로킹 대기.
 _SIGNUP_LOCK_KEY = -(2**62)
 
-# refresh token httpOnly 쿠키 (#323, FE #246 후속) — `Path=/auth` 로 스코프해
-# `/auth/refresh`·`/auth/logout` 호출에만 실린다. 네이티브 앱(capacitor://localhost)은
+# refresh token httpOnly 쿠키 (#323, FE #246 후속) — 인증 경로로 스코프해
+# `/auth/refresh`·`/auth/logout` 호출에만 실린다. 경로는 설정(`refresh_cookie_paths`)이다 —
+# 직접 접속은 `/auth`, 웹은 Vercel rewrite 를 거쳐 `/api/auth` 라서 둘 다에 심는다. 네이티브 앱(capacitor://localhost)은
 # 크로스오리진이라 쿠키를 안 쓰고 지금처럼 본문으로만 받는다 — 이미 Keystore 로
 # 안전해서 굳이 SameSite=None 의 CSRF 노출을 감수할 이유가 없다(이슈가 명시한 "단순한
 # 쪽" 선택). 그래서 로그인 응답은 본문 `refreshToken` 도 그대로 유지한다(이행 기간 겸
 # 네이티브용) — 웹은 앞으로 쿠키만 읽어도 되고, `/auth/refresh`·`/auth/logout` 은 본문이
 # 없으면 쿠키로 폴백한다.
 _REFRESH_COOKIE_NAME = "reaction_refresh"
-_REFRESH_COOKIE_PATH = "/auth"
 
 
 @asynccontextmanager
@@ -168,16 +170,18 @@ async def _validate_new_signup(
 
 
 def _set_refresh_cookie(response: Response, token: str, expires_at: datetime) -> None:
+    cfg = get_settings()
     max_age = max(int((expires_at - datetime.now(UTC)).total_seconds()), 0)
-    response.set_cookie(
-        key=_REFRESH_COOKIE_NAME,
-        value=token,
-        max_age=max_age,
-        path=_REFRESH_COOKIE_PATH,
-        httponly=True,
-        secure=get_settings().app_env != "local",
-        samesite="lax",
-    )
+    for path in cfg.refresh_cookie_paths:
+        response.set_cookie(
+            key=_REFRESH_COOKIE_NAME,
+            value=token,
+            max_age=max_age,
+            path=path,
+            httponly=True,
+            secure=cfg.app_env != "local",
+            samesite="lax",
+        )
 
 
 @router.post("/google")
@@ -302,7 +306,9 @@ async def logout(
     쿠키는 토큰 유효성과 무관하게 항상 지운다(#323) — 브라우저에 남은 쿠키를 정리하는
     게 목적이라, revoke 대상 jti 를 못 찾는 경우(토큰 없음/깨짐)에도 해야 할 일이다.
     """
-    response.delete_cookie(key=_REFRESH_COOKIE_NAME, path=_REFRESH_COOKIE_PATH)
+    # 쿠키는 (이름, 경로) 쌍으로 따로 저장된다 — 심은 경로마다 지워야 남지 않는다.
+    for path in get_settings().refresh_cookie_paths:
+        response.delete_cookie(key=_REFRESH_COOKIE_NAME, path=path)
 
     token = body.refresh_token or reaction_refresh
     if token is None:

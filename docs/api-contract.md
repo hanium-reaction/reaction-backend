@@ -172,7 +172,17 @@ token 이 사라져 60분마다 재로그인해야 했다(XSS 노출을 우려�
 
 ```
 Set-Cookie: reaction_refresh=<token>; HttpOnly; Path=/auth; SameSite=Lax; Max-Age=1209599[; Secure]
+Set-Cookie: reaction_refresh=<token>; HttpOnly; Path=/api/auth; SameSite=Lax; Max-Age=1209599[; Secure]
 ```
+
+- **같은 쿠키를 두 경로에 심는다(v2.28).** 웹은 Vercel rewrite(`/api/:path*` → 백엔드)를 거쳐
+  브라우저 주소가 `/api/auth/refresh` 다. 예전엔 `Path=/auth` 하나라 브라우저가 그 요청에 쿠키를
+  **싣지 않았다** — 쿠키 폴백이 배포 환경에서 동작한 적이 없다. 직접 접속은 `/auth`, 프록시 경유는
+  `/api/auth` 쿠키가 실린다. 경로 목록은 `REFRESH_COOKIE_PATHS`(기본 `["/auth","/api/auth"]`).
+  로그아웃은 두 경로 모두 지운다.
+- **웹 FE 가 할 일**: 메모리에 refresh token 이 없어도(새로고침 뒤) 401 이면 `POST /auth/refresh`
+  를 **빈 본문 `{}`** 으로 호출한다(same-origin 이라 쿠키는 브라우저가 싣는다). 로그아웃도 본문
+  없이 `POST /auth/logout` 을 불러야 쿠키가 지워진다.
 
 - `Secure` 는 `APP_ENV≠local` 일 때만 붙는다(로컬 개발은 http 라 Secure 쿠키가 아예
   전송 안 됨).

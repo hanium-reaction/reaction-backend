@@ -1,3 +1,4 @@
+import re
 from functools import lru_cache
 from typing import Literal, Self
 
@@ -279,6 +280,13 @@ class Settings(BaseSettings):
     # refresh token은 기존 14일을 유지하며, 명시적 로그아웃/계정 삭제 시에는 즉시 차단된다.
     jwt_access_token_ttl_minutes: int = 24 * 60
     jwt_refresh_token_ttl_days: int = 14
+    # refresh 쿠키(`reaction_refresh`, #323)를 심을 경로들. 웹은 Vercel rewrite
+    # (`/api/:path*` → 백엔드 `/:path*`)를 거쳐 **브라우저 주소가 `/api/auth/...`** 인데
+    # 백엔드는 그 프리픽스를 모른다. `Path=/auth` 하나만 두면 브라우저가 `/api/auth/refresh`
+    # 에 쿠키를 싣지 않아 쿠키 폴백이 한 번도 동작하지 못했다(2026-09-17 발견).
+    # 직접 접속(`/auth`)과 프록시 경유(`/api/auth`) 두 경로에 같은 쿠키를 심는다 — 프록시
+    # 프리픽스가 바뀌면 이 목록만 바꾼다. JSON 배열(예: `["/auth","/api/auth"]`).
+    refresh_cookie_paths: list[str] = Field(default_factory=lambda: ["/auth", "/api/auth"])
 
     # Local 개발에서 Google id_token 검증을 우회하고 고정 demo user 를 발급한다.
     # staging/prod 는 반드시 False. True 일 때 GOOGLE_OAUTH_CLIENT_ID 가 비어도 부팅 가능.
@@ -347,6 +355,20 @@ class Settings(BaseSettings):
             return 0
         override = {"interview": self.llm_endpoint_daily_call_limit_interview}.get(module, 0)
         return override if override > 0 else self.llm_endpoint_daily_call_limit
+
+    @model_validator(mode="after")
+    def _validate_refresh_cookie_paths(self) -> Self:
+        """쿠키 Path 는 `/` 로 시작하는 단순 경로여야 한다 — 틀리면 기동을 멈춘다.
+
+        `;`·공백이 섞이면 Set-Cookie 헤더에 다른 속성을 끼워 넣을 수 있고, 빈 목록이면
+        로그인해도 쿠키가 안 나가 웹 세션 유지가 조용히 꺼진다.
+        """
+        if not self.refresh_cookie_paths:
+            raise ValueError("REFRESH_COOKIE_PATHS must not be empty")
+        for path in self.refresh_cookie_paths:
+            if not re.fullmatch(r"/[A-Za-z0-9/_\-.]*", path):
+                raise ValueError(f"REFRESH_COOKIE_PATHS has an invalid path: {path!r}")
+        return self
 
     @model_validator(mode="after")
     def _forbid_auth_stub_in_deployed_envs(self) -> Self:

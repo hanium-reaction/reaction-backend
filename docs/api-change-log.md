@@ -28,7 +28,36 @@
 
 ### FE 에 미치는 것
 
-가입 화면이 초대코드 입력을 **필수로 요구할 필요가 없다**. 계속 보내도 무해하다.
+할 일 없음. FE 는 원래 `inviteCode` 를 보내지 않는다(타입에만 있다) — 그래서 지금까지 앱에서는
+신규 가입 경로 자체가 없었고, 이 배포부터 수정 없이 가입된다. 보내더라도 무해하다.
+
+---
+
+## v2.28 — 2026-09-17 (웹 refresh 쿠키가 Vercel `/api` 경유에서도 실린다)
+
+**동작 변경 — `POST /auth/google` · `POST /auth/logout` 의 Set-Cookie.** 응답 본문 무변경. 마이그레이션 없음.
+
+### 무엇이 잘못됐었나
+
+v2.x #323 이 refresh token 을 `reaction_refresh` httpOnly 쿠키(`Path=/auth`)로도 내려주고,
+`/auth/refresh`·`/auth/logout` 이 본문이 없으면 쿠키로 폴백하게 했다. 그런데 배포된 웹은
+Vercel rewrite(`/api/:path*` → 백엔드 `/:path*`)를 거쳐 **브라우저 주소가 `/api/auth/refresh`** 다.
+쿠키의 `Path=/auth` 는 `/api/auth/...` 와 맞지 않아 브라우저가 쿠키를 싣지 않는다 — 쿠키 폴백이
+배포 환경에서 **한 번도 동작할 수 없었다.** 스테이징 로그(9/13~9/17)에 `/auth/refresh` 호출이 0건이다
+(FE 가 메모리에 토큰이 없으면 호출 자체를 안 하는 문제도 겹쳐 있다 — reaction-frontend 이슈).
+
+### 이제
+
+- 같은 쿠키를 **`/auth` 와 `/api/auth` 두 경로에** 심는다(`REFRESH_COOKIE_PATHS`, 기본 `["/auth","/api/auth"]`).
+  직접 접속·프록시 경유 어느 쪽이든 자기 경로의 쿠키가 실린다.
+- 로그아웃은 **두 경로 모두** 지운다(쿠키는 이름·경로 쌍으로 따로 저장된다).
+- 경로 설정은 기동 시 검증한다 — `/` 로 시작하는 단순 경로만, 빈 목록 금지(`;` 로 속성 주입 차단).
+- 쿠키 속성(HttpOnly · SameSite=Lax · 배포 환경 Secure)과 본문 `refreshToken` 은 그대로.
+
+### FE 가 할 일
+
+메모리에 refresh token 이 없어도 401 이면 `POST /auth/refresh` 를 빈 본문으로 부른다 — 그래야
+새로고침 뒤에도 세션이 이어진다.
 
 ---
 
