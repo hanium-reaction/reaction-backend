@@ -189,6 +189,22 @@ def test_connect_is_501_when_credentials_are_missing(
     assert response.status_code == 501
 
 
+def test_connection_is_501_when_the_token_encryption_key_is_missing(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """키 없이 켜 두면 사용자가 Google 동의를 다 마친 뒤 저장에서 500 이 난다.
+
+    500 은 CORS 헤더도 못 달아 FE 에는 원인 모를 네트워크 오류로만 보인다(로컬에서 실제로
+    겪음). 저장할 수 없으면 상태 조회부터 501 로 닫아 동의 화면을 열지 않게 한다.
+    """
+    _enable(monkeypatch)
+    monkeypatch.setattr(get_settings(), "column_encryption_key", "", raising=False)
+    monkeypatch.delenv("COLUMN_ENCRYPTION_KEY", raising=False)
+
+    assert client.get("/calendar/connect").status_code == 501
+    assert client.post("/calendar/connect", json={"code": "x"}).status_code == 501
+
+
 def test_connect_maps_oauth_failure_to_422(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """만료·재사용된 code — Google 의 error 문자열을 사용자에게 노출하지 않는다."""
     _enable(monkeypatch)

@@ -71,7 +71,9 @@ def test_missing_web_client_id_raises_regardless_of_android(
     _real_verification: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """웹 client_id 가 비어 있으면 Android 만 설정돼 있어도 misconfig 로 취급한다."""
-    monkeypatch.delenv("GOOGLE_OAUTH_CLIENT_ID", raising=False)
+    # delenv 가 아니라 빈 값 — 지우면 pydantic-settings 가 개발자 `.env` 의 값을 읽어
+    # 로컬에서 Google 을 설정해 둔 사람만 이 테스트가 깨졌다(환경 변수가 `.env` 보다 우선).
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "")
     monkeypatch.setenv("GOOGLE_OAUTH_ANDROID_CLIENT_ID", "android-client-id")
     get_settings.cache_clear()
 
