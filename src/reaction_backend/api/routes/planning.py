@@ -2143,7 +2143,16 @@ async def generate_replan(
 
         scheduled_pairs = [(b, a) for b, a in scheduled_pairs if _goal_is_live(a)]
         stale_pairs = [(b, a) for b, a in stale_pairs if _goal_is_live(a)]
-        backlog = [a for a in backlog if _goal_is_live(a)]
+        # 블록 없이 **이번 주(오늘~다음 주 월요일 전)** 로 날짜를 잡아 둔 카드는 밀린 일이 아니라
+        # 사용자가 이번 주에 하려고 둔 일이다 (planA-17) — 인박스 메모를 '할 일로' 바꾼 오늘
+        # 카드가 대표적이다. 백로그로 집으면 승인 때 다음 주로 옮겨져 오늘 화면에서 사라졌다.
+        # 날짜가 지났거나 없는 카드만 진짜 백로그다.
+        backlog = [
+            a
+            for a in backlog
+            if _goal_is_live(a)
+            and (a.target_date is None or not today <= a.target_date < window_start)
+        ]
 
         # 후보(action_id dedup) + 각 후보가 교체할 옛 블록 **전부**.
         # #115 스케줄러가 긴 액션을 여러 세션 블록으로 쪼개므로 한 액션에 옛 블록이 여러 개일

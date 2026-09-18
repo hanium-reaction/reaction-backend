@@ -189,3 +189,28 @@ def test_replan_fills_placeholders_in_the_users_tone(
 
     assert resp.status_code == 201, resp.text
     assert seen.get("tone_mode") == "strict"
+
+
+def test_replan_leaves_this_weeks_blockless_cards_where_they_are(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_goal_repo: FakeGoalRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """planA-17 — 오늘(7/9 목) 인박스에서 '할 일로' 바꾼 카드는 다음 주로 끌려가지 않는다."""
+    _freeze_now(monkeypatch)  # 오늘 7/9(목), window_start 7/13(월)
+    today_card = _seed_action(fake_action_item_repo, title="우체국 들르기", target=date(2026, 7, 9))
+    sunday_card = _seed_action(fake_action_item_repo, title="방 정리", target=date(2026, 7, 12))
+    goal = _seed_goal(fake_goal_repo, title="토익 900")
+    overdue = _card(fake_action_item_repo, goal, title="지난주 못 한 RC")
+    overdue.target_date = date(2026, 7, 1)
+    undated = _seed_action(fake_action_item_repo, title="날짜 없는 백로그")
+
+    resp = client.post("/plans/replan")
+
+    assert resp.status_code == 201, resp.text
+    ids = _action_ids(resp)
+    assert f"action_{overdue.id}" in ids
+    assert f"action_{undated.id}" in ids
+    assert f"action_{today_card.id}" not in ids
+    assert f"action_{sunday_card.id}" not in ids
