@@ -197,15 +197,21 @@ async def generate_structured[T: BaseModel](
     raw_text = _extract_text(response)
     usage = _extract_usage(response, model_name)
 
+    # ⚠️ 두 에러 메시지에 **응답 내용을 싣지 않는다** (llm-8). 이 문자열은 `llm_runs.error`
+    # (평문 컬럼 — input/output 요약과 달리 암호화되지 않는다)와 로그로 간다. 인터뷰 질문·
+    # 추출은 학생의 자유서술 답(건강·개인사)을 그대로 옮겨 쓰곤 해서, 예전처럼 응답 앞 200자나
+    # pydantic 기본 메시지(`input_value=…`)를 실으면 그 내용이 평문으로 남았다.
     try:
         parsed = json.loads(raw_text)
     except json.JSONDecodeError as exc:
-        raise ProviderValidationError(f"non-JSON response: {raw_text[:200]}") from exc
+        raise ProviderValidationError(
+            f"non-JSON response (len={len(raw_text)}, {exc.msg} at {exc.pos})"
+        ) from exc
 
     try:
         validated = schema.model_validate(parsed)
     except ValidationError as exc:
-        raise ProviderValidationError(str(exc)) from exc
+        raise ProviderValidationError(validation_error_summary(exc)) from exc
 
     return validated, usage
 
