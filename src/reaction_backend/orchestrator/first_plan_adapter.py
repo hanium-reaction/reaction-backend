@@ -2821,6 +2821,14 @@ async def _sync_milestones(
 
     반환값은 **새로 만든** 노드들(`activatedGoalNodes` 집계용) — 유지·보관된 것은 제외한다.
     """
+    # 제목은 저장 컬럼(VARCHAR 200)에 맞춰 **대조 전에** 자른다(interview-10). 긴 목표 제목을
+    # 룰 폴백이 '{제목} 준비·기초' 로 잇거나 LLM 이 그대로 옮겨 쓰면 200자를 넘고, 사용자가
+    # 그대로 확정하면 승인이 INSERT 에서 죽어 세 번 재시도 끝에 실패한다. 자른 제목으로 키를
+    # 만들어야 다음 승인·Stage A 재사용(저장된 = 잘린 제목을 되읽는다)과 같은 행을 잇는다 —
+    # 원문으로 대조하면 매 승인마다 새 행을 만들고 옛것(진척 포함)을 보관한다.
+    milestones = [
+        m.model_copy(update={"title": fit_title(m.title, NODE_TITLE_MAX_CHARS)}) for m in milestones
+    ]
     # 정규화 제목이 빈 항목은 뼈대가 아니다 — 대조 키를 만들 수 없어 매 승인 재생성된다.
     milestones = [m for m in milestones if _norm_title(m.title)]
     if not milestones:

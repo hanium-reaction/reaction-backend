@@ -15,6 +15,7 @@ import pytest
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
+from reaction_backend.orchestrator import goal_cycle
 from reaction_backend.orchestrator.first_plan_adapter import (
     ACTION_TITLE_MAX_CHARS,
     GOAL_TITLE_MAX_CHARS,
@@ -552,3 +553,41 @@ async def test_long_free_text_goal_title_is_clipped_instead_of_crashing_the_inte
     )
     found = await heaviest_goal_id(again, user_id=uid, outcome=outcome)  # type: ignore[arg-type]
     assert found == heaviest.id
+
+
+def test_seed_outcome_finds_the_template_of_a_clipped_goal_title() -> None:
+    """잘려 저장된 목표로 다음 계획을 열어도 인터뷰에서 답한 슬롯을 잃지 않는다 (interview-10 리뷰).
+
+    `goal_cycle.seed_outcome` 은 저장된 제목과 인터뷰 원문을 대조해 이미 답한 주당 시간·세션
+    길이를 이어 쓴다. 저장 쪽만 자르고 대조는 원문으로 하면 긴 제목 목표는 그 슬롯을 버렸다.
+    """
+    base = InterviewOutcome.model_validate(
+        {
+            "session_id": "t",
+            "generated_at": "2026-09-18T10:00:00+09:00",
+            "end_reason": "completed",
+            "ambiguity_final": 0.1,
+            "analysis_source": "llm",
+            "identity": {"role": "대3", "season": "학기중"},
+            "core_goals": [
+                _goal(_LONG_ANSWER, heaviest=True, tier="focus")
+                .model_copy(update={"session_length_min": 40, "frequency_per_week": 3})
+                .model_dump()
+            ],
+            "availability": {
+                "activity_window": {"start": "09:00", "end": "23:00"},
+                "peak_window": [],
+            },
+            "preferences": {"recovery_tone": "담백", "rest_ok": True, "downscope_unit_min": 10},
+        }
+    )
+    stored = Goal()
+    stored.id = uuid4()
+    stored.title = fit_title(_LONG_ANSWER, GOAL_TITLE_MAX_CHARS)
+    stored.category = "study"
+    stored.goal_tier = "focus"
+
+    got = goal_cycle.seed_outcome(base=base, goal=stored).core_goals[0]
+
+    assert (got.session_length_min, got.frequency_per_week) == (40, 3)
+    assert got.title == stored.title
