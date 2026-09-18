@@ -348,7 +348,9 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 `proposed` 로 저장되고, `POST /plans/{planId}/approve` 가 그 목표를 `active` 로 승격한다.
 승격되지 않은 잠정 목표는 두 경로로 정리된다 — ① **다음 인터뷰가 대체(보관)**, ② **14일간
 미승격 시 cron 이 보관** (`expire_proposed_goals`, 매일 04:00 KST, #178) — 인터뷰 한 번 하고
-돌아오지 않는 사용자에게도 탈출구가 있도록. 둘 다 soft 보관(`status='archived'`+`archived_at`)
+돌아오지 않는 사용자에게도 탈출구가 있도록. **만다라 축에서 사용자가 직접 올린(`promote`) 목표는 이
+만료에서 빠진다**(v2.30-goals — 예전엔 14일 뒤 말없이 보관됐다). 올린 목표를 지우면(보관)
+`GET /goals/{id}/mandala` 의 그 축 `promotedGoalId` 는 `null` 로 나간다(다시 올릴 수 있다). 둘 다 soft 보관(`status='archived'`+`archived_at`)
 이며 사용자 알림은 없다(ADR-0005 §7.8).
 `GET /goals` 에는 계속 노출되지만 tier 한도(Focus ≤3 / Maintain ≤5)에는 포함되지 않는다.
 

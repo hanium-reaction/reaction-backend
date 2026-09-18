@@ -642,13 +642,34 @@ class FakeGoalRepo:
     async def expire_stale_proposed(self, *, before: datetime, archived_at: datetime) -> int:
         # 실 GoalRepo.expire_stale_proposed 의 WHERE 를 손으로 그대로 옮긴다 (#178) —
         # status=='proposed' + archived_at IS NULL + created_at < before, 셋 다 있어야 한다.
+        # 살아 있는 만다라 축이 승격한 목표는 빼다(goals-7) — 실 repo 의 NOT EXISTS 와 같은 판정.
+        promoted = {
+            getattr(nd, "promoted_goal_id", None)
+            for nodes in self._nodes.values()
+            for nd in nodes
+            if getattr(nd, "tree_kind", "plan") == "mandala" and nd.archived_at is None
+        }
         n = 0
         for g in self._items.values():
-            if g.status == "proposed" and g.archived_at is None and g.created_at < before:
+            if (
+                g.status == "proposed"
+                and g.archived_at is None
+                and g.created_at < before
+                and g.id not in promoted
+            ):
                 g.status = "archived"
                 g.archived_at = archived_at
                 n += 1
         return n
+
+    async def live_goal_ids(self, user_id: UUID, goal_ids: Any) -> set[UUID]:
+        return {
+            gid
+            for gid in goal_ids
+            if (g := self._items.get(gid)) is not None
+            and g.user_id == user_id
+            and g.archived_at is None
+        }
 
 
 class FakeHabitRepo:

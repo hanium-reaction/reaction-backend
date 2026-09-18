@@ -453,6 +453,12 @@ async def get_mandala_tree(
     )
 
     root = next((n for n in rows if n.parent_node_id is None), None)
+    # 승격한 목표를 지웠으면(보관) 축의 "이미 학기 목표로 올린 축" 배지도 내린다 — FK 의
+    # SET NULL 은 hard delete 에만 걸려 soft 보관 뒤에도 id 가 남아 있다. 다시 승격하면
+    # `promote` 가 새 목표를 만든다(그쪽도 살아 있는 목표만 멱등으로 본다).
+    live_promoted = await repo.live_goal_ids(
+        user.id, [n.promoted_goal_id for n in rows if n.promoted_goal_id is not None]
+    )
     nodes = []
     for n in rows:
         node_progress, node_coverage = progress_map.get(n.id, (None, None))
@@ -463,6 +469,8 @@ async def get_mandala_tree(
             coverage=node_coverage,
             habit_id=linked_habit.id if linked_habit is not None else None,
         )
+        if n.promoted_goal_id is not None and n.promoted_goal_id not in live_promoted:
+            node = node.model_copy(update={"promoted_goal_id": None})
         if n.parent_node_id is None:
             # 중앙 칸은 **목표 문장 그대로** — 이 수정 전에 문장을 고쳐 둘이 어긋난 트리도
             # 머리(`statement`)와 같은 글을 보여준다(쓰기 없음).

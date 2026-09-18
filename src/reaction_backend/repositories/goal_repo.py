@@ -15,12 +15,34 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import func, select, update
+from sqlalchemy import ColumnElement, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.db.session import get_db
+
+
+def stale_proposed_where(before: datetime) -> list[ColumnElement[bool]]:
+    """잠정 목표 만료(`expire_stale_proposed`) 대상의 WHERE — 프리뷰 스크립트도 이 한 벌을 쓴다.
+
+    만다라 축에서 사용자가 직접 올린 목표(살아 있는 축의 `promoted_goal_id`)는 빼다.
+    """
+    promoted_from_live_axis = (
+        select(GoalNode.id)
+        .where(
+            GoalNode.promoted_goal_id == Goal.id,
+            GoalNode.tree_kind == "mandala",
+            GoalNode.archived_at.is_(None),
+        )
+        .exists()
+    )
+    return [
+        Goal.status == "proposed",
+        Goal.archived_at.is_(None),
+        Goal.created_at < before,
+        ~promoted_from_live_axis,
+    ]
 
 
 class GoalRepo:
@@ -301,18 +323,30 @@ class GoalRepo:
         기준은 `updated_at` 이 아니라 `created_at` 이다 — `updated_at` 은 `onupdate=func.now()`
         라서 무관한 `PATCH /goals/{id}` 한 번이 조용히 TTL 을 새로 사버리고, 그러면 경계가
         비결정적이 되어 테스트로 고정할 수 없다.
+
+        ⚠️ **사용자가 만다라 축에서 직접 올린 목표는 빼다**(살아 있는 만다라 축의
+        `promoted_goal_id`). 그것도 `proposed` 로 태어나지만 인터뷰가 뽑은 잠정 목표가 아니라
+        사용자가 고른 것이다 — 예전엔 14일 뒤 말없이 보관돼, 만다라는 여전히 "이미 학기 목표로
+        올린 축" 이라는데 목표 목록엔 없었다.
         """
         stmt = (
             update(Goal)
-            .where(
-                Goal.status == "proposed",
-                Goal.archived_at.is_(None),
-                Goal.created_at < before,
-            )
+            .where(*stale_proposed_where(before))
             .values(status="archived", archived_at=archived_at)
         )
         result = await self._session.execute(stmt)
         return int(result.rowcount or 0)  # type: ignore[attr-defined]  # CursorResult (UPDATE)
+
+    async def live_goal_ids(self, user_id: UUID, goal_ids: Sequence[UUID]) -> set[UUID]:
+        """이 id 들 중 **보관되지 않은** 이 사용자 목표 — 만다라 축의 승격 배지 판정용."""
+        if not goal_ids:
+            return set()
+        stmt = select(Goal.id).where(
+            Goal.id.in_(goal_ids),
+            Goal.user_id == user_id,
+            Goal.archived_at.is_(None),
+        )
+        return set((await self._session.execute(stmt)).scalars().all())
 
     async def goal_ids_with_plan(self, goal_ids: Sequence[UUID]) -> set[UUID]:
         """이 목표들 중 **계획 트리를 가진** 것의 id.
