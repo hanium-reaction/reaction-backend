@@ -524,10 +524,10 @@ class FakeGoalRepo:
         return None
 
     async def get_mandala_node(self, user_id: UUID, node_id: UUID) -> Any | None:
-        """실 repo 와 동일 — goal 소유권 + `tree_kind='mandala'` + 미보관만 통과."""
+        """실 repo 와 동일 — goal 소유권(보관된 목표 제외) + `tree_kind='mandala'` + 미보관만."""
         for goal_id, nodes in self._nodes.items():
             goal = self._items.get(goal_id)
-            if goal is None or goal.user_id != user_id:
+            if goal is None or goal.user_id != user_id or goal.archived_at is not None:
                 continue
             for n in nodes:
                 if (
@@ -629,6 +629,12 @@ class FakeGoalRepo:
         goal.archived_at = datetime.now(UTC)
         goal.status = "archived"
 
+    async def archive_nodes(self, nodes: Any) -> None:
+        now = datetime.now(UTC)
+        for n in nodes:
+            if n.archived_at is None:
+                n.archived_at = now
+
     async def expire_stale_proposed(self, *, before: datetime, archived_at: datetime) -> int:
         # 실 GoalRepo.expire_stale_proposed 의 WHERE 를 손으로 그대로 옮긴다 (#178) —
         # status=='proposed' + archived_at IS NULL + created_at < before, 셋 다 있어야 한다.
@@ -717,6 +723,15 @@ class FakeHabitRepo:
 
     async def soft_delete(self, habit: Habit) -> None:
         habit.archived_at = datetime.now(UTC)
+
+    async def archive_linked_to_nodes(self, user_id: UUID, node_ids: Any) -> int:
+        wanted = set(node_ids)
+        n = 0
+        for h in self._items.values():
+            if h.user_id == user_id and h.goal_node_id in wanted and h.archived_at is None:
+                h.archived_at = datetime.now(UTC)
+                n += 1
+        return n
 
     def seed(self, habit: Habit) -> None:
         """테스트 보조 — habit 직접 주입."""

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
@@ -129,6 +130,28 @@ class HabitRepo:
     async def soft_delete(self, habit: Habit) -> None:
         habit.archived_at = datetime.now(UTC)
         await self._session.flush()
+
+    async def archive_linked_to_nodes(self, user_id: UUID, node_ids: Sequence[UUID]) -> int:
+        """이 만다라 칸들에 링크된 활성 습관을 soft 보관. 반환: 보관한 수.
+
+        궁극목표를 지우면 만다라가 사라지는데, 그 칸에서 만든 반복형 습관은 `goal_node_id`
+        로만 이어져 있어 그대로 살아 있었다 — 오늘 화면에 매주 뜨고, 00:05 cron 이 새 주
+        인스턴스를 만들고, 3주 뒤엔 어디서 왔는지 볼 화면도 없는 습관에 빈도 조정 제안이
+        왔다. soft 보관만 한다(AGENTS §2) — 주간 기록(`habit_instances`)은 그대로 남는다.
+        """
+        if not node_ids:
+            return 0
+        stmt = select(Habit).where(
+            Habit.user_id == user_id,
+            Habit.goal_node_id.in_(node_ids),
+            Habit.archived_at.is_(None),
+        )
+        habits = list((await self._session.execute(stmt)).scalars().all())
+        now = datetime.now(UTC)
+        for h in habits:
+            h.archived_at = now
+        await self._session.flush()
+        return len(habits)
 
     async def count_active(self, user_id: UUID) -> int:
         stmt = (

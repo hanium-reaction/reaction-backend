@@ -99,6 +99,10 @@ class GoalRepo:
 
         `tree_kind='mandala'` 로 좁힌다 — 계획 트리(`tree_kind='plan'`) 노드 id 를 이 endpoint
         에 잘못 넣어도(예: 다른 endpoint 응답에서 id 를 잘못 복사) 조용히 편집되지 않는다.
+
+        **보관된 궁극목표의 칸도 막는다** — 목표를 지운 뒤 열려 있던 만다라 화면에서 축을
+        승격하거나 "이 축으로 2주" 를 누르면, 사라진 만다라에서 새 목표·계획이 생겼다.
+        삭제가 노드도 보관하지만(`archive_nodes`), 그 전에 보관된 목표까지 여기서 한 번 더 막는다.
         """
         stmt = (
             select(GoalNode)
@@ -108,6 +112,7 @@ class GoalRepo:
                 GoalNode.tree_kind == "mandala",
                 GoalNode.archived_at.is_(None),
                 Goal.user_id == user_id,
+                Goal.archived_at.is_(None),
             )
         )
         result = await self._session.execute(stmt)
@@ -262,6 +267,18 @@ class GoalRepo:
     async def soft_delete(self, goal: Goal) -> None:
         goal.archived_at = datetime.now(UTC)
         goal.status = "archived"
+        await self._session.flush()
+
+    async def archive_nodes(self, nodes: Sequence[GoalNode]) -> None:
+        """노드 soft 보관 — 궁극목표를 지울 때 그 만다라 트리를 함께 닫는다.
+
+        hard delete 가 아니라 `archived_at` 만 찍는다(AGENTS §2). 이미 보관된 노드는 시각을
+        덮어쓰지 않는다 — 다시 세우기로 보관된 옛 트리의 기록을 흐리지 않게.
+        """
+        now = datetime.now(UTC)
+        for n in nodes:
+            if n.archived_at is None:
+                n.archived_at = now
         await self._session.flush()
 
     async def expire_stale_proposed(self, *, before: datetime, archived_at: datetime) -> int:

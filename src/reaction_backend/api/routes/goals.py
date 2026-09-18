@@ -848,11 +848,44 @@ async def complete_goal(
 
 
 @router.delete("/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_goal(goal_id: str, user: CurrentUser, repo: RepoDep, session: SessionDep) -> None:
-    """목표 soft delete (`archived_at` + `status=archived`)."""
+async def delete_goal(
+    goal_id: str,
+    user: CurrentUser,
+    repo: RepoDep,
+    habit_repo: HabitRepoDep,
+    session: SessionDep,
+) -> None:
+    """목표 soft delete (`archived_at` + `status=archived`) — 그 목표가 남긴 것도 함께 멈춘다.
+
+    예전엔 목표 행만 보관했다. 오늘 화면·주간 캘린더·아침 브리프·`pre_card` 알림은 전부
+    `action_items` 를 목표 상태와 무관하게 읽으므로, "정말 삭제" 를 누른 목표의 카드가 다음
+    날에도 그대로 떴고(취소도 "계획에 묶여 있어" 거절됐다) 재계획이 다음 주로 다시 옮겼다.
+
+    정리는 **완료 경로와 같은 함수·같은 두 축**이다(`complete_goal` 참고) — 손대지 않은 예정
+    카드는 `archived_at`, 그 블록은 `cancelled`. 시작·완료·실패한 카드와 사용자가 시간을
+    옮긴(`user_edit`) 카드는 보존된다(규칙을 두 벌로 가르지 않으려고 그대로 따른다).
+
+    궁극목표면 만다라도 닫는다 — 트리를 보관하고, 그 칸에서 만든 반복형 습관도 보관한다.
+    안 그러면 볼 화면이 없는 습관이 매주 오늘 화면에 뜨고 빈도 조정 제안까지 온다.
+    축에서 승격한 목표는 독립 목표라 그대로 남는다(다시 세우기의 승계 규칙과 같다).
+    전부 soft 이고(AGENTS §2) 한 트랜잭션이다.
+    """
     goal = await repo.get_by_id(user.id, _parse_goal_id(goal_id))
     if goal is None:
         raise _not_found()
+    await first_plan_adapter.supersede_previous_plan(
+        session,
+        user_id=user.id,
+        goal_id=goal.id,
+        include_mandala=True,
+        include_recovery=True,
+    )
+    if goal.is_ultimate:
+        mandala_nodes = await repo.list_nodes(goal.id, tree_kind="mandala")
+        await habit_repo.archive_linked_to_nodes(
+            user.id, [n.id for n in mandala_nodes if n.depth == 2]
+        )
+        await repo.archive_nodes(mandala_nodes)
     await repo.soft_delete(goal)
     await session.commit()
     return None
