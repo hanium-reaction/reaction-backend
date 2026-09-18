@@ -1099,3 +1099,80 @@ async def test_no_calendar_connection_is_silent(monkeypatch: Any) -> None:
     new_state = await first_plan.schedule_blocks(_state(), config)
 
     assert not any("캘린더" in w for w in new_state["schedule_warnings"])
+
+
+# ── planB-13 과부하 안내는 배치와 **같은 상한**으로 판정한다 ─────────────────
+
+
+async def test_overload_notice_uses_the_same_cap_as_the_scheduler() -> None:
+    """집중 시간을 '4시간 이상'(240분)으로 답해도 이번 계획 카드가 120분이면 상한은 180분이다.
+
+    배치는 180분 상한으로 넘긴 날을 만들었는데, 안내는 따로 계산한 240분 상한으로 판정해
+    하루 4시간짜리 날을 말하지 않았다(ADR-0009 D3 가 배치만 고쳤다).
+    """
+    wed = TUE + timedelta(days=1)
+    outcome = InterviewOutcome(
+        session_id="t-cap",
+        generated_at=datetime.now(KST),
+        end_reason="completed",
+        ambiguity_final=0.1,
+        analysis_source="llm",
+        identity=IdentityContext(role="대3", season="방학"),
+        core_goals=[
+            GoalCandidate(
+                title="졸업 작품",
+                category="study",
+                is_heaviest=True,
+                tentative_tier="focus",
+                confidence=0.9,
+                session_length_min=240,
+                deadline=wed.isoformat(),
+            )
+        ],
+        availability=AvailabilityProfile(
+            activity_window=TimeRange(start="09:00", end="23:30"), peak_window=["오후"]
+        ),
+        preferences=PreferenceProfile(recovery_tone="담백", rest_ok=True, downscope_unit_min=10),
+        horizon=wed.isoformat(),
+    )
+    state = first_plan.initial_state(
+        user_id=DEMO_USER_UUID, outcome=outcome, target_date=TUE.isoformat(), scope="horizon"
+    )
+    gp = GoalDecomposition(
+        goal_nodes=[
+            GoalNodeDraft(
+                node_id="n1",
+                parent_id=None,
+                title="졸업 작품",
+                node_type="root",
+                order_index=0,
+                is_leaf=True,
+            )
+        ],
+        action_items=[
+            ActionItemDraft(
+                node_id="n1",
+                title=f"작업{i}",
+                estimated_minutes=120,
+                category="study",
+                first_step="시작",
+            )
+            for i in range(3)
+        ],
+        policy_violations=[],
+    )
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+
+    new_state = await first_plan.schedule_blocks({**state, "goal_plan": gp}, config)
+
+    blocks = new_state["scheduled_blocks"]
+    assert len(blocks) == 3
+    by_day: dict[date, int] = {}
+    for b in blocks:
+        day = b.start.astimezone(KST).date()
+        by_day[day] = by_day.get(day, 0) + round((b.end - b.start).total_seconds() / 60)
+    assert max(by_day.values()) > 180, "두 날에 세 장이면 한 날은 180분을 넘는다"
+    overload = [w for w in new_state["schedule_warnings"] if "평소 기준" in w]
+    assert overload, new_state["schedule_warnings"]
+    assert "평소 기준(3시간)" in overload[0]

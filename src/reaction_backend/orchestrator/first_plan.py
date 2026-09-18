@@ -868,6 +868,17 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         ]
 
     break_min = first_plan_adapter.break_min_from_outcome(outcome)
+    # 하루 상한은 density 프리셋과 **이번 계획의 최장 세션** 중 큰 쪽 — 세션 하나가 상한을
+    # 넘으면 1차 배치가 모든 '이미 뭔가 있는 날' 을 걸러내 케이던스가 무너진다. 집중 용량이
+    # 아니라 실제 최장 세션을 쓰는 이유는 `daily_cap_for_plan` 참고 (ADR-0009 D3).
+    # ⚠️ **한 번만 계산해 배치와 과부하 안내가 같은 값을 본다** (planB-13). 예전엔 안내만
+    # 최장 세션 없이 따로 계산해(= 집중 용량 240분) 배치가 180분 상한을 넘긴 날을 놓쳤고,
+    # 잡더라도 기준 시간을 틀리게 말했다.
+    daily_cap = first_plan_adapter.daily_cap_for_plan(
+        outcome,
+        state["density"],
+        longest_action_min=max((a.estimated_minutes for a in actions), default=0),
+    )
 
     def roomy_busy_for_day(day: date) -> list[BusyBlock]:
         """1차 배치용 busy — **기존 승인 블록에만** 앞뒤 휴식 여백을 덧댄다(#191).
@@ -901,14 +912,7 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         peak_windows=first_plan_adapter.peak_windows_for_plan(outcome),
         focus_chunk_min=first_plan_adapter.focus_chunk_min_from_outcome(outcome),
         break_min=break_min,
-        # 상한은 density 프리셋과 **이번 계획의 최장 세션** 중 큰 쪽 — 세션 하나가 상한을
-        # 넘으면 1차 배치가 모든 '이미 뭔가 있는 날' 을 걸러내 케이던스가 무너진다. 집중
-        # 용량이 아니라 실제 최장 세션을 쓰는 이유는 `daily_cap_for_plan` 참고 (ADR-0009 D3).
-        daily_focus_cap_min=first_plan_adapter.daily_cap_for_plan(
-            outcome,
-            state["density"],
-            longest_action_min=max((a.estimated_minutes for a in actions), default=0),
-        ),
+        daily_focus_cap_min=daily_cap,
         committed_min_by_day=first_plan_adapter.committed_minutes_by_day(existing_busy),
         roomy_busy_for_day=roomy_busy_for_day,
         # 창을 개수로 넓혀도 stride 는 평균 간격만 맞춘다 — 막힌 날을 뒤로 밀면 한 달력 주에
@@ -1061,7 +1065,7 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
     overload = first_plan_adapter.daily_overload_notice(
         placed,
         committed_min_by_day=first_plan_adapter.committed_minutes_by_day(existing_busy),
-        cap_min=first_plan_adapter.daily_cap_for_plan(outcome, state["density"]),
+        cap_min=daily_cap,
         # 마감이 없으면 마감을 이유로 대지 않는다 — 없는 마감을 지어내던 문구 봉합.
         horizon=outcome.horizon,
     )
