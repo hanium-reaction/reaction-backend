@@ -238,6 +238,7 @@ async def refresh_access_token(
     body: RefreshRequest,
     revoke_store: Annotated[RevokeStore, Depends(get_revoke_store)],
     user_repo: Annotated[UserRepo, Depends(get_user_repo)],
+    session: Annotated[AsyncSession, Depends(get_db)],
     reaction_refresh: Annotated[str | None, Cookie()] = None,
 ) -> AccessToken:
     """refresh → 새 access. refresh 회전 X (refresh 자체 재발급 안 함).
@@ -252,6 +253,9 @@ async def refresh_access_token(
     대신 `UserRepo.get_by_id` 의 `archived_at IS NULL` 필터로 막는다. `get_current_user`
     가 이미 같은 필터로 access token 을 막고 있으니, 여기도 같은 기준을 적용해야
     "삭제된 계정은 refresh 로도 못 살아난다"가 성립한다.
+
+    통과하면 `last_active_at` 을 갱신한다 — 90일 비활성 판정이 "마지막 로그인"이 아니라
+    "마지막 사용"을 기준으로 하게(auth-6).
     """
     token = body.refresh_token or reaction_refresh
     if token is None:
@@ -283,12 +287,19 @@ async def refresh_access_token(
             http_status=HTTPStatus.UNAUTHORIZED,
         )
 
-    if await user_repo.get_by_id(decoded.user_id) is None:
+    user = await user_repo.get_by_id(decoded.user_id)
+    if user is None:
         raise ApiError(
             ErrorCode.AUTH_INVALID_TOKEN,
             "사용자를 찾을 수 없습니다.",
             http_status=HTTPStatus.UNAUTHORIZED,
         )
+
+    # 활동 기록 — 90일 비활성 익명화(잠금 §1.4)의 기준값. 로그인에서만 쓰면 refresh token
+    # 14일 동안 앱을 써도 값이 안 움직여, 실제 비활성 76~78일 만에 익명화될 수 있었다.
+    # access token 이 24시간이라 쓰는 동안은 하루 한 번 이상 여기를 지난다.
+    await user_repo.touch_last_active(user)
+    await session.commit()
 
     new_access = issue_access_token(decoded.user_id)
     return AccessToken(access_token=new_access.token)

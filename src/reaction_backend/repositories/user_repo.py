@@ -114,6 +114,17 @@ class UserRepo:
         await self._session.flush()
         return user
 
+    async def touch_last_active(self, user: User) -> None:
+        """활동 시각만 갱신 — `/auth/refresh` 에서 부른다 (90일 비활성 판정의 기준값).
+
+        예전엔 `last_active_at` 을 Google 로그인에서만 썼다. refresh token 이 14일 살아서
+        로그인 뒤 매일 앱을 써도 값이 안 움직였고, 90일 cron 이 실제 비활성 76~78일 만에
+        익명화할 수 있었다. access token 은 24시간이라 쓰는 동안은 최소 하루 한 번 refresh 를
+        거치므로, 여기서 갱신하면 오차가 하루 이내로 줄어든다. commit 은 호출자 책임.
+        """
+        user.last_active_at = datetime.now(UTC)
+        await self._session.flush()
+
     async def upsert_from_google(self, profile: GoogleProfile) -> User:
         """email 기준 upsert.
 

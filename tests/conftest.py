@@ -2274,6 +2274,9 @@ class FakeUserRepo:
             user.anonymized_at = None
         return user
 
+    async def touch_last_active(self, user: User) -> None:
+        user.last_active_at = datetime.now(UTC)
+
     async def upsert_from_google(self, profile: GoogleProfile) -> User:
         existing = self._by_email.get(profile.email)
         if existing is not None:

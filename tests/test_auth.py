@@ -13,7 +13,7 @@ fixture 로 켜고 돈다. 기존 사용자 로그인(같은 email 두 번째 �
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -669,3 +669,47 @@ def test_relogin_after_anonymization_clears_flags(
     )
     assert step1.status_code == 200
     assert step1.json()["status"] == "confirmation_required"
+
+
+# ───────────────────── refresh 가 활동 시각을 남긴다 (auth-6) ─────────────────────
+
+
+def test_refresh_records_activity_for_inactivity_rule(
+    auth_client: TestClient,
+    fake_invite_code_repo: FakeInviteCodeRepo,
+    fake_user_repo: FakeUserRepo,
+) -> None:
+    """90일 비활성 익명화는 '마지막 사용' 기준이어야 한다 — refresh 도 활동이다.
+
+    예전엔 `last_active_at` 을 로그인에서만 써서, refresh token(14일)으로 계속 쓰는 동안
+    값이 멈춰 있었다 → 실제 비활성 76~78일 만에 익명화될 수 있었다.
+    """
+    login = _login(auth_client, fake_invite_code_repo)
+    user_id = UUID(login["user"]["userId"].removeprefix("user_"))
+    stored = fake_user_repo._by_id[user_id]
+    stale = datetime.now(UTC) - timedelta(days=30)
+    stored.last_active_at = stale
+
+    resp = auth_client.post("/auth/refresh", json={"refreshToken": login["refreshToken"]})
+
+    assert resp.status_code == 200
+    assert stored.last_active_at > datetime.now(UTC) - timedelta(minutes=1)
+
+
+def test_rejected_refresh_does_not_record_activity(
+    auth_client: TestClient,
+    fake_invite_code_repo: FakeInviteCodeRepo,
+    fake_user_repo: FakeUserRepo,
+) -> None:
+    """로그아웃(revoke)된 refresh 는 401 이고 활동으로 치지 않는다."""
+    login = _login(auth_client, fake_invite_code_repo)
+    user_id = UUID(login["user"]["userId"].removeprefix("user_"))
+    stored = fake_user_repo._by_id[user_id]
+    auth_client.post("/auth/logout", json={"refreshToken": login["refreshToken"]})
+    stale = datetime.now(UTC) - timedelta(days=30)
+    stored.last_active_at = stale
+
+    resp = auth_client.post("/auth/refresh", json={"refreshToken": login["refreshToken"]})
+
+    assert resp.status_code == 401
+    assert stored.last_active_at == stale

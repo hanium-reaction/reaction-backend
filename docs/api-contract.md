@@ -1143,7 +1143,8 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 - `/settings/profile` — 지속형 선호(에너지·시간·톤)의 **단일 진실 소스**. 온보딩 딥 인터뷰 완료 시 자동 영속(`behavioral_profiles`·`interaction_styles`), 이후 이 endpoint 로 조회/편집(#A). 인터뷰를 다시 하지 않아도 값 변경 가능. `PATCH` 는 부분 갱신(미지정 필드 유지), 행 없으면 생성.
 - 톤모드 적용: 시스템 프롬프트 prefix 1줄(`llm/prompt_compose.py`). `aiClient.run(tone_mode=...)` 배선 완료(ADR-0003 addendum 0003-llm-tool-executor.md) — **모든 LLM 호출**: inbox·recovery·morning_brief(#23-C) + interview·first_plan(#23-D, LangGraph는 config 채널).
 - S28 Privacy(anonymize·consent)는 #23-B — consent 는 append-only `user_consents` 테이블(마이그레이션 동반).
-- 자동 익명화: `last_active_at < now()-90d` 매일 04:00 KST cron — **구현 완료**(#24,
+- 자동 익명화: `last_active_at < now()-90d` 매일 04:00 KST cron (`last_active_at` 은 Google
+  로그인과 `POST /auth/refresh` 성공 때 갱신 — v2.30-auth) — **구현 완료**(#24,
   `scheduler/anonymize_inactive.py`). `POST /settings/anonymize` 와 **같은 정의**의
   익명화이되 트리거만 다르다(사람 vs 시간). email 은 양쪽 다 안 건드린다 — 로그인 1차
   키라 마스킹하면 익명화가 아니라 사실상 계정 삭제가 되기 때문(그건 `/settings/delete-account`
