@@ -3,6 +3,7 @@
 - planA-9: 이미 시작했거나 끝낸 블록은 시간을 옮길 수 없다(제목·목표만 바꾸는 건 허용).
 - planA-4: 300자를 넘는 제목은 한국어 422 로 거절한다(예전엔 UPDATE 에서 터져 일반 500).
 - planA-13: 고정 일정(수업)·노터치 시간 위로는 못 옮긴다. 주간 그리드에 고정 일정이 함께 온다.
+  시각을 그대로 보낸 제목·목표 편집은 겹침·정책 검사도 15분 snap 도 하지 않는다(리뷰 반영).
 """
 
 from __future__ import annotations
@@ -140,6 +141,56 @@ def test_a_block_cannot_be_dropped_onto_a_class(
 
     right_after: Any = _patch(client, f"block_{block.id}", {"startAt": _dt(0, 12, 0).isoformat()})
     assert right_after.status_code == 200, right_after.text
+
+
+def test_a_block_already_on_a_class_can_still_be_renamed_where_it_is(
+    client: TestClient,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_fixed_schedule_repo: FakeFixedScheduleRepo,
+) -> None:
+    """리뷰 반영: 수업을 나중에 추가해 이미 수업 위에 놓인 블록도, 시각을 그대로 보내고 제목만
+    바꾸면 200 — 겹침 검사는 시간을 옮기는 편집에만 건다(예전엔 이름조차 못 바꿨다)."""
+    _class_on_monday(fake_fixed_schedule_repo)
+    action = _action()
+    fake_action_item_repo.seed(action)
+    block = _block(_dt(0, 10, 30), _dt(0, 11, 30), action_id=action.id)  # 월 수업 10~12 위
+    fake_scheduled_block_repo.seed(block, title=action.title, category=action.category)
+
+    resp: Any = _patch(
+        client,
+        f"block_{block.id}",
+        {
+            "startAt": _dt(0, 10, 30).isoformat(),
+            "endAt": _dt(0, 11, 30).isoformat(),
+            "title": "SQL 복습",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert action.title == "SQL 복습"
+    assert (block.start_at, block.end_at) == (_dt(0, 10, 30), _dt(0, 11, 30))
+
+
+def test_renaming_an_off_grid_block_does_not_shift_it(
+    client: TestClient,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """스케줄러 블록은 15분 격자가 아니다(수업 끝 10:50 시작). 제목만 바꾸는 편집이 snap 으로
+    10:45 로 당겨지지 않는다."""
+    action = _action()
+    fake_action_item_repo.seed(action)
+    block = _block(_dt(1, 10, 50), _dt(1, 11, 50), action_id=action.id)
+    fake_scheduled_block_repo.seed(block, title=action.title, category=action.category)
+
+    resp: Any = _patch(
+        client, f"block_{block.id}", {"startAt": _dt(1, 10, 50).isoformat(), "title": "SQL 복습"}
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert (block.start_at, block.end_at) == (_dt(1, 10, 50), _dt(1, 11, 50))
+    assert resp.json()["startAt"].startswith(f"{_dt(1, 0).date().isoformat()}T10:50")
 
 
 def test_a_class_on_another_weekday_does_not_block(

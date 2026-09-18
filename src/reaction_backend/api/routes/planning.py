@@ -833,6 +833,7 @@ async def edit_block(
     (수면·점심·심야 차단 **·노터치**). `category`/`title` 을 주면
     블록이 매달린 action_item 을 갱신한다(같은 액션의 모든 세션 블록 공유). 정책 검사는
     **변경된 category** 로 수행하고, 변경 반영은 성공 commit 시에만 영속된다(422 면 롤백).
+    시각을 지금 그대로 보낸 편집(제목·목표만)은 snap·겹침·정책 검사 없이 시각을 유지한다.
     """
     block = await repo.get_block(user.id, _parse_block_id(block_id))
     if block is None:
@@ -850,8 +851,8 @@ async def edit_block(
     # 가고, 카드 날짜(target_date)가 따라 움직여 오늘 끝낸 카드가 오늘 화면에서 사라졌다.
     # 제목·목표만 바꾸는 편집(시각은 그대로 보냄)은 허용한다 — 그때는 시각·출처를 건드리지 않는다.
     locked = block.block_status in ("started", "finished")
+    same_time = raw_start == block.start_at and (raw_end is None or raw_end == block.end_at)
     if locked:
-        same_time = raw_start == block.start_at and (raw_end is None or raw_end == block.end_at)
         if not same_time and (new_start, new_end) != (block.start_at, block.end_at):
             raise ApiError(
                 ErrorCode.PLAN_INVALID_TIME,
@@ -860,6 +861,11 @@ async def edit_block(
                 field="startAt",
             )
         new_start, new_end = block.start_at, block.end_at
+    elif same_time:
+        # 시각을 그대로 보낸 제목·목표 편집 — snap 하지도, 겹침·정책을 다시 보지도 않는다(리뷰
+        # 반영, planA-13). 스케줄러 블록은 15분 격자가 아니라(10:50 시작 등) snap 하면 제목만
+        # 바꿨는데 5분 옮겨졌고, 나중에 추가한 수업 위에 이미 놓인 블록은 이름조차 못 바꿨다.
+        new_start, new_end = block.start_at, block.end_at
     elif new_end <= new_start:
         raise ApiError(
             ErrorCode.PLAN_INVALID_TIME,
@@ -867,8 +873,10 @@ async def edit_block(
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="endAt",
         )
+    # 시간을 실제로 옮기는 편집만 겹침·정책·고정 일정 검사를 거친다.
+    moving = not locked and not same_time
 
-    if not locked:
+    if moving:
         conflicts = await repo.list_overlapping(
             user.id, new_start, new_end, exclude_block_id=block.id
         )
@@ -889,7 +897,7 @@ async def edit_block(
         if body.title is not None and body.title.strip():
             action.title = body.title.strip()
     category = action.category if action is not None else "other"
-    if not locked:
+    if moving:
         policies = await policy_repo.list_active(user.id)
         violated = find_policy_violation(to_kst(new_start), to_kst(new_end), category, policies)
         if violated is not None:
@@ -903,6 +911,7 @@ async def edit_block(
         await _ensure_clear_of_fixed_and_no_touch(
             to_kst(new_start), to_kst(new_end), policies=policies, fixed_repo=fixed_repo, user=user
         )
+    if not locked:
         block.start_at = new_start
         block.end_at = new_end
         block.source = "user_edit"
