@@ -897,6 +897,49 @@ def drop_waiting_steps(goal_plan: GoalDecomposition) -> tuple[GoalDecomposition,
     return goal_plan.model_copy(update={"action_items": kept}), dropped
 
 
+def attach_orphan_actions(goal_plan: GoalDecomposition) -> GoalDecomposition:
+    """트리에 없는 `node_id` 를 가리키는 카드에 leaf 노드를 만들어 root 아래에 단다 (planB-14).
+
+    `GoalDecomposition` 에는 참조 검증이 없어 LLM 이 `leaf_extra_1` 처럼 트리에 없는 노드로
+    카드를 내면 그대로 통과했다(미러 실측: 마감이 먼 토익 계획의 카드 2장). 승인은
+    `node_by_temp.get(item.node_id)` 가 None 이라 `goal_node_id` 없이 저장했고, 그 카드는
+    캘린더엔 있는데 목표 화면의 단계 트리·진행률·이어가기 채우기 문맥에서 빠졌다.
+
+    버리지 않고 달아 준다 — 카드 내용은 멀쩡하고, 버리면 사용자가 받을 분량이 조용히 준다.
+    같은 없는 id 를 여러 카드가 가리키면 노드는 하나다(첫 카드 제목). root 가 없으면
+    부모 없는 첫 노드, 그것도 없으면 첫 노드 아래에 단다. 고칠 게 없으면 받은 그대로 돌려준다.
+    """
+    known = {n.node_id for n in goal_plan.goal_nodes}
+    orphan_titles: dict[str, str] = {}
+    for item in goal_plan.action_items:
+        if item.node_id not in known and item.node_id not in orphan_titles:
+            orphan_titles[item.node_id] = item.title
+    if not orphan_titles:
+        return goal_plan
+    nodes = list(goal_plan.goal_nodes)
+    parent = next(
+        (n for n in nodes if n.node_type == "root"),
+        next((n for n in nodes if n.parent_id is None), nodes[0]),
+    )
+    siblings = sum(1 for n in nodes if n.parent_id == parent.node_id)
+    if parent.is_leaf:
+        # 자식이 생기므로 더는 leaf 가 아니다 — 트리 모양을 사실대로 둔다.
+        nodes = [n.model_copy(update={"is_leaf": False}) if n is parent else n for n in nodes]
+    for i, (node_id, title) in enumerate(orphan_titles.items()):
+        nodes.append(
+            GoalNodeDraft(
+                node_id=node_id,
+                parent_id=parent.node_id,
+                title=title,
+                node_type="leaf",
+                order_index=siblings + i,
+                is_leaf=True,
+            )
+        )
+    _log.info("orphan_actions_attached", extra={"count": len(orphan_titles)})
+    return goal_plan.model_copy(update={"goal_nodes": nodes})
+
+
 def _user_phrase_pairs(phrases: Sequence[str | None]) -> list[tuple[str, str]]:
     """사용자 문구 → (금지어 치환이 만든 모양, 원문) 쌍. 치환에 안 걸리는 문구는 빠진다.
 

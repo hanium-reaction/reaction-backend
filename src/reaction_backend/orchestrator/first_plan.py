@@ -573,6 +573,10 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
             goal_plan,
             [heaviest_goal.title, *(m.title for m in state.get("milestones") or [])],
         )
+    if goal_plan is not None:
+        # 트리에 없는 노드를 가리키는 카드는 root 아래 leaf 로 달아 준다(planB-14) — 아래
+        # 걷어내기·가지치기·누락 고지와 승인의 goal_node_id 연결이 모두 같은 트리를 보게.
+        goal_plan = first_plan_adapter.attach_orphan_actions(goal_plan)
     extended = 0
     waiting_dropped: list[str] = []
     out_of_cycle: list[str] = []
