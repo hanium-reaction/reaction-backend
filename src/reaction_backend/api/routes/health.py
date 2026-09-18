@@ -2,9 +2,15 @@
 
 DB 연결 가능 여부와 latency 를 함께 노출. DB 실패해도 HTTP 200 유지하고
 `status="degraded"` 로 표시. (k8s readiness 분리는 추후 도입.)
+
+⚠️ 이 경로는 **인증 없이 공개**다(Caddy 가 그대로 프록시). DB 예외 원문을 응답에 싣지 않는다 —
+asyncpg 메시지에는 DB 사용자 이름(`password authentication failed for user "…"`)과 내부 주소
+(`Connect call failed ('172.31.x.x', 5432)`)가 들어 있어, 장애 중엔 누구나 그걸 읽을 수 있었다.
+응답엔 고정 값만, 원문은 서버 로그에만 남긴다.
 """
 
 import asyncio
+import logging
 import time
 from typing import Annotated
 
@@ -16,6 +22,11 @@ from reaction_backend.db.session import get_engine
 from reaction_backend.schemas.common import DbStatus, HealthResponse
 
 router = APIRouter(tags=["health"])
+
+_log = logging.getLogger(__name__)
+
+# 공개 응답에 싣는 고정 오류 값 — 원인은 서버 로그(`health db check failed`)에서 본다.
+DB_UNAVAILABLE = "db_unavailable"
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 
@@ -36,8 +47,9 @@ async def _check_db(database_url: str) -> DbStatus:
             )
         latency_ms = int((time.perf_counter() - start) * 1000)
         return DbStatus(ok=True, latency_ms=latency_ms)
-    except Exception as e:  # noqa: BLE001 — health는 어떤 에러든 잡아 보고
-        return DbStatus(ok=False, error=f"{type(e).__name__}: {e}"[:200])
+    except Exception:  # noqa: BLE001 — health는 어떤 에러든 잡아 보고
+        _log.warning("health db check failed", exc_info=True)
+        return DbStatus(ok=False, error=DB_UNAVAILABLE)
 
 
 @router.get("/health", response_model=HealthResponse)
