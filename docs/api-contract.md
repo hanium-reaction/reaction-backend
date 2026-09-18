@@ -1090,6 +1090,9 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
   422 `COMMON_VALIDATION_ERROR`(`field: "endpoint"`) — 서버가 이 URL 로 요청을 보내기 때문
   (SSRF 차단, v2.30-auth). 발송은 리다이렉트를 따라가지 않는다
 - 재구독은 덮어쓰기 (1 device 1 subscription — Issue #16)
+- 같은 `endpoint`(= 한 기기의 브라우저)는 **마지막으로 구독한 사용자에게만** 남는다 — 다른
+  사용자 행에 같은 endpoint 가 있으면 그쪽 구독을 지운다(공용 기기에서 남의 알림이 뜨지 않게,
+  v2.30-auth). FE 는 로그아웃할 때 `DELETE /notifications/subscribe` 를 먼저 부르는 것을 권장
 - 응답은 `GET /notifications/settings` 와 같은 형태. `pushSubscribed` 는 저장된 구독 유무에서 파생
 
 가드 (서버 측 enforce — 발송 게이트 `safety/push_gate.py` 단일 지점, ADR-0006):

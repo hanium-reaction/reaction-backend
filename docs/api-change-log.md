@@ -48,6 +48,12 @@
   (`PRIVACY_INVALID_CONFIRMATION`, 코드 그대로) 문구도 "확인 시간이 지났어요. 처음부터 한 번 더
   눌러 주세요." FE 후속: 이 코드를 받으면 확인 단계를 처음으로 되돌리고, 삭제 완료 `message`
   를 로그아웃 뒤 화면에 보여 주기.
+- **`POST /notifications/subscribe` — 같은 endpoint 는 마지막 구독자에게만.** 공용 PC·친구 폰에서
+  A 가 알림을 켜고 로그아웃한 뒤 B 가 같은 브라우저로 켜면, 예전엔 두 사람 모두 그 기기로 알림을
+  받았다(A 의 카드 제목이 B 앞에). 이제 A 의 구독이 지워진다. FE 후속: 로그아웃 때
+  `unsubscribePush()` + `DELETE /notifications/subscribe` 를 먼저 부르기.
+- **알림 설정 첫 조회가 동시에 와도 500 이 나지 않는다** — `GET/PATCH /notifications/settings`·
+  `POST /notifications/subscribe` 의 행 생성이 `ON CONFLICT DO NOTHING` 으로 바뀌었다.
 
 ---
 

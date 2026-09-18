@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from reaction_backend.config import get_settings
 from reaction_backend.db.models.notification_send import NotificationSend
+from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.user import User
 from reaction_backend.schemas.common import KST
 from tests.conftest import DEMO_USER_UUID, FakeNotificationRepo, FakeNotificationSendRepo
@@ -274,3 +275,26 @@ def test_subscribe_accepts_real_push_services(client: TestClient, endpoint: str)
     )
     assert resp.status_code == 201
     assert resp.json()["pushSubscribed"] is True
+
+
+def test_subscribe_takes_the_endpoint_away_from_other_users(
+    client: TestClient, fake_notification_repo: FakeNotificationRepo
+) -> None:
+    """같은 브라우저(endpoint)는 한 사람 몫 — 마지막으로 켠 사람에게 간다 (sched-4)."""
+    previous_owner = uuid4()
+    their = fake_notification_repo._items.setdefault(previous_owner, NotificationSetting())
+    their.user_id = previous_owner
+    their.push_subscription = dict(_SUBSCRIPTION)
+    elsewhere = uuid4()
+    other = fake_notification_repo._items.setdefault(elsewhere, NotificationSetting())
+    other.user_id = elsewhere
+    other.push_subscription = {
+        "endpoint": "https://fcm.googleapis.com/fcm/send/other-phone",
+        "keys": {"p256dh": "k", "auth": "a"},
+    }
+
+    resp = client.post("/notifications/subscribe", json=_SUBSCRIPTION)
+
+    assert resp.status_code == 201
+    assert their.push_subscription is None
+    assert other.push_subscription is not None

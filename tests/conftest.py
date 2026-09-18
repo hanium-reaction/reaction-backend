@@ -362,6 +362,15 @@ class FakeNotificationRepo:
     async def set_push_subscription(
         self, setting: NotificationSetting, subscription: dict[str, Any]
     ) -> NotificationSetting:
+        # 실 repo 와 같은 규칙 — 같은 endpoint 를 가진 다른 사용자의 구독은 지운다 (sched-4).
+        endpoint = subscription.get("endpoint")
+        for other in self._items.values():
+            if (
+                other.user_id != setting.user_id
+                and other.push_subscription is not None
+                and other.push_subscription.get("endpoint") == endpoint
+            ):
+                other.push_subscription = None
         setting.push_subscription = subscription
         return setting
 
