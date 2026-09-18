@@ -637,7 +637,7 @@ class RecoveryRepo:
         `recovery_duration_minutes` 가 영영 NULL 로 남는다 — **완주한 회복이
         `average_recovery_minutes` 에서 통째로 사라진다**(#20 이 만든 KPI 자체의 손실).
 
-        가드 5개 (전부 데이터 보호 목적):
+        가드 6개 (전부 데이터 보호 목적):
         1. `recovery_result='pending'` — 멱등. **이미 completed 인 회복을 덮으면 지표가 파괴**된다.
         2. 카드 status 가 완주(done/over_done)면 제외 — `complete_for_action` 이 생기기 전
            데이터나 스탬프를 놓친 경우, 실제로 해낸 회복을 '포기' 로 오염시키지 않는다.
@@ -648,6 +648,15 @@ class RecoveryRepo:
         5. 경계 이후에 살아있는 블록(scheduled/started)이 남은 카드도 제외 — `_after_block_time`
            이 `plan_start_at` 기준이라 블록 날짜가 `target_date` 와 어긋날 수 있고, S15 이동으로
            일정을 미래로 옮긴 회복도 여기 해당한다. 아직 하기로 되어 있는 회복을 포기로 덮지 않는다.
+        6. **만료가 아닌 사유로 치워진 카드는 제외** — `archived_at` 이 있고
+           `system_failure_reason` 이 없는 것. 회복 카드는 사용자가 취소할 수 없으니
+           (`domain/action_cancel.py`) 이건 목표 완료(`complete_goal` →
+           `supersede_previous_plan(include_recovery=True)`)나 계획 교체의 정리다. 끝낸 목표의
+           카드를 '포기'로 적으면 다음 실패가 거짓 L1 에스컬레이션이 되고(`escalation.py`
+           `L1_RECOVERY_ABANDONED_THRESHOLD`), 계획 프롬프트에도 "수락했지만 못 끝냄"으로
+           들어간다. 그런 회복은 `pending` 으로 남는다 — 결과 이력(`list_recovery_results`)이
+           pending 을 안 읽으므로 에스컬레이션에 중립이다. 만료(`reflection_skipped`)로 보관된
+           카드는 정말 못 하고 지나간 것이라 종전대로 포기 처리한다.
 
         ⚠️ `action_item.status` 는 **건드리지 않는다** (AGENTS.md §2) — 포기는
         `recovery_attempts.recovery_result` 에만 기록한다. 전역(모든 사용자) 일괄 — cron 전용.
@@ -676,6 +685,8 @@ class RecoveryRepo:
             ActionItem.status.notin_(RECOVERY_SUCCESS_STATUSES),
             ~still_reflectable,
             ~has_live_block,
+            # 가드 6 — 목표 완료·계획 교체로 치워진 카드(만료 아님)는 포기가 아니다.
+            ~and_(ActionItem.archived_at.is_not(None), ActionItem.system_failure_reason.is_(None)),
         )
         stmt = (
             update(RecoveryAttempt)
