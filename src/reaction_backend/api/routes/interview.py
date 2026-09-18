@@ -523,11 +523,20 @@ async def _carry_over_answers(
         )
 
     if target_kind == "plan":
+        behavioral = await profile_repo.get_behavioral(user.id)
+        interaction = await profile_repo.get_interaction(user.id)
+        focus_mode_prefs = user.focus_mode_preferences or {}
         overlay = profile_memory.seed_slots_from_profile(
-            behavioral=await profile_repo.get_behavioral(user.id),
-            interaction=await profile_repo.get_interaction(user.id),
-            focus_mode_prefs=user.focus_mode_preferences or {},
+            behavioral=behavioral, interaction=interaction, focus_mode_prefs=focus_mode_prefs
         )
+        # 프로필이 값을 가졌는데 칩 보기로 못 옮긴 슬롯(내 정보에서 고른 45분·20분 등)은 지난
+        # 인터뷰 원답도 치운다 — 안 그러면 옛 원답이 이월돼 인터뷰 종료 때 프로필에 다시 쓰이고,
+        # 설정에서 바꾼 값이 조용히 되돌아간다. 슬롯은 열린 채 남아 묻거나(필수) 영속되지 않는다.
+        owned = profile_memory.profile_owned_slots(
+            behavioral=behavioral, interaction=interaction, focus_mode_prefs=focus_mode_prefs
+        )
+        for key in owned - overlay.keys():
+            base.pop(key, None)
         base.update(overlay)  # 설정 수정이 반영된 프로필이 지난 인터뷰 원답을 덮는다(최신 우선).
     return base
 

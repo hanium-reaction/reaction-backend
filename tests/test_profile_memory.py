@@ -103,6 +103,7 @@ def _outcome(tone: str) -> Any:
         preferences=SimpleNamespace(
             focus_duration_min=60, downscope_unit_min=15, rest_ok=True, recovery_tone=tone
         ),
+        unresolved_slots=[],
     )
 
 
@@ -255,3 +256,121 @@ def test_seed_skips_values_the_user_could_never_have_picked() -> None:
         seed = pm.seed_slots_from_profile(behavioral=beh, interaction=None, focus_mode_prefs={})
         assert "energy.focus_duration" not in seed, span
         assert seed["time.peak_window"] == {"type": "chip", "values": ["저녁"]}  # 나머지는 그대로
+
+
+# ───────────────────── 답하지 않은 칸은 프로필에 쓰지 않는다 (interview-6·8) ─────────────────────
+
+
+class _RecordingProfileRepo:
+    """upsert 호출에 실린 fields 를 기록한다 — 무엇을 **쓰려 했는지**가 검증 대상이다."""
+
+    calls: dict[str, list[dict[str, Any]]] = {}
+
+    def __init__(self, session: Any) -> None:
+        self.session = session
+
+    async def upsert_behavioral(self, user_id: Any, *, fields: dict[str, Any]) -> None:
+        type(self).calls.setdefault("behavioral", []).append(fields)
+
+    async def upsert_interaction(self, user_id: Any, *, fields: dict[str, Any]) -> None:
+        type(self).calls.setdefault("interaction", []).append(fields)
+
+
+def _persist_real_outcome(
+    monkeypatch: Any, user: Any, slot_answers: dict[str, Any], end_reason: str
+) -> dict[str, list[dict[str, Any]]]:
+    from reaction_backend.orchestrator import interview_adapter
+
+    _RecordingProfileRepo.calls = {}
+    monkeypatch.setattr(pm, "ProfileRepo", _RecordingProfileRepo)
+    outcome = interview_adapter.build_outcome(
+        session_id="s1",
+        slot_answers=slot_answers,
+        ambiguity_final=0.5,
+        end_reason=cast(Any, end_reason),
+        analysis_source="llm",
+    )
+    asyncio.run(pm.persist_profile_from_outcome(cast(Any, None), user=user, outcome=outcome))
+    return _RecordingProfileRepo.calls
+
+
+def test_early_finish_does_not_write_defaults_into_the_profile(monkeypatch: Any) -> None:
+    """⚠️ 역할만 답하고 [충분해요]·이탈한 사용자의 프로필에 **기본값을 쓰지 않는다** (interview-6).
+
+    고치기 전엔 피크 '변동'·활동창 09~23시·톤 normal·최소 단위 10분·휴식 수용 true 가 그대로
+    프로필에 들어갔고, 다음 재인터뷰가 그걸 시드로 읽어 **묻지도 않은 네 칸을 건너뛰었다**.
+    """
+    user = cast(Any, SimpleNamespace(id="u1", tone_mode=None, focus_mode_preferences=None))
+    calls = _persist_real_outcome(
+        monkeypatch,
+        user,
+        {"identity.role": {"type": "chip", "values": ["3학년"]}},
+        "early_user",
+    )
+
+    assert calls.get("behavioral") is None  # 쓸 칸이 없으면 행도 만들지 않는다
+    assert calls.get("interaction") is None
+    assert not (user.focus_mode_preferences or {})
+    assert user.tone_mode is None
+
+
+def test_answered_fields_are_still_persisted(monkeypatch: Any) -> None:
+    """답한 칸은 그대로 영속한다 — 가드는 '안 답한 칸' 만 거른다."""
+    user = cast(Any, SimpleNamespace(id="u1", tone_mode=None, focus_mode_preferences={}))
+    calls = _persist_real_outcome(
+        monkeypatch,
+        user,
+        {
+            "time.peak_window": {"type": "chip", "values": ["저녁"]},
+            "time.activity_window": {"type": "range", "start": "08:00", "end": "22:00"},
+            "energy.focus_duration": {"type": "chip", "values": ["50분"]},
+            "recovery.tone": {"type": "chip", "values": ["따뜻"]},
+            "recovery.rest_ok": {"type": "chip", "values": ["네"]},
+            "recovery.downscope_unit": {"type": "chip", "values": ["15분"]},
+        },
+        "early_user",
+    )
+
+    (behavioral,) = calls["behavioral"]
+    assert behavioral["energy_cycle"] == "evening"
+    assert behavioral["attention_span"] == 50
+    assert behavioral["preferred_start_time"] is not None
+    assert behavioral["recovery_speed_type"] == "medium"
+    assert calls["interaction"] == [{"recovery_tone": "gentle"}]
+    assert user.focus_mode_preferences == {"downscope_unit_min": 15, "rest_ok": True}
+    assert user.tone_mode == "gentle"
+
+
+def test_unanswered_focus_and_downscope_keep_settings_edits(monkeypatch: Any) -> None:
+    """내 정보에서 고친 값(집중 45분·최소 단위 20분)을 인터뷰 종료가 되돌리지 않는다 (interview-8).
+
+    집중 길이는 필수 슬롯이 아니라 계획 인터뷰가 묻지 않는다 — 고치기 전엔 `or 30` 으로 늘
+    30 이 쓰였다. 최소 단위도 안 답했으면 기존 20 을 그대로 둔다.
+    """
+    user = cast(
+        Any,
+        SimpleNamespace(id="u1", tone_mode=None, focus_mode_preferences={"downscope_unit_min": 20}),
+    )
+    calls = _persist_real_outcome(
+        monkeypatch,
+        user,
+        {"time.peak_window": {"type": "chip", "values": ["오전"]}},
+        "early_user",
+    )
+
+    (behavioral,) = calls["behavioral"]
+    assert "attention_span" not in behavioral
+    assert "time_chunk_preference" not in behavioral
+    assert user.focus_mode_preferences == {"downscope_unit_min": 20}
+
+
+def test_profile_owned_slots_include_values_the_seed_could_not_map() -> None:
+    """칩으로 못 옮긴 프로필 값도 '프로필이 가진 슬롯' 이다 — 호출자가 옛 이월 원답을 치운다."""
+    beh = cast(Any, SimpleNamespace(energy_cycle="evening", attention_span=45))
+    owned = pm.profile_owned_slots(
+        behavioral=beh, interaction=None, focus_mode_prefs={"downscope_unit_min": 20}
+    )
+    seed = pm.seed_slots_from_profile(
+        behavioral=beh, interaction=None, focus_mode_prefs={"downscope_unit_min": 20}
+    )
+    assert owned - seed.keys() == {"energy.focus_duration", "recovery.downscope_unit"}

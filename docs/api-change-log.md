@@ -28,10 +28,26 @@
 - 방어선: `POST /interview/sessions` 가 시드만으로 필수 슬롯이 다 차면 빈 질문 대신 곧바로
   종료 응답(201, `endReason=completed`)을 준다.
 
+### 인터뷰 종료가 답하지 않은 칸을 프로필에 쓰지 않는다
+
+- 조기 종료([충분해요]·재진입 때의 자동 종료 포함)는 빈 필수 슬롯을 안전 기본값으로 채운 outcome 을
+  만든다(`unresolved_slots` 에 키가 남는다). 그 기본값이 그대로 프로필 메모리에 쓰여, 다음
+  재인터뷰가 그것을 시드로 읽고 **묻지도 않은 피크 시간·회복 톤·휴식 수용·최소 단위를 건너뛰었다**.
+  이제 `unresolved_slots` 에 든 칸은 프로필(`behavioral`·`interaction`·`focus_mode_preferences`)과
+  `users.tone_mode` 시드에 쓰지 않는다.
+- 집중 길이(`energy.focus_duration`, 필수 아님)는 답했을 때만 `attentionSpan`·`timeChunkPreference`
+  에 쓴다 — 예전엔 `or 30` 으로 늘 30 이 쓰였다.
+- 내 정보에서 칩 보기에 없는 값(집중 45분·최소 단위 20분 등)으로 고쳤으면, 재인터뷰가 지난
+  인터뷰 원답을 이월해 그 값을 되돌리지 않는다 — 그 슬롯은 열린 채 남아(필수면 다시 묻는다)
+  답하지 않으면 설정 값이 유지된다.
+
 ### FE 에 미치는 것
 
 - `next-question` 응답에 `endReason` 이 올 수 있다 — `answers` 의 종료 응답과 같은 분기로
   처리하면 된다(자료 확정 후 재개가 확인 단계로 이어진다).
+- 화면 진입 때 저장된 세션을 `finish` 로 닫지 말고 `next-question` 으로 이어가거나 새로
+  `POST /interview/sessions` 를 부르면 된다(restart-wins 가 부수효과 없이 닫는다). `finish` 는
+  사용자의 [충분해요] 에만 — 그래야 몇 문항만 답한 세션이 '조기 종료' 로 굳지 않는다.
 
 ---
 

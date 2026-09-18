@@ -65,6 +65,33 @@ _CYCLE_TO_PEAK: dict[str, str] = {v: k for k, v in _PEAK_TO_CYCLE.items()}
 _INTERACTION_TO_TONE: dict[str, str] = {"gentle": "따뜻", "normal": "담백", "encouraging": "유머"}
 
 
+def _profile_slot_values(
+    *,
+    behavioral: BehavioralProfile | None,
+    interaction: InteractionStyle | None,
+    focus_mode_prefs: Mapping[str, Any],
+) -> dict[str, str]:
+    """프로필이 **값을 가진** 슬롯 → 그 값을 칩 표기로 옮긴 원문(아직 카탈로그 대조 전)."""
+    raw: dict[str, str] = {}
+    if behavioral is not None:
+        peak = _CYCLE_TO_PEAK.get(behavioral.energy_cycle)
+        if peak:
+            raw["time.peak_window"] = peak
+        if behavioral.attention_span:
+            raw["energy.focus_duration"] = f"{behavioral.attention_span}분"
+    if interaction is not None:
+        tone = _INTERACTION_TO_TONE.get(interaction.recovery_tone)
+        if tone:
+            raw["recovery.tone"] = tone
+    downscope = focus_mode_prefs.get("downscope_unit_min")
+    if downscope is not None:
+        raw["recovery.downscope_unit"] = f"{downscope}분"
+    rest_ok = focus_mode_prefs.get("rest_ok")
+    if rest_ok is not None:
+        raw["recovery.rest_ok"] = "네" if rest_ok else "아니오"
+    return raw
+
+
 def seed_slots_from_profile(
     *,
     behavioral: BehavioralProfile | None,
@@ -76,42 +103,49 @@ def seed_slots_from_profile(
     **설정에서 수정 가능한 필드만** 슬롯으로 되돌린다: 피크시간대·집중길이·회복톤·최소단위·
     휴식수용. 활동창(preferred_*)은 설정 편집 대상이 아니고 '24:00' 등이 프로필로 왕복되지
     않으므로 여기서 만들지 않는다(호출자가 지난 인터뷰 원답을 그대로 쓴다).
+
+    카탈로그 옵션으로 정규화해서만 시드에 넣는다 — 못 맞추면 **아예 안 넣는다**.
+    시드는 `routes/interview._persist_turn` 을 타고 `interview_slot_answers` 에 UPSERT
+    되므로, 옵션에 없는 표기를 넣으면 **사용자가 고른 적 없는 값이 사용자의 답으로**
+    남는다. 실제로 그랬다: 프로필의 `attention_span` 을 `f"{n}분"` 으로 되돌리는데 그
+    표기가 옵션에 없어(`"120분"` vs `"2시간 이상"`) 그대로 저장됐고, 오염된 프로필에서는
+    `"2분"` 이 사용자의 답인 것처럼 남아 백필을 틀리게 할 뻔했다(v2.01).
+
+    안 넣으면 그 슬롯은 열린 채 남아 인터뷰가 실제 보기를 들고 묻는다 — 지어낸 답으로
+    슬롯을 닫는 것보다 낫다. ⚠️ 그때 **지난 인터뷰의 이월 원답도 치워야** 한다
+    (`profile_owned_slots` — 호출자 몫).
     """
     seed: dict[str, dict[str, Any]] = {}
-
-    def _chip(slot_key: str, raw: str) -> None:
-        """카탈로그 옵션으로 정규화해서만 시드에 넣는다 — 못 맞추면 **아예 안 넣는다**.
-
-        시드는 `routes/interview._persist_turn` 을 타고 `interview_slot_answers` 에 UPSERT
-        되므로, 옵션에 없는 표기를 넣으면 **사용자가 고른 적 없는 값이 사용자의 답으로**
-        남는다. 실제로 그랬다: 프로필의 `attention_span` 을 `f"{n}분"` 으로 되돌리는데 그
-        표기가 옵션에 없어(`"120분"` vs `"2시간 이상"`) 그대로 저장됐고, 오염된 프로필에서는
-        `"2분"` 이 사용자의 답인 것처럼 남아 백필을 틀리게 할 뻔했다(v2.01).
-
-        안 넣으면 그 슬롯은 열린 채 남아 인터뷰가 실제 보기를 들고 묻는다 — 지어낸 답으로
-        슬롯을 닫는 것보다 낫다.
-        """
-        values = canonical_chip_values(PLAN_CATALOG.by_key.get(slot_key), [raw])
+    raw = _profile_slot_values(
+        behavioral=behavioral, interaction=interaction, focus_mode_prefs=focus_mode_prefs
+    )
+    for slot_key, value in raw.items():
+        values = canonical_chip_values(PLAN_CATALOG.by_key.get(slot_key), [value])
         if values:
             seed[slot_key] = {"type": "chip", "values": values}
-
-    if behavioral is not None:
-        peak = _CYCLE_TO_PEAK.get(behavioral.energy_cycle)
-        if peak:
-            _chip("time.peak_window", peak)
-        if behavioral.attention_span:
-            _chip("energy.focus_duration", f"{behavioral.attention_span}분")
-    if interaction is not None:
-        tone = _INTERACTION_TO_TONE.get(interaction.recovery_tone)
-        if tone:
-            _chip("recovery.tone", tone)
-    downscope = focus_mode_prefs.get("downscope_unit_min")
-    if downscope is not None:
-        _chip("recovery.downscope_unit", f"{downscope}분")
-    rest_ok = focus_mode_prefs.get("rest_ok")
-    if rest_ok is not None:
-        _chip("recovery.rest_ok", "네" if rest_ok else "아니오")
     return seed
+
+
+def profile_owned_slots(
+    *,
+    behavioral: BehavioralProfile | None,
+    interaction: InteractionStyle | None,
+    focus_mode_prefs: Mapping[str, Any],
+) -> frozenset[str]:
+    """프로필이 값을 가진 슬롯 — 시드로 못 옮겼어도 **지난 인터뷰의 이월 원답이 이기면 안 된다**.
+
+    내 정보에서 '한 번에 집중하는 길이' 를 45분, '회복 시 최소 단위' 를 20분으로 바꾸면 그 값은
+    칩 보기(25/50/90분 · 5/10/15/30분)에 없어 시드에서 빠진다. 그런데 지난 인터뷰의 원답
+    (예: 15분)은 그대로 이월돼, 재인터뷰를 열었다 닫기만 해도 15분이 다시 프로필에 쓰였다
+    — 설정 화면이 "여기서 바꾸면 인터뷰를 다시 하지 않아도 반영돼요" 라고 약속한 값을
+    인터뷰가 조용히 되돌린 것이다. 호출자는 이 집합에서 시드된 키를 뺀 나머지의 이월 원답을
+    치워, 그 슬롯을 열어 둔다(묻거나, 안 물으면 영속하지 않는다).
+    """
+    return frozenset(
+        _profile_slot_values(
+            behavioral=behavioral, interaction=interaction, focus_mode_prefs=focus_mode_prefs
+        )
+    )
 
 
 def energy_cycle_from_peak(peak_window: list[str]) -> str:
@@ -169,41 +203,59 @@ async def persist_profile_from_outcome(
     - interaction_style: recovery_tone
     - users.focus_mode_preferences(JSONB): 회복 최소 단위·휴식 수용 (전용 컬럼이 없어 여기 저장)
 
+    ⚠️ **사용자가 답하지 않은 칸은 쓰지 않는다.** outcome 은 빈 필수 슬롯을 안전 기본값으로
+    채우고 그 키를 `unresolved_slots` 에 남긴다. 그 기본값(피크 '변동'·활동창 09~23시·톤
+    '담백'·최소 단위 10분·휴식 수용 '네')을 프로필에 쓰면, 다음 재인터뷰가 그것을 시드로 읽어
+    **한 번도 묻지 않은 값이 사용자의 답으로 굳는다**(몇 문항 답하고 나갔다 오거나 [충분해요]를
+    누른 사용자가 실측으로 그랬다). 내 정보 화면도 그 값을 '인터뷰에서 파악한 값' 으로 보여줬다.
+    집중 길이는 필수 슬롯이 아니라 `focus_duration_min` 이 None 이면 답이 없는 것이다.
+
     commit 은 호출자(인터뷰 finalize) 책임 — materialize_goals 와 같은 트랜잭션.
     """
     repo = ProfileRepo(session)
     availability = outcome.availability
     prefs = outcome.preferences
+    unresolved = set(outcome.unresolved_slots)
 
-    await repo.upsert_behavioral(
-        user.id,
-        fields={
-            "energy_cycle": energy_cycle_from_peak(availability.peak_window),
-            "attention_span": prefs.focus_duration_min or 30,
-            "time_chunk_preference": chunk_bucket(prefs.focus_duration_min),
-            "preferred_start_time": _parse_hhmm(availability.activity_window.start),
-            "preferred_end_time": _parse_hhmm(availability.activity_window.end),
-            "recovery_speed_type": recovery_speed_from_prefs(
-                prefs.downscope_unit_min, prefs.rest_ok
-            ),
-        },
-    )
-    await repo.upsert_interaction(
-        user.id,
-        fields={"recovery_tone": recovery_tone_enum(prefs.recovery_tone)},
-    )
+    def answered(slot_key: str) -> bool:
+        return slot_key not in unresolved
+
+    behavioral: dict[str, Any] = {}
+    if answered("time.peak_window"):
+        behavioral["energy_cycle"] = energy_cycle_from_peak(availability.peak_window)
+    if prefs.focus_duration_min is not None:
+        behavioral["attention_span"] = prefs.focus_duration_min
+        behavioral["time_chunk_preference"] = chunk_bucket(prefs.focus_duration_min)
+    if answered("time.activity_window"):
+        behavioral["preferred_start_time"] = _parse_hhmm(availability.activity_window.start)
+        behavioral["preferred_end_time"] = _parse_hhmm(availability.activity_window.end)
+    if answered("recovery.downscope_unit") and answered("recovery.rest_ok"):
+        behavioral["recovery_speed_type"] = recovery_speed_from_prefs(
+            prefs.downscope_unit_min, prefs.rest_ok
+        )
+    if behavioral:
+        await repo.upsert_behavioral(user.id, fields=behavioral)
+
+    if answered("recovery.tone"):
+        await repo.upsert_interaction(
+            user.id,
+            fields={"recovery_tone": recovery_tone_enum(prefs.recovery_tone)},
+        )
 
     # 회복 최소 단위·휴식 수용 → users.focus_mode_preferences (마이그레이션 불필요, 새 dict 재대입).
     fmp = dict(user.focus_mode_preferences or {})
-    fmp["downscope_unit_min"] = prefs.downscope_unit_min
-    fmp["rest_ok"] = prefs.rest_ok
-    user.focus_mode_preferences = fmp
+    if answered("recovery.downscope_unit"):
+        fmp["downscope_unit_min"] = prefs.downscope_unit_min
+    if answered("recovery.rest_ok"):
+        fmp["rest_ok"] = prefs.rest_ok
+    if fmp != (user.focus_mode_preferences or {}):
+        user.focus_mode_preferences = fmp
 
     # 인터뷰에서 고른 톤 → AI 말투(users.tone_mode). 예전엔 이 답이 interaction_styles 에만
     # 저장되고 실제 말투를 정하는 tone_mode 는 설정 화면에서만 바뀌어, "따뜻하게" 를 골라도
     # 설정의 코칭 톤은 빈 칸이고 AI 말투도 기본값이었다. **비어 있을 때만** 채운다 — 사용자가
     # 설정에서 직접 고른 톤을 재인터뷰가 덮어쓰면 안 된다.
-    if user.tone_mode is None:
+    if user.tone_mode is None and answered("recovery.tone"):
         seeded = user_tone_mode_from_chip(prefs.recovery_tone)
         if seeded is not None:
             user.tone_mode = seeded

@@ -1117,7 +1117,7 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 | --- | --- | --- | --- |
 | GET | `/settings` | 내 설정 메타 (tone, language, timezone, 알림 요약) | ✅ #23-A |
 | PATCH | `/settings/tone-mode` | `gentle` / `strict` / `encouraging` | ✅ #23-A |
-| GET | `/settings/profile` | 지속형 프로필 메모리 — behavioral(energyCycle·attentionSpan·timeChunkPreference·선호시각) + interaction(recoveryTone·suggestionStyle·explanationDepth·reminderFrequency). 인터뷰가 아직 안 채웠으면 각 항목 null | ✅ #A |
+| GET | `/settings/profile` | 지속형 프로필 메모리 — behavioral(energyCycle·attentionSpan·timeChunkPreference·선호시각) + interaction(recoveryTone·suggestionStyle·explanationDepth·reminderFrequency). 인터뷰가 아직 안 채웠으면 각 항목 null. 인터뷰 종료는 **사용자가 답한 칸만** 쓴다 — [충분해요]·이탈로 비어 끝난 칸의 안전 기본값(피크 '변동'·활동창 09~23시·톤·최소 단위 10분·휴식 수용)은 쓰지 않고, 묻지 않은 집중 길이·최소 단위는 내 정보에서 고친 값을 그대로 둔다 (v2.30-interview) | ✅ #A |
 | PATCH | `/settings/profile` | 프로필 메모리 부분 수정 — 지정 필드만 갱신(미지정 유지), 행 없으면 생성. enum 외 값 422 | ✅ #A |
 | POST | `/settings/anonymize` | 즉시 익명화 (2단계 확인 토큰 필수) | ✅ #23-B |
 | GET | `/privacy/consent` | 동의 기록 | ✅ #23-B |

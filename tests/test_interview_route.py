@@ -762,3 +762,81 @@ def test_next_question_still_asks_when_slots_remain(client: TestClient, monkeypa
     body = client.post(f"/interview/sessions/{sid}/next-question").json()
     assert body["endReason"] is None
     assert body["currentQuestion"]["slotKey"] == "identity.role"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 인터뷰 종료가 답하지 않은 칸을 프로필에 쓰지 않는다 (interview-6·8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _complete_plan_interview(client: TestClient) -> dict[str, Any]:
+    body = client.post("/interview/sessions").json()
+    sid = body["sessionId"]
+    turn = 0
+    while body["currentQuestion"] is not None:
+        question = body["currentQuestion"]
+        turn += 1
+        body = client.post(
+            f"/interview/sessions/{sid}/answers",
+            json={
+                "slotKey": question["slotKey"],
+                "value": _answer_for(question),
+                "clientTurn": turn,
+            },
+        ).json()
+        assert turn <= 40
+    return body
+
+
+def test_reinterview_keeps_profile_values_edited_in_settings(
+    client: TestClient, fake_profile_repo: Any, monkeypatch: Any
+) -> None:
+    """⚠️ 내 정보에서 고친 집중 길이·최소 단위를 재인터뷰가 되돌리지 않는다 (interview-8).
+
+    45분·20분은 칩 보기에 없어 시드로 못 옮긴다. 고치기 전엔 그때 지난 인터뷰 원답(5분)이
+    대신 이월돼, 재인터뷰를 열고 [충분해요] 만 눌러도 최소 단위가 5분으로, 집중 길이는
+    `or 30` 기본값으로 덮였다 — 설정 화면이 "인터뷰를 다시 하지 않아도 반영돼요" 라고
+    약속한 값이었다.
+    """
+    from reaction_backend.orchestrator import profile_memory
+
+    monkeypatch.setattr(aiClient, "run", _stub(echo_normalized=True))
+    monkeypatch.setattr(profile_memory, "ProfileRepo", lambda _session: fake_profile_repo)
+
+    first = _complete_plan_interview(client)
+    assert first["endReason"] == "completed"
+    edited = client.patch("/settings/profile", json={"attentionSpan": 45, "downscopeUnitMin": 20})
+    assert edited.status_code == 200, edited.text
+
+    sid = client.post("/interview/sessions").json()["sessionId"]
+    assert client.post(f"/interview/sessions/{sid}/finish").status_code == 200
+
+    profile = client.get("/settings/profile").json()
+    assert profile["behavioral"]["attentionSpan"] == 45
+    assert profile["downscopeUnitMin"] == 20
+
+
+def test_reinterview_asks_again_what_an_early_exit_left_unanswered(
+    client: TestClient, fake_profile_repo: Any, monkeypatch: Any
+) -> None:
+    """몇 문항만 답하고 [충분해요] 한 뒤 다시 시작하면, 안 답한 칸은 **다시 묻는다** (interview-6).
+
+    고치기 전엔 그 종료가 피크 '변동'·톤 '담백'·휴식 '네'·최소 단위 10분을 프로필에 썼고,
+    다음 세션이 그걸 시드로 읽어 네 칸을 묻지 않았다(ambiguityScore 17 → 13).
+    """
+    from reaction_backend.orchestrator import profile_memory
+
+    monkeypatch.setattr(aiClient, "run", _stub())
+    monkeypatch.setattr(profile_memory, "ProfileRepo", lambda _session: fake_profile_repo)
+
+    sid = client.post("/interview/sessions").json()["sessionId"]
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.role", "value": ["3학년"], "clientTurn": 1},
+    )
+    assert client.post(f"/interview/sessions/{sid}/finish").status_code == 200
+
+    again = client.post("/interview/sessions").json()
+    # 역할 하나만 이월된다 — 나머지 필수 17칸은 그대로 열려 있다.
+    assert again["ambiguityScore"] == 17
+    assert client.get("/settings/profile").json()["interaction"] is None
