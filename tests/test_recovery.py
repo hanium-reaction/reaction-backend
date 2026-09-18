@@ -2113,3 +2113,137 @@ def test_edited_text_with_non_edited_decision_is_rejected(
 
     assert resp.status_code == 422
     assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"
+
+
+# ───────────────────────── 회복 카드 제목·첫 걸음 (recovery-1) ─────────────────────────
+
+
+def _stub_personalize_top(monkeypatch: Any, *, if_clause: str, then_clause: str) -> None:
+    """선두 카드만 LLM 이 다듬는 실제 흐름을 재현 — 형제 카드는 카탈로그 템플릿 그대로."""
+    from reaction_backend.llm import RunResult, aiClient
+    from reaction_backend.schemas.recovery import RecoveryProposalLLM
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        return RunResult(
+            value=RecoveryProposalLLM(
+                strategy_code="downscope",
+                if_clause=if_clause,
+                then_clause=then_clause,
+                rationale="",
+            ),
+            fell_back=False,
+            reason=None,
+            prompt_id="recovery/if_then_proposal",
+            prompt_version="v2",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+
+def test_accepted_sibling_card_is_titled_after_the_original_not_the_template(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """형제 카드(템플릿 문구)를 골라도 새 카드 이름은 원본 제목이다.
+
+    회귀: 제안 문구를 그대로 제목으로 써서, '내일 같은 시간' 을 고르면 다음 날 오늘 화면·
+    주간 그리드·아침 알림에 "내일 같은 슬롯으로 그대로 옮겨드릴까요?" 가 카드 이름으로 떴다.
+    """
+    _stub_personalize_top(
+        monkeypatch, if_clause="책상에 앉으면", then_clause="예제 한 문제만 먼저 풀어봐요"
+    )
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["PRIORITY_SHIFT", "AMBIGUITY"]
+    )
+    original = next(a for a in fake_action_item_repo._items.values() if a.source == "manual")
+    original.first_step = "교재 3장 펴기"
+
+    cards = _generate(client, exec_id).json()["cards"]
+    assert cards[0]["optionGroup"] != "CARRY_OVER", "형제 카드를 고르는 시나리오여야 한다"
+    carry = next(c for c in cards if c["optionGroup"] == "CARRY_OVER")
+    assert "옮겨드릴까요" in carry["suggestedActionText"]  # 템플릿 문구 그대로인 형제
+
+    resp = _decide(
+        client,
+        {"executionId": exec_id, "decision": "accepted", "acceptedAttemptId": carry["attemptId"]},
+    )
+    assert resp.status_code == 200, resp.json()
+
+    new_action = next(
+        a for a in fake_action_item_repo._items.values() if a.source == "recovery_carryover"
+    )
+    assert new_action.title == "GROUP BY 실습 · 이어서"
+    assert "옮겨드릴까요" not in new_action.title
+    # 같은 일을 이어가는 것이라 원본의 첫 걸음을 물려받는다 — 템플릿은 할 일이 아니다.
+    assert new_action.first_step == "교재 3장 펴기"
+    # AI 원문은 보존 (Draft Layer 지표)
+    attempt = fake_recovery_repo._attempts[UUID(carry["attemptId"].removeprefix("rec_"))]
+    assert attempt.suggested_action_text == carry["suggestedActionText"]
+
+    diff = client.get(f"/replan/{exec_id}").json()
+    assert diff["after"]["title"] == "GROUP BY 실습 · 이어서"
+
+
+def test_comeback_prefix_never_reaches_the_new_card(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """L1 컴백 프리픽스는 제안하는 순간의 말 — 수락한 카드 제목·첫 걸음에 남지 않는다."""
+    _stub_personalize_top(
+        monkeypatch, if_clause="책상에 앉으면", then_clause="보고서 첫 문단만 써봐요"
+    )
+    action = _seed_action(fake_action_item_repo, title="보고서 작성")
+    for day in (1, 2):
+        current = fake_recovery_repo.register_execution(
+            user_id=DEMO_USER_UUID,
+            action_item_id=action.id,
+            completion_status="failed",
+            failure_tags=["AMBIGUITY"],
+            plan_start_at=datetime(2026, 6, day, tzinfo=KST),
+        )
+    exec_id = f"exec_{current.id}"
+
+    top = _generate(client, exec_id).json()["cards"][0]
+    assert top["optionGroup"] == "DOWNSCOPE"
+    assert top["suggestedActionText"].startswith(COMEBACK_ACK_PREFIX)
+
+    resp = _decide(
+        client,
+        {"executionId": exec_id, "decision": "accepted", "acceptedAttemptId": top["attemptId"]},
+    )
+    assert resp.status_code == 200, resp.json()
+
+    new_action = next(
+        a for a in fake_action_item_repo._items.values() if a.source == "recovery_downscope"
+    )
+    assert new_action.title == "보고서 작성 · 가볍게 다시"
+    # 제안 문구는 '첫 걸음' 으로 옮기되 프리픽스는 뗀다.
+    assert new_action.first_step == "책상에 앉으면 보고서 첫 문단만 써봐요"
+
+
+def test_recovery_action_title_does_not_stack_suffixes_on_repeated_recovery() -> None:
+    from reaction_backend.orchestrator.recovery import recovery_action_title
+
+    once = recovery_action_title("자료구조 과제 2번", "DOWNSCOPE")
+    assert once == "자료구조 과제 2번 · 가볍게 다시"
+    # 회복 카드가 또 실패해 다시 회복해도 꼬리표가 쌓이지 않는다.
+    assert recovery_action_title(once, "DOWNSCOPE") == once
+    assert recovery_action_title(once, "CARRY_OVER") == "자료구조 과제 2번 · 이어서"
+
+
+def test_recovery_action_title_fits_the_column_and_survives_missing_original() -> None:
+    from reaction_backend.orchestrator.recovery import (
+        RECOVERY_TITLE_MAX_LENGTH,
+        recovery_action_title,
+    )
+
+    long_title = "가" * RECOVERY_TITLE_MAX_LENGTH
+    titled = recovery_action_title(long_title, "CARRY_OVER")
+    assert len(titled) == RECOVERY_TITLE_MAX_LENGTH
+    assert titled.endswith(" · 이어서")
+    # 원본을 못 읽으면(보관 등) 질문형 템플릿 대신 짧고 정직한 이름.
+    assert recovery_action_title(None, "DOWNSCOPE") == "다시 해보기"

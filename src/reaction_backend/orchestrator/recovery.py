@@ -116,6 +116,52 @@ def with_comeback_ack(text: str, *, escalation_level: EscalationLevel | None) ->
     return f"{COMEBACK_ACK_PREFIX}{text}"
 
 
+def without_comeback_ack(text: str) -> str:
+    """`with_comeback_ack` 의 역 — 제안 문구를 카드 본문(첫 걸음)으로 옮길 때 프리픽스를 뗀다.
+
+    프리픽스는 **제안을 보여주는 그 순간**의 말이다("다시 돌아온 지금이 중요해요"). 수락해서
+    만들어진 카드에 남으면 다음 날 오늘 화면·알림에서도 계속 같은 말을 하게 된다.
+    """
+    return text.removeprefix(COMEBACK_ACK_PREFIX).strip()
+
+
+# 회복 카드 제목 꼬리표 — 원본 제목 뒤에 붙여 "무슨 일의 어떤 회복인지"를 한눈에 보이게 한다.
+# 분 단위나 날짜 말("5분", "내일")은 일부러 안 넣는다: 카드 길이는 원본에서 파생되고
+# (`recovery_action_minutes`), 블록 날짜는 승인 시각에 따라 달라져 제목과 어긋날 수 있다.
+RECOVERY_TITLE_SUFFIX: dict[str, str] = {
+    "DOWNSCOPE": "가볍게 다시",
+    _CARRY_OVER_GROUP: "이어서",
+}
+_RECOVERY_TITLE_SEPARATOR = " · "
+# `action_items.title` 컬럼 길이(String(300)).
+RECOVERY_TITLE_MAX_LENGTH = 300
+
+
+def recovery_action_title(original_title: str | None, option_group: str) -> str:
+    """수락한 회복으로 만드는 새 카드의 제목 — **원본 제목 + 그룹 꼬리표**.
+
+    예전엔 제안 문구(`suggested_action_text`)를 그대로 제목으로 썼다. 선두 카드만 LLM 이
+    다듬고 나머지는 카탈로그 템플릿이라, 형제 카드를 고르면 다음 날 오늘 화면·주간 그리드·
+    아침 알림에 "내일 같은 슬롯으로 그대로 옮겨드릴까요?" 같은 **질문 문장**이 카드 이름으로
+    떴다 — 무슨 일인지도 안 보이고, 당일인데 "내일"이라고 적혀 있었다.
+
+    이미 회복 카드였던 것을 또 회복하면 꼬리표가 쌓이지 않게 기존 꼬리표를 먼저 뗀다
+    ("과제 · 가볍게 다시 · 가볍게 다시" 방지). 원본을 못 읽으면(보관 등) 꼬리표 없이
+    "다시 해보기" 로 둔다 — 지어낸 제목보다 짧고 정직한 편이 낫다.
+    """
+    suffix = RECOVERY_TITLE_SUFFIX.get(option_group)
+    base = " ".join((original_title or "").split())
+    known_tails = tuple(f"{_RECOVERY_TITLE_SEPARATOR}{s}" for s in RECOVERY_TITLE_SUFFIX.values())
+    while base.endswith(known_tails):
+        base = next(base.removesuffix(t) for t in known_tails if base.endswith(t))
+    if not base:
+        return "다시 해보기"
+    if suffix is None:
+        return base[:RECOVERY_TITLE_MAX_LENGTH]
+    tail = f"{_RECOVERY_TITLE_SEPARATOR}{suffix}"
+    return f"{base[: RECOVERY_TITLE_MAX_LENGTH - len(tail)]}{tail}"
+
+
 def select_strategies(
     failure_tags: list[str],
     strategies: list[RecoveryStrategyCatalog],

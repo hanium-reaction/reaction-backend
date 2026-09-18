@@ -797,6 +797,15 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   acceptedAttemptId?, editedActionText?, decisionReason?, reEngagementAnchorAt? }` — accepted 시
   나머지 pending 은 rejected. DOWNSCOPE/CARRY_OVER 수락 → 새 ActionItem(source=`recovery_downscope`/
   `recovery_carryover`, `parent_action_item_id` 혈통) 생성. RESCHEDULE/PARK 는 생성 없음.
+- **새 회복 카드의 `title` = 원본 카드 제목 + 그룹 꼬리표**(v2.30-recovery) — DOWNSCOPE
+  `"<원본> · 가볍게 다시"`, CARRY_OVER `"<원본> · 이어서"`(최대 300자, 회복을 또 회복해도
+  꼬리표는 한 번만). ⚠️ 그전에는 `suggestedActionText` 를 그대로 제목으로 썼다 — 선두 카드만
+  LLM 이 다듬고 나머지는 카탈로그 템플릿이라, 형제 카드를 고르면 "내일 같은 슬롯으로 그대로
+  옮겨드릴까요?" 같은 질문이 오늘 화면·주간 그리드·아침 알림의 카드 이름이 됐다. 제안 문구는
+  DOWNSCOPE 카드의 `firstStep`(오늘 화면 '첫 걸음')으로 옮기고(L1/L2 컴백 프리픽스는 뗀다),
+  CARRY_OVER 는 원본의 `firstStep` 을 물려받는다. `decision="edited"` 면 종전대로 사용자
+  문구가 제목이다(이때 DOWNSCOPE `firstStep` 은 비운다 — 사용자가 AI 문구 대신 자기 말을
+  골랐다). `recovery_attempts.suggested_action_text`(AI 원문)는 그대로 보존.
 - **회복 카드의 `estimatedMinutes` 는 원본 카드에서 파생한다** (2026-08-28, ADR-0009 D6):
   **CARRY_OVER = 원본 그대로**('내일로 그대로 옮기기'라 길이를 줄이지 않는다),
   **DOWNSCOPE = 원본의 40%** 를 5분 눈금으로 반올림하고 `[min(minRecoveryUnitMinutes, 원본),
@@ -806,6 +815,14 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   DOWNSCOPE 가 오히려 **확대**됐다(15분 원본 + 30분 단위 전략 → 30분).
   `minRecoveryUnitMinutes` **필드 자체의 의미는 그대로**다(전략의 최소 회복 단위) — 이제
   카드 길이가 아니라 그 하한으로 쓰인다.
+- **회복 카드의 `title` 은 원본 카드 제목 + 그룹 꼬리표다** (v2.30-recovery):
+  DOWNSCOPE = `"<원본 제목> · 가볍게 다시"`, CARRY_OVER = `"<원본 제목> · 이어서"`. 회복 카드를
+  다시 회복해도 꼬리표는 쌓이지 않는다. 원본을 못 읽으면 `"다시 해보기"`. `firstStep` 은
+  DOWNSCOPE 면 제안 문구(`suggestedActionText`, 컴백 프리픽스 제외), CARRY_OVER 면 원본 카드의
+  `firstStep` 을 물려받는다. `decision="edited"` 면 종전대로 사용자 문구가 `title` 이 되고
+  DOWNSCOPE 의 `firstStep` 은 비운다. ⚠️ 그전에는 제안 문구를 그대로 `title` 로 써서, 템플릿
+  그대로인 형제 카드를 고르면 "내일 같은 슬롯으로 그대로 옮겨드릴까요?" 같은 질문 문장이 오늘
+  화면·주간 그리드·아침 알림의 카드 이름이 됐다. AI 원문 `suggestedActionText` 는 그대로 보존.
 - **`reEngagementAnchorAt`(#327, FE #221)** — PARK/CARRY_OVER 수락(accepted/edited)에만
   유효. 시간대 포함 ISO 8601(예: `2026-09-01T09:00:00+09:00`) 이어야 한다(시간대 없으면 422
   `COMMON_VALIDATION_ERROR`). 생략하면 서버가 `orchestrator.recovery.re_engagement_anchor_at`

@@ -53,11 +53,13 @@ from reaction_backend.orchestrator.recovery import (
     first_matching_tag,
     re_engagement_anchor_at,
     recovery_action_minutes,
+    recovery_action_title,
     recovery_target_date,
     render_template,
     select_strategies,
     shift_to_recovery_day,
     with_comeback_ack,
+    without_comeback_ack,
 )
 from reaction_backend.repositories.action_item_repo import (
     ActionItemRepo,
@@ -624,6 +626,10 @@ async def _create_recovery_action(
 
     소요 시간은 `recovery_action_minutes` 가 원본에서 파생한다 — CARRY_OVER 는 그대로,
     DOWNSCOPE 는 비례 축소. 예전엔 그룹과 무관하게 전략 카탈로그 상수를 썼다.
+
+    제목은 **원본 제목 + 그룹 꼬리표**(`recovery_action_title`)다 — 제안 문구는 질문형
+    템플릿일 수 있어 카드 이름이 될 수 없다. 제안 문구는 DOWNSCOPE 에서만 '첫 걸음'으로
+    옮긴다(`_recovery_first_step`).
     """
     original = await action_repo.get_by_id(user_id, execution.action_item_id)
     strategy = await repo.get_strategy(target.recovery_strategy_type)
@@ -632,7 +638,10 @@ async def _create_recovery_action(
         parent_action_item_id=execution.action_item_id,
         # 편집 수락이면 사용자 문구가 카드 제목이 된다. `target.suggested_action_text`
         # (AI 원문)는 그대로 둔다 — 덮어쓰면 "얼마나 고쳐 썼나"를 영영 못 잰다.
-        title=edited_text or (target.suggested_action_text or "회복 액션")[:300],
+        title=edited_text
+        or recovery_action_title(
+            original.title if original is not None else None, target.recovery_option_group
+        ),
         category=original.category if original is not None else "other",
         source=source,
         target_date=recovery_target_date(decided_at.date(), target.recovery_option_group),
@@ -644,7 +653,27 @@ async def _create_recovery_action(
             ),
         ),
     )
+    # 리포지토리 시그니처를 늘리지 않고 반환된 행에 싣는다 — commit 은 이 요청의 끝에서 한 번.
+    new_action.first_step = _recovery_first_step(target, original, edited=bool(edited_text))
     return new_action.id
+
+
+def _recovery_first_step(
+    target: RecoveryAttempt, original: ActionItem | None, *, edited: bool
+) -> str | None:
+    """회복 카드의 '첫 걸음'(오늘 화면 상세에 그대로 보인다).
+
+    - DOWNSCOPE 수락: 제안 문구가 곧 "무엇을 얼마나 작게" 할지다 — 컴백 프리픽스만 떼고
+      옮긴다. 편집 수락이면 사용자가 AI 문구 대신 자기 말을 제목으로 골랐으니 AI 문구를
+      다른 자리에 되살리지 않는다(None).
+    - CARRY_OVER: 같은 일을 그대로 이어가는 것이라 원본의 첫 걸음을 물려받는다. 템플릿
+      ("같은 슬롯으로 그대로 옮겨드릴까요?")은 옮기자는 제안일 뿐 할 일이 아니다.
+    """
+    if target.recovery_option_group == "CARRY_OVER":
+        return original.first_step if original is not None else None
+    if edited:
+        return None
+    return without_comeback_ack(target.suggested_action_text or "") or None
 
 
 @router.post("/recovery/decisions")
