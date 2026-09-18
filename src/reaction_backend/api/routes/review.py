@@ -67,6 +67,7 @@ from reaction_backend.schemas.reviews import (
     HabitPenaltyListResponse,
     HabitPenaltyRejectResponse,
     HabitWeekStat,
+    HabitWeekSummary,
     MandalaHabitWeekStat,
     MandalaWeeklySummary,
     NextCycleProposal,
@@ -119,6 +120,7 @@ class _ReadTimeSections:
     stale_axis_proposals: list[StaleAxisProposal]
     top_failure_contexts: list[TopFailureContext]
     unstarted_blocks: int = 0
+    habits: list[HabitWeekSummary] = field(default_factory=list)
 
 
 def _kpi_from_summary(summary: PeriodSummary) -> WeeklyKpi:
@@ -159,6 +161,7 @@ def _to_response(
         average_recovery_minutes=kpi.average_recovery_minutes,
         effort=sections.effort,
         unstarted_blocks=sections.unstarted_blocks,
+        habits=sections.habits,
         category_success_rate=kpi.category_success_rate,
         peak_window=kpi.peak_point_window,
         drain_window=kpi.drain_point_window,
@@ -395,6 +398,22 @@ def _effort_minutes(executions: list[ExecutionStat]) -> EffortMinutes:
     )
 
 
+def _standalone_habit_summaries(
+    instances: list[HabitInstance], *, mandala_habit_ids: set[UUID]
+) -> list[HabitWeekSummary]:
+    """그 주 습관 인스턴스 → 응답 행. 만다라 반복형 칸의 습관은 `mandala.habits` 에 이미 있어 뺀다."""
+    return [
+        HabitWeekSummary(
+            habit_id=f"{_HABIT_PREFIX}{inst.habit_id}",
+            title=inst.habit.title,
+            done_count=inst.done_count,
+            target_count=inst.target_count,
+        )
+        for inst in instances
+        if inst.habit_id not in mandala_habit_ids
+    ]
+
+
 async def _read_time_sections(
     user_id: UUID,
     monday: date,
@@ -402,10 +421,14 @@ async def _read_time_sections(
     *,
     repo: ReviewRepo,
     goal_repo: GoalRepo,
+    habit_inst_repo: HabitInstanceRepo,
     session: AsyncSession,
 ) -> _ReadTimeSections:
     """GET·POST generate 공통 — 매 요청 파생 절을 한 번씩만 읽어 모은다."""
     tree = await _load_mandala_tree(user_id, goal_repo=goal_repo, session=session)
+    mandala_habit_ids: set[UUID] = set()
+    if tree is not None:
+        mandala_habit_ids = {h.id for h in tree.habits_by_node.values()}
     proposals, completions = await _cycle_proposals(user_id, goal_repo=goal_repo, session=session)
     start_dt, end_dt = week_window(monday)
     return _ReadTimeSections(
@@ -421,6 +444,11 @@ async def _read_time_sections(
         # 확정 저장본 경로에서도 같은 값이 나간다.
         unstarted_blocks=await repo.count_unstarted_blocks(
             user_id, start_dt, end_dt, now=now_kst()
+        ),
+        # 습관만 쓰는 사용자도 그 주 기록을 본다 — KPI 는 카드 실행만 센다.
+        habits=_standalone_habit_summaries(
+            await habit_inst_repo.list_for_user_week(user_id, monday),
+            mandala_habit_ids=mandala_habit_ids,
         ),
     )
 
@@ -439,6 +467,7 @@ async def get_weekly_review(
     user: CurrentUser,
     repo: ReviewRepoDep,
     goal_repo: GoalRepoDep,
+    habit_inst_repo: HabitInstRepoDep,
     session: SessionDep,
     week_start: Annotated[str | None, Query(alias="weekStart")] = None,
 ) -> WeeklyReviewResponse:
@@ -455,7 +484,13 @@ async def get_weekly_review(
     start_dt, end_dt = week_window(monday)
     executions = await repo.collect_execution_stats(user.id, start_dt, end_dt)
     sections = await _read_time_sections(
-        user.id, monday, executions, repo=repo, goal_repo=goal_repo, session=session
+        user.id,
+        monday,
+        executions,
+        repo=repo,
+        goal_repo=goal_repo,
+        habit_inst_repo=habit_inst_repo,
+        session=session,
     )
     existing = await repo.get_weekly(user.id, monday)
     if existing is not None and is_final_summary(existing, monday):
@@ -475,6 +510,7 @@ async def generate_weekly_review(
     user: CurrentUser,
     repo: ReviewRepoDep,
     goal_repo: GoalRepoDep,
+    habit_inst_repo: HabitInstRepoDep,
     session: SessionDep,
 ) -> WeeklyReviewResponse:
     """주간 리뷰 강제 재생성 + 영속화 (디버그/관리자). 같은 주 덮어쓰기."""
@@ -482,7 +518,13 @@ async def generate_weekly_review(
     start_dt, end_dt = week_window(monday)
     executions = await repo.collect_execution_stats(user.id, start_dt, end_dt)
     sections = await _read_time_sections(
-        user.id, monday, executions, repo=repo, goal_repo=goal_repo, session=session
+        user.id,
+        monday,
+        executions,
+        repo=repo,
+        goal_repo=goal_repo,
+        habit_inst_repo=habit_inst_repo,
+        session=session,
     )
     kpi = await _live_kpi(user.id, monday, executions, repo=repo)
     summary = await persist_weekly_review(user.id, monday, kpi, now_kst(), repo=repo)

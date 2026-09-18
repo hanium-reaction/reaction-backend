@@ -896,7 +896,14 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
 
 핵심 필드: `adherenceRate`, `consistencyDays`, `resilienceRate`, `categorySuccessRate`,
 `peakWindow`, `drainWindow`, `policyUpdateCandidates`, `topFailureContexts`(#301),
-`effort`(v1.99), `unstartedBlocks`(v2.30)
+`effort`(v1.99), `unstartedBlocks`(v2.30), `habits`(v2.30)
+
+`habits`(v2.30, 기본 `[]`): 만다라에 걸리지 않은 **활성** 습관의 그 주 체크인 —
+`{ habitId("habit_<uuid>"), title, doneCount, targetCount }`. `habit_instances` 의 그 주 행에서
+조회 시점에 파생한다(저장 안 함). 만다라 반복형 칸에 링크된 습관은 `mandala.habits` 에 이미
+있으므로 여기서 뺀다(중복 나열 없음). KPI(`adherenceRate` 등)는 카드 실행만 세므로 습관만 쓰는
+주에는 KPI 가 null 이어도 이 배열은 채워진다 — FE 는 "집계할 활동이 없어요" 를 실행도 습관
+체크인도 없을 때만 보여야 한다.
 
 `unstartedBlocks`(v2.30, int, 기본 0): 그 주(`[월 00:00, 다음 월 00:00)` KST)에 시작했어야
 하는데 **한 번도 [▶ 시작] 하지 않고 지나간** 블록(세션) 수. 조건: `block_status='scheduled'`,

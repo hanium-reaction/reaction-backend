@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
+from reaction_backend.db.models.habit import Habit
 from reaction_backend.orchestrator.weekly_review import (
     ExecutionStat,
     RecoveryStat,
@@ -30,7 +31,13 @@ from reaction_backend.scheduler.weekly_review_precompute import (
     week_start_of,
 )
 from reaction_backend.schemas.common import KST
-from tests.conftest import DEMO_USER_UUID, FakeGoalRepo, FakeReviewRepo
+from tests.conftest import (
+    DEMO_USER_UUID,
+    FakeGoalRepo,
+    FakeHabitInstanceRepo,
+    FakeHabitRepo,
+    FakeReviewRepo,
+)
 
 # 어떤 날을 넣어도 그 주 월요일 — day_offset 0~6 = 월~일.
 WEEK = week_start_of(datetime(2026, 6, 17, tzinfo=KST).date())
@@ -59,6 +66,19 @@ def _exec(
         planned_minutes=planned_minutes,
         actual_minutes=actual_minutes,
     )
+
+
+def _standalone_habit(title: str, *, target: int) -> Habit:
+    h = Habit()
+    h.id = uuid4()
+    h.user_id = DEMO_USER_UUID
+    h.title = title
+    h.category = "health"
+    h.frequency_per_week = target
+    h.target_count = target
+    h.goal_node_id = None
+    h.archived_at = None
+    return h
 
 
 # ───────────────────────── 순수 함수 ─────────────────────────
@@ -229,6 +249,57 @@ def test_get_weekly_reports_unstarted_blocks_next_to_an_unchanged_adherence(
 
 def test_get_weekly_unstarted_blocks_defaults_to_zero(client: TestClient) -> None:
     assert _get(client, WEEK.isoformat()).json()["unstartedBlocks"] == 0
+
+
+def test_get_weekly_lists_standalone_habit_check_ins(
+    client: TestClient,
+    fake_habit_repo: FakeHabitRepo,
+    fake_habit_instance_repo: FakeHabitInstanceRepo,
+) -> None:
+    """습관만 쓴 주도 기록이 보인다 — 카드 실행이 없어 준수율은 여전히 null.
+
+    회귀: KPI 가 카드 실행만 세서, 러닝을 두 번 체크인한 주에 "집계할 활동이 없어요" 가 떴다.
+    """
+    habit = _standalone_habit("러닝", target=3)
+    fake_habit_repo.seed(habit)
+    fake_habit_instance_repo.seed_instance(habit.id, WEEK, done=2, target=3)
+    fake_habit_instance_repo.seed_instance(habit.id, WEEK - timedelta(days=7), done=3, target=3)
+
+    body = _get(client, WEEK.isoformat()).json()
+
+    assert body["adherenceRate"] is None
+    assert body["habits"] == [
+        {"habitId": f"habit_{habit.id}", "title": "러닝", "doneCount": 2, "targetCount": 3}
+    ]
+    generated = client.post("/reviews/weekly/generate", json={"weekStart": WEEK.isoformat()})
+    assert generated.json()["habits"] == body["habits"]
+
+
+def test_standalone_habit_summaries_skip_habits_already_in_the_mandala_section() -> None:
+    """만다라 반복형 칸의 습관은 `mandala.habits` 에 이미 있다 — 두 번 나열하지 않는다."""
+    from reaction_backend.api.routes.review import _standalone_habit_summaries
+    from reaction_backend.db.models.habit_instance import HabitInstance
+
+    mandala_habit = _standalone_habit("만다라 칸 습관", target=5)
+    loose_habit = _standalone_habit("물 마시기", target=7)
+    instances = []
+    for habit, done in ((mandala_habit, 4), (loose_habit, 6)):
+        inst = HabitInstance()
+        inst.id = uuid4()
+        inst.habit_id = habit.id
+        inst.habit = habit
+        inst.week_start = WEEK
+        inst.done_count = done
+        inst.target_count = habit.target_count
+        instances.append(inst)
+
+    rows = _standalone_habit_summaries(instances, mandala_habit_ids={mandala_habit.id})
+
+    assert [(r.title, r.done_count, r.target_count) for r in rows] == [("물 마시기", 6, 7)]
+
+
+def test_get_weekly_habits_empty_without_check_ins(client: TestClient) -> None:
+    assert _get(client, WEEK.isoformat()).json()["habits"] == []
 
 
 def test_get_weekly_invalid_week(client: TestClient) -> None:
