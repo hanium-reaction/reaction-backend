@@ -1,11 +1,13 @@
 """재계획이 목표의 상태·마감을 본다.
 
 - planA-8: 지운(보관)·완료한 목표의 카드는 '남은 일' 로 다시 배치하지 않는다.
+- planA-6: 목표마다 자기 마감 안에 배치한다 — 지평 하나로 균등 분산하면 금요일 시험 목표의
+  남은 세션이 한 달짜리 목표의 지평에 섞여 시험 뒤로 밀렸다.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -85,3 +87,74 @@ def test_replan_leaves_out_cards_of_a_deleted_or_completed_goal(
     assert f"action_{inbox_card.id}" in ids  # 목표 없는 카드는 그대로 후보
     assert f"action_{deleted_card.id}" not in ids
     assert f"action_{done_card.id}" not in ids
+
+
+def _blocks_of(resp: Any, card_ids: set[str]) -> list[dict[str, Any]]:
+    return [b for b in resp.json()["blocks"] if b["actionId"] in card_ids]
+
+
+def test_replan_keeps_an_exam_goals_sessions_before_its_deadline(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_goal_repo: FakeGoalRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+) -> None:
+    """시험(7/17 금) 목표 카드 4개 + 4주짜리 프로젝트 카드 12개 — 시험 카드는 전부 7/17 안에."""
+    _freeze_now(monkeypatch)  # window_start = 2026-07-13(월)
+    exam = _seed_goal(fake_goal_repo, title="토익 시험", deadline=date(2026, 7, 17))
+    project = _seed_goal(fake_goal_repo, title="캡스톤", deadline=date(2026, 8, 9))
+    for i in range(12):  # 프로젝트 블록이 8/9 까지 흩어져 있어 전체 지평이 8/9 가 된다
+        card = _card(fake_action_item_repo, project, title=f"캡스톤 {i}")
+        day = date(2026, 7, 13) + timedelta(days=i * 27 // 11)
+        _seed_block(
+            fake_scheduled_block_repo,
+            action_id=card.id,
+            start=_kst(day.year, day.month, day.day, 14, 0),
+            end=_kst(day.year, day.month, day.day, 15, 0),
+        )
+    exam_ids = {
+        f"action_{_card(fake_action_item_repo, exam, title=f'RC {i}').id}" for i in range(4)
+    }
+
+    resp = client.post("/plans/replan")
+
+    assert resp.status_code == 201, resp.text
+    exam_blocks = _blocks_of(resp, exam_ids)
+    assert len(exam_blocks) == 4
+    late = [b for b in exam_blocks if datetime.fromisoformat(b["end"]).date() > date(2026, 7, 17)]
+    assert late == [], late
+    # 프로젝트 카드는 여전히 자기 지평(8/9)까지 퍼진다 — 시험 마감으로 같이 당겨지지 않는다.
+    project_days = [
+        datetime.fromisoformat(b["start"]).date()
+        for b in resp.json()["blocks"]
+        if b["actionId"] not in exam_ids
+    ]
+    assert max(project_days) > date(2026, 7, 31)
+    assert not any("마감(" in w for w in resp.json()["warnings"])
+
+
+def test_replan_says_so_when_a_goal_cannot_fit_before_its_deadline(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_goal_repo: FakeGoalRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """마감(7/13) 하루에 20시간 분량 — 넘친 세션은 마감 뒤로 밀지 않고 한 줄로 알린다."""
+    _freeze_now(monkeypatch)
+    exam = _seed_goal(fake_goal_repo, title="중간고사", deadline=date(2026, 7, 13))
+    ids = {
+        f"action_{_card(fake_action_item_repo, exam, title=f'범위 {i}', est=240).id}"
+        for i in range(5)
+    }
+
+    resp = client.post("/plans/replan")
+
+    assert resp.status_code == 201, resp.text
+    blocks = _blocks_of(resp, ids)
+    assert blocks
+    assert all(datetime.fromisoformat(b["start"]).date() == date(2026, 7, 13) for b in blocks)
+    notes = [w for w in resp.json()["warnings"] if "'중간고사' 마감(7월 13일)" in w]
+    assert len(notes) == 1, resp.json()["warnings"]
+    # 세션마다 한 줄씩 늘어놓지 않는다 — 목표 단위 한 줄.
+    assert not any("배치할 가용 시간을 찾지 못했어요" in w for w in resp.json()["warnings"])

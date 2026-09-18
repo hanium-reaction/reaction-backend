@@ -2163,12 +2163,24 @@ async def generate_replan(
         for day_blocks in calendar_busy.values():
             committed.extend(day_blocks)
 
-        blocks, warnings = replan.build_forward_replan(
+        # 목표마다 **자기 마감 안에** 배치한다 (planA-6). 지평 하나로 균등 분산하면 금요일 시험
+        # 목표의 남은 세션이 한 달짜리 프로젝트 지평에 섞여 절반이 시험 뒤로 밀렸다.
+        goal_of = {a.id: a.goal_id for a in (*actions_by_id.values(), *backlog)}
+        goal_deadlines: dict[UUID, replan.GoalDeadline] = {}
+        for c in candidates:
+            gid = goal_of.get(c.action_id)
+            goal = goals_by_id.get(gid) if gid is not None else None
+            if goal is not None and goal.deadline is not None:
+                goal_deadlines[c.action_id] = replan.GoalDeadline(
+                    day=goal.deadline, goal_title=goal.title
+                )
+        blocks, warnings = replan.build_forward_replan_by_deadline(
             window_start=window_start,
             horizon_day=deadline,
             candidates=candidates,
             committed_busy=committed,
             tuning=_replan_tuning_for(outcome),
+            deadlines=goal_deadlines,
         )
         # 연결해 둔 사용자에게만 알린다 — 연결 안 한 사용자에게 매번 말하면 알림 피로다.
         calendar_limit = window_start + timedelta(days=freebusy.MAX_RANGE_DAYS)
