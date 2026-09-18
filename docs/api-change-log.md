@@ -118,6 +118,17 @@ AI 원안이 그대로 저장됐다 — 사용자는 캘린더에서야 알게 �
 바꾼 오늘 카드도 승인 때 다음 주로 옮겨져 오늘 화면에서 사라졌다. 이제 `targetDate` 가 오늘부터
 `windowStart` 전(이번 주 남은 날)인 카드는 후보에서 뺀다. 날짜가 지났거나 없는 카드만 백로그다.
 
+### `POST /plans/replan` — 미리보기 블록에 `replacesStart`/`replacesEnd` (additive)
+
+미리보기가 교체할 옛 블록의 **id** 만 실어서, FE 는 "기존 일정 교체 (block_f3b4…)" 처럼 내부 id 를
+그대로 보여 줬고 무엇이 어디로 옮겨지는지 알 수 없었다. 이제 `ReplanBlockPreview` 에 그 대표 옛
+블록의 원래 시각 `replacesStart`/`replacesEnd`(KST ISO 8601, 백로그면 null)를 싣는다. 이 필드 이전의
+초안은 null 로 읽힌다.
+
+**FE 가 할 일(reaction-frontend 이슈).** `WeeklyReplanCard` 에서 id 를 지우고 "9/21(월) 12:00 →
+9/22(화) 19:00" 처럼 보여 준다. `windowStart` 는 "9월 21일(월)부터" 로 쓰고, 승인 응답의
+`skippedBlocks > 0` 이면 "이미 시작했거나 옮긴 N개는 그대로 뒀어요" 를 알린다.
+
 ---
 
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)

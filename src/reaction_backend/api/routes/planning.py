@@ -1971,6 +1971,11 @@ def _block_minutes(block: ScheduledBlock) -> int:
     return max(0, int((block.end_at - block.start_at).total_seconds() // 60))
 
 
+def _optional_dt(raw: object) -> datetime | None:
+    """초안 payload 의 선택 시각 — 없거나(옛 초안) 비면 None."""
+    return datetime.fromisoformat(raw) if isinstance(raw, str) and raw else None
+
+
 def _replan_response(draft: PlanDraft) -> ReplanResponse:
     """저장된 재계획 Draft → 응답(재조회·생성 공용)."""
     payload = draft.payload
@@ -1982,6 +1987,8 @@ def _replan_response(draft: PlanDraft) -> ReplanResponse:
             start=datetime.fromisoformat(str(b["start"])),
             end=datetime.fromisoformat(str(b["end"])),
             replaces_block_id=b.get("replacesBlockId"),
+            replaces_start=_optional_dt(b.get("replacesStart")),
+            replaces_end=_optional_dt(b.get("replacesEnd")),
         )
         for b in payload.get("blocks", [])
     ]
@@ -2163,9 +2170,11 @@ async def generate_replan(
         # 밀린 블록을 미래 블록보다 **먼저** 넣는다 — 아래 `covered` 산수가 "교체 대상(old_ids)"
         # 과 "살아남는 미래 블록"을 가르는데, 밀린 블록도 교체 대상에 들어가야 그 몫이 남은
         # 분량에서 이중으로 빠지지 않는다.
+        old_block_times: dict[UUID, tuple[datetime, datetime]] = {}
         for block, action in (*stale_pairs, *scheduled_pairs):
             actions_by_id[action.id] = action
             old_blocks_by_action.setdefault(action.id, []).append(block.id)
+            old_block_times[block.id] = (block.start_at, block.end_at)
 
         # 후보 분량은 액션의 **전체 live 블록**을 보고 정한다. scheduled_pairs 는 스캔 창
         # [window_start, +365d] 안의 'scheduled' 블록만 주는데, 세션 분할(#115 _split_minutes)이
@@ -2324,6 +2333,17 @@ async def generate_replan(
                 *warnings,
             ]
 
+        def _replaced_times(action_id: UUID) -> dict[str, str | None]:
+            """대표 옛 블록의 원래 시각(KST) — 미리보기의 '기존 → 새' 비교용 (planA-15)."""
+            bids = old_blocks_by_action.get(action_id)
+            if not bids:
+                return {"replacesStart": None, "replacesEnd": None}
+            start, end = old_block_times[bids[0]]
+            return {
+                "replacesStart": to_kst(start).isoformat(),
+                "replacesEnd": to_kst(end).isoformat(),
+            }
+
         payload: dict[str, Any] = {
             "kind": "replan",
             "window_start": window_start.isoformat(),
@@ -2340,6 +2360,7 @@ async def generate_replan(
                         if b.action_id in old_blocks_by_action
                         else None
                     ),
+                    **_replaced_times(b.action_id),
                 }
                 for b in blocks
             ],

@@ -376,6 +376,10 @@ class ReplanBlockPreview(CamelModel):
     start: KstDatetime
     end: KstDatetime
     replaces_block_id: str | None = None  # block_<uuid> 대표 1개 | null (백로그)
+    # 그 대표 옛 블록의 원래 시각 (planA-15, additive) — 미리보기가 "월 12:00 → 화 19:00" 처럼
+    # 무엇이 어디로 옮겨지는지 보여 주게. 백로그이거나 이 필드 이전에 만든 초안이면 null.
+    replaces_start: KstDatetime | None = None
+    replaces_end: KstDatetime | None = None
 
 
 class ReplanResponse(DraftMixin):
