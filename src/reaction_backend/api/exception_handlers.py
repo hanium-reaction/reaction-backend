@@ -1,8 +1,8 @@
 """전역 예외 핸들러 — 모든 에러를 `ErrorResponse` 한 형태로 직렬화한다 (ADR-0002 §2.2).
 
 - `ApiError`              → `code`/`message`/`field` 그대로, `http_status` 적용
-- `RequestValidationError`→ 422 `COMMON_VALIDATION_ERROR`, 첫 위반 필드 표기
-- `HTTPException`         → status code 보존하며 `ErrorResponse` 로 정규화
+- `RequestValidationError`→ 422 `COMMON_VALIDATION_ERROR`, 첫 위반 필드 표기 + **한국어 문구**
+- `HTTPException`         → status code 보존하며 `ErrorResponse` 로 정규화 (영어 detail 은 한국어로)
 - 그 외 `Exception`       → 500 `COMMON_INTERNAL_ERROR` (스택 트레이스 비노출).
   실제로는 `middleware/unhandled_error.py` 가 CORS 안쪽에서 먼저 받는다 — 여기 핸들러는
   Starlette 가 CORS **바깥**에서 실행해 500 에 CORS·`x-request-id` 가 빠지기 때문이다.
@@ -10,7 +10,8 @@
 
 from __future__ import annotations
 
-from typing import cast
+import re
+from typing import Any, cast
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -32,6 +33,42 @@ _STATUS_TO_CODE: dict[int, ErrorCode] = {
 # Pydantic 검증 에러 loc 의 위치 prefix (필드명에서 제거)
 _LOC_PREFIXES = frozenset({"body", "query", "path", "header", "cookie"})
 
+# ── 사용자에게 보이는 검증 문구 ──
+# FE 는 422 의 `message` 를 화면에 그대로 띄운다. 예전엔 pydantic 기본 문구가 그대로 나가
+# 'String should have at least 1 character'·'Field required' 같은 영어가 사용자에게 보였다.
+# - 문구에 한글이 이미 있으면(스키마가 PydanticCustomError/ValueError 로 직접 쓴 한국어) 그대로.
+# - 아니면 pydantic 에러 종류(type)별 한국어로 바꾼다. 원문은 `field` 로 위치만 남긴다.
+_HANGUL = re.compile(r"[가-힣]")
+_VALUE_ERROR_PREFIX = "Value error, "
+_GENERIC_VALIDATION_MESSAGE = "입력한 내용을 한 번 더 확인해 주세요."
+_FORMAT_MESSAGE = "형식이 올바르지 않아요. 한 번 더 확인해 주세요."
+_BAD_REQUEST_MESSAGE = "요청을 읽지 못했어요. 잠시 후 다시 시도해 주세요."
+_RANGE_MESSAGE = "허용된 범위를 벗어났어요. 한 번 더 확인해 주세요."
+_CHOICE_MESSAGE = "고를 수 없는 값이에요. 목록에서 골라 주세요."
+_TYPE_MESSAGES: dict[str, str] = {
+    "missing": "꼭 필요한 항목이 빠졌어요.",
+    "json_invalid": _BAD_REQUEST_MESSAGE,
+    "json_type": _BAD_REQUEST_MESSAGE,
+    "model_type": _BAD_REQUEST_MESSAGE,
+    "model_attributes_type": _BAD_REQUEST_MESSAGE,
+    "dict_type": _BAD_REQUEST_MESSAGE,
+    "extra_forbidden": _BAD_REQUEST_MESSAGE,
+    "string_pattern_mismatch": _FORMAT_MESSAGE,
+    "greater_than": _RANGE_MESSAGE,
+    "greater_than_equal": _RANGE_MESSAGE,
+    "less_than": _RANGE_MESSAGE,
+    "less_than_equal": _RANGE_MESSAGE,
+    "literal_error": _CHOICE_MESSAGE,
+    "enum": _CHOICE_MESSAGE,
+}
+
+# Starlette 기본 detail('Not Found' 등)이 그대로 나가지 않게 — 상태별 한국어.
+_STATUS_MESSAGES: dict[int, str] = {
+    404: "찾는 내용이 없어요.",
+    405: "지원하지 않는 요청이에요.",
+    501: "아직 준비 중인 기능이에요.",
+}
+
 
 def _error_json(
     http_status: int, error: ErrorResponse, *, headers: dict[str, str] | None = None
@@ -50,16 +87,46 @@ async def _handle_api_error(request: Request, exc: Exception) -> Response:
     )
 
 
+def _validation_message(error: dict[str, Any]) -> str:
+    """pydantic 에러 1건 → 사용자에게 보일 한국어 문구 (위 `_TYPE_MESSAGES` 주석)."""
+    raw = str(error.get("msg") or "")
+    if raw.startswith(_VALUE_ERROR_PREFIX):
+        raw = raw[len(_VALUE_ERROR_PREFIX) :]
+    if _HANGUL.search(raw):
+        return raw
+    kind = str(error.get("type") or "")
+    ctx = error.get("ctx") or {}
+    if kind == "string_too_short":
+        minimum = ctx.get("min_length", 1)
+        return "내용을 입력해 주세요." if minimum <= 1 else f"{minimum}자 이상 입력해 주세요."
+    if kind == "string_too_long":
+        maximum = ctx.get("max_length")
+        if maximum is None:
+            return "너무 길어요. 조금 줄여 주세요."
+        return f"{maximum}자까지 입력할 수 있어요. 조금 줄여 주세요."
+    if kind == "too_short":
+        minimum = ctx.get("min_length", 1)
+        return "하나 이상 골라 주세요." if minimum <= 1 else f"{minimum}개 이상 필요해요."
+    if kind == "too_long":
+        maximum = ctx.get("max_length")
+        return f"{maximum}개까지 보낼 수 있어요." if maximum is not None else "너무 많아요."
+    if kind in _TYPE_MESSAGES:
+        return _TYPE_MESSAGES[kind]
+    if kind.endswith(("_parsing", "_type")):
+        return _FORMAT_MESSAGE
+    return _GENERIC_VALIDATION_MESSAGE
+
+
 async def _handle_validation_error(request: Request, exc: Exception) -> Response:
     err = cast(RequestValidationError, exc)
     details = err.errors()
     first = details[0] if details else None
     field: str | None = None
-    message = "요청 형식이 올바르지 않습니다."
+    message = _GENERIC_VALIDATION_MESSAGE
     if first is not None:
         loc = [str(p) for p in first.get("loc", ()) if p not in _LOC_PREFIXES]
         field = ".".join(loc) or None
-        message = first.get("msg", message)
+        message = _validation_message(first)
     return _error_json(
         422,
         ErrorResponse(code=ErrorCode.COMMON_VALIDATION_ERROR.value, message=message, field=field),
@@ -69,7 +136,12 @@ async def _handle_validation_error(request: Request, exc: Exception) -> Response
 async def _handle_http_exception(request: Request, exc: Exception) -> Response:
     err = cast(StarletteHTTPException, exc)
     code = _STATUS_TO_CODE.get(err.status_code, ErrorCode.COMMON_INTERNAL_ERROR)
-    message = err.detail if isinstance(err.detail, str) and err.detail else code.value
+    detail = err.detail if isinstance(err.detail, str) else ""
+    if _HANGUL.search(detail):
+        message = detail  # 라우트가 직접 쓴 한국어 문구
+    else:
+        # 'Not Found'·'Method Not Allowed' 같은 Starlette 기본 영어 문구를 그대로 보이지 않는다.
+        message = _STATUS_MESSAGES.get(err.status_code, "요청을 처리하지 못했어요.")
     return _error_json(err.status_code, ErrorResponse(code=code.value, message=message))
 
 

@@ -39,6 +39,12 @@
 
 - `code` — 도메인 prefix UPPER_SNAKE_CASE
 - 표준 HTTP status code 매핑: 400 / 401 / 403 / 404 / 409 / 422 / 500
+- `message` — **화면에 그대로 띄울 수 있는 한국어**(v2.30-auth). 요청 검증 422
+  (`COMMON_VALIDATION_ERROR`)도 pydantic 영어 원문 대신 종류별 한국어("꼭 필요한 항목이
+  빠졌어요.", "200자까지 입력할 수 있어요. 조금 줄여 주세요." 등)이고, 어느 입력인지는 `field`
+  로 알린다. 없는 경로·메서드(404/405)도 한국어. 분기는 `message` 가 아니라 `code` 로 할 것.
+- 500 `COMMON_INTERNAL_ERROR` 에도 CORS 헤더와 `x-request-id` 가 붙는다(v2.30-auth) —
+  크로스오리진 네이티브 앱도 네트워크 오류가 아니라 이 envelope 을 받는다.
 
 ### 1.4 에러 코드 도메인 prefix
 

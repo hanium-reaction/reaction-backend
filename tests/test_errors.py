@@ -1,8 +1,11 @@
 """전역 예외 핸들러 — 모든 에러가 `ErrorResponse` 로 직렬화되는지 (ADR-0002 §2.2)."""
 
+import re
+
+import pytest
 from fastapi import FastAPI, HTTPException, status
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from reaction_backend.main import create_app
 from reaction_backend.schemas.errors import ApiError, ErrorCode
@@ -43,6 +46,21 @@ def _app_with_test_routes() -> FastAPI:
     @app.post("/__test__/validate")
     async def _validate(body: _Body) -> dict[str, int]:
         return {"count": body.count}
+
+    class _TitleBody(BaseModel):
+        title: str = Field(min_length=1, max_length=200)
+        tags: list[str] = Field(default_factory=list, max_length=3)
+
+        @field_validator("title")
+        @classmethod
+        def _no_tilde(cls, v: str) -> str:
+            if v.startswith("~"):
+                raise ValueError("제목은 물결표로 시작할 수 없어요.")
+            return v
+
+    @app.post("/__test__/title")
+    async def _title(body: _TitleBody) -> dict[str, str]:
+        return {"title": body.title}
 
     @app.get("/__test__/api-error")
     async def _api_error() -> None:
@@ -121,3 +139,72 @@ def test_api_error_still_uses_its_own_status_with_cors() -> None:
     assert resp.status_code == 404
     assert resp.json()["code"] == "COMMON_NOT_FOUND"
     assert resp.headers.get("access-control-allow-origin") == origin
+
+
+# ── 사용자에게 보이는 검증 문구는 한국어 (abuse-8 / auth-5) ──
+#
+# FE 는 422 의 message 를 화면에 그대로 띄운다. 예전엔 pydantic 기본 영어 문구가 나갔다.
+
+_HANGUL = re.compile(r"[가-힣]")
+
+
+@pytest.mark.parametrize(
+    ("path", "payload", "field", "expected"),
+    [
+        ("/__test__/validate", {"count": "not-an-int"}, "count", "형식이 올바르지 않아요"),
+        ("/__test__/validate", {}, "count", "꼭 필요한 항목이 빠졌어요"),
+        ("/__test__/title", {"title": ""}, "title", "내용을 입력해 주세요"),
+        ("/__test__/title", {"title": "가" * 201}, "title", "200자까지 입력할 수 있어요"),
+        ("/__test__/title", {"title": "x", "tags": ["a"] * 4}, "tags", "3개까지"),
+    ],
+)
+def test_validation_messages_are_korean(
+    path: str, payload: dict[str, object], field: str, expected: str
+) -> None:
+    client = TestClient(_app_with_test_routes())
+    resp = client.post(path, json=payload)
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["code"] == "COMMON_VALIDATION_ERROR"  # envelope·코드 그대로
+    assert body["field"] == field
+    assert expected in body["message"]
+    for english in ("should", "Field required", "Input", "String"):
+        assert english not in body["message"]
+
+
+def test_title_of_exactly_max_length_is_accepted() -> None:
+    client = TestClient(_app_with_test_routes())
+    assert client.post("/__test__/title", json={"title": "가" * 200}).status_code == 200
+
+
+def test_custom_korean_validator_message_passes_through_without_prefix() -> None:
+    """스키마가 직접 쓴 한국어 문구는 그대로 — pydantic 의 'Value error, ' 접두어만 뗀다."""
+    client = TestClient(_app_with_test_routes())
+    resp = client.post("/__test__/title", json={"title": "~제목"})
+
+    assert resp.status_code == 422
+    assert resp.json()["message"] == "제목은 물결표로 시작할 수 없어요."
+
+
+def test_malformed_json_body_message_is_korean() -> None:
+    client = TestClient(_app_with_test_routes())
+    resp = client.post(
+        "/__test__/validate", content=b"{not json", headers={"content-type": "application/json"}
+    )
+
+    assert resp.status_code == 422
+    assert _HANGUL.search(resp.json()["message"])
+    assert "JSON" not in resp.json()["message"]
+
+
+def test_starlette_404_and_405_messages_are_korean(client: TestClient) -> None:
+    not_found = client.get("/this-route-does-not-exist").json()
+    assert not_found["code"] == "COMMON_NOT_FOUND"
+    assert _HANGUL.search(not_found["message"])
+    assert "Not Found" not in not_found["message"]
+
+    wrong_method = client.put("/auth/me")
+    assert wrong_method.status_code == 405
+    assert wrong_method.json()["code"] == "COMMON_METHOD_NOT_ALLOWED"
+    assert "Method Not Allowed" not in wrong_method.json()["message"]

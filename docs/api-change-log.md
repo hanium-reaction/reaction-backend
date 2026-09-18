@@ -54,6 +54,13 @@
   `unsubscribePush()` + `DELETE /notifications/subscribe` 를 먼저 부르기.
 - **알림 설정 첫 조회가 동시에 와도 500 이 나지 않는다** — `GET/PATCH /notifications/settings`·
   `POST /notifications/subscribe` 의 행 생성이 `ON CONFLICT DO NOTHING` 으로 바뀌었다.
+- **에러 `message` 가 한국어로** — 요청 검증 422(`COMMON_VALIDATION_ERROR`)가 pydantic 영어 원문
+  ('String should have at least 1 character', 'Field required' …)을 그대로 내보내던 것을 종류별
+  한국어로 바꿨다(`field` 는 그대로, 스키마가 직접 쓴 한국어 문구는 그대로). Starlette 기본
+  404/405('Not Found'…)도 한국어. 코드·envelope 무변경 — 분기는 `code` 로.
+- **500 응답에도 CORS·`x-request-id` 헤더가 붙는다.** 예전엔 처리 안 된 예외의 500 만 CORS 바깥에서
+  만들어져, 크로스오리진 네이티브 앱은 네트워크 오류로 받았다. FE 후속: 목표 화면의 "백엔드
+  미동작 — 더미 목표 추가" 폴백 제거.
 
 ---
 
