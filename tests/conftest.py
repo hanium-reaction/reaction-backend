@@ -1959,6 +1959,19 @@ class FakeScheduledBlockRepo:
             and b.end_at > start_dt
         ]
 
+    async def list_busy_between(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[ScheduledBlock]:
+        """[start_dt, end_dt) 와 겹치는 모든 비-cancelled 블록 (실 repo 규칙 미러)."""
+        return [
+            b
+            for b in self._blocks.values()
+            if b.user_id == user_id
+            and b.block_status != "cancelled"
+            and b.start_at < end_dt
+            and b.end_at > start_dt
+        ]
+
     async def list_scheduled_between(
         self, user_id: UUID, start_dt: datetime, end_dt: datetime
     ) -> list[tuple[ScheduledBlock, ActionItem]]:

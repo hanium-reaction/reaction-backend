@@ -72,7 +72,17 @@ from reaction_backend.orchestrator.goal_structuring import (
     fixed_schedules_to_busy,
     time_policies_to_busy,
 )
-from reaction_backend.orchestrator.plan_edit import find_policy_violation, snap_to_15min
+from reaction_backend.orchestrator.plan_edit import (
+    DraftBlockEdit,
+    DraftEditError,
+    EditedDraft,
+    apply_draft_edits,
+    card_title_from,
+    find_policy_violation,
+    first_busy_overlap,
+    snap_to_15min,
+    spanned_days,
+)
 from reaction_backend.repositories.action_item_repo import ActionItemRepo, get_action_item_repo
 from reaction_backend.repositories.fixed_schedule_repo import (
     FixedScheduleRepo,
@@ -118,6 +128,7 @@ from reaction_backend.schemas.planning import (
     ActionItemDraft,
     BlockEditRequest,
     BlockEditResponse,
+    FirstPlanApproveRequest,
     FirstPlanApproveResponse,
     FirstPlanGenerateRequest,
     FirstPlanResponse,
@@ -164,6 +175,7 @@ ActionRepoDep = Annotated[ActionItemRepo, Depends(get_action_item_repo)]
 PolicyRepoDep = Annotated[TimePolicyRepo, Depends(get_time_policy_repo)]
 GoalRepoDep = Annotated[GoalRepo, Depends(get_goal_repo)]
 InboxRepoDep = Annotated[InboxRepo, Depends(get_inbox_repo)]
+FixedRepoDep = Annotated[FixedScheduleRepo, Depends(get_fixed_schedule_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 
 # S14/S15 (#21-B) — 주간 그리드/블록 편집. planId 는 주 논리 식별자(Plan 테이블 없음), 편집 권한은 blockId.
@@ -839,6 +851,113 @@ async def _attach_goal_resources(
         await session.rollback()
 
 
+def _parse_draft_edits(body: FirstPlanApproveRequest | None) -> list[DraftBlockEdit] | None:
+    """승인 본문의 편집본 → 도메인 값. 본문이 없거나 `blocks` 가 없으면 None(초안 그대로).
+
+    시각은 PATCH 블록 편집과 같은 규칙(naive 면 KST, 15분 snap)으로 맞춘다. 형식 오류는
+    결정적이라 lock·재시도 전에 거른다.
+    """
+    if body is None or body.blocks is None:
+        return None
+    edits: list[DraftBlockEdit] = []
+    for b in body.blocks:
+        edits.append(
+            DraftBlockEdit(
+                origin_id=b.origin_id,
+                start=to_kst(snap_to_15min(_parse_block_dt(b.start, "blocks"))),
+                end=to_kst(snap_to_15min(_parse_block_dt(b.end, "blocks"))),
+                title=b.title,
+            )
+        )
+    return edits
+
+
+def _apply_draft_edits_or_422(
+    blocks: list[ScheduledBlockPreview],
+    action_items: list[ActionItemDraft],
+    edits: list[DraftBlockEdit],
+) -> EditedDraft:
+    try:
+        return apply_draft_edits(blocks=blocks, action_items=action_items, edits=edits)
+    except DraftEditError as exc:
+        raise ApiError(
+            ErrorCode(exc.code),
+            exc.message,
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="blocks",
+        ) from exc
+
+
+async def _ensure_moved_blocks_fit(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    outcome: InterviewOutcome,
+    edited: EditedDraft,
+    block_repo: ScheduledBlockRepo,
+    fixed_repo: FixedScheduleRepo,
+    policy_repo: TimePolicyRepo,
+) -> None:
+    """사용자가 **옮긴** 블록만 기존 일정·고정 일정·시간 정책과 대조한다 (planA-2).
+
+    초안 그대로인 블록은 생성 단계에서 이미 같은 busy 를 피해 놓였다. 옮긴 블록은 그 검사를
+    안 거쳤으므로 생성과 같은 소스로 다시 본다 — 활동 시간대(outcome 정책)는 영속화의
+    `policy_guarded_transaction` 이 따로 막는다.
+
+    기존 일정은 **이 승인이 교체해 비울 카드**(`superseded_card_ids`, 같은 목표의 손대지
+    않은 이전 계획)를 빼고 본다 — 재생성 계획이 그 자리를 쓰는 건 정상이다(#118 과 같은 규칙).
+    """
+    if not edited.moved:
+        return
+    goal_id = await first_plan_adapter.heaviest_goal_id(session, user_id=user_id, outcome=outcome)
+    replaced = await first_plan_adapter.superseded_card_ids(
+        session, user_id=user_id, goal_id=goal_id
+    )
+    lo = min(b.start for b in edited.moved)
+    hi = max(b.end for b in edited.moved)
+    existing = [
+        b
+        for b in await block_repo.list_busy_between(user_id, lo, hi)
+        if b.action_item_id not in replaced
+    ]
+    # ORM 행은 스케줄러 Protocol 을 런타임에 만족하지만 mypy 는 Mapped[...] 를 못 맞춘다 —
+    # generate_replan 과 같은 이유로 Any 로 넘긴다.
+    fixed: list[Any] = list(await fixed_repo.list_active(user_id))
+    db_policies: list[Any] = list(await policy_repo.list_active(user_id))
+
+    def _conflict(message: str, code: ErrorCode = ErrorCode.PLAN_BLOCK_CONFLICT) -> ApiError:
+        return ApiError(code, message, http_status=HTTPStatus.UNPROCESSABLE_ENTITY, field="blocks")
+
+    for moved in edited.moved:
+        start, end = to_kst(moved.start), to_kst(moved.end)
+        label = card_title_from(moved.title) or moved.title
+        if any(b.start_at < end and b.end_at > start for b in existing):
+            raise _conflict(
+                f"'{label}' 블록을 옮긴 시간에 이미 다른 일정이 있어요. 다른 시간으로 옮겨 주세요."
+            )
+        if any(
+            other is not moved and other.start < end and other.end > start
+            for other in edited.blocks
+        ):
+            raise _conflict(
+                f"'{label}' 블록을 옮긴 시간에 이 계획의 다른 블록이 있어요. 한쪽을 옮겨 주세요."
+            )
+        for day in spanned_days(start, end):
+            hit = first_busy_overlap(
+                start,
+                end,
+                [*fixed_schedules_to_busy(day, fixed), *time_policies_to_busy(day, db_policies)],
+            )
+            if hit is None:
+                continue
+            if hit.source == "fixed_schedule":
+                raise _conflict(f"'{label}' 블록을 옮긴 시간이 '{hit.label}' 고정 일정과 겹쳐요.")
+            raise _conflict(
+                f"'{label}' 블록을 옮긴 시간이 {hit.label} 시간과 겹쳐요. 다른 시간으로 옮겨 주세요.",
+                ErrorCode.PLAN_POLICY_VIOLATION,
+            )
+
+
 @router.post("/{plan_id}/approve")
 async def approve_plan(
     plan_id: str,
@@ -847,7 +966,11 @@ async def approve_plan(
     draft_repo: DraftRepoDep,
     goal_repo: GoalRepoDep,
     inbox_repo: InboxRepoDep,
+    block_repo: BlockRepoDep,
+    fixed_repo: FixedRepoDep,
+    policy_repo: PolicyRepoDep,
     session: SessionDep,
+    body: FirstPlanApproveRequest | None = None,
 ) -> FirstPlanApproveResponse:
     """First Plan Draft 승인 → SAVING (goal 트리 단일 가드 트랜잭션 영속화, ADR-0005 §2.5.1).
 
@@ -877,12 +1000,33 @@ async def approve_plan(
     WELCOME 에 고정돼 새로고침 시 재-온보딩되던 문제가 있어 승인에서 ACTIVE 로 마감
     (api-contract §3).
     응답은 명시 승인이므로 `is_draft=false` (ADR-0005 §7.2).
+
+    **초안 편집 반영**(HITL '수정', planA-2, additive): 본문 `blocks` 가 오면 그것이 최종
+    블록 목록이다 — 옮긴 시각·지운 카드·바꾼 제목을 반영해 영속화한다(`apply_draft_edits`).
+    예전엔 본문을 아예 안 받아, 초안 화면에서 끌어 옮기고 지운 것이 승인 때 전부 버려지고
+    AI 원안이 그대로 저장됐다 — '수정' 버튼이 있는데 수정이 안 되는 HITL 이었다. 옮긴 블록은
+    생성과 같은 소스(기존 일정·고정 일정·시간 정책)로 다시 대조하고(`_ensure_moved_blocks_fit`),
+    활동 시간대는 영속화 가드가 그대로 막는다. 본문이 없으면 종전과 같다.
     """
+    # ⚠️ 원시 값으로 먼저 잡아 둔다 (planA-3). 시도가 실패하면 가드 트랜잭션이 rollback 하는데,
+    # rollback 은 세션의 ORM 인스턴스를 **전부 만료**시킨다 — 같은 세션에서 읽은 `user` 도.
+    # 다음 시도에서 `user.id` 를 읽으면 async 세션이 지연 로드를 못 해 MissingGreenlet 으로
+    # 터졌고, 3회 재시도는 한 번도 돌지 못한 채 문서화된 PLAN_SAVE_FAILED 대신 일반 500 이
+    # 나갔다(가짜 세션 테스트는 만료를 흉내내지 않아 통과했다).
+    user_id = user.id
+    edits = _parse_draft_edits(body)
     last_exc: Exception | None = None
-    for _attempt in range(first_plan_adapter.MAX_SAVE_RETRIES):
-        async with user_agent_lock(session, user.id, _LOCK_AGENT):
+    for attempt in range(first_plan_adapter.MAX_SAVE_RETRIES):
+        if attempt > 0:
+            # `_finalize` 의 advance_onboarding 이 user 의 상태 컬럼을 읽는다 — 다시 채운다.
+            try:
+                await session.refresh(user)
+            except Exception as exc:  # noqa: BLE001 — 다시 읽지도 못하면 저장 실패로 마감
+                last_exc = exc
+                break
+        async with user_agent_lock(session, user_id, _LOCK_AGENT):
             # 검사→영속화→승인 마킹이 lock 을 쥔 한 트랜잭션 — 이중 영속화 방지.
-            draft = await _load_draft(draft_repo, user.id, plan_id)
+            draft = await _load_draft(draft_repo, user_id, plan_id)
             if draft.status == "expired" or draft.expires_at < now_kst():
                 raise ApiError(
                     ErrorCode.PLAN_DRAFT_EXPIRED,
@@ -910,8 +1054,35 @@ async def approve_plan(
             blocks = [ScheduledBlockPreview.model_validate(b) for b in payload["blocks"]]
             milestones = [MilestoneDraft.model_validate(m) for m in payload.get("milestones", [])]
             policies = first_plan_adapter.time_policies_from_outcome(outcome)
+            if edits is not None:
+                edited = _apply_draft_edits_or_422(blocks, action_items, edits)
+                await _ensure_moved_blocks_fit(
+                    session,
+                    user_id=user_id,
+                    outcome=outcome,
+                    edited=edited,
+                    block_repo=block_repo,
+                    fixed_repo=fixed_repo,
+                    policy_repo=policy_repo,
+                )
+                blocks, action_items = edited.blocks, edited.action_items
+                # 편집본으로 승인하면 초안 스냅샷도 **저장한 그대로**로 바꿔 둔다 — 재조회
+                # (`GET /plans/{id}`)와 멱등 재승인 응답이 실제로 저장된 것과 같아야 한다.
+                # AI 원안은 `ai_blocks`/`ai_action_items` 로 남긴다(무엇을 고쳤는지 추적).
+                approved_payload: dict[str, Any] | None = {
+                    **payload,
+                    "blocks": [b.model_dump(mode="json") for b in blocks],
+                    "action_items": [a.model_dump(mode="json") for a in action_items],
+                    "ai_blocks": payload["blocks"],
+                    "ai_action_items": payload["action_items"],
+                    "user_edited": True,
+                }
+            else:
+                approved_payload = None
 
-            async def _finalize(draft: PlanDraft = draft) -> None:
+            async def _finalize(
+                draft: PlanDraft = draft, approved_payload: dict[str, Any] | None = approved_payload
+            ) -> None:
                 """영속화와 같은 가드 트랜잭션(단일 commit) 안에서 실행되는 부수 기록.
 
                 첫 계획 승인 = 온보딩 완료 신호 → onboarding_state 를 ACTIVE 로 마감(멱등).
@@ -921,6 +1092,8 @@ async def approve_plan(
                 시 재-온보딩·계획 중복 누적 문제가 있었다. 승인 시점에 어느 온보딩 단계에
                 있든 ACTIVE 로 올려 이를 없앤다. 이미 ACTIVE 면 no-op.
                 """
+                if approved_payload is not None:
+                    draft.payload = approved_payload
                 await draft_repo.mark_approved(draft, approved_at=now_kst())
                 await user_repo.advance_onboarding(
                     user,
@@ -940,7 +1113,7 @@ async def approve_plan(
             try:
                 result = await first_plan_adapter.db_apply_first_plan(
                     session,
-                    user_id=user.id,
+                    user_id=user_id,
                     target_date=draft.target_date,
                     outcome=outcome,
                     goal_nodes=goal_nodes,
@@ -963,7 +1136,7 @@ async def approve_plan(
                 last_exc = exc
                 continue
 
-            await _attach_goal_resources(session, inbox_repo, goal_repo, user_id=user.id)
+            await _attach_goal_resources(session, inbox_repo, goal_repo, user_id=user_id)
 
             tier_warning = first_plan_adapter.tier_park_notice(result.tier_parked_goals)
             return FirstPlanApproveResponse(
@@ -1574,7 +1747,6 @@ async def open_mandala_next_cycle(
 # ─────────────────────────────────────────────────────────────────────────────
 
 ReviewRepoDep = Annotated[ReviewRepo, Depends(get_review_repo)]
-FixedRepoDep = Annotated[FixedScheduleRepo, Depends(get_fixed_schedule_repo)]
 
 # 재계획 튜닝 폴백 — 완료 인터뷰가 없어 outcome 을 못 얻을 때만 사용.
 # 정상 경로는 `_replan_tuning_for` 가 First Plan 과 동일한 개인화(세션 길이·선호 시간)를 유도한다.

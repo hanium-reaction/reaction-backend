@@ -16,11 +16,22 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pydantic_core import PydanticCustomError
 
 from reaction_backend.schemas.calendar import CalendarCheck
 from reaction_backend.schemas.common import CamelModel, DraftMixin, KstDatetime
 from reaction_backend.schemas.interview import InterviewOutcome
+
+# 사용자가 직접 쓰는 제목의 길이 상한 — 저장 컬럼 길이와 같다(action_items.title String(300),
+# goal_nodes.title String(200)). 검증이 없으면 넘친 제목이 INSERT/UPDATE 에서 터져 사용자는
+# 무엇을 고칠지 모른 채 '서버 내부 오류'만 본다(마일스톤은 그 초안이 영영 승인되지 않았다).
+# 메시지는 pydantic 기본(영문) 대신 한국어로 준다 — 422 `message` 가 그대로 화면에 뜬다.
+_BLOCK_TITLE_MAX = 300
+_BLOCK_TITLE_TOO_LONG = "제목은 300자까지 쓸 수 있어요. 조금 줄여 주세요."
+_MILESTONE_TITLE_MAX = 200
+_MILESTONE_SUMMARY_MAX = 500
+_MILESTONES_MAX = 10
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM Structured Output (LLM ②③) — goal_decompose.v1.md 출력 형식과 1:1 대응.
@@ -238,6 +249,38 @@ class ScheduledBlockPreview(CamelModel):
     category: str
     origin: Literal["habit", "goal"]
     origin_id: str | None = None
+
+
+class FirstPlanApproveBlock(CamelModel):
+    """승인 요청에 싣는 **편집된** 초안 블록 한 칸 (HITL '수정', additive).
+
+    `originId` 는 초안 블록의 `originId` 를 그대로 되돌려 보낸다(같은 카드의 나뉜 회차는
+    같은 값). 시각은 KST ISO 8601 — 서버가 15분 경계로 맞춘다(PATCH 블록 편집과 같은 규칙).
+    `title` 을 바꾸면 그 카드 이름이 바뀐다(회차 꼬리표 "(1/2)" 는 떼고 저장).
+    """
+
+    origin_id: str = Field(min_length=1, max_length=64)
+    start: str
+    end: str
+    title: str | None = Field(default=None, max_length=300)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title_fits(cls, v: object) -> object:
+        if isinstance(v, str) and len(v) > _BLOCK_TITLE_MAX:
+            raise PydanticCustomError("string_too_long", _BLOCK_TITLE_TOO_LONG)
+        return v
+
+
+class FirstPlanApproveRequest(CamelModel):
+    """POST /plans/{planId}/approve 본문 — **선택**. 본문이 없거나 `blocks` 가 없으면 초안 그대로.
+
+    `blocks` 를 보내면 그것이 **최종 블록 목록 전체**다: 옮긴 블록은 새 시각으로, 목록에서
+    빠진 카드는 만들지 않고, 바꾼 제목은 카드 이름으로 저장한다. 초안에 없던 `originId` 는
+    받지 않는다(422) — 승인은 초안을 고치는 자리지 새 카드를 만드는 자리가 아니다.
+    """
+
+    blocks: list[FirstPlanApproveBlock] | None = Field(default=None, max_length=500)
 
 
 class FirstPlanApproveResponse(CamelModel):
