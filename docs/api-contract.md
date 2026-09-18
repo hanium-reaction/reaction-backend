@@ -326,6 +326,11 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 응답 ID 형식: `goal_<uuid>` (§1.8). category enum 9종 (`study`/`project`/`health`/`routine`/`schedule`/`career`/`relationship`/`self_dev`/`other`).
 
+**`hasPlan`**(v2.30-goals) — 이 목표에 살아 있는 계획 트리가 있는지. `GET /goals` 는 목록 전체를 한 번에,
+단건 응답(`PATCH`·`park`·`complete`·`promote`·`ultimate`)은 그 목표를 한 번 물어 채운다. `POST /goals` 로
+방금 만든 목표는 정의상 `false`. 예전엔 단건 응답이 늘 `true` 라 만들거나 고친 직후 '미계획' 배지와
+'이 목표 계획 세우기' 가 사라졌다.
+
 **입력 상한**(v2.30-goals) — 넘으면 500 대신 422 `COMMON_VALIDATION_ERROR`(envelope·코드 그대로, 문구만 한국어):
 - 목표 `title`(`POST /goals`, `PATCH /goals/{id}`): 앞뒤 공백을 떼고 **1~200자**. 공백뿐이거나 비면
   "목표 이름을 적어 주세요.", 길면 "목표 이름은 200자까지 적을 수 있어요."(`field="title"`).

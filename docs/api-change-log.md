@@ -70,6 +70,8 @@
   형식 오류 문구에서 필드 이름을 뺐다("마감일은 2026-12-31 처럼 연-월-일로 적어 주세요.").
 - `POST /goals/{id}/complete` `{completed:false}` 는 완료한 목표만 되돌린다. `proposed`·`active` 엔 no-op 200
   (예전엔 `proposed` 가 `active` 로 승격돼 계획 승인·tier 한도를 건너뛰었다).
+- 단건 목표 응답의 `hasPlan` 이 실제 값이다 — `POST /goals` 는 `false`, `PATCH`·`park`·`complete`·`promote`·
+  `ultimate` 는 그 목표의 계획 트리를 물어 채운다(예전엔 늘 `true`).
 
 ---
 

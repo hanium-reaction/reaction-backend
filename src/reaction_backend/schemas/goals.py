@@ -51,9 +51,10 @@ class Goal(CamelModel):
     deadline: str | None  # YYYY-MM-DD
     estimated_minutes: int | None
     status: str  # active | archived | completed | proposed
-    # 이 목표에 **이번 주기 계획 트리가 있는가**. `GET /goals` 에서만 채운다(목록 조회 시점에
-    # 한 번에 묻는다 — `GoalRepo.goal_ids_with_plan`). 그 외 응답은 기본값 `True` 로 둬서
-    # 단건 응답이 카드를 **미계획으로 잘못 칠하지 않게** 한다(다음 목록 새로고침이 채운다).
+    # 이 목표에 **이번 주기 계획 트리가 있는가**. `GET /goals` 는 목록 조회 시점에 한 번에,
+    # 단건 응답(update/park/complete/promote/ultimate)은 그 목표 하나를 묻는다 —
+    # `GoalRepo.goal_ids_with_plan`. 새로 만든 목표(`POST /goals`)는 정의상 `false`
+    # (v2.30-goals — 예전엔 단건 응답이 늘 `true` 라 '미계획'·'계획 세우기' 가 사라졌다).
     #
     # ⚠️ `status` 로 대신할 수 없다. 계획 승인은 인터뷰가 뽑은 목표를 **전부** `active` 로
     # 승격하는데 계획은 heaviest **하나**에만 생긴다 — 실측으로 계획 없는 active 가 24건.

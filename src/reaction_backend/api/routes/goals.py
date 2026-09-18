@@ -80,12 +80,14 @@ _ID_PREFIX = "goal_"
 _CATEGORIES = frozenset(GOAL_CATEGORY_VALUES)
 
 
-def _to_schema(
-    goal: GoalModel, *, promoted_from_axis: str | None = None, has_plan: bool = True
-) -> Goal:
-    """`has_plan` 기본값이 `True` 인 이유: 단건 응답(create/update/park)은 계획 트리를
-    조회하지 않는다. 기본값을 `False` 로 두면 방금 만든 목표가 **미계획으로 잘못 칠해진다** —
-    목록 새로고침 전까지. 모르는 것을 "없다" 로 단정하지 않는다."""
+def _to_schema(goal: GoalModel, *, has_plan: bool, promoted_from_axis: str | None = None) -> Goal:
+    """`has_plan` 은 **모든 호출부가 직접** 정한다(기본값 없음).
+
+    예전엔 기본값 `True` 로 단건 응답(create/update/park)이 계획 트리를 안 묻고 "있음" 이라고
+    답했다 — 방금 만든 목표(정의상 계획이 없다)도, 계획 없는 목표를 고친 직후도 '미계획' 배지와
+    '이 목표 계획 세우기' 버튼이 사라졌다. 이제 새로 만든 목표는 `False`, 기존 목표는
+    `_has_plan` 으로 한 번 묻는다(목록과 같은 판정).
+    """
     return Goal(
         goal_id=f"{_ID_PREFIX}{goal.id}",
         title=goal.title,
@@ -99,6 +101,11 @@ def _to_schema(
         is_ultimate=goal.is_ultimate,
         promoted_from_axis=promoted_from_axis,
     )
+
+
+async def _has_plan(repo: GoalRepo, goal: GoalModel) -> bool:
+    """이 목표에 살아 있는 계획 트리가 있나 — `GET /goals` 와 같은 판정(인덱스 한 번)."""
+    return goal.id in await repo.goal_ids_with_plan([goal.id])
 
 
 def _parse_goal_id(goal_id: str) -> UUID:
@@ -218,13 +225,14 @@ async def create_goal(
     )
     await session.commit()
     await session.refresh(goal)
-    return _to_schema(goal)
+    return _to_schema(goal, has_plan=False)  # 방금 만든 목표 — 계획 트리가 있을 수 없다
 
 
 @router.post("/ultimate", status_code=status.HTTP_201_CREATED)
 async def upsert_ultimate_goal(
     body: UltimateGoalRequest,
     user: CurrentUser,
+    repo: RepoDep,
     interview_repo: InterviewRepoDep,
     session: SessionDep,
 ) -> Goal:
@@ -247,7 +255,7 @@ async def upsert_ultimate_goal(
         )
         await session.commit()
         await session.refresh(goal)
-    return _to_schema(goal)
+    return _to_schema(goal, has_plan=await _has_plan(repo, goal))
 
 
 @router.patch("/{goal_id}")
@@ -286,7 +294,7 @@ async def update_goal(
     )
     await session.commit()
     await session.refresh(updated)
-    return _to_schema(updated)
+    return _to_schema(updated, has_plan=await _has_plan(repo, updated))
 
 
 @router.get("/{goal_id}/nodes")
@@ -647,7 +655,11 @@ async def promote_mandala_node(
     if node.promoted_goal_id is not None:
         existing = await repo.get_by_id(user.id, node.promoted_goal_id)
         if existing is not None:
-            return _to_schema(existing, promoted_from_axis=node.title)
+            return _to_schema(
+                existing,
+                promoted_from_axis=node.title,
+                has_plan=await _has_plan(repo, existing),
+            )
 
     await goal_policy.enforce_tier_limit(session, repo, user.id, body.goal_tier)
     goal = GoalModel()
@@ -668,7 +680,7 @@ async def promote_mandala_node(
     node.promoted_goal_id = goal.id
     await session.commit()
     await session.refresh(goal)
-    return _to_schema(goal, promoted_from_axis=node.title)
+    return _to_schema(goal, promoted_from_axis=node.title, has_plan=False)  # 방금 만든 잠정 목표
 
 
 @router.post("/mandala/nodes/{node_id}/habit", status_code=status.HTTP_201_CREATED)
@@ -758,7 +770,7 @@ async def park_goal(goal_id: str, user: CurrentUser, repo: RepoDep, session: Ses
     parked = await repo.park(goal)
     await session.commit()
     await session.refresh(parked)
-    return _to_schema(parked)
+    return _to_schema(parked, has_plan=await _has_plan(repo, parked))
 
 
 @router.post("/{goal_id}/complete")
@@ -819,7 +831,7 @@ async def complete_goal(
         # 되돌리기는 **완료한 목표만**. 그 외(`active`·`proposed`)에 `completed=false` 는 아무것도
         # 바꾸지 않는 멱등 no-op 다 — 예전엔 `proposed` 가 여기서 `active` 로 나와, 계획 승인
         # (HITL)과 tier 한도를 둘 다 건너뛰고 승격됐다.
-        return _to_schema(goal)
+        return _to_schema(goal, has_plan=await _has_plan(repo, goal))
     updated = await repo.set_completed(goal, completed=body.completed)
     if body.completed:
         # 끝냈다고 확인했는데 남은 카드가 계속 뜨면 "이제 그만 알려줘" 가 안 지켜진다.
@@ -842,7 +854,7 @@ async def complete_goal(
         )
     await session.commit()
     await session.refresh(updated)
-    return _to_schema(updated)
+    return _to_schema(updated, has_plan=await _has_plan(repo, updated))
 
 
 @router.delete("/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
