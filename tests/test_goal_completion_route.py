@@ -177,6 +177,34 @@ def test_only_active_goals_can_be_completed(
     assert goal.status == "proposed"  # 손 안 댐
 
 
+def test_undo_on_a_proposed_goal_does_not_promote_it(
+    client: TestClient, fake_goal_repo: FakeGoalRepo
+) -> None:
+    """`completed=false` 는 **완료한 목표만** 되돌린다 (goals-6).
+
+    예전엔 `proposed` 에 `completed=false` 를 보내면 `active` 가 됐다 — 계획 승인(HITL)과 tier
+    한도를 둘 다 건너뛴 승격이다(Focus 가 이미 3개여도 통과).
+    """
+    for _ in range(3):
+        _seed(fake_goal_repo, _goal())
+    proposed = _seed(fake_goal_repo, _goal(status="proposed"))
+
+    res = client.post(f"/goals/goal_{proposed.id}/complete", json={"completed": False})
+
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "proposed"
+    assert proposed.status == "proposed"
+
+
+def test_undo_on_an_active_goal_is_a_no_op(
+    client: TestClient, fake_goal_repo: FakeGoalRepo
+) -> None:
+    goal = _seed(fake_goal_repo, _goal())
+    res = client.post(f"/goals/goal_{goal.id}/complete", json={"completed": False})
+    assert res.status_code == 200
+    assert res.json()["status"] == "active"
+
+
 def test_completion_triggers_card_cleanup_but_undo_does_not(
     client: TestClient, fake_goal_repo: FakeGoalRepo, monkeypatch: Any
 ) -> None:

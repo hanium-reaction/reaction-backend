@@ -119,14 +119,18 @@ def _not_found() -> ApiError:
 
 
 def _parse_deadline(value: str | None) -> date | None:
-    if value is None:
+    """`YYYY-MM-DD` → date. 비었으면(`null`·공백) 마감 없음.
+
+    문구에 필드 이름(`deadline`)을 싣지 않는다 — FE 가 message 를 그대로 띄운다.
+    """
+    if value is None or not value.strip():
         return None
     try:
-        return date.fromisoformat(value)
+        return date.fromisoformat(value.strip())
     except ValueError as e:
         raise ApiError(
             ErrorCode.COMMON_VALIDATION_ERROR,
-            "deadline 형식이 올바르지 않아요 (YYYY-MM-DD).",
+            "마감일은 2026-12-31 처럼 연-월-일로 적어 주세요.",
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="deadline",
         ) from e
@@ -254,7 +258,12 @@ async def update_goal(
     repo: RepoDep,
     session: SessionDep,
 ) -> Goal:
-    """목표 부분 수정. tier 변경 시 한도 재검사, category 변경 시 값 검증(#326)."""
+    """목표 부분 수정. tier 변경 시 한도 재검사, category 변경 시 값 검증(#326).
+
+    `deadline` 은 **보냈는지**로 가른다 — 빼면 그대로, `null`(또는 빈 문자열)을 보내면 마감
+    해제. 예전엔 `null` 을 "안 바꿈" 으로 읽어 마감을 지울 방법이 없었다(FE 는 칸을 비우면
+    `null` 을 보낸다).
+    """
     goal = await repo.get_by_id(user.id, _parse_goal_id(goal_id))
     if goal is None:
         raise _not_found()
@@ -264,7 +273,8 @@ async def update_goal(
     if body.category is not None:
         _validate_category(body.category)
 
-    deadline = _parse_deadline(body.deadline) if body.deadline is not None else None
+    deadline_sent = "deadline" in body.model_fields_set
+    deadline = _parse_deadline(body.deadline) if deadline_sent else None
     updated = await repo.update(
         goal,
         title=body.title,
@@ -272,6 +282,7 @@ async def update_goal(
         deadline=deadline,
         priority_level=body.priority_level,
         goal_tier=body.goal_tier,
+        clear_deadline=deadline_sent and deadline is None,
     )
     await session.commit()
     await session.refresh(updated)
@@ -804,6 +815,11 @@ async def complete_goal(
         # 되돌리면 다시 한도 집계 대상이 된다 — 여기서 안 재면 "완료 → 새 목표 생성 →
         # 완료 해제" 세 번으로 Focus≤3 을 넘길 수 있다(AGENTS §1 잠금 결정).
         await goal_policy.enforce_tier_limit(session, repo, user.id, goal.goal_tier)
+    else:
+        # 되돌리기는 **완료한 목표만**. 그 외(`active`·`proposed`)에 `completed=false` 는 아무것도
+        # 바꾸지 않는 멱등 no-op 다 — 예전엔 `proposed` 가 여기서 `active` 로 나와, 계획 승인
+        # (HITL)과 tier 한도를 둘 다 건너뛰고 승격됐다.
+        return _to_schema(goal)
     updated = await repo.set_completed(goal, completed=body.completed)
     if body.completed:
         # 끝냈다고 확인했는데 남은 카드가 계속 뜨면 "이제 그만 알려줘" 가 안 지켜진다.

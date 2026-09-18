@@ -409,3 +409,36 @@ def test_single_goal_responses_do_not_claim_unplanned(client: TestClient) -> Non
     """
     body = _new_goal(client, title="새 목표")
     assert body["hasPlan"] is True
+
+
+def test_patch_deadline_null_clears_it_and_omitting_keeps_it(client: TestClient) -> None:
+    """abuse-6 / goals-15 — `deadline: null` 은 마감 해제, 빼면 그대로."""
+    resp = client.post(
+        "/goals",
+        json={
+            "title": "토익",
+            "category": "study",
+            "goalTier": "parked",
+            "priorityLevel": 2,
+            "deadline": "2026-12-01",
+        },
+    )
+    gid = resp.json()["goalId"]
+
+    kept = client.patch(f"/goals/{gid}", json={"title": "토익 900"})
+    assert kept.json()["deadline"] == "2026-12-01"
+
+    cleared = client.patch(f"/goals/{gid}", json={"deadline": None})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["deadline"] is None
+    parked = client.get("/goals").json()["parked"]
+    assert parked[0]["deadline"] is None
+
+
+def test_bad_deadline_message_has_no_field_name(client: TestClient) -> None:
+    gid = _new_goal(client)["goalId"]
+    resp = client.patch(f"/goals/{gid}", json={"deadline": "2026.12.31"})
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["field"] == "deadline"
+    assert "deadline" not in body["message"]

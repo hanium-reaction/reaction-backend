@@ -232,6 +232,7 @@ class GoalRepo:
         deadline: date | None = None,
         priority_level: int | None = None,
         goal_tier: str | None = None,
+        clear_deadline: bool = False,
     ) -> Goal:
         if title is not None:
             goal.title = title
@@ -239,6 +240,9 @@ class GoalRepo:
             goal.category = category
         if deadline is not None:
             goal.deadline = deadline
+        elif clear_deadline:
+            # `None` 은 "안 바꿈" 이라 명시적 해제는 따로 받는다(PATCH `deadline: null`).
+            goal.deadline = None
         if priority_level is not None:
             goal.priority_level = priority_level
         if goal_tier is not None:
