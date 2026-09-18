@@ -2688,6 +2688,23 @@ def test_rule_summary_omits_unset_optional_fields() -> None:
     assert "단위로 줄여" not in s.preference_summary
 
 
+def test_summary_does_not_state_an_unanswered_tone_as_a_preference() -> None:
+    """톤을 답하지 않고 끝낸 인터뷰의 요약이 '담백' 을 사용자 선호로 적지 않는다 (interview-15).
+
+    고치기 전엔 _summary_variables 가 미답 톤을 '담백' 으로 채워, [충분해요] 뒤 요약이
+    "담백한 회복 톤을 선호하시는군요" 라고 말했다.
+    """
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = {
+        "goals.list": {"type": "text", "raw": "캡스톤", "normalized": ["캡스톤"]},
+    }
+
+    assert interview._summary_variables(state)["tone"] == interview._NOT_SET
+    s = interview._rule_summary(state)
+    assert "담백" not in s.preference_summary
+    assert s.preference_summary  # 빈 문장은 아니다
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 다음 질문 러닝 컨텍스트 (P2-a)
 # ─────────────────────────────────────────────────────────────────────────────

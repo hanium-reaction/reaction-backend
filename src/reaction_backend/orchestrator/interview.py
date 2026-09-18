@@ -346,11 +346,16 @@ def _rule_summary(state: InterviewState) -> InterviewSummary:
     if v["weekly_load"] != _NOT_SET:
         time_summary += f" 이 목표에는 {v['weekly_load']} 정도 쓰게 돼요."
 
-    preference_summary = f"못 한 날엔 '{v['tone']}' 톤을 선호하세요."
+    # 톤을 답하지 않았으면(조기 종료) 선호라고 말하지 않는다 — 예전엔 기본값 '담백' 을
+    # "담백한 회복 톤을 선호하시는군요" 처럼 사용자의 선호로 적었다.
+    prefs: list[str] = []
+    if v["tone"] != _NOT_SET:
+        prefs.append(f"못 한 날엔 '{v['tone']}' 톤을 선호하세요.")
     if v["rest_ok"] != _NOT_SET:
-        preference_summary += f" 휴식 제안은 '{v['rest_ok']}'."
+        prefs.append(f"휴식 제안은 '{v['rest_ok']}'.")
     if v["downscope_unit"] != _NOT_SET:
-        preference_summary += f" 밀리면 {v['downscope_unit']} 단위로 줄여볼게요."
+        prefs.append(f"밀리면 {v['downscope_unit']} 단위로 줄여볼게요.")
+    preference_summary = " ".join(prefs) or "회복 방식은 계획을 써 보면서 함께 맞춰 갈게요."
 
     return InterviewSummary(
         headline=f"{v['identity']} · 핵심 목표 {goals}",
@@ -1239,7 +1244,9 @@ def _summary_variables(state: InterviewState) -> dict[str, str]:
         else _NOT_SET
     )
     peak = ", ".join(_slot_chips(answers.get("time.peak_window"))) or _NOT_SET
-    tone = _slot_first_chip(answers.get("recovery.tone")) or "담백"
+    # 미답이면 기본값('담백')이 아니라 _NOT_SET — 요약 프롬프트가 "말하지 않은 사실을 지어내지
+    # 말 것" 규칙대로 생략하게 한다. outcome 의 안전 기본값과 요약 문구는 다른 문제다.
+    tone = _slot_first_chip(answers.get("recovery.tone")) or _NOT_SET
     rest_ok = _slot_first_chip(answers.get("recovery.rest_ok")) or _NOT_SET
     downscope_unit = _slot_first_chip(answers.get("recovery.downscope_unit")) or _NOT_SET
     identity = f"{role} {season}".strip()
