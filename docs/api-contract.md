@@ -795,6 +795,12 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   무력화돼 같은 실패에 회복 ActionItem 이 여러 개 생기고, replan 은 `created_at` 오름차순의
   **첫** 채택 카드에 고정돼 사용자가 다시 고른 최신 회복이 영영 배치되지 않는다.
   → FE 는 회복 화면 재진입 시 409 를 "이미 결정함"으로 처리한다(에러 토스트 X).
+- **`personalizationSkipped: boolean`(v2.30-recovery, 추가 필드 — 기본 `false`)** — L2(단서
+  전환)·L3(`goal_renegotiation`)처럼 **제품 규칙으로 LLM 개인화를 일부러 건너뛴** 세트면 `true`.
+  이때도 `aiSource` 는 계약대로 `"rule"` 이다. 타임아웃·키 없음 같은 **룰 폴백**이면 `false`.
+  → FE 는 "오프라인 모드(룰 기반)로 제안했어요" 안내를 `aiSource === "rule" &&
+  !personalizationSkipped` 일 때만 띄운다(예전엔 L2/L3 마다 AI 가 안 되는 것처럼 보였다).
+  pending 재반환 경로도 같은 판정(다시 계산한 에스컬레이션 레벨)을 쓴다.
 - 룰 선택: `recovery_strategy_catalog.primary_trigger_tags` ↔ 실패 태그 매칭,
   그룹별 최고 1장, 최소 2장 패딩 (orchestrator/recovery.py).
 - `POST /recovery/decisions` 요청 `{ executionId, decision: accepted|edited|skipped,

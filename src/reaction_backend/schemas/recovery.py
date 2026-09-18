@@ -100,6 +100,11 @@ class RecoveryProposalsResponse(DraftMixin):
     execution_id: str
     cards: list[RecoveryCard]
     recovery_mode: RecoveryMode = "standard"
+    # 개인화(LLM 문구 다듬기)를 **일부러** 건너뛴 세트인가 — L2(단서 전환)·L3(재협상)는 제품
+    # 규칙상 LLM 을 부르지 않는다(근거 대장 §5.2). 그래도 `aiSource` 는 계약 동결 값이라
+    # 'rule' 로 나가므로, FE 가 이걸 "AI 를 못 불렀다(오프라인)"와 구분하려면 이 필드가 필요하다.
+    # true 면 오프라인 안내를 띄우지 않는다. 룰 폴백(타임아웃 등)이면 false.
+    personalization_skipped: bool = False
 
 
 class RecoveryDecisionRequest(CamelModel):

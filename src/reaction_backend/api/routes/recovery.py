@@ -228,6 +228,15 @@ def _recovery_mode(level: EscalationLevel | None) -> RecoveryMode:
     return "goal_renegotiation" if level == "L3" else "standard"
 
 
+def _personalization_skipped(level: EscalationLevel | None) -> bool:
+    """L2/L3 는 LLM 개인화를 **일부러** 건너뛴다(근거 대장 §5.2, #328) — 실패가 아니다.
+
+    generate 의 LLM 분기와 응답 `personalizationSkipped` 가 같은 판정을 써야 한다. 이 경우도
+    `aiSource` 는 'rule' 이지만(계약 동결), FE 는 이 값으로 "AI 를 못 불렀다" 안내를 거른다.
+    """
+    return level in ("L2", "L3")
+
+
 async def _determine_escalation_level(
     user_id: UUID,
     execution: ExecutionEvent,
@@ -370,6 +379,7 @@ async def generate_recovery_proposals(
             cards=[_to_card(a, catalog.get(a.recovery_strategy_type)) for a in pending],
             ai_source=_ai_source(all(a.llm_fallback_used for a in pending)),
             recovery_mode=recovery_mode,
+            personalization_skipped=_personalization_skipped(escalation_level),
         )
 
     # 진짜 새로 생성하는 경로에서만 카운트한다(#325) — 위 멱등 분기(pending 재반환)는 LLM 도,
@@ -407,7 +417,7 @@ async def generate_recovery_proposals(
     top_obstacle: str | None = None
     top_coping_clause: str | None = None
     top_acknowledgment: str | None = None
-    if escalation_level in ("L2", "L3"):
+    if _personalization_skipped(escalation_level):
         llm_fell_back = True
         llm_prompt_version: str | None = None
     else:
@@ -516,6 +526,7 @@ async def generate_recovery_proposals(
         cards=[_to_card(a, catalog.get(a.recovery_strategy_type)) for a in attempts],
         ai_source=_ai_source(llm_fell_back),
         recovery_mode=recovery_mode,
+        personalization_skipped=_personalization_skipped(escalation_level),
     )
 
 

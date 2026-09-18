@@ -128,6 +128,8 @@ def test_generate_returns_2_to_4_cards(
     assert body["isDraft"] is True
     # LLM 키 없음 → 룰 fallback
     assert body["aiSource"] == "rule"
+    # 폴백은 '일부러 건너뜀'이 아니다 — 오프라인 안내 대상(recovery-5)
+    assert body["personalizationSkipped"] is False
     # 에스컬레이션 없는 평범한 실패 — 재협상 모드가 아니다(#328).
     assert body["recoveryMode"] == "standard"
 
@@ -458,6 +460,8 @@ def test_generate_forces_environment_shift_lead_and_skips_llm_at_l2(
     assert top["strategyType"] == "ENVIRONMENT_SHIFT"
     assert "NANO_STEP" not in {c["strategyType"] for c in body["cards"]}
     assert body["aiSource"] == "rule"
+    # 일부러 건너뛴 것 — FE 가 '오프라인 모드' 안내를 띄우지 않게 구분해 준다(recovery-5).
+    assert body["personalizationSkipped"] is True
 
 
 def test_generate_does_not_escalate_one_below_l2_threshold(
@@ -572,9 +576,13 @@ def test_generate_l3_escalates_on_two_consecutive_skipped_recoveries(
     assert body["recoveryMode"] == "goal_renegotiation"
     assert {c["optionGroup"] for c in body["cards"]} == {"DOWNSCOPE", "RESCHEDULE", "PARK"}
 
+    assert body["aiSource"] == "rule"
+    assert body["personalizationSkipped"] is True  # recovery-5 — 오프라인 아님
+
     # 멱등 재조회(같은 pending 카드) — recoveryMode 가 그대로 유지된다.
     refetched = _generate(client, f"exec_{current.id}").json()
     assert refetched["recoveryMode"] == "goal_renegotiation"
+    assert refetched["personalizationSkipped"] is True
     assert refetched["cards"] == body["cards"]
 
 

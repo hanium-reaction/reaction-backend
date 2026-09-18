@@ -56,6 +56,15 @@
 - FE 할 일(이슈): 세 필드는 지금 화면에 안 쓰인다. 값이 있을 때만 선두 카드 아래
   "혹시 {obstacle} → {copingClause}" 로 보여 주면 잠금 결정의 'if-then 코핑 플랜'이 완성된다.
 
+### `personalizationSkipped` 추가 — `POST /recovery/proposals/generate` 응답 (추가 필드)
+
+- `personalizationSkipped: boolean`(기본 `false`) — L2/L3 에서 LLM 개인화를 **일부러** 건너뛴
+  세트면 `true`. `aiSource` 는 종전대로 `"rule"`(계약 동결).
+- 예전엔 L2/L3 마다 FE 가 `aiSource === "rule"` 만 보고 "오프라인 모드(룰 기반)로 제안했어요.
+  AI 호출이 가능해지면…" 안내를 띄웠다 — AI 가 고장 난 게 아닌데 그렇게 보였다.
+- FE 할 일(이슈): 오프라인 안내를 `aiSource === "rule" && !personalizationSkipped` 일 때만.
+  필드를 모르는 클라이언트는 종전과 같다.
+
 ---
 
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)
