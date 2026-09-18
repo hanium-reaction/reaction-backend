@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from uuid import UUID
 
@@ -294,3 +295,48 @@ def test_second_plan_interview_carries_over_ultimate_statement(
     assert "ultimate.statement" in stored  # 이월된 슬롯 — 사용자에게 다시 안 묻는다
     assert stored["ultimate.statement"].value["raw"] == "메이저리그 8구단 드래프트 1순위"
     assert "goals.list" not in stored  # 다른 슬롯으로 자동 채워지지 않는다
+
+
+def test_second_ultimate_interview_asks_again_from_the_statement(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """⚠️ 궁극목표 인터뷰를 다시 열면 **처음부터 묻는다** (interview-5).
+
+    고치기 전엔 지난 궁극목표 세션의 `ultimate.*` 전부가 새 궁극목표 세션에 이월돼 필수
+    슬롯이 시작부터 다 찼고, 201 이 `currentQuestion=null`·`endReason=null` 로 왔다. FE 는
+    그 상태에서 '나중에 할게요' 버튼만 그려, 만다라트 전에 나간 사용자는 궁극목표를 다시
+    세울 길이 없었다.
+    """
+    monkeypatch.setattr(aiClient, "run", _stub())
+    _run_ultimate_interview_to_completion(client)
+
+    again = client.post("/interview/sessions", json={"kind": "ultimate"})
+    assert again.status_code == 201
+    body = again.json()
+    assert body["currentQuestion"]["slotKey"] == "ultimate.statement"
+    assert body["ambiguityScore"] == 9
+    assert body["endReason"] is None
+
+
+def test_next_question_finalizes_an_ultimate_session_whose_slots_are_all_filled(
+    client: TestClient, monkeypatch: Any, fake_interview_repo: FakeInterviewRepo
+) -> None:
+    """답 제출 밖에서 필수 슬롯이 다 찬 궁극목표 세션도 재개하면 마감된다 (interview-4)."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    start = client.post("/interview/sessions", json={"kind": "ultimate"}).json()
+    sid = UUID(start["sessionId"])
+    for slot_key, value in _ULTIMATE_ANSWERS:
+        stored = (
+            {"type": "chip", "values": value}
+            if isinstance(value, list)
+            else {"type": "text", "raw": value}
+        )
+        asyncio.run(fake_interview_repo.upsert_slot_answer(sid, slot_key, stored, is_required=True))
+
+    res = client.post(f"/interview/sessions/{sid}/next-question")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["endReason"] == "completed"
+    assert body["currentQuestion"] is None
+    assert body["ultimateOutcome"]["statement"] == "메이저리그 8구단 드래프트 1순위"
+    assert body["outcome"] is None

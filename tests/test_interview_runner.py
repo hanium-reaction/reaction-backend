@@ -547,3 +547,29 @@ async def test_off_menu_text_is_not_forced_into_a_chip(monkeypatch: pytest.Monke
     )
 
     assert result.state["slot_answers"]["identity.role"].get("type") != "chip"
+
+
+async def test_start_with_every_required_slot_seeded_finishes_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """시드만으로 필수 슬롯이 다 찼으면 빈 질문 대신 곧바로 마감한다 (interview-5 방어선).
+
+    빈 질문으로 시작하면 FE 는 답할 칸도, 끝났다는 신호도 없는 화면에 갇힌다.
+    """
+    monkeypatch.setattr(aiClient, "run", _stub())
+    seed = {
+        key: (
+            {"type": "chip", "values": ["5년"]}
+            if key in {"ultimate.domain", "ultimate.horizon"}
+            else {"type": "text", "raw": "테스트 답"}
+        )
+        for key in interview_catalog.ULTIMATE_CATALOG.required_keys
+    }
+
+    result = await interview_runner.start_interview(
+        session_id=uuid4(), user_id=uuid4(), kind="ultimate", seed_answers=seed
+    )
+
+    assert result.done is True
+    assert result.end_reason == "completed"
+    assert result.ultimate_outcome is not None

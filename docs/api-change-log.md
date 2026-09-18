@@ -7,6 +7,34 @@
 
 ---
 
+## v2.30-interview — 2026-09-18 (인터뷰가 끝나야 할 때 끝나고, 답한 값이 그대로 남는다)
+
+**동작 변경 — `/interview/*`.** 응답 스키마·envelope·에러 코드 무변경, 마이그레이션 없음.
+
+### 재개(`next-question`)가 이미 다 찬 세션을 마감한다
+
+- 답 제출 밖에서 마지막 빈 슬롯이 채워지는 경로가 있다 — 자료 확정
+  (`POST /plans/materials/spec-confirm`)이 `goals.materials` 를 직접 쓴다. 재인터뷰에선 활동창·
+  회복 슬롯이 이월돼 materials 가 마지막 빈 슬롯이 되는데, 그 뒤 `next-question` 이
+  `currentQuestion=null`·`endReason=null` 을 돌려줘 인터뷰가 영영 끝나지 않았다.
+- 이제 그 경우 `answers` 의 마지막 답과 **같은 종료 응답**(`endReason=completed` + `summary` +
+  `outcome`/`ultimateOutcome`)을 준다. 목표 영속·프로필 영속도 같은 출구를 지난다. 두 번 불러도
+  종료 응답 재조회라 안전하다.
+
+### 궁극목표 인터뷰를 다시 열면 처음부터 묻는다
+
+- 지난 궁극목표 답(`ultimate.*`)은 **계획 인터뷰로만** 이월한다. 궁극목표 → 궁극목표 이월은
+  필수 슬롯을 시작부터 전부 채워, 두 번째 궁극목표 인터뷰가 질문 없이 멈췄다.
+- 방어선: `POST /interview/sessions` 가 시드만으로 필수 슬롯이 다 차면 빈 질문 대신 곧바로
+  종료 응답(201, `endReason=completed`)을 준다.
+
+### FE 에 미치는 것
+
+- `next-question` 응답에 `endReason` 이 올 수 있다 — `answers` 의 종료 응답과 같은 분기로
+  처리하면 된다(자료 확정 후 재개가 확인 단계로 이어진다).
+
+---
+
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)
 
 **동작 완화 — `POST /auth/google`.** 요청·응답 스키마 무변경, 마이그레이션 없음. 기존 사용자

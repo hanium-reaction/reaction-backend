@@ -308,10 +308,12 @@ async def test_supersede_still_cleans_up_during_onboarding(state: str) -> None:
 
 
 def test_both_interview_completion_paths_pass_the_onboarding_state() -> None:
-    """호출부 **둘 다** 사용자 상태를 넘기는가.
+    """인터뷰가 끝나는 **모든** 경로가 사용자 상태를 넘기는가.
 
-    인터뷰가 끝나는 경로는 둘이다(`submit_answer` 의 `result.done`, `finish_session`).
-    한쪽만 고치면 다른 쪽으로 끝낸 사용자만 목표를 잃는다 — 재현하기 어려운 버그가 된다.
+    인터뷰가 끝나는 경로는 넷이다(`submit_answer` 의 `result.done`, `finish_session`,
+    이미 다 찬 세션을 재개한 `next_question`, 시드로 다 찬 `start_session`). 한쪽만 고치면
+    다른 쪽으로 끝낸 사용자만 목표를 잃는다 — 재현하기 어려운 버그가 된다. 그래서 넷 다
+    단일 출구(`_finalize_and_respond`)를 지나고, 인자를 넘기는 곳은 그 한 군데뿐이어야 한다.
     """
     from pathlib import Path
 
@@ -319,8 +321,10 @@ def test_both_interview_completion_paths_pass_the_onboarding_state() -> None:
         Path(__file__).resolve().parent.parent / "src/reaction_backend/api/routes/interview.py"
     ).read_text(encoding="utf-8")
     # `supersede_proposed_goals(` 문자열은 주석(#186 함정 설명)에도 나온다 — **실제로 넘기는
-    # 인자**를 센다. 호출 경로가 둘이므로 둘 다여야 한다.
-    assert src.count("onboarding_state=user.onboarding_state") == 2
+    # 인자**를 센다. 단일 출구 한 곳에서만 넘긴다.
+    assert src.count("onboarding_state=user.onboarding_state") == 1
+    # 종료 경로 넷이 모두 그 출구를 부른다.
+    assert src.count("await _finalize_and_respond(") == 4
 
 
 # ───────────────────── 만다라 오염 격리 (W3, `1ee508b967ba`) ─────────────────────

@@ -6,8 +6,9 @@ interview_sessions/slot_answers 재조립·영속(FakeInterviewRepo)을 HTTP 레
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
@@ -673,3 +674,91 @@ def test_drop_placeholder_cards_keeps_real_names() -> None:
         "OOP 개념 정리 노트",
         "BOOK 챌린지",
     ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 답 제출 밖에서 마지막 슬롯이 채워진 세션의 재개 (interview-4)
+#
+# 자료 확정(`POST /plans/materials/spec-confirm`)은 `goals.materials` 를 슬롯에 **직접**
+# 쓴다. 재인터뷰에서는 활동창·회복 슬롯이 이월돼 materials 가 마지막 빈 슬롯이 되는데,
+# 그걸 채운 뒤 재개(`next-question`)하면 물을 슬롯 없이 빈 질문만 돌아왔다 — FE 는
+# "다음 질문을 받지 못했어요" 를 되풀이했고 인터뷰는 영영 끝나지 않았다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _fill_all_but_materials(client: TestClient) -> str:
+    """plan 세션을 `goals.materials` 직전까지 채운다(실제 답 제출 경로)."""
+    body = client.post("/interview/sessions").json()
+    sid = str(body["sessionId"])
+    turn = 0
+    while body["currentQuestion"] is not None:
+        question = body["currentQuestion"]
+        if question["slotKey"] == "goals.materials":
+            return sid
+        turn += 1
+        body = client.post(
+            f"/interview/sessions/{sid}/answers",
+            json={
+                "slotKey": question["slotKey"],
+                "value": _answer_for(question),
+                "clientTurn": turn,
+            },
+        ).json()
+        assert turn <= 40
+    raise AssertionError("goals.materials 에 닿기 전에 인터뷰가 끝났다")
+
+
+def _spec_confirm_directly(repo: FakeInterviewRepo, sid: str) -> None:
+    """spec-confirm 이 하는 일 — 답 제출을 거치지 않고 슬롯에 바로 쓴다."""
+    asyncio.run(
+        repo.upsert_slot_answer(
+            UUID(sid),
+            "goals.materials",
+            {"type": "spec", "items": [{"kind": "book", "title": "토익 보카"}]},
+            is_required=True,
+        )
+    )
+
+
+def test_next_question_finalizes_when_the_last_slot_was_filled_out_of_band(
+    client: TestClient, fake_interview_repo: FakeInterviewRepo, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr(aiClient, "run", _stub(echo_normalized=True))
+    sid = _fill_all_but_materials(client)
+    # 활동창·회복 슬롯은 재인터뷰에서 이월된다 — materials 를 마지막 빈 슬롯으로 만든다.
+    row_id = UUID(sid)
+    for slot_key, value in (
+        ("time.activity_window", {"type": "range", "start": "09:00", "end": "23:00"}),
+        ("recovery.tone", {"type": "chip", "values": ["담백"]}),
+        ("recovery.rest_ok", {"type": "chip", "values": ["네"]}),
+        ("recovery.downscope_unit", {"type": "chip", "values": ["10분"]}),
+    ):
+        asyncio.run(
+            fake_interview_repo.upsert_slot_answer(row_id, slot_key, value, is_required=True)
+        )
+    _spec_confirm_directly(fake_interview_repo, sid)
+
+    res = client.post(f"/interview/sessions/{sid}/next-question")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["endReason"] == "completed"
+    assert body["currentQuestion"] is None
+    assert body["outcome"] is not None
+    assert body["outcome"]["unresolvedSlots"] == []
+    assert fake_interview_repo._sessions[row_id].end_reason == "completed"
+
+    # 다시 불러도 같은 종료 응답이다(재마감·중복 영속 없음).
+    again = client.post(f"/interview/sessions/{sid}/next-question").json()
+    assert again["endReason"] == "completed"
+    assert again["currentQuestion"] is None
+    assert again["outcome"] is not None
+
+
+def test_next_question_still_asks_when_slots_remain(client: TestClient, monkeypatch: Any) -> None:
+    """재개는 여전히 재개다 — 빈 슬롯이 남아 있으면 마감하지 않고 그 슬롯을 묻는다."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    sid = client.post("/interview/sessions").json()["sessionId"]
+
+    body = client.post(f"/interview/sessions/{sid}/next-question").json()
+    assert body["endReason"] is None
+    assert body["currentQuestion"]["slotKey"] == "identity.role"
