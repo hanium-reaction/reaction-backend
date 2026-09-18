@@ -304,13 +304,25 @@ def first_matching_tag(failure_tags: list[str], strategy: RecoveryStrategyCatalo
     return None
 
 
-def recovery_target_date(decided_on: date, option_group: str) -> date:
+def recovery_target_date(
+    decided_on: date, option_group: str, *, re_engagement_on: date | None = None
+) -> date:
     """회복 카드를 언제 할 것인가 — 기본은 결정한 날, CARRY_OVER 만 '내일로 이어가기'.
 
     제품 규칙(UX 4 그룹)이라 HTTP 핸들러가 아니라 여기 산다. DOWNSCOPE 는 "지금 작게라도
     해보기"라 같은 날, CARRY_OVER 는 그룹 이름 그대로 하루 뒤다.
+
+    `re_engagement_on` — 사용자가 CARRY_OVER 를 고르며 **직접 고른** 재관여 날짜(#327 앵커,
+    KST 달력일). 있으면 카드도 그날로 간다: 화면은 "금요일에 다시 확인할게요"라고 약속했는데
+    카드는 내일에 놓이고 알림은 금요일에 와서, 설정이 반영되지 않은 것처럼 보였다. 내일보다
+    이르면(오늘 등) 내일로 둔다 — '이어가기'가 오늘 안으로 당겨지면 그룹의 뜻이 사라진다.
     """
-    return decided_on + timedelta(days=1) if option_group == _CARRY_OVER_GROUP else decided_on
+    if option_group != _CARRY_OVER_GROUP:
+        return decided_on
+    tomorrow = decided_on + timedelta(days=1)
+    if re_engagement_on is None:
+        return tomorrow
+    return max(re_engagement_on, tomorrow)
 
 
 def re_engagement_anchor_at(option_group: str, decided_at: datetime) -> datetime | None:

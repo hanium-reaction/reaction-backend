@@ -824,6 +824,11 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   만들지 않는다. 응답 `reEngagementAnchorAt` 는 확정된(명시값 또는 계산된 기본값) 시점을 항상
   KST 로 반환하며, PARK/CARRY_OVER 가 아니면 `null`. 저장 위치는
   `recovery_attempts.re_engagement_anchor_at`.
+  **CARRY_OVER 에 명시값을 보내면 새 회복 카드의 `targetDate` 도 그 KST 날짜가 된다**
+  (v2.30-recovery) — 단 내일보다 이르면 내일('이어가기'는 오늘 안으로 당기지 않는다). 생략하면
+  종전대로 내일. ⚠️ 그전에는 앵커만 저장되고 카드는 무조건 내일에 놓여, "금요일에 다시
+  확인할게요"라고 고른 사용자의 할 일이 내일 오늘 화면에 떴다. 앵커의 **시각**은 여전히 쓰지
+  않는다 — 재관여 알림은 그날 아침 알림 시각에 한 번 간다(§15 morning_brief).
 - **`decision="edited"`(잠금 결정 [수락/수정/거절] 의 '수정')** — `acceptedAttemptId` +
   `editedActionText`(trim 후 1~300자) 필수. 부수효과는 accepted 와 **동일**(형제 rejected,
   새 ActionItem 생성, replan 대상)이고 **새 카드 title 만 사용자 문구**가 된다.

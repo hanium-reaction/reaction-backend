@@ -622,6 +622,7 @@ async def _create_recovery_action(
     decided_at: datetime,
     repo: RecoveryRepo,
     action_repo: ActionItemRepo,
+    re_engagement_anchor_override: datetime | None = None,
 ) -> UUID:
     """DOWNSCOPE/CARRY_OVER 수락 → 회복 ActionItem 생성. 반환: 새 카드 ID.
 
@@ -634,6 +635,9 @@ async def _create_recovery_action(
     제목은 **원본 제목 + 그룹 꼬리표**(`recovery_action_title`)다 — 제안 문구는 질문형
     템플릿일 수 있어 카드 이름이 될 수 없다. 제안 문구는 DOWNSCOPE 에서만 '첫 걸음'으로
     옮긴다(`_recovery_first_step`).
+
+    날짜는 `recovery_target_date` 가 정한다 — CARRY_OVER 를 고르며 사용자가 재관여 날짜를
+    **직접** 골랐으면(`re_engagement_anchor_override`, #327) 카드도 그날로 간다.
     """
     original = await action_repo.get_by_id(user_id, execution.action_item_id)
     strategy = await repo.get_strategy(target.recovery_strategy_type)
@@ -648,7 +652,17 @@ async def _create_recovery_action(
         ),
         category=original.category if original is not None else "other",
         source=source,
-        target_date=recovery_target_date(decided_at.date(), target.recovery_option_group),
+        target_date=recovery_target_date(
+            decided_at.date(),
+            target.recovery_option_group,
+            # 사용자가 직접 고른 재관여 날짜만 반영한다(#327 명시값) — 서버 기본값은 이미
+            # '내일 09시'라 결과가 같다.
+            re_engagement_on=(
+                _kst_day(re_engagement_anchor_override)
+                if re_engagement_anchor_override is not None
+                else None
+            ),
+        ),
         estimated_minutes=recovery_action_minutes(
             option_group=target.recovery_option_group,
             original_minutes=original.estimated_minutes if original is not None else None,
@@ -754,6 +768,7 @@ async def decide_recovery(
                 decided_at=decided_at,
                 repo=repo,
                 action_repo=action_repo,
+                re_engagement_anchor_override=anchor_override,
             )
             target.resulting_action_item_id = new_action_id
             resulting_action_id = f"{_ACTION_PREFIX}{new_action_id}"

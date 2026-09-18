@@ -2362,3 +2362,112 @@ def test_shift_to_recovery_day_keeps_a_quarter_aligned_start() -> None:
         now=datetime(2026, 9, 18, 21, 0, tzinfo=KST),
     )
     assert start_at == datetime(2026, 9, 19, 11, 30, tzinfo=KST)
+
+
+# ───────────────────────── 직접 고른 이어가기 날짜 (recovery-14) ─────────────────────────
+
+
+def _accept_carry_over_with_anchor(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+    *,
+    now: datetime,
+    anchor: str | None,
+) -> Any:
+    """`now` 에 CARRY_OVER 를 (선택적으로 앵커와 함께) 수락하고 새 회복 카드를 돌려준다."""
+    from reaction_backend.api.routes import recovery as recovery_routes
+
+    monkeypatch.setattr(recovery_routes, "now_kst", lambda: now)
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo,
+        fake_action_item_repo,
+        failure_tags=["AMBIGUITY", "PRIORITY_SHIFT"],
+        target_date=now.date(),
+        plan_start_at=now.replace(hour=14, minute=0),
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    carry_over = next(c for c in cards if c["optionGroup"] == "CARRY_OVER")
+    body: dict[str, Any] = {
+        "executionId": exec_id,
+        "decision": "accepted",
+        "acceptedAttemptId": carry_over["attemptId"],
+    }
+    if anchor is not None:
+        body["reEngagementAnchorAt"] = anchor
+    decision = _decide(client, body)
+    assert decision.status_code == 200, decision.json()
+    recovery_id = UUID(decision.json()["resultingActionItemId"].removeprefix("action_"))
+    return fake_action_item_repo._items[recovery_id]
+
+
+def test_carry_over_card_lands_on_the_day_the_user_picked(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """'금요일에 다시 확인할게요'로 골랐으면 이어가는 카드도 금요일에 놓인다.
+
+    회귀: 앵커는 금요일로 저장되는데 카드는 무조건 내일로 만들어져, 화면이 약속한 날과
+    할 일이 놓인 날이 달랐다(설정이 반영되지 않은 것처럼 보였다).
+    """
+    now = datetime(2026, 9, 16, 21, 5, tzinfo=KST)  # 수요일
+    recovery_action = _accept_carry_over_with_anchor(
+        client,
+        fake_recovery_repo,
+        fake_action_item_repo,
+        monkeypatch,
+        now=now,
+        anchor="2026-09-25T20:00:00+09:00",  # 다음 주 금요일 20:00
+    )
+    assert recovery_action.target_date == date(2026, 9, 25)
+    # 원본 카드는 그대로 (AGENTS.md §2)
+    original = next(a for a in fake_action_item_repo._items.values() if a.source == "manual")
+    assert original.status == "failed"
+    assert original.target_date == date(2026, 9, 16)
+
+
+def test_carry_over_anchor_before_tomorrow_keeps_the_card_on_tomorrow(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """오늘(또는 과거) 앵커 — '이어가기'가 오늘 안으로 당겨지진 않는다(내일 그대로)."""
+    now = datetime(2026, 9, 16, 21, 5, tzinfo=KST)
+    recovery_action = _accept_carry_over_with_anchor(
+        client,
+        fake_recovery_repo,
+        fake_action_item_repo,
+        monkeypatch,
+        now=now,
+        anchor="2026-09-16T22:00:00+09:00",
+    )
+    assert recovery_action.target_date == date(2026, 9, 17)
+
+
+def test_carry_over_without_anchor_still_goes_to_tomorrow(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    now = datetime(2026, 9, 16, 21, 5, tzinfo=KST)
+    recovery_action = _accept_carry_over_with_anchor(
+        client, fake_recovery_repo, fake_action_item_repo, monkeypatch, now=now, anchor=None
+    )
+    assert recovery_action.target_date == date(2026, 9, 17)
+
+
+def test_recovery_target_date_follows_an_explicit_carry_over_day_only() -> None:
+    decided_on = date(2026, 9, 16)
+    friday = date(2026, 9, 25)
+    assert recovery_target_date(decided_on, "CARRY_OVER", re_engagement_on=friday) == friday
+    # 내일보다 이르면 내일
+    assert recovery_target_date(decided_on, "CARRY_OVER", re_engagement_on=decided_on) == date(
+        2026, 9, 17
+    )
+    # 다른 그룹은 앵커와 무관하게 결정한 날
+    assert recovery_target_date(decided_on, "DOWNSCOPE", re_engagement_on=friday) == decided_on
