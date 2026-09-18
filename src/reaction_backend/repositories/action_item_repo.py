@@ -12,17 +12,18 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.session import get_db
+from reaction_backend.schemas.common import KST
 
 
 class ActionItemRepo:
@@ -32,12 +33,32 @@ class ActionItemRepo:
         self._session = session
 
     async def list_by_date(self, user_id: UUID, target_date: date) -> list[ActionItem]:
-        """오늘 어젠다 — target_date 의 활성 카드 (priority 오름차순)."""
+        """그날의 활성 카드 — target_date 가 그날이거나, **그날 시작하는 세션 블록**이 있는 카드.
+
+        카드 1장이 여러 날짜의 세션 블록을 가질 수 있다(`plan_scheduler` 가 긴 카드를 쪼갠다 —
+        주간 '남은 일 다시 배치' 가 90분 카드를 월·수 45분씩으로 놓는 식). 그런데
+        `target_date` 는 **가장 이른** 블록의 날짜 하나뿐이라, target_date 만 보면 둘째 날부터는
+        그 카드가 오늘 화면에서 사라져 시작할 방법이 없었다(critic-2).
+
+        블록 날짜는 KST 로 자른다(`start_at` 은 UTC 저장). cancelled 블록은 계획에서 빠진
+        것이라 세지 않고, finished 는 센다 — 둘째 세션을 체크인한 순간 카드가 오늘 화면에서
+        사라지면 방금 한 일이 어디 갔는지 모른다. 보관 카드 제외, priority 오름차순.
+        """
+        day_start = datetime.combine(target_date, time(0, 0), tzinfo=KST)
+        session_today = select(ScheduledBlock.action_item_id).where(
+            ScheduledBlock.user_id == user_id,
+            ScheduledBlock.block_status != "cancelled",
+            ScheduledBlock.start_at >= day_start,
+            ScheduledBlock.start_at < day_start + timedelta(days=1),
+        )
         stmt = (
             select(ActionItem)
             .where(
                 ActionItem.user_id == user_id,
-                ActionItem.target_date == target_date,
+                or_(
+                    ActionItem.target_date == target_date,
+                    ActionItem.id.in_(session_today),
+                ),
                 ActionItem.archived_at.is_(None),
             )
             .order_by(ActionItem.priority.asc(), ActionItem.created_at.asc())

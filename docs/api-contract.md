@@ -654,12 +654,14 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
   1. **진행 중(in_progress) 실행**이 회고 창 안에 있다 — 창 기준은 `/reflection/pending` 과 같다(§11, 계획·착수 시각 중 나중 ≥ 그제 0시). 23:40 에 시작한 카드가 00:00 에 화면에서 사라지지 않고, 창을 벗어나면 만료 cron 이 정리한다. `executionId` 가 실려 있어 그대로 체크인할 수 있다
   2. **어제 시작해 아직 안 끝난 블록**(`startAt` < 오늘 0시 < `endAt`, 지금 < `endAt`, 미종결)이 있다 — 23:30~00:30 블록을 00:05 에 늦게라도 시작할 수 있게. 다음 날 세션 블록은 여기 안 걸린다
   체크인으로 끝나면 다음 조회부터 빠진다. FE 는 '어제 이어서' 같은 표시만 얹으면 된다
+- **여러 날로 쪼갠 카드 (v2.30-today)** — 긴 카드는 여러 날의 세션 블록으로 쪼개질 수 있다(주간 재계획 등). 카드는 1장이고 `target_date` 는 가장 이른 블록의 날짜라, 예전엔 둘째 날부터 카드가 오늘 화면에서 사라졌다. 이제 `cards` 는 target_date 가 오늘인 카드에 더해 **오늘(KST) 시작하는, 취소 안 된 세션 블록**이 있는 카드도 오늘 카드로 싣는다(`carriedOver=false`, 중복 없음, 같은 priority 정렬). `finished` 블록도 센다 — 오늘 회차를 체크인해도 카드가 오늘 화면에서 사라지지 않게. 같은 목록을 모닝 브리프·코칭 조언의 '오늘/어제 카드' 도 쓴다
 - `GET /today/actions/{id}` — `action_<uuid>`. 없으면 404 `COMMON_NOT_FOUND`
 **#19-B 실행 쓰기 (구현)**:
 - `POST /today/actions/{id}/start` — 미종결 scheduled_block 있으면 사용, 없으면 **즉석(ad-hoc) 블록 생성**(source=`user_edit`, §5.10)으로 NOT NULL 의존 해소. 응답 `{ executionId, actionId, completionStatus, actualStartAt }` (201)
   - **같은 카드가 이미 진행 중이면 그 실행을 200 으로 돌려준다**(v2.30-today, 종전 409 `TODAY_EXECUTION_ALREADY_ACTIVE`). 새 실행·블록을 만들지 않고 카드 상태도 안 건드린다. 응답 모양은 같고 `actualStartAt` 은 **처음 시작한 시각**이다 — 앱을 다시 열어 실행 id 를 잃은 FE 가 [이어서 하기] 로 start 를 다시 불러도 같은 실행을 이어받아 체크인할 수 있다. 끝난(체크인한) 실행은 되살리지 않는다 — 그 뒤 start 는 새 실행(201)
   - 다른 카드가 진행 중이어도 시작은 막지 않는다(종전과 같음). `TODAY_EXECUTION_ALREADY_ACTIVE` 코드는 남아 있지만 이 경로는 더 이상 내보내지 않는다
 - `POST /today/check-ins` — `{ executionId, completionStatus(4칩), userRating?, userFeedback? }`. execution 종결(actual_end_at·duration) + 블록 finished + **`action_item.status` 전이**(execution 레이어의 합의된 유일 지점). feedback 은 at-rest 암호화. 재체크인 409 `TODAY_ALREADY_CHECKED_IN`. 응답 `needsFailureTags=true`(failed/partial_done) → S18 → §11 태깅 → §12 Recovery 로 연결
+  - **`done`/`over_done` 이면 이 카드의 남은 세션 블록을 정리한다**(v2.30-today). 쪼갠 카드의 한 회차에서 '완료' 하면 카드는 끝난 것이라, 아직 `scheduled` 인 다른 회차 블록을 `cancelled` 로 바꾼다 — 주간 그리드에 할 일로 남지 않고 '곧 시작'(pre_card) 알림도 오지 않는다. `finished`(수행 이력)·`started` 블록과 사용자가 직접 옮긴 블록(`source=user_edit`)은 건드리지 않는다. `partial_done`/`failed` 는 '아직 남았다' 라 남은 회차를 그대로 둔다 — 다음 [▶ 시작] 은 가장 이른 미종결 블록을 잡는다. `POST /reflection/batch` 도 같은 규칙. pre_card 알림은 블록 상태와 별개로 **끝낸(done/over_done) 카드의 블록엔 보내지 않는다**(이중 방어)
 - pause/resume(interruption_events) + context_snapshot 캡처는 #19-B-2 후속
 
 **카드 취소 (#214)**:

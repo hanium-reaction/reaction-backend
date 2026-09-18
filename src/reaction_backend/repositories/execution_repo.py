@@ -31,6 +31,10 @@ from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
 
+# 카드를 **끝냈다**고 말하는 체크인 값 — 남은 세션 블록을 정리하고 pre_card 알림을 멈추는 기준.
+# partial_done/failed 는 "아직 남았다" 라 남은 세션을 그대로 둔다(다음 세션에 이어서 한다).
+_CARD_DONE_STATUSES = ("done", "over_done")
+
 
 def reflectable_from() -> ColumnElement[datetime]:
     """실행을 **회고할 수 있게 된 시각** = 계획 시각과 실제 착수 시각 중 나중 (#20).
@@ -281,7 +285,8 @@ class ExecutionRepo:
         들고 있었다. 한쪽만 고치면 '집중 화면에서 완료한 기록' 과 '저녁 회고로 완료한 기록' 이
         같은 결과인데 다르게 저장된다 — 취소 블록 가드가 실제로 한쪽에만 먼저 들어갔었다.
 
-        하는 일: completion_status·actual_end_at·actual_duration_minutes + 블록 finished.
+        하는 일: completion_status·actual_end_at·actual_duration_minutes + 블록 finished
+        + (완료면) 이 카드의 남은 세션 블록 정리.
         `action_item.status` 전이와 회복 완료 스탬프는 **호출자 몫**이다(카드·회복 repo 를
         라우터가 쥔다). commit 도 호출자.
         """
@@ -297,6 +302,39 @@ class ExecutionRepo:
             # 정리한 블록에 stale 한 executionId 로 체크인·회고가 들어오면, finished 로 덮어써서
             # 주간 그리드에 유령 블록이 되살아난다(list_week 는 archived 를 안 보고 block_status 만 본다).
             block.block_status = "finished"
+
+        if status in _CARD_DONE_STATUSES:
+            await self.cancel_remaining_sessions(execution)
+
+    async def cancel_remaining_sessions(self, execution: ExecutionEvent) -> None:
+        """카드를 끝냈으면 **아직 안 한 다른 세션 블록**을 계획에서 뺀다 (critic-2).
+
+        긴 카드는 여러 날의 세션 블록으로 쪼개진다(`plan_scheduler`). 카드 상태는 하나라,
+        첫 세션에서 '완료' 를 누르면 카드는 done 인데 둘째 날 블록은 `scheduled` 로 남았다 —
+        주간 그리드엔 할 일처럼 계속 뜨고, 5분 전 '곧 시작' 알림까지 왔다. 재계획의 밀린 일
+        수거(`list_stale_scheduled_before`)도 카드 상태를 안 봐서 끝낸 카드를 다시 배치하려 한다.
+
+        고르는 블록은 좁다(전부 데이터 보호):
+        - `scheduled` 만 — finished(수행 이력)·started(다른 실행이 잡은 블록)는 안 건드린다.
+        - `user_edit` 제외 — 사용자가 손으로 옮긴 블록은 시스템이 지우지 않는다(#113 과 같은 선).
+        - 방금 끝낸 실행의 블록 제외 — 그건 위에서 finished 가 된다.
+
+        partial_done/failed 는 부르지 않는다 — 남은 세션이 다음에 이어서 할 자리다.
+        카드 `status` 는 건드리지 않는다(호출자의 기존 체크인 전이 그대로, AGENTS §2).
+        계획 교체·만료 cron 과 같은 soft 규칙(블록 cancelled, hard delete 없음).
+        """
+        await self._session.execute(
+            update(ScheduledBlock)
+            .where(
+                ScheduledBlock.user_id == execution.user_id,
+                ScheduledBlock.action_item_id == execution.action_item_id,
+                ScheduledBlock.id != execution.scheduled_block_id,
+                ScheduledBlock.block_status == "scheduled",
+                ScheduledBlock.source != "user_edit",
+            )
+            .values(block_status="cancelled")
+            .execution_options(synchronize_session=False)
+        )
 
     # ── pause / resume (interruption_events) — #83 Focus 일시정지/재개 ──
     async def get_open_pause(self, execution_id: UUID) -> InterruptionEvent | None:
@@ -339,6 +377,9 @@ class ExecutionRepo:
         - `started` 제외 — 이미 착수한 카드에 "곧 시작" 알림은 소음
         - 카드 archived 제외 — 만료 cron(`expire_unreflected`)이 보관한 카드의 블록은
           cancel 되지만, 블록 상태만 믿지 않고 카드 생사도 본다 (이중 방어)
+        - 이미 끝낸(done/over_done) 카드 제외 — 쪼갠 세션의 첫 회차에서 '완료' 하면 남은
+          세션 블록은 체크인이 정리하지만(`cancel_remaining_sessions`), 그 전에 남은 블록·
+          사용자가 옮긴 블록에 "곧 시작" 이 가지 않게 카드 상태도 본다 (critic-2)
         - 비활성 사용자 제외 — `UserRepo.list_active()` 와 같은 3조건 (soft-archived·
           익명화 사용자의 잔존 블록에 발송하지 않는다)
 
@@ -353,6 +394,7 @@ class ExecutionRepo:
                 ScheduledBlock.start_at >= start,
                 ScheduledBlock.start_at < end,
                 ActionItem.archived_at.is_(None),
+                ActionItem.status.notin_(_CARD_DONE_STATUSES),
                 User.archived_at.is_(None),
                 User.is_anonymized.is_(False),
                 User.onboarding_state == "ACTIVE",
