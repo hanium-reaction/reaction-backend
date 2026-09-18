@@ -105,6 +105,8 @@ class WebPushSender:
             # 지워 다음 폴부터 다시 시도하지 않는다. endpoint 값은 로그에 남기지 않는다.
             _log.warning("web push endpoint not allowed → treated as gone")
             return "gone"
+        # 발송 1건 = 세션 1개. pywebpush 기본(`requests.post`)처럼 쓰고 바로 닫는다.
+        http = _NoRedirectSession()
         try:
             # pywebpush 는 동기(requests) — 이벤트 루프를 막지 않게 스레드로 내린다.
             await asyncio.wait_for(
@@ -117,7 +119,7 @@ class WebPushSender:
                     timeout=_SEND_TIMEOUT_SECONDS,
                     ttl=max(int(ttl), 1),
                     headers={"Urgency": urgency},
-                    requests_session=_NoRedirectSession(),
+                    requests_session=http,
                 ),
                 timeout=_SEND_HARD_TIMEOUT_SECONDS,
             )
@@ -133,6 +135,8 @@ class WebPushSender:
         except Exception:  # noqa: BLE001 — 전송 실패가 cron 사용자 루프를 멈추면 안 된다
             _log.exception("web push send failed (transport)")
             return "error"
+        finally:
+            http.close()
         return "ok"
 
 
