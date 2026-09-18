@@ -90,3 +90,34 @@ def test_unhandled_error_returns_500_error_response() -> None:
     body = resp.json()
     assert set(body) == _ERROR_KEYS
     assert body["code"] == "COMMON_INTERNAL_ERROR"
+
+
+def test_unhandled_error_500_keeps_cors_and_request_id_headers() -> None:
+    """처리 안 된 예외의 500 에도 CORS·`x-request-id` 가 붙어야 한다 (auth-4 / abuse-7).
+
+    전역 `Exception` 핸들러는 Starlette 가 CORS **바깥**에서 돌려, 예전엔 500 에 ACAO 가
+    빠졌다 — 크로스오리진으로 부르는 네이티브 앱은 그 응답을 네트워크 오류로 보고, 목표 화면이
+    저장 안 된 가짜 목표를 끼워 넣었다. 422(ApiError 경로)에는 원래부터 붙어 있었다.
+    """
+    client = TestClient(_app_with_test_routes(), raise_server_exceptions=False)
+    origin = "http://localhost:5173"  # 기본 cors_allow_origins
+    resp = client.get("/__test__/boom", headers={"Origin": origin})
+
+    assert resp.status_code == 500
+    body = resp.json()
+    assert set(body) == _ERROR_KEYS
+    assert body["code"] == "COMMON_INTERNAL_ERROR"
+    assert "unexpected failure" not in resp.text  # 예외 문구는 로그에만
+    assert resp.headers.get("access-control-allow-origin") == origin
+    assert resp.headers.get("x-request-id")
+
+
+def test_api_error_still_uses_its_own_status_with_cors() -> None:
+    """미들웨어가 ApiError 경로를 가로채지 않는다 — 제 상태·코드 그대로 + CORS."""
+    client = TestClient(_app_with_test_routes(), raise_server_exceptions=False)
+    origin = "http://localhost:5173"
+    resp = client.get("/__test__/api-error", headers={"Origin": origin})
+
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "COMMON_NOT_FOUND"
+    assert resp.headers.get("access-control-allow-origin") == origin

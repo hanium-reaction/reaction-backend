@@ -3,7 +3,9 @@
 - `ApiError`              → `code`/`message`/`field` 그대로, `http_status` 적용
 - `RequestValidationError`→ 422 `COMMON_VALIDATION_ERROR`, 첫 위반 필드 표기
 - `HTTPException`         → status code 보존하며 `ErrorResponse` 로 정규화
-- 그 외 `Exception`       → 500 `COMMON_INTERNAL_ERROR` (스택 트레이스 비노출)
+- 그 외 `Exception`       → 500 `COMMON_INTERNAL_ERROR` (스택 트레이스 비노출).
+  실제로는 `middleware/unhandled_error.py` 가 CORS 안쪽에서 먼저 받는다 — 여기 핸들러는
+  Starlette 가 CORS **바깥**에서 실행해 500 에 CORS·`x-request-id` 가 빠지기 때문이다.
 """
 
 from __future__ import annotations
@@ -71,7 +73,11 @@ async def _handle_http_exception(request: Request, exc: Exception) -> Response:
     return _error_json(err.status_code, ErrorResponse(code=code.value, message=message))
 
 
-async def _handle_unhandled_error(request: Request, exc: Exception) -> Response:
+def internal_error_response() -> JSONResponse:
+    """500 `COMMON_INTERNAL_ERROR` — 스택 트레이스 없이 고정 문구만.
+
+    `UnhandledErrorMiddleware`(CORS 안쪽)와 아래 최후 핸들러가 같은 응답을 쓰도록 한 곳에 둔다.
+    """
     return _error_json(
         500,
         ErrorResponse(
@@ -79,6 +85,12 @@ async def _handle_unhandled_error(request: Request, exc: Exception) -> Response:
             message="서버 내부 오류가 발생했어요. 잠시 후 다시 시도해 주세요.",
         ),
     )
+
+
+async def _handle_unhandled_error(request: Request, exc: Exception) -> Response:
+    # 최후 안전망 — 평소엔 `UnhandledErrorMiddleware` 가 먼저 받아 CORS 헤더가 붙은 500 을
+    # 보낸다. 여기까지 오는 건 응답이 이미 시작된 뒤의 예외 등 그 미들웨어 밖의 경우뿐이다.
+    return internal_error_response()
 
 
 def register_exception_handlers(app: FastAPI) -> None:
