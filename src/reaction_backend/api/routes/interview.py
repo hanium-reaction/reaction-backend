@@ -527,7 +527,10 @@ async def _carry_over_answers(
         interaction = await profile_repo.get_interaction(user.id)
         focus_mode_prefs = user.focus_mode_preferences or {}
         overlay = profile_memory.seed_slots_from_profile(
-            behavioral=behavioral, interaction=interaction, focus_mode_prefs=focus_mode_prefs
+            behavioral=behavioral,
+            interaction=interaction,
+            focus_mode_prefs=focus_mode_prefs,
+            carried=base,
         )
         # 프로필이 값을 가졌는데 칩 보기로 못 옮긴 슬롯(내 정보에서 고른 45분·20분 등)은 지난
         # 인터뷰 원답도 치운다 — 안 그러면 옛 원답이 이월돼 인터뷰 종료 때 프로필에 다시 쓰이고,

@@ -374,3 +374,32 @@ def test_profile_owned_slots_include_values_the_seed_could_not_map() -> None:
         behavioral=beh, interaction=None, focus_mode_prefs={"downscope_unit_min": 20}
     )
     assert owned - seed.keys() == {"energy.focus_duration", "recovery.downscope_unit"}
+
+
+def test_seed_keeps_the_carried_chip_when_the_profile_still_agrees() -> None:
+    """'코치처럼' 을 고른 사용자의 재인터뷰 시드가 '유머' 로 바뀌지 않는다 (interview-9).
+
+    톤 역매핑은 다대일(유머·코치처럼 → encouraging → '유머')이고 피크는 첫 값만 본다. 프로필만
+    으로 되돌리면 사용자가 고른 칩이 재인터뷰마다 바뀌었다. 이월 원답이 같은 프로필 값으로
+    이어지면 그 원답을 그대로 쓰고, 설정에서 실제로 바꿨을 때만 프로필이 이긴다.
+    """
+    beh = cast(Any, SimpleNamespace(energy_cycle="evening", attention_span=None))
+    inter = cast(Any, SimpleNamespace(recovery_tone="encouraging"))
+    carried = {
+        "recovery.tone": {"type": "chip", "values": ["코치처럼"]},
+        "time.peak_window": {"type": "chip", "values": ["저녁", "심야"]},
+    }
+    seed = pm.seed_slots_from_profile(
+        behavioral=beh, interaction=inter, focus_mode_prefs={}, carried=carried
+    )
+    assert seed["recovery.tone"] == {"type": "chip", "values": ["코치처럼"]}
+    assert seed["time.peak_window"] == {"type": "chip", "values": ["저녁", "심야"]}
+
+    # 설정에서 톤을 gentle 로, 피크를 오전으로 바꿨다면 프로필이 이긴다.
+    beh.energy_cycle = "morning"
+    inter.recovery_tone = "gentle"
+    seed = pm.seed_slots_from_profile(
+        behavioral=beh, interaction=inter, focus_mode_prefs={}, carried=carried
+    )
+    assert seed["recovery.tone"] == {"type": "chip", "values": ["따뜻"]}
+    assert seed["time.peak_window"] == {"type": "chip", "values": ["오전"]}

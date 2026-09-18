@@ -97,6 +97,7 @@ def seed_slots_from_profile(
     behavioral: BehavioralProfile | None,
     interaction: InteractionStyle | None,
     focus_mode_prefs: Mapping[str, Any],
+    carried: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """저장된 프로필 → 재인터뷰 시드 슬롯값(설정 수정이 반영된 '최신 진실').
 
@@ -114,16 +115,43 @@ def seed_slots_from_profile(
     안 넣으면 그 슬롯은 열린 채 남아 인터뷰가 실제 보기를 들고 묻는다 — 지어낸 답으로
     슬롯을 닫는 것보다 낫다. ⚠️ 그때 **지난 인터뷰의 이월 원답도 치워야** 한다
     (`profile_owned_slots` — 호출자 몫).
+
+    `carried`(지난 인터뷰의 이월 원답)가 **같은 프로필 값**으로 이어지면 그 원답을 그대로
+    둔다. 역매핑이 다대일·첫 값 기준이라 프로필만으로 되돌리면 사용자가 고른 칩이 바뀐다
+    — '코치처럼' 을 고른 사용자가 재인터뷰마다 '유머' 로(예전엔 매핑 누락으로 '담백' 으로),
+    피크 [저녁, 심야] 가 [저녁] 으로 바뀌었다. 설정에서 실제로 다른 값으로 바꿨을 때만
+    프로필이 이긴다.
     """
     seed: dict[str, dict[str, Any]] = {}
     raw = _profile_slot_values(
         behavioral=behavioral, interaction=interaction, focus_mode_prefs=focus_mode_prefs
     )
     for slot_key, value in raw.items():
+        prev = (carried or {}).get(slot_key)
+        if prev is not None and _profile_raw_of(slot_key, prev) == value:
+            seed[slot_key] = dict(prev)
+            continue
         values = canonical_chip_values(PLAN_CATALOG.by_key.get(slot_key), [value])
         if values:
             seed[slot_key] = {"type": "chip", "values": values}
     return seed
+
+
+def _profile_raw_of(slot_key: str, answer: Mapping[str, Any]) -> str | None:
+    """이월 원답이 프로필에 저장됐다면 되돌아올 칩 표기 — 다대일로 손실되는 두 슬롯만 본다.
+
+    나머지 슬롯(집중 길이·최소 단위·휴식 수용)은 칩 ↔ 프로필이 일대일이라 비교할 필요가
+    없다(None → 늘 프로필 시드를 쓴다, 값도 같다).
+    """
+    chips = answer.get("values") if answer.get("type") == "chip" else None
+    if not isinstance(chips, list) or not chips:
+        return None
+    labels = [str(c) for c in chips]
+    if slot_key == "recovery.tone":
+        return _INTERACTION_TO_TONE.get(recovery_tone_enum(labels[0]))
+    if slot_key == "time.peak_window":
+        return _CYCLE_TO_PEAK.get(energy_cycle_from_peak(labels))
+    return None
 
 
 def profile_owned_slots(
