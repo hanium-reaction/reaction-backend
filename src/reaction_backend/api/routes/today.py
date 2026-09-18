@@ -18,7 +18,7 @@ from http import HTTPStatus
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
@@ -329,17 +329,26 @@ async def start_action(
     action_repo: ActionRepoDep,
     execution_repo: ExecutionRepoDep,
     session: SessionDep,
+    response: Response,
 ) -> ExecutionStartResponse:
     """[▶ 시작] → execution_events 생성 (#19-B).
 
     카드의 미종결 scheduled_block 이 있으면 사용, 없으면 즉석 블록 생성
-    (source='user_edit'). 같은 카드의 in_progress 실행이 있으면 409.
+    (source='user_edit').
+
+    **같은 카드가 이미 진행 중이면 그 실행을 200 으로 돌려준다**(새로 만들지 않는다).
+    예전엔 409 였는데, FE 는 실행 id 를 sessionStorage 에만 들고 있어서 앱이 백그라운드에서
+    죽거나 탭을 닫으면 그게 비고, [이어서 하기] 가 start 를 다시 부른다 — 그러면 409 가
+    끝없이 반복되고 [완료] 가 영영 막혔다. 끝낸 일을 '일부만/잘 안됐어요' 로만 남길 수
+    있었다(today-1). 응답 모양은 같다 — `actualStartAt` 은 **처음 시작한 시각**이라 FE 가
+    타이머를 그 시각부터 이어 붙일 수 있다.
 
     카드는 **행 잠금으로 읽는다**(#368). 계획 교체·목표 완료가 같은 카드를 보관하는
     중이면 여기서 기다렸다가 `archived_at IS NULL` 재평가에 걸려 404 로 끝난다 —
     execution_events·scheduled_block 을 만들기 **전에** 걸러야 한다. 상태만 조건부로
     막으면 실행 행이 남고, `list_pending_reflection` 은 `action_items` 에 join 하지
-    않으므로 그 실행이 회고 화면까지 새어 나간다.
+    않으므로 그 실행이 회고 화면까지 새어 나간다. 같은 잠금 덕에 [시작] 연타도 직렬화돼
+    두 번째 요청은 첫 요청이 만든 실행을 돌려받는다(실행이 두 개 생기지 않는다).
     """
     action = await action_repo.get_by_id_for_update(user.id, _parse_action_id(action_id))
     if action is None:
@@ -347,10 +356,14 @@ async def start_action(
 
     active = await execution_repo.get_active_for_action(user.id, action.id)
     if active is not None:
-        raise ApiError(
-            ErrorCode.TODAY_EXECUTION_ALREADY_ACTIVE,
-            "이미 진행 중인 실행이 있어요. 먼저 체크인으로 마무리해 주세요.",
-            http_status=HTTPStatus.CONFLICT,
+        # 멱등 — 카드 상태도 블록도 건드리지 않는다(이미 시작 때 전이됐다).
+        await session.commit()  # 행 잠금을 바로 놓는다
+        response.status_code = HTTPStatus.OK
+        return ExecutionStartResponse(
+            execution_id=f"{_EXEC_PREFIX}{active.id}",
+            action_id=f"{_ACTION_PREFIX}{action.id}",
+            completion_status=active.completion_status,
+            actual_start_at=active.actual_start_at or active.plan_start_at,
         )
 
     started_at = now_kst()

@@ -652,7 +652,9 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 - `GET /today/agenda` — KST 오늘 기준. `brief`(daily_briefs, Morning Brief cron #19-C 가 채움; 없으면 null), `cards`(action_items, 오늘 target_date, priority 오름차순), `habits`(이번 주 habit_instances 진행), `fixedSchedules`(오늘 요일에 걸린 것). ID prefix `action_`/`hinst_`/`habit_`/`fixed_`
 - `GET /today/actions/{id}` — `action_<uuid>`. 없으면 404 `COMMON_NOT_FOUND`
 **#19-B 실행 쓰기 (구현)**:
-- `POST /today/actions/{id}/start` — 미종결 scheduled_block 있으면 사용, 없으면 **즉석(ad-hoc) 블록 생성**(source=`user_edit`, §5.10)으로 NOT NULL 의존 해소. 같은 카드 in_progress 중복 시 409 `TODAY_EXECUTION_ALREADY_ACTIVE`. 응답 `{ executionId, actionId, completionStatus, actualStartAt }` (201)
+- `POST /today/actions/{id}/start` — 미종결 scheduled_block 있으면 사용, 없으면 **즉석(ad-hoc) 블록 생성**(source=`user_edit`, §5.10)으로 NOT NULL 의존 해소. 응답 `{ executionId, actionId, completionStatus, actualStartAt }` (201)
+  - **같은 카드가 이미 진행 중이면 그 실행을 200 으로 돌려준다**(v2.30-today, 종전 409 `TODAY_EXECUTION_ALREADY_ACTIVE`). 새 실행·블록을 만들지 않고 카드 상태도 안 건드린다. 응답 모양은 같고 `actualStartAt` 은 **처음 시작한 시각**이다 — 앱을 다시 열어 실행 id 를 잃은 FE 가 [이어서 하기] 로 start 를 다시 불러도 같은 실행을 이어받아 체크인할 수 있다. 끝난(체크인한) 실행은 되살리지 않는다 — 그 뒤 start 는 새 실행(201)
+  - 다른 카드가 진행 중이어도 시작은 막지 않는다(종전과 같음). `TODAY_EXECUTION_ALREADY_ACTIVE` 코드는 남아 있지만 이 경로는 더 이상 내보내지 않는다
 - `POST /today/check-ins` — `{ executionId, completionStatus(4칩), userRating?, userFeedback? }`. execution 종결(actual_end_at·duration) + 블록 finished + **`action_item.status` 전이**(execution 레이어의 합의된 유일 지점). feedback 은 at-rest 암호화. 재체크인 409 `TODAY_ALREADY_CHECKED_IN`. 응답 `needsFailureTags=true`(failed/partial_done) → S18 → §11 태깅 → §12 Recovery 로 연결
 - pause/resume(interruption_events) + context_snapshot 캡처는 #19-B-2 후속
 

@@ -79,15 +79,49 @@ def test_start_creates_execution_and_adhoc_block(
     assert action.status == "in_progress"
 
 
-def test_start_conflict_when_already_active(
+def test_start_again_returns_the_running_execution(
     client: TestClient,
     fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
 ) -> None:
+    """앱이 죽어 sessionStorage 가 비면 FE 는 [이어서 하기] 에서 start 를 다시 부른다 (today-1).
+
+    예전엔 409 `TODAY_EXECUTION_ALREADY_ACTIVE` 가 끝없이 반복돼 [완료] 가 영영 막혔다.
+    이제 같은 실행을 200 으로 돌려주고, 아무것도 새로 만들지 않는다.
+    """
     action = _seed_action(fake_action_item_repo)
-    _start(client, f"action_{action.id}")
-    resp = _start(client, f"action_{action.id}")
-    assert resp.status_code == 409
-    assert resp.json()["code"] == "TODAY_EXECUTION_ALREADY_ACTIVE"
+    first = _start(client, f"action_{action.id}")
+    assert first.status_code == 201
+    again = _start(client, f"action_{action.id}")
+    assert again.status_code == 200, again.json()
+    body = again.json()
+    assert body["executionId"] == first.json()["executionId"]
+    assert body["actionId"] == f"action_{action.id}"
+    assert body["completionStatus"] == "in_progress"
+    # 타이머를 이어 붙일 기준 — 두 번째 호출 시각이 아니라 처음 시작한 시각
+    assert body["actualStartAt"] == first.json()["actualStartAt"]
+    assert len(fake_execution_repo._executions) == 1
+    assert len(fake_execution_repo._blocks) == 1
+
+    # 돌려받은 id 로 완료할 수 있다 — 막혀 있던 바로 그 경로
+    done = _check_in(client, body["executionId"], "done")
+    assert done.status_code == 200, done.json()
+    assert action.status == "done"
+
+
+def test_start_after_check_in_creates_a_new_execution(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """멱등은 **진행 중일 때만** — 끝난 실행을 되살려 돌려주지 않는다."""
+    action = _seed_action(fake_action_item_repo)
+    first = _start(client, f"action_{action.id}").json()["executionId"]
+    _check_in(client, first, "partial_done")
+    again = _start(client, f"action_{action.id}")
+    assert again.status_code == 201
+    assert again.json()["executionId"] != first
+    assert len(fake_execution_repo._executions) == 2
 
 
 def test_start_404_unknown_action(client: TestClient) -> None:
