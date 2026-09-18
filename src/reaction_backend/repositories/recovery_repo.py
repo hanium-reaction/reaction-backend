@@ -14,12 +14,14 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import and_, case, func, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.execution_failure_tag import ExecutionFailureTag
+from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.recovery_attempt import (
     ADOPTED_DECISION_VALUES,
     RECOVERY_SUCCESS_STATUSES,
@@ -37,6 +39,9 @@ from reaction_backend.schemas.common import KST
 # 와 섞이지 않게 접두어를 둔다. FE 는 이 값을 화면에 표시하지 않는다(RecoveryCard 응답에
 # decision_reason 필드 자체가 없다) — 순전히 내부/운영 조회용.
 _UNDECIDED_EXPIRY_REASON = "system: 회고 창 밖 — 결정 없이 자동 정리"
+
+# 재관여 알림을 멈추는 목표 상태 — 끝냈거나(completed) 지운(archived) 목표.
+_CLOSED_GOAL_STATUSES = ("completed", "archived")
 
 if TYPE_CHECKING:
     from reaction_backend.orchestrator.escalation import (
@@ -453,13 +458,56 @@ class RecoveryRepo:
         `IS NOT NULL` 만으로 이미 "채택된 PARK/CARRY_OVER" 로 좁혀진다 — 별도 decision
         필터가 필요 없다. KST 달력일 경계로 잰다 — 발송 게이트의 class_dedup 과 같은 기준
         (근거 대장 §6.2 T2).
+
+        **"다시 보러 갈까요?"가 더는 할 말이 아닌 회복은 뺀다** — 주 3건뿐인 알림 한 칸을
+        이미 끝낸 일에 쓰면, 앱이 내 상황을 모른다는 신호가 된다:
+
+        1. 이미 완주한 회복(`recovery_result='completed'`) — 아침에 CARRY_OVER 카드를 끝냈는데
+           08시에 그 카드를 다시 보자는 알림이 왔다.
+        2. 결과 카드(CARRY_OVER)가 끝났거나(done/over_done) **치워진** 경우 — `archived_at`
+           이 있고 만료(`system_failure_reason`)가 아닌 것. 회복 카드는 사용자가 취소할 수
+           없으므로(`domain/action_cancel.py`) 이건 목표 완료·계획 교체의 정리다. 만료로
+           보관된 카드는 남긴다 — 못 하고 지나간 일이라 다시 챙길 이유가 그대로다.
+        3. 원본 카드의 목표가 완료·보관된 경우 — PARK 는 결과 카드가 없어 1·2 로 못 거른다.
+           목표를 끝내거나 지웠는데 그 목표의 카드를 다시 보자는 알림이 왔다. 목표 없는
+           카드(인박스/수동)는 그대로 대상이다.
+
+        `pending` 만 남기지 않는 이유: PARK 는 결과 카드가 없어 `recovery_result` 가 영영
+        `pending` 이고, 결과가 `abandoned` 인 CARRY_OVER(해 보다 못 끝냄)도 다시 권할 대상이다.
         """
         start = datetime.combine(target_date, time.min, tzinfo=KST)
         end = start + timedelta(days=1)
-        stmt = select(RecoveryAttempt).where(
-            RecoveryAttempt.user_id == user_id,
-            RecoveryAttempt.re_engagement_anchor_at >= start,
-            RecoveryAttempt.re_engagement_anchor_at < end,
+        resulting = aliased(ActionItem)
+        original = aliased(ActionItem)
+        stmt = (
+            select(RecoveryAttempt)
+            .join(ExecutionEvent, ExecutionEvent.id == RecoveryAttempt.execution_id)
+            .join(original, original.id == ExecutionEvent.action_item_id)
+            .outerjoin(Goal, Goal.id == original.goal_id)
+            .outerjoin(resulting, resulting.id == RecoveryAttempt.resulting_action_item_id)
+            .where(
+                RecoveryAttempt.user_id == user_id,
+                RecoveryAttempt.re_engagement_anchor_at >= start,
+                RecoveryAttempt.re_engagement_anchor_at < end,
+                # 1
+                RecoveryAttempt.recovery_result != "completed",
+                # 2
+                or_(
+                    resulting.id.is_(None),
+                    and_(
+                        resulting.status.notin_(RECOVERY_SUCCESS_STATUSES),
+                        or_(
+                            resulting.archived_at.is_(None),
+                            resulting.system_failure_reason.is_not(None),
+                        ),
+                    ),
+                ),
+                # 3
+                or_(
+                    Goal.id.is_(None),
+                    and_(Goal.archived_at.is_(None), Goal.status.notin_(_CLOSED_GOAL_STATUSES)),
+                ),
+            )
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
