@@ -446,10 +446,14 @@ async def test_past_deadline_is_disclosed_in_warnings() -> None:
     """지난 마감을 조용히 넘기지 않는다 — 어떻게 잡았는지 밝히고 새 마감을 묻는다 (#231)."""
     session = _RoutingSession(blocks=[], fixed=[], policies=[])
     config: Any = {"configurable": {"session": session, "tone_mode": None}}
-    past = (TUE - timedelta(days=11)).isoformat()
+    past_day = TUE - timedelta(days=11)
+    past = past_day.isoformat()
     new_state = await first_plan.schedule_blocks(_freq_state(deadline=past), config)
-    notice = next((w for w in new_state["schedule_warnings"] if past in w), None)
+    # 날짜는 ISO 가 아니라 "7월 3일" 로 말한다(planB-11).
+    label = f"{past_day.month}월 {past_day.day}일"
+    notice = next((w for w in new_state["schedule_warnings"] if label in w), None)
     assert notice is not None, "지난 마감 고지가 warnings 에 있어야 한다"
+    assert past not in notice
     assert "이미 지난 날짜" in notice
     assert "새로 정해주시면" in notice
 
@@ -550,7 +554,7 @@ def test_daily_overload_notice_does_not_invent_a_deadline() -> None:
         [_draft(day, 20, 60)], **kwargs, horizon="2026-09-30"
     )
     assert with_deadline is not None
-    assert "마감(2026-09-30)까지 담으려면" in with_deadline  # 있으면 날짜까지 밝힌다
+    assert "마감(9월 30일)까지 담으려면" in with_deadline  # 있으면 날짜까지 밝힌다(ISO 아님)
 
 
 # ── 하루 상한이 세션 길이보다 작으면 안 된다 ──────────────────────────────

@@ -401,8 +401,11 @@ def schedule_actions_multiday(
     for idx, action, minutes, si, n in leftovers:
         if not _try_place(action, minutes, n, _target_day_index(idx), respect_cap=False):
             label = f"{action.title} ({si + 1}/{n})" if n > 1 else action.title
+            # 제목 뒤에 '을(를)' 을 붙이지 않는다 — 받침을 알 수 없는 제목에 조사를 고르지 못해
+            # 개발자용 표기가 그대로 나갔다(planB-11). 뒤 문장은 `first_plan._UNPLACED_MARKER` 와
+            # 맞물려 있어 그대로 둔다.
             warnings.append(
-                f"'{label}' 을(를) 배치할 가용 시간을 찾지 못했어요. 다른 시간으로 옮겨볼까요?"
+                f"'{label}' — 배치할 가용 시간을 찾지 못했어요. 다른 시간으로 옮겨볼까요?"
             )
 
     # 시각순 정렬 후 분할 카드의 (i/n) 라벨을 **실제 시각 순서대로** 부여한다 → 뒤 세션이 피크 밖

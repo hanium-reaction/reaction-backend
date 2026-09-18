@@ -1024,7 +1024,10 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         warnings = [*warnings, out_of_cycle_note]
     # 회차 세션으로 마감까지 채웠으면 그 사실을 밝힌다 — 내용까지 지어낸 게 아님을 알 수 있게.
     extended = first_plan_adapter.coverage_extended_warning(
-        state.get("coverage_extended", 0), outcome.horizon, max_weeks=state["max_plan_weeks"]
+        state.get("coverage_extended", 0),
+        outcome.horizon,
+        max_weeks=state["max_plan_weeks"],
+        target_date=start_day,
     )
     if extended and not placeholder_plan:
         warnings = [*warnings, extended]

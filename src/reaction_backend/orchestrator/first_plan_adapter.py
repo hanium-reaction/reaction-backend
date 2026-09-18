@@ -191,6 +191,40 @@ def materials_for_prompt(note: str | None, *, fetched: str | None = None) -> str
 _DEFERRED_GOALS_SHOWN = 3
 
 
+def format_title_list(titles: Sequence[str], *, limit: int = _DEFERRED_GOALS_SHOWN) -> str:
+    """제목 목록 → "'A' · 'B' · 'C' 외 N개" — 안내 문구가 목록을 싣는 **한 가지** 모양.
+
+    ⚠️ **이 결과 뒤에 조사를 붙이지 않는다.** 은/는·을/를은 마지막 글자의 받침에 따라
+    갈리는데 목록 끝은 사용자·LLM 이 지은 제목이거나 '외 N개' 라 받침을 알 수 없다. 예전엔
+    다섯 곳이 제각기 `{listed}는` 을 붙여 "'토익 900점' · '운동'는" 같은 틀린 문장이 첫 계획
+    화면에 나갔다(planB-11·journey-9). 목록은 "…: {목록} — …" 처럼 절 끝이나 콜론 뒤에만 둔다
+    (`missing_milestones_notice` 가 먼저 쓰던 문형).
+    """
+    shown = list(titles)[:limit]
+    rest = len(titles) - len(shown)
+    return " · ".join(f"'{t}'" for t in shown) + (f" 외 {rest}개" if rest > 0 else "")
+
+
+def ko_date(value: date | str | None, *, today: date | None = None) -> str:
+    """날짜 → "10월 15일" (해가 `today` 와 다르면 "2027년 8월 30일"). 안내 문구 전용.
+
+    예전엔 ISO 문자열("2026-10-15 까지고")을 그대로 문장에 끼워 넣었다(planB-11) — 화면이
+    개발자용 표기를 보여 주는 셈이다. 날짜로 읽히지 않는 값은 받은 그대로 돌려준다.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        try:
+            day = date.fromisoformat(value)
+        except ValueError:
+            return value
+    else:
+        day = value
+    if today is not None and day.year != today.year:
+        return f"{day.year}년 {day.month}월 {day.day}일"
+    return f"{day.month}월 {day.day}일"
+
+
 def other_goals_deferred_notice(outcome: InterviewOutcome) -> str | None:
     """계획이 **가장 무거운 목표 하나에만** 집중했음을 알린다. 목표가 하나면 None.
 
@@ -210,12 +244,9 @@ def other_goals_deferred_notice(outcome: InterviewOutcome) -> str | None:
         return None
     heaviest = next((g for g in real if g.is_heaviest), real[0])
     others = [g.title for g in real if g is not heaviest]
-    shown = others[:_DEFERRED_GOALS_SHOWN]
-    rest = len(others) - len(shown)
-    listed = " · ".join(f"'{t}'" for t in shown) + (f" 외 {rest}개" if rest else "")
     return (
         f"이번 계획은 '{heaviest.title}' 한 가지에 집중했어요. "
-        f"{listed}는 이번 계획에 넣지 않았어요 — 다음 계획에서 다룰 수 있어요."
+        f"이번 계획에 넣지 않은 목표: {format_title_list(others)} — 다음 계획에서 다룰 수 있어요."
     )
 
 
@@ -1119,23 +1150,23 @@ def missing_milestones_notice(missing: list[str], *, confirmed: int) -> str | No
     """
     if not missing:
         return None
-    listed = " · ".join(f"'{t}'" for t in missing[:3])
-    more = f" 외 {len(missing) - 3}개" if len(missing) > 3 else ""
     return (
         f"확정하신 중간 목표 {confirmed}개 중 이번 계획에 아직 넣지 않은 게 있어요 — "
-        f"{listed}{more}. 한 번에 4주까지만 세우고 나머지는 다음 계획에서 이어받거든요. "
+        f"{format_title_list(missing)}. 한 번에 4주까지만 세우고 나머지는 다음 계획에서 이어받거든요. "
         "지금 다 담고 싶으면 계획 분량을 늘리거나 중간 목표를 더 굵게 묶어보세요."
     )
 
 
 def waiting_steps_notice(dropped: list[str]) -> str | None:
-    """대기 단계를 세션으로 만들지 않았음을 알리는 문구 — 조용히 빼지 않는다."""
+    """대기 단계를 세션으로 만들지 않았음을 알리는 문구 — 조용히 빼지 않는다.
+
+    제목 뒤에 조사를 붙이지 않는다(`format_title_list`).
+    """
     if not dropped:
         return None
-    listed = " · ".join(f"'{t}'" for t in dropped[:3])
-    more = f" 외 {len(dropped) - 3}개" if len(dropped) > 3 else ""
     return (
-        f"{listed}{more}는 상대의 처리를 기다리는 단계라 오늘 할 일로 만들지 않았어요 — "
+        "상대의 처리를 기다리는 단계라 오늘 할 일로 만들지 않은 것: "
+        f"{format_title_list(dropped)} — "
         "계획의 큰 그림에는 남아 있고, 때가 되면 재계획에서 이어받아요."
     )
 
@@ -1195,11 +1226,9 @@ def out_of_cycle_notice(dropped: list[str]) -> str | None:
     """
     if not dropped:
         return None
-    listed = " · ".join(f"'{t}'" for t in dropped[:3])
-    more = f" 외 {len(dropped) - 3}개" if len(dropped) > 3 else ""
     return (
-        f"{listed}{more}는 이번 계획에 넣지 않았어요 — 지금 구간에서 하기엔 앞선 단계가 "
-        "먼저예요. 이어지는 주기에서 받아요."
+        f"이번 계획에 넣지 않은 단계: {format_title_list(dropped)} — 지금 구간에서 하기엔 "
+        "앞선 단계가 먼저예요. 이어지는 주기에서 받아요."
     )
 
 
@@ -1396,16 +1425,18 @@ def horizon_coverage_notice(
     # 캡 판정은 올림(그 주 수만큼 '필요' 하므로), 사용자에게 보여줄 숫자는 반올림
     # (64일을 '약 10주' 라고 하면 과장이라 '약 9주' 로 읽히게).
     weeks_to_deadline = max(1, -(-days_to_deadline // 7))
+    deadline_label = ko_date(deadline, today=target_date)
+    last_label = ko_date(last_planned_day, today=target_date)
     if weeks_to_deadline > max_weeks:
         return (
-            f"마감({outcome.horizon})까지는 약 {round(days_to_deadline / 7)}주인데, "
+            f"마감({deadline_label})까지는 약 {round(days_to_deadline / 7)}주인데, "
             "한 번에 세우는 계획은 "
-            f"{max_weeks}주까지만 잡아요. 그래서 이번 계획은 {last_planned_day} 까지고, "
+            f"{max_weeks}주까지만 잡아요. 그래서 이번 계획은 {last_label}까지고, "
             "그 뒤는 매주 재계획에서 진행 상황을 보고 이어서 채웁니다 — 빠뜨린 게 아니에요."
         )
     return (
-        f"이번 계획은 {last_planned_day} 까지예요 — 이 목표를 나눈 분량이 거기까지라서요. "
-        f"마감({outcome.horizon})까지 남은 기간은 매주 재계획에서 이어집니다. "
+        f"이번 계획은 {last_label}까지예요 — 이 목표를 나눈 분량이 거기까지라서요. "
+        f"마감({deadline_label})까지 남은 기간은 매주 재계획에서 이어집니다. "
         "지금 더 촘촘히 하고 싶으면 계획 분량을 올려서 다시 만들어 보세요."
     )
 
@@ -1428,7 +1459,8 @@ def overdue_deadline_notice(
         else ""
     )
     return (
-        f"적어주신 마감({horizon})이 이미 지난 날짜라, 그 날짜에 맞추면 오늘 하루에 전부 "
+        f"적어주신 마감({ko_date(horizon, today=start_day)})이 이미 지난 날짜라, "
+        "그 날짜에 맞추면 오늘 하루에 전부 "
         f"몰아넣게 돼요. 대신{span} 따라잡는 흐름으로 잡았어요. "
         "언제까지 끝내고 싶은지 새로 정해주시면 그 기준으로 다시 세울게요."
     )
@@ -1458,7 +1490,11 @@ def decompose_fallback_notice(reason: str | None) -> str | None:
 
 
 def coverage_extended_warning(
-    added: int, horizon: str | None, *, max_weeks: int = _MAX_PLAN_WEEKS
+    added: int,
+    horizon: str | None,
+    *,
+    max_weeks: int = _MAX_PLAN_WEEKS,
+    target_date: date | None = None,
 ) -> str | None:
     """회차 세션으로 보충했음을 알리는 문구 — 내용까지 지어낸 게 아님을 분명히 한다.
 
@@ -1470,10 +1506,28 @@ def coverage_extended_warning(
     마감 없는 습관형도 보충 대상이라 horizon 이 없을 수 있다 — 그때 "마감까지" 라고 쓰면
     없는 마감을 지어내는 셈이라, 계획 지평(`max_weeks`, 기본 4주 · 만다라 유래 목표는
     2주) 기준으로 말한다.
+
+    **마감이 계획 지평보다 멀어도 같다** (planB-9). 보충은 `max_weeks` 까지만 붙는데 예전엔
+    마감이 있기만 하면 "2027-08-30까지 채우려고" 라고 해, 같은 화면의 "이번 계획은 10월
+    12일까지" (`horizon_coverage_notice`)와 맞부딪쳤다. 마감이 지평 안(같은 올림 주 수 규칙)에
+    있을 때만 마감 날짜를 말한다. `target_date` 를 모르면 종전대로 마감을 쓴다(하위호환).
     """
     if added <= 0:
         return None
-    until = f"{horizon}" if horizon else f"이번 계획 구간({max_weeks}주)"
+    until = f"이번 계획 구간({max_weeks}주)"
+    if horizon:
+        try:
+            deadline: date | None = date.fromisoformat(horizon)
+        except ValueError:
+            deadline = None
+        if deadline is not None and (
+            target_date is None
+            or (
+                deadline >= target_date
+                and max(1, -(-(deadline - target_date).days // 7)) <= max_weeks
+            )
+        ):
+            until = ko_date(deadline, today=target_date)
     return (
         f"{until}까지 채우려고 '이어가기' 회차 {added}개를 덧붙였어요. "
         "아직 내용은 비어 있어요 — 지금 정하면 안 해 본 걸 정하는 셈이라서요. "
@@ -1609,7 +1663,7 @@ def daily_overload_notice(
     hours = totals[worst] / 60
     tail = f" (이런 날이 {len(over)}일 있어요)" if len(over) > 1 else ""
     reason = (
-        f"마감({horizon})까지 담으려면 이만큼이 필요해서예요"
+        f"마감({ko_date(horizon, today=worst)})까지 담으려면 이만큼이 필요해서예요"
         if horizon
         else "이번 계획 분량을 담으려면 이만큼이 필요해서예요"
     )
@@ -3076,15 +3130,15 @@ async def _park_tier_overflow_on_approval(
 def tier_park_notice(demoted: list[str]) -> str | None:
     """tier 한도 초과로 parked 로 내린 목표를 알리는 문구 (#371) — 조용히 내리지 않는다.
 
-    `waiting_steps_notice`/`out_of_cycle_notice` 와 같은 원칙·형식.
+    `waiting_steps_notice`/`out_of_cycle_notice` 와 같은 원칙·형식. 한도는 목표 화면과 같은
+    말(집중·유지·보류)로 적는다 — 예전엔 'Focus 3 · Maintain 5'·'parked' 같은 내부 표기가
+    그대로 나갔다(planB-11).
     """
     if not demoted:
         return None
-    listed = " · ".join(f"'{t}'" for t in demoted[:3])
-    more = f" 외 {len(demoted) - 3}개" if len(demoted) > 3 else ""
     return (
-        f"{listed}{more}는 집중/유지 한도(Focus 3 · Maintain 5)를 넘어 대기(parked)로 "
-        "옮겼어요 — 목표 화면에서 자리를 만들면 다시 올릴 수 있어요."
+        "집중 목표 3개·유지 목표 5개 한도를 넘어 보류로 옮긴 목표: "
+        f"{format_title_list(demoted)} — 목표 화면에서 자리를 만들면 다시 올릴 수 있어요."
     )
 
 
