@@ -201,6 +201,7 @@ async def login_with_google(
     # 검증은 Google 공개키를 HTTPS 로 가져오는 **동기** 호출이다 — 이벤트 루프에서 그대로
     # 부르면 그동안 다른 모든 사용자의 요청이 멈춘다(단일 워커). 스레드로 내린다.
     claims = await asyncio.to_thread(verify_google_id_token, body.id_token)
+    profile = GoogleProfile(email=claims.email, name=claims.name)
     existing = await user_repo.get_by_email(claims.email)
 
     if existing is None:
@@ -212,18 +213,15 @@ async def login_with_google(
                 code_row = await _validate_new_signup(
                     body, user_repo=user_repo, invite_repo=invite_repo
                 )
-                user = await user_repo.upsert_from_google(
-                    GoogleProfile(email=claims.email, name=claims.name),
-                )
+                user = await user_repo.upsert_from_google(profile)
                 if code_row is not None:
                     await invite_repo.mark_used(code_row, used_by_user_id=user.id)
-                await session.commit()
             else:
-                user = existing
+                user = await user_repo.touch_login(existing, profile)
+            await session.commit()
     else:
-        user = await user_repo.upsert_from_google(
-            GoogleProfile(email=claims.email, name=claims.name),
-        )
+        # 이미 읽은 행을 그대로 갱신한다 — upsert_from_google 은 email 로 한 번 더 조회한다.
+        user = await user_repo.touch_login(existing, profile)
         await session.commit()
 
     access = issue_access_token(user.id)

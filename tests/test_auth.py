@@ -742,3 +742,37 @@ def test_google_login_verifies_off_the_event_loop(
 
     assert resp.status_code == 200
     assert ran_on_loop == [False]
+
+
+def test_existing_user_login_looks_up_email_once(
+    auth_client: TestClient,
+    fake_invite_code_repo: FakeInviteCodeRepo,
+    fake_user_repo: FakeUserRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """기존 사용자 로그인은 이미 읽은 행을 갱신한다 — 같은 email 조회를 반복하지 않는다 (auth-15).
+
+    실 `UserRepo.upsert_from_google` 은 안에서 email 로 한 번 더 조회한다 — 기존 사용자
+    경로가 그걸 부르면 로그인마다 같은 SELECT 가 두 번 나간다(fake 는 dict 조회라 안 보인다).
+    """
+    _login(auth_client, fake_invite_code_repo)
+    lookups: list[str] = []
+    upserts: list[str] = []
+    original_get = fake_user_repo.get_by_email
+    original_upsert = fake_user_repo.upsert_from_google
+
+    async def _counting_get(email: str) -> Any:
+        lookups.append(email)
+        return await original_get(email)
+
+    async def _counting_upsert(profile: Any) -> Any:
+        upserts.append(profile.email)
+        return await original_upsert(profile)
+
+    monkeypatch.setattr(fake_user_repo, "get_by_email", _counting_get)
+    monkeypatch.setattr(fake_user_repo, "upsert_from_google", _counting_upsert)
+    resp = auth_client.post("/auth/google", json={"idToken": "stub"})
+
+    assert resp.status_code == 200
+    assert lookups == ["demo@reaction.local"]
+    assert upserts == []  # 이미 읽은 행을 touch_login 으로 갱신
