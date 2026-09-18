@@ -947,3 +947,26 @@ def test_reinterview_asks_the_season_again(
 
     again = client.post("/interview/sessions").json()
     assert again["currentQuestion"]["slotKey"] == "identity.season"  # 역할은 이월, 학기는 다시
+
+
+def test_start_is_refused_once_the_daily_interview_limit_is_reached(
+    client: TestClient, fake_interview_repo: FakeInterviewRepo, monkeypatch: Any
+) -> None:
+    """일일 인터뷰 한도에 닿았으면 시작부터 429 로 알린다 (interview-14).
+
+    고치기 전엔 시작만 한도 검사를 건너뛰어, 첫 질문(LLM 호출)은 받고 그 뒤 모든 답이 429 로
+    실패했다. 거절된 시작은 세션을 만들지도, 진행 중 세션을 닫지도 않는다.
+    """
+    from reaction_backend.safety import endpoint_rate_limit
+
+    async def _exhausted(*_args: Any, **kwargs: Any) -> None:
+        raise endpoint_rate_limit.EndpointCallLimitExceeded(kwargs["module"], used=60, limit=60)
+
+    monkeypatch.setattr(aiClient, "run", _stub())
+    monkeypatch.setattr(endpoint_rate_limit, "check", _exhausted)
+
+    res = client.post("/interview/sessions")
+    assert res.status_code == 429
+    assert res.json()["code"] == "RATE_LIMIT_DAILY_CALLS_EXCEEDED"
+    assert res.headers["Retry-After"].isdigit()
+    assert fake_interview_repo._sessions == {}

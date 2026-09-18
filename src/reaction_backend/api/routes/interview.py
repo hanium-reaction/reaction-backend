@@ -584,6 +584,10 @@ async def start_session(
     동시성 lock(ADR-0005 §7.6, kind 스코프) 안에서 검사+생성해 다중 디바이스 race 를 막는다.
     """
     kind = body.kind if body else "plan"
+    # 시작도 첫 질문 생성에 LLM 을 부르고 그 호출이 같은 일일 한도에 잡힌다. 여기서 막지 않으면
+    # 한도에 닿은 사용자가 첫 질문까지는 보고, 그 뒤 **모든 답이** 실패했다 — 시작에서 바로
+    # 알려 준다(답 제출·재개와 같은 429, 같은 Retry-After). `enforce` 는 세기만 하고 늘리지 않는다.
+    await endpoint_rate_limit.enforce(session, user_id=user.id, module="interview")
     async with user_agent_lock(session, user.id, _lock_agent(kind)):
         stale = await repo.get_active_session(user.id, kind=kind)
         if stale is not None:

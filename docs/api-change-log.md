@@ -58,6 +58,12 @@
   고칠 칸이 없어, 8월의 '방학' 이 9월 재인터뷰와 계획에 계속 남았다. 재인터뷰의
   `ambiguityScore` 가 그만큼(1) 커질 수 있다. 역할(`identity.role`) 등 나머지 이월은 그대로.
 
+### 인터뷰 시작도 일일 호출 상한을 본다
+
+- `POST /interview/sessions` 가 `answers`/`next-question` 과 같은 일일 상한을 검사해, 넘었으면
+  429 `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(+ `Retry-After`)를 준다. 예전엔 시작만 열려 있어 첫
+  질문을 받은 뒤 모든 답이 실패했다. 에러 코드·envelope 는 기존 그대로.
+
 ### FE 에 미치는 것
 
 - `next-question` 응답에 `endReason` 이 올 수 있다 — `answers` 의 종료 응답과 같은 분기로
@@ -67,6 +73,9 @@
   사용자의 [충분해요] 에만 — 그래야 몇 문항만 답한 세션이 '조기 종료' 로 굳지 않는다.
 - 앱을 다시 열어 `onboardingState=ONBOARDING_CONFIRM` 으로 목표 분류 화면에 들어오면, 메모리의
   outcome 이 없을 수 있다 — `GET /goals`(인터뷰가 저장한 잠정 목표)로 채우면 된다.
+- `RATE_LIMIT_DAILY_CALLS_EXCEEDED` 는 아직 FE 문구 표에 없어 "요청 처리 중 오류" 로 보인다 —
+  "오늘 이용 가능한 횟수를 다 썼어요. 자정 이후에 이어서 할 수 있어요." 처럼 매핑하고
+  `Retry-After` 를 쓰면 된다. 인터뷰 시작에서도 이 코드가 올 수 있다.
 
 ---
 

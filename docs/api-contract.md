@@ -285,7 +285,11 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 - 궁극목표 세션 완료는 계획 목표 영속 경로(`materialize_goals`/`supersede_proposed_goals`)를 타지 않는다 — 직전 계획 인터뷰의 잠정 목표가 지워지지 않는다.
 - 구현 상태(#6, #6-B): 엔진+영속화 배선 + 단일 활성 세션(restart-wins, kind 별) + 동시성 lock(kind 별) + 궁극목표 인터뷰(kind="ultimate") 완료. **후속**: 재조립 시 transient 상태(stall_count·used_fallback) 영속. `POST /goals/ultimate`(U1, `UltimateGoalOutcome` → `Goal` 영속)는 `goal_nodes.tree_kind` 도입(§6 후속 PR)과 함께 배선된다.
 - `answers`/`next-question`(LLM 호출) 은 사용자별 일일 호출 상한 대상 — 초과 시 429
-  `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(§1.10, #325).
+  `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(§1.10, #325). **`POST /interview/sessions`(시작)도 같은
+  상한으로 막는다**(v2.30-interview) — 첫 질문 생성도 LLM 을 불러 같은 한도에 잡히는데, 시작만
+  열려 있어 한도에 닿은 사용자가 첫 질문을 받고 그 뒤 모든 답이 429 로 실패했다. 거절된
+  시작은 세션을 만들지도, 진행 중 세션을 닫지도 않는다. `finish` 는 막지 않는다(끝내기는
+  언제나 가능해야 한다).
 
 ---
 
