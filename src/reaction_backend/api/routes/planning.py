@@ -693,13 +693,29 @@ async def edit_block(
     if block is None:
         raise _block_not_found()
 
-    new_start = snap_to_15min(_parse_block_dt(body.start_at, "startAt"))
-    if body.end_at is not None:
-        new_end = snap_to_15min(_parse_block_dt(body.end_at, "endAt"))
+    raw_start = _parse_block_dt(body.start_at, "startAt")
+    raw_end = _parse_block_dt(body.end_at, "endAt") if body.end_at is not None else None
+    new_start = snap_to_15min(raw_start)
+    if raw_end is not None:
+        new_end = snap_to_15min(raw_end)
     else:
         new_end = new_start + (block.end_at - block.start_at)  # 길이 보존
 
-    if new_end <= new_start:
+    # 이미 시작했거나 끝낸 블록은 **시간을 못 옮긴다** (planA-9). 옮기면 수행 기록이 미래로
+    # 가고, 카드 날짜(target_date)가 따라 움직여 오늘 끝낸 카드가 오늘 화면에서 사라졌다.
+    # 제목·목표만 바꾸는 편집(시각은 그대로 보냄)은 허용한다 — 그때는 시각·출처를 건드리지 않는다.
+    locked = block.block_status in ("started", "finished")
+    if locked:
+        same_time = raw_start == block.start_at and (raw_end is None or raw_end == block.end_at)
+        if not same_time and (new_start, new_end) != (block.start_at, block.end_at):
+            raise ApiError(
+                ErrorCode.PLAN_INVALID_TIME,
+                "이미 시작했거나 끝낸 일정은 옮길 수 없어요. 제목이나 목표만 바꿀 수 있어요.",
+                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                field="startAt",
+            )
+        new_start, new_end = block.start_at, block.end_at
+    elif new_end <= new_start:
         raise ApiError(
             ErrorCode.PLAN_INVALID_TIME,
             "종료 시각이 시작 시각보다 늦어야 해요.",
@@ -707,14 +723,17 @@ async def edit_block(
             field="endAt",
         )
 
-    conflicts = await repo.list_overlapping(user.id, new_start, new_end, exclude_block_id=block.id)
-    if conflicts:
-        raise ApiError(
-            ErrorCode.PLAN_BLOCK_CONFLICT,
-            "그 시간에 이미 다른 일정이 있어요.",
-            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-            field="startAt",
+    if not locked:
+        conflicts = await repo.list_overlapping(
+            user.id, new_start, new_end, exclude_block_id=block.id
         )
+        if conflicts:
+            raise ApiError(
+                ErrorCode.PLAN_BLOCK_CONFLICT,
+                "그 시간에 이미 다른 일정이 있어요.",
+                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                field="startAt",
+            )
 
     action = await action_repo.get_by_id(user.id, block.action_item_id)
     # 목표(category)/제목 변경을 action_item 에 반영 — 미지정 필드는 유지. 정책 검사·응답이
@@ -725,23 +744,23 @@ async def edit_block(
         if body.title is not None and body.title.strip():
             action.title = body.title.strip()
     category = action.category if action is not None else "other"
-    policies = await policy_repo.list_active(user.id)
-    violated = find_policy_violation(to_kst(new_start), to_kst(new_end), category, policies)
-    if violated is not None:
-        raise ApiError(
-            ErrorCode.POLICY_VIOLATION,
-            f"이 시간대는 '{violated}' 정책과 겹쳐요.",
-            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-            field="startAt",
-        )
-
-    block.start_at = new_start
-    block.end_at = new_end
-    block.source = "user_edit"
+    if not locked:
+        policies = await policy_repo.list_active(user.id)
+        violated = find_policy_violation(to_kst(new_start), to_kst(new_end), category, policies)
+        if violated is not None:
+            raise ApiError(
+                ErrorCode.POLICY_VIOLATION,
+                f"이 시간대는 '{violated}' 정책과 겹쳐요.",
+                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                field="startAt",
+            )
+        block.start_at = new_start
+        block.end_at = new_end
+        block.source = "user_edit"
     # 카드의 target_date 는 자기 블록(가장 이른 활성 블록)의 날짜를 따른다 (#222).
     # 블록을 다른 날로 옮기면 오늘 아젠다도 그 날로 따라가야 한다 — 아젠다는
     # target_date 로 조회하므로, 안 옮기면 카드가 옛 날짜에 유령으로 남는다.
-    if action is not None:
+    if action is not None and not locked:
         siblings = await repo.list_by_action_item(user.id, action.id)
         active_starts = [
             to_kst(b.start_at)
