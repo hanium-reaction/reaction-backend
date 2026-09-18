@@ -54,6 +54,7 @@ from reaction_backend.orchestrator.plan_scheduler import PlanAction, PlanWindow
 from reaction_backend.repositories.goal_repo import GoalRepo
 from reaction_backend.repositories.recovery_repo import RecoveryOutcomeContext
 from reaction_backend.repositories.review_repo import TopFailureContext
+from reaction_backend.safety import banned_words
 from reaction_backend.schemas.common import now_kst, to_kst
 from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome, TimeRange
 from reaction_backend.schemas.planning import (
@@ -863,6 +864,75 @@ def drop_waiting_steps(goal_plan: GoalDecomposition) -> tuple[GoalDecomposition,
         return goal_plan, []
     kept = [a for a in goal_plan.action_items if not _WAITING_TITLE_RE.search(a.title)]
     return goal_plan.model_copy(update={"action_items": kept}), dropped
+
+
+def _user_phrase_pairs(phrases: Sequence[str | None]) -> list[tuple[str, str]]:
+    """사용자 문구 → (금지어 치환이 만든 모양, 원문) 쌍. 치환에 안 걸리는 문구는 빠진다.
+
+    긴 것부터 돌려준다 — 한 문구가 다른 문구를 품으면(목표 제목 ⊂ 마일스톤 제목) 긴 쪽을
+    먼저 되돌려야 짧은 쪽이 긴 쪽의 일부만 바꿔 놓지 않는다.
+    """
+    pairs: list[tuple[str, str]] = []
+    for phrase in phrases:
+        if not phrase:
+            continue
+        filtered = banned_words.enforce(phrase).text
+        if filtered != phrase and (filtered, phrase) not in pairs:
+            pairs.append((filtered, phrase))
+    return sorted(pairs, key=lambda p: len(p[0]), reverse=True)
+
+
+def _restore(text: str, pairs: Sequence[tuple[str, str]]) -> str:
+    for filtered, original in pairs:
+        if filtered in text:
+            text = text.replace(filtered, original)
+    return text
+
+
+def restore_user_phrases(
+    goal_plan: GoalDecomposition, phrases: Sequence[str | None]
+) -> GoalDecomposition:
+    """금지어 치환이 **사용자가 직접 쓴 문구**까지 바꿔 놓은 자리를 원문으로 되돌린다 (planB-3).
+
+    금지어 필터(DevBaseline §4.2)는 `aiClient.run` 이 LLM 출력 전체에 건다. 그런데 분해는
+    사용자 목표 제목을 root·branch·카드 제목에 **그대로 옮겨 쓰고**, 룰 폴백도 '{제목} N회차'
+    를 만든다. 그래서 '포기하지 않고 영어 회화 끝내기' 가 '잠깐 쉬어가는하지 않고 영어 회화
+    끝내기' 로 저장돼 목표 화면에 떴다(미러 실측) — 사용자에겐 앱이 자기 말을 망가뜨린 것이다.
+
+    **필터를 끄지 않는다** — 사용자 원문이 치환된 **정확한 모양**만 원문으로 돌린다. 원문에
+    없던 LLM 문장('포기하지 마세요')은 그대로 치환된 채 남는다. 사용자 문구는 필터 대상이
+    아니라는 계약(api-contract: "사용자 문구는 금지어 필터를 거치지 않는다")을 지키는 것이지
+    AI 문장의 필터를 우회하는 게 아니다(AGENTS §2).
+
+    치환어는 전부 원어보다 길거나 같아서 되돌리면 길이가 줄기만 한다 — 제목 길이 제한을
+    새로 넘길 일이 없다.
+    """
+    pairs = _user_phrase_pairs(phrases)
+    if not pairs:
+        return goal_plan
+    nodes = [n.model_copy(update={"title": _restore(n.title, pairs)}) for n in goal_plan.goal_nodes]
+    items = [
+        a.model_copy(
+            update={"title": _restore(a.title, pairs), "first_step": _restore(a.first_step, pairs)}
+        )
+        for a in goal_plan.action_items
+    ]
+    return goal_plan.model_copy(update={"goal_nodes": nodes, "action_items": items})
+
+
+def restore_user_phrases_in_milestones(
+    milestones: Sequence[MilestoneDraft], phrases: Sequence[str | None]
+) -> list[MilestoneDraft]:
+    """`restore_user_phrases` 의 마일스톤(Stage A)판 — 제목·요약에서 사용자 원문을 되돌린다."""
+    pairs = _user_phrase_pairs(phrases)
+    if not pairs:
+        return list(milestones)
+    return [
+        m.model_copy(
+            update={"title": _restore(m.title, pairs), "summary": _restore(m.summary, pairs)}
+        )
+        for m in milestones
+    ]
 
 
 # 확정 마일스톤 제목 대조용 정규화 — 공백만 걷어낸다. LLM 이 "React 기초" → "React 기초 문법"

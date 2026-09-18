@@ -560,6 +560,19 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
     # 과다 생성해도, 밴드로 가두고 주당 시간만큼으로 잘라 이번 주 분량이 weekly_hours 에 맞게
     # 한다(#per-goal). 목표별 입력이 없으면 no-op.
     goal_plan = result.value
+    heaviest_goal = next(
+        (g for g in state["outcome"].core_goals if g.is_heaviest),
+        state["outcome"].core_goals[0] if state["outcome"].core_goals else None,
+    )
+    if goal_plan is not None and heaviest_goal is not None:
+        # 금지어 치환이 사용자가 쓴 목표 제목·확정 마일스톤 제목까지 바꿔 놓았으면 원문으로
+        # 되돌린다(planB-3) — LLM·룰 폴백 두 경로 모두 여기를 지난다. 마일스톤 제목도 넣는
+        # 이유: 사용자가 고친 제목이 치환되면 branch 제목과 어긋나 `missing_milestone_titles`
+        # 가 멀쩡한 단계를 '빠졌다' 고 알린다.
+        goal_plan = first_plan_adapter.restore_user_phrases(
+            goal_plan,
+            [heaviest_goal.title, *(m.title for m in state.get("milestones") or [])],
+        )
     extended = 0
     waiting_dropped: list[str] = []
     out_of_cycle: list[str] = []
@@ -577,10 +590,6 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
         # 자연스럽지 않아서다. 그런 목표에서 걷어내면 되채울 수단이 없어 4주 계획이
         # 이틀치로 무너지고, `volume_shortfall_warning` 은 **배치된 구간** 기준이라
         # 침묵한다(계획이 짧아지면 그 안에서는 비율이 맞아 보인다). 실측: 12세션 → 3세션.
-        heaviest_goal = next(
-            (g for g in state["outcome"].core_goals if g.is_heaviest),
-            state["outcome"].core_goals[0] if state["outcome"].core_goals else None,
-        )
         can_refill = bool(heaviest_goal and (heaviest_goal.frequency_per_week or 0) > 0)
         if can_refill:
             goal_plan, out_of_cycle = first_plan_adapter.drop_out_of_cycle_branches(
