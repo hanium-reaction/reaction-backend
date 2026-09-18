@@ -43,6 +43,20 @@ class ProviderValidationError(ProviderError):
     """Structured Output 이 schema 검증을 통과하지 못함."""
 
 
+def validation_error_summary(exc: ValidationError) -> str:
+    """검증 실패를 **내용 없이** 요약한다 — `필드경로:오류종류` 목록.
+
+    pydantic 의 기본 메시지(`str(exc)`)는 `input_value=…` 로 입력 값을 그대로 싣는다. 그 값은
+    LLM 출력이고, LLM 출력은 사용자의 자유서술 답(건강·개인사)을 옮겨 쓰곤 한다. 이 요약은
+    `llm_runs.error`(평문 컬럼)·로그로 가므로 값은 빼고 어디가 왜 틀렸는지만 남긴다.
+    """
+    parts = [
+        f"{'.'.join(str(p) for p in err['loc']) or '<root>'}:{err['type']}"
+        for err in exc.errors(include_input=False, include_url=False, include_context=False)
+    ]
+    return f"{exc.title}: " + "; ".join(parts)
+
+
 class ProviderRecitationBlocked(ProviderError):
     """Google 이 **저작권 낭송**(`finish_reason=RECITATION`)으로 응답을 통째로 막았다.
 

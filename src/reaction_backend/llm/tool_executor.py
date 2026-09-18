@@ -44,7 +44,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.config import get_settings
@@ -61,6 +61,7 @@ from reaction_backend.llm.provider import (
     ProviderValidationError,
     generate_grounded_text,
     generate_structured,
+    validation_error_summary,
 )
 from reaction_backend.observability.correlation import get_trace_id
 from reaction_backend.prompts import registry as prompt_registry
@@ -344,8 +345,34 @@ class LLMToolExecutor:
                 banned_hits=hits,
             )
 
-        # 치환 결과를 schema 로 재검증 — 안전.
-        sanitized = schema.model_validate(sanitized_payload)
+        # 치환 결과를 schema 로 재검증. 치환어는 원어보다 길어서('실패'→'한 번 멈춤', +3~7자)
+        # 길이 상한에 딱 맞춘 제목이 넘칠 수 있다 — 만다라 축 ≤10자·칸 ≤16자에서 '실패노트 정리'
+        # → '한 번 멈춤노트 정리' 로 실측(llm-3). 예전엔 ValidationError 가 그대로 올라가 500
+        # 이 났고 트랜잭션 롤백으로 llm_runs 행·토큰 기록까지 사라졌다. 치환 전 값으로 돌아가면
+        # 금지어가 나가므로(AGENTS §2) 폴백으로 내린다.
+        try:
+            sanitized = schema.model_validate(sanitized_payload)
+        except ValidationError as exc:
+            return await self._fallback(
+                fallback,
+                module=module,
+                schema=schema,
+                protected=user_texts,
+                prompt_id=resolved_prompt_id,
+                prompt_version=prompt_version,
+                reason="banned",
+                error=f"banned_revalidate_failed: {validation_error_summary(exc)}",
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                tokens_in=provider_resp.tokens_in,
+                tokens_out=provider_resp.tokens_out,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                log_payloads=log_payloads,
+                input_summary=prompt_text if log_payloads else None,
+                output_summary=validated.model_dump_json() if log_payloads else None,
+                banned_hits=hits,
+            )
 
         # ── 5) 톤 게이트 (근거 대장 §4 S6) ──────────────────────────
         # banned_words 는 명사 1:1 치환이라 "당신이 게을러서" 류의 문장 구조 문제는 못
@@ -796,7 +823,7 @@ class LLMToolExecutor:
             value.model_dump(), protected=protected or ()
         )
         if fallback_hits:
-            value = schema.model_validate(sanitized_fallback)
+            value = _validate_within_limits(schema, sanitized_fallback)
 
         _log.warning(
             "llm_fallback",
@@ -850,6 +877,50 @@ class LLMToolExecutor:
             latency_ms=latency_ms,
             banned_hits=banned_hits,
         )
+
+
+def _validate_within_limits[T: BaseModel](schema: type[T], payload: Any) -> T:
+    """금지어 치환을 거친 룰 폴백 값을 schema 로 되살린다 — 길이 초과는 잘라서 맞춘다 (llm-3).
+
+    치환어가 원어보다 길어 룰 폴백의 제목도 상한을 넘을 수 있다: 축 '실패 원인 분석하기' 의
+    칸 '실패 원인 분석하기 1단계'(15자) → '한 번 멈춤 원인 분석하기 1단계'(18자 > 16).
+    폴백의 폴백은 없으므로 여기서 500 이 나면 사용자는 아무것도 못 받는다. 치환 전으로
+    되돌리면 금지어가 나가니(AGENTS §2) **상한에 맞춰 자른다** — 룰 문구가 조금 잘리는
+    쪽이 오류보다 낫다. 길이 말고 다른 이유로 틀리면 종전처럼 그대로 올린다.
+    """
+    for _ in range(3):
+        try:
+            return schema.model_validate(payload)
+        except ValidationError as exc:
+            fixed = False
+            for err in exc.errors(include_input=False, include_url=False):
+                max_length = (err.get("ctx") or {}).get("max_length")
+                if err["type"] == "string_too_long" and isinstance(max_length, int):
+                    fixed = _truncate_at(payload, err["loc"], max_length) or fixed
+            if not fixed:
+                raise
+    return schema.model_validate(payload)
+
+
+def _truncate_at(payload: Any, loc: tuple[int | str, ...], max_length: int) -> bool:
+    node = payload
+    for key in loc[:-1]:
+        try:
+            node = node[key]
+        except (KeyError, IndexError, TypeError):
+            return False
+    last = loc[-1] if loc else None
+    try:
+        current = node[last]
+    except (KeyError, IndexError, TypeError):
+        return False
+    if not isinstance(current, str) or len(current) <= max_length:
+        return False
+    try:
+        node[last] = current[:max_length].rstrip() or current[:max_length]
+    except TypeError:  # 튜플 등 불변 컨테이너 — 못 고친다(호출부가 원래 오류를 올린다).
+        return False
+    return True
 
 
 async def _resolve_fallback[T: BaseModel](fallback: Fallback[T], *, schema: type[T]) -> T:
