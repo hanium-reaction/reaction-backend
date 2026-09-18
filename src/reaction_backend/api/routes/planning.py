@@ -1022,8 +1022,10 @@ async def _attach_goal_resources(
 def _parse_draft_edits(body: FirstPlanApproveRequest | None) -> list[DraftBlockEdit] | None:
     """승인 본문의 편집본 → 도메인 값. 본문이 없거나 `blocks` 가 없으면 None(초안 그대로).
 
-    시각은 PATCH 블록 편집과 같은 규칙(naive 면 KST, 15분 snap)으로 맞춘다. 형식 오류는
-    결정적이라 lock·재시도 전에 거른다.
+    시각은 naive 면 KST 로 보고 KST aware 로만 맞춘다 — **15분 snap 은 하지 않는다**.
+    초안 시각 자체가 15분 격자가 아니라(쉬는 시간 10분·수업 끝 직후 시작), 여기서 snap 하면
+    손대지 않은 블록이 초안과 달라져 "옮긴 블록"으로 잡혔다(`apply_draft_edits` 참고).
+    형식 오류는 결정적이라 lock·재시도 전에 거른다.
     """
     if body is None or body.blocks is None:
         return None
@@ -1032,8 +1034,8 @@ def _parse_draft_edits(body: FirstPlanApproveRequest | None) -> list[DraftBlockE
         edits.append(
             DraftBlockEdit(
                 origin_id=b.origin_id,
-                start=to_kst(snap_to_15min(_parse_block_dt(b.start, "blocks"))),
-                end=to_kst(snap_to_15min(_parse_block_dt(b.end, "blocks"))),
+                start=to_kst(_parse_block_dt(b.start, "blocks")),
+                end=to_kst(_parse_block_dt(b.end, "blocks")),
                 title=b.title,
             )
         )

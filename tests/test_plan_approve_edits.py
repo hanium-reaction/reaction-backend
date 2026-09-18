@@ -96,7 +96,9 @@ def _draft_actions() -> list[ActionItemDraft]:
     ]
 
 
-def _seed_two_card_draft(repo: FakePlanDraftRepo) -> UUID:
+def _seed_two_card_draft(
+    repo: FakePlanDraftRepo, blocks: list[ScheduledBlockPreview] | None = None
+) -> UUID:
     nodes = [
         GoalNodeDraft(
             node_id="root",
@@ -134,7 +136,7 @@ def _seed_two_card_draft(repo: FakePlanDraftRepo) -> UUID:
         "outcome": _outcome().model_dump(mode="json"),
         "goal_nodes": [n.model_dump(mode="json") for n in nodes],
         "action_items": [a.model_dump(mode="json") for a in _draft_actions()],
-        "blocks": [b.model_dump(mode="json") for b in _draft_blocks()],
+        "blocks": [b.model_dump(mode="json") for b in (blocks or _draft_blocks())],
         "warnings": [],
         "policy_violations": [],
         "generated_at": now_kst().isoformat(),
@@ -227,7 +229,144 @@ def test_apply_edits_rejects_unknown_origin_and_inverted_time() -> None:
     assert inverted.value.code == "PLAN_INVALID_TIME"
 
 
+# 스케줄러가 실제로 만드는 15분 격자 밖 초안 — 수업(09:00~10:50) 직후 시작, 쉬는 시간 10분 뒤
+# 2회차(:10 시작), 10분짜리 짧은 회차. 리뷰에서 재현된 세 경우를 한 초안에 담았다.
+def _unaligned_draft_blocks() -> list[ScheduledBlockPreview]:
+    return [
+        _preview("n1", _at(10, 50), title="토익 LC (1/2)"),
+        _preview("n2", _at(12, 40), dur=10, title="RC 파트 5"),
+        _preview("n1", _at(13, 10), title="토익 LC (2/2)"),
+    ]
+
+
+def _unchanged_edits(blocks: list[ScheduledBlockPreview]) -> list[dict[str, Any]]:
+    """FE 가 손대지 않은 초안을 그대로 돌려보내는 모양 — 받은 start/end·title 그대로."""
+    return [
+        {
+            "originId": b.origin_id,
+            "start": b.start.isoformat(),
+            "end": b.end.isoformat(),
+            "title": b.title,
+        }
+        for b in blocks
+    ]
+
+
+def test_apply_edits_keeps_unaligned_draft_times_and_marks_nothing_moved() -> None:
+    """**리뷰 회귀.** 15분 격자 밖 초안을 그대로 보내면 초안 시각 그대로이고 옮긴 블록이 없다.
+
+    예전엔 전부 15분 snap 한 뒤 초안과 비교해 10:50→10:45, 13:10→13:15, 12:40~12:50→
+    12:45~12:45 가 됐고, 모두 "옮긴 블록"으로 잡혀 다시 검사됐다.
+    """
+    draft = _unaligned_draft_blocks()
+    edited = apply_draft_edits(
+        blocks=draft,
+        action_items=_draft_actions(),
+        edits=[DraftBlockEdit(b.origin_id or "", b.start, b.end, b.title) for b in draft],
+    )
+    assert [(b.start, b.end, b.title) for b in edited.blocks] == [
+        (b.start, b.end, b.title) for b in draft
+    ]
+    assert edited.moved == []
+    assert edited.dropped_origin_ids == []
+
+
+def test_apply_edits_saves_a_moved_block_at_the_time_the_user_chose() -> None:
+    """옮긴 블록은 보낸 시각 그대로(15분 격자로 당기지 않는다) — 초안 화면이 10:50 블록을
+    한 시간 끌면 11:50 을 보여 주고, 사용자는 그 화면을 보고 승인한다. 초·밀리초는 뗀다."""
+    edited = apply_draft_edits(
+        blocks=_unaligned_draft_blocks(),
+        action_items=_draft_actions(),
+        edits=[
+            DraftBlockEdit("n1", _at(11, 50).replace(second=30), _at(12, 50), "토익 LC (1/2)"),
+            DraftBlockEdit("n2", _at(12, 40), _at(12, 50)),
+        ],
+    )
+    assert [(b.start, b.end) for b in edited.moved] == [(_at(11, 50), _at(12, 50))]
+    # 초안 그대로인 10분 회차는 10분 그대로 — 0분이 되거나 15분으로 늘지 않는다.
+    assert [(b.start, b.end) for b in edited.blocks if b.origin_id == "n2"] == [
+        (_at(12, 40), _at(12, 50))
+    ]
+
+
+def test_apply_edits_rejects_the_same_draft_block_sent_twice() -> None:
+    """같은 초안 칸을 두 번 보내면 422 — 옮긴 블록이 아니라 겹침 검사를 안 거치므로 여기서
+    막지 않으면 똑같은 블록 두 개가 저장된다."""
+    with pytest.raises(DraftEditError) as dup:
+        apply_draft_edits(
+            blocks=_draft_blocks(),
+            action_items=_draft_actions(),
+            edits=[_dedit("n2", _at(16)), _dedit("n2", _at(16))],
+        )
+    assert dup.value.code == "COMMON_VALIDATION_ERROR"
+
+
 # ─────────────────────────── 라우트 ───────────────────────────
+
+
+def _seed_class(repo: FakeFixedScheduleRepo, days: list[str], start: time, end: time) -> None:
+    s = FixedSchedule()
+    s.id = uuid4()
+    s.user_id = DEMO_USER_UUID
+    s.title = "자료구조 수업"
+    s.days_of_week = days
+    s.start_time = start
+    s.end_time = end
+    s.archived_at = None
+    repo._items[s.id] = s
+
+
+def test_approve_unchanged_unaligned_draft_saves_the_exact_draft_times(
+    client: TestClient,
+    fake_plan_draft_repo: FakePlanDraftRepo,
+    fake_fixed_schedule_repo: FakeFixedScheduleRepo,
+) -> None:
+    """**리뷰 회귀(라우트).** 수업(월 09:00~10:50) 직후 10:50 블록, 쉬는 시간 뒤 13:10 회차,
+    10분짜리 12:40~12:50 회차를 손대지 않고 그대로 승인 → 200, 초안 시각 그대로 저장.
+
+    예전엔 10:50 이 10:45 로 당겨져 422 PLAN_BLOCK_CONFLICT("…'자료구조 수업' 고정 일정과
+    겹쳐요"), 10분 회차는 12:45~12:45 가 돼 422 PLAN_INVALID_TIME 이었다.
+    """
+    cap = _CapturingSession()
+    _use_session(client, cap)
+    _seed_class(fake_fixed_schedule_repo, ["mon"], time(9, 0), time(10, 50))
+    draft = _unaligned_draft_blocks()
+    plan_id = _seed_two_card_draft(fake_plan_draft_repo, draft)
+
+    res = client.post(f"/plans/{plan_id}/approve", json={"blocks": _unchanged_edits(draft)})
+
+    assert res.status_code == 200, res.text
+    assert res.json()["activatedBlocks"] == 3
+    saved = sorted((b.start_at, b.end_at) for b in _persisted_blocks(cap))
+    assert saved == sorted((b.start, b.end) for b in draft)
+    stored = client.get(f"/plans/{plan_id}").json()
+    assert [(b["start"], b["end"]) for b in stored["blocks"]] == [
+        (b.start.isoformat(), b.end.isoformat()) for b in draft
+    ]
+
+
+def test_approve_moved_unaligned_block_is_saved_where_the_user_put_it(
+    client: TestClient,
+    fake_plan_draft_repo: FakePlanDraftRepo,
+    fake_fixed_schedule_repo: FakeFixedScheduleRepo,
+) -> None:
+    """월 10:50 블록을 화요일 같은 시각(화요일도 10:50 에 끝나는 수업)으로 옆으로 끌었다.
+    15분 snap 했다면 10:45 가 돼 수업과 겹친다며 422 였다 — 사용자가 본 10:50 그대로 200."""
+    cap = _CapturingSession()
+    _use_session(client, cap)
+    _seed_class(fake_fixed_schedule_repo, ["mon", "tue"], time(9, 0), time(10, 50))
+    draft = _unaligned_draft_blocks()
+    plan_id = _seed_two_card_draft(fake_plan_draft_repo, draft)
+    tue = _DAY + timedelta(days=1)
+    edits = _unchanged_edits(draft)
+    edits[0] = _edit("n1", _at(10, 50, day=tue), title="토익 LC (1/2)")
+
+    res = client.post(f"/plans/{plan_id}/approve", json={"blocks": edits})
+
+    assert res.status_code == 200, res.text
+    saved = sorted((b.start_at, b.end_at) for b in _persisted_blocks(cap))
+    assert (_at(10, 50, day=tue), _at(11, 50, day=tue)) in saved
+    assert (_at(12, 40), _at(12, 50)) in saved
 
 
 def test_approve_persists_the_edited_blocks_not_the_ai_draft(
