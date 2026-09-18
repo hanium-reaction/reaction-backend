@@ -6,7 +6,7 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 
 | 시각 | 작업 | 출력 |
 | --- | --- | --- |
-| 매일 06:00 | `daily_brief_precompute` — 헤드라인 + Big Rock 생성 (LLM 1회) + **오늘 블록 × Google 캘린더 겹침 힌트**(연결한 사용자만, freebusy 1회) | `daily_briefs` row |
+| 06~10시 15분 폴 | `daily_brief_precompute` — 헤드라인 + Big Rock 생성 (LLM 1회) + **오늘 블록 × Google 캘린더 겹침 힌트**(연결한 사용자만, freebusy 1회). 오늘 브리프가 이미 있으면 skip — 06:00 을 놓치거나 실패한 사용자만 다음 폴이 채운다 | `daily_briefs` row |
 | 19~23시 5분 폴 | `evening_reflection_notify` — 사용자별 설정 시각 이후 회고 알림 (pending 있을 때만, 게이트 enforce) | (외부) Web Push + `notification_sends` row |
 | 종일 5분 폴 | `pre_card_notify` — 2~7분 뒤 시작 블록 사전 알림 (opt-in, 게이트 enforce) | (외부) Web Push + `notification_sends` row |
 | 06~10시 5분 폴 | `morning_brief_notify` — 오늘이 anchor 인 PARK/CARRY_OVER 재관여 대상에게만(T2, 근거 대장 §6.2), `morning_brief` 클래스 재사용 | (외부) Web Push + `notification_sends` row |
@@ -44,11 +44,11 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 
 | 모듈 | 역할 |
 | --- | --- |
-| `sweeps.py` | **전체 활성 사용자 순회 wrapper** — `run_morning_brief_sweep` / `run_weekly_review_sweep`. per-user job 을 `user_repo.list_active()` 전체에 실행(개별 try/except 격리, 사용자 톤 반영). |
+| `sweeps.py` | **전체 활성 사용자 순회 wrapper** — `run_morning_brief_sweep` / `run_weekly_review_sweep`. per-user job 을 `user_repo.list_active()` 전체에 실행(사용자 톤 반영). `notify_sweeps` 와 같은 트랜잭션 규약(사용자 단위 commit + except rollback). |
 | `habit_instances.py` | **전체 활성 사용자 × 활성 습관 순회** — `run_habit_instances_sweep`. `notify_sweeps` 와 같은 트랜잭션 규약(사용자 단위 commit + except rollback). |
 | `runtime.py` | **APScheduler(AsyncIOScheduler) 등록** — `build_scheduler()` 가 11 job 을 KST cron 으로 add_job. job wrapper 가 1회용 세션·repo 를 만들어 sweep/전역 job 호출. |
 
-등록 시각: morning_brief=매일 06:00 · weekly_review=일요일 03:00 · interruption_resolver=6h ·
+등록 시각: morning_brief=06~10시 */15분 · weekly_review=일요일 03:00 · interruption_resolver=6h ·
 expire_drafts=6h · expire_reflections=매일 04:00 · expire_proposed_goals=매일 04:00 ·
 evening_reflection_notify=19~23시 */5분 · pre_card_notify=종일 */5분 ·
 morning_brief_notify=06~10시 */5분 · habit_instances=매일 00:05.
@@ -59,6 +59,12 @@ morning_brief_notify=06~10시 */5분 · habit_instances=매일 00:05.
 > 회수되지 않고 **그 주 전체가 인스턴스 없이 지나간다** — 이 job 이 고치려는 버그가 그대로
 > 재현된다. 월요일이 아닌 날은 get-or-create 가 no-op 이라 비용이 없고, 재기동 구멍을 하루
 > 안에 자가치유한다.
+
+> **사용자 순회 sweep 의 공통 규약** (`sweeps` · `notify_sweeps` · `habit_instances`): 사용자(블록)
+> 단위 commit, except 에서 rollback, 그리고 **순회는 미리 떠 둔 원시값(id 등)으로**. rollback 은
+> 세션이 들고 있던 ORM 객체를 전부 만료시키므로, 그 뒤 `user.id` 를 읽으면 비동기 세션이
+> `MissingGreenlet` 로 죽어 격리가 무너진다. fake 세션으로는 안 보이는 성질이라
+> `tests/test_scheduler_sweeps_real_db.py` 가 실 Postgres 로 고정한다.
 
 기동: `main.py` lifespan 이 **`SCHEDULER_ENABLED=true`** 일 때만 `build_scheduler().start()`.
 기본 OFF — 테스트/로컬은 안 돈다(데모는 시드로 커버).

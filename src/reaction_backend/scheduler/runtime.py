@@ -198,11 +198,18 @@ async def _pre_card_notify_job() -> None:
 def build_scheduler() -> AsyncIOScheduler:
     """cron job 을 등록한 (미기동) 스케줄러. 호출자가 `.start()`."""
     scheduler = AsyncIOScheduler(timezone=KST)
+    # 06~10시 15분 폴 — 예전엔 06:00 고정 1회(misfire_grace_time 기본 1초)였다. 브리프는 이
+    # job 말고는 만드는 곳이 없는데(`GET /today/agenda` 는 읽기만 한다), 배포 재기동·스케줄러
+    # 토글·루프 지연이 06:00 에 걸리면 그날은 **전원이 브리프 없이** 지나갔다. 이미 오늘
+    # 브리프가 있는 사용자는 job 이 즉시 건너뛰므로(`get_by_date`, idempotent) 폴의 추가 비용은
+    # 사용자당 조회 1번이고, 앞선 폴에서 실패하거나 놓친 사용자만 다음 폴이 채운다.
+    # misfire_grace_time 은 폴 간격(15분)보다 짧게 — weekly_review 폴과 같은 이유.
     scheduler.add_job(
         _morning_brief_job,
-        CronTrigger(hour=6, minute=0, timezone=KST),
+        CronTrigger(hour="6-10", minute="*/15", timezone=KST),
         id="morning_brief",
         replace_existing=True,
+        misfire_grace_time=600,
     )
     # 일요일 18~23시 30분 폴 — 예전엔 일요일 03:00 고정 1회였는데, `week_window()` 가 재는
     # 주 경계는 [월 00:00, 다음 월 00:00) 라 03:00 실행 시점엔 그 주 일요일 활동의 대부분이

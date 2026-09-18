@@ -113,17 +113,48 @@ async def test_sweep_isolates_one_user_failure(monkeypatch: pytest.MonkeyPatch) 
         return None
 
     monkeypatch.setattr(sweeps, "run_morning_brief_for_user", _flaky)
+    session = _FakeSession()
 
     result = await sweeps.run_morning_brief_sweep(
         NOW,
         user_repo=user_repo,
         action_repo=FakeActionItemRepo(),
         brief_repo=FakeDailyBriefRepo(),
-        session=_FakeSession(),
+        session=session,
     )
     assert result.total == 2
     assert result.ok == 1  # 한 명 실패해도 나머지 진행
     assert result.failed == 1
+    # 사용자 단위 commit + 실패 시 rollback — 배치 말미 일괄 commit 이면 한 사용자의 DB 예외가
+    # 세션을 aborted 로 남겨 전원의 브리프를 날린다(실 DB 재현: test_scheduler_sweeps_real_db).
+    assert session.commit_count == 1
+    assert session.rollback_count == 1
+
+
+@pytest.mark.asyncio
+async def test_weekly_review_sweep_commits_per_user_and_rolls_back_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_repo = FakeUserRepo()
+    good, bad = _user(), _user()
+    _seed_users(user_repo, [good, bad])
+
+    async def _flaky(user_id, week_start, now_kst_dt, **kwargs):  # noqa: ANN001, ANN003
+        if user_id == bad.id:
+            raise RuntimeError("boom")
+        return None
+
+    monkeypatch.setattr(sweeps, "run_weekly_review_for_user", _flaky)
+    session = _FakeSession()
+    sunday = datetime(2026, 6, 7, 20, 0, tzinfo=UTC)
+
+    result = await sweeps.run_weekly_review_sweep(
+        sunday, user_repo=user_repo, review_repo=FakeReviewRepo(), session=session
+    )
+
+    assert result == sweeps.SweepResult(total=2, ok=1, failed=1)
+    assert session.commit_count == 1
+    assert session.rollback_count == 1
 
 
 @pytest.mark.asyncio
@@ -157,6 +188,26 @@ def test_build_scheduler_registers_expected_jobs() -> None:
         "morning_brief_notify",
         "habit_instances",
     }
+
+
+def test_morning_brief_job_polls_the_morning_so_a_missed_run_is_recovered() -> None:
+    """브리프 생성이 **06~10시 15분 폴 KST** 로 돈다 — 06:00 한 번을 놓쳐도 그날이 비지 않는다.
+
+    회귀: 예전엔 06:00 고정 1회 + grace 1초라 배포 재기동·스케줄러 토글이 06:00 에 걸리면 그날
+    전원이 브리프 없이 지나갔다(브리프를 만드는 곳이 이 job 하나뿐). 폴이 안전한 건 job 이
+    같은 날 이미 있는 브리프를 건너뛰기 때문(`run_morning_brief_for_user` 의 `get_by_date`).
+    """
+    from reaction_backend.scheduler import runtime
+
+    job = next(j for j in runtime.build_scheduler().get_jobs() if j.id == "morning_brief")
+
+    assert job.func is runtime._morning_brief_job
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"] == "6-10", f"브리프 폴 시간대가 06~10시가 아니다: {fields}"
+    assert fields["minute"] == "*/15", f"브리프가 15분 폴이 아니다: {fields}"
+    assert str(job.trigger.timezone) == "Asia/Seoul"
+    # 폴 간격(15분=900초)보다 짧고 기본 1초보다 넉넉하게.
+    assert 600 <= job.misfire_grace_time < 900
 
 
 def test_expire_reflections_job_is_wired_to_the_right_function_and_time() -> None:
