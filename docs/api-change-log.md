@@ -76,6 +76,18 @@ AI 원안이 그대로 저장됐다 — 사용자는 캘린더에서야 알게 �
 있어요."). 지금 시각을 그대로 보내고 제목·목표만 바꾸는 편집은 200 이고 시각·`source` 는 그대로다.
 기존 에러 코드 재사용 — envelope 무변경. **FE(reaction-frontend 이슈)**: 시작/끝낸 블록은 끌기를 막는다.
 
+### `GET /plans/weekly` — 블록마다 `completionStatus` (additive)
+
+체크인은 결과와 무관하게 블록을 `finished` 로 닫아서, `blockStatus` 만으로는 끝냈는지 못 했는지
+알 수 없다. 주간 캘린더는 `'done'`/`'failed'` 를 기대해 '완료 N' 이 늘 0 이었고 실패한 회차에 표시가
+없었다. 이제 `WeeklyBlock.completionStatus: "done" | "partial_done" | "failed" | "over_done" | null`
+— 끝난 블록의 마지막 체크인 결과(블록 단위). 기존 필드는 그대로다.
+
+**FE 가 할 일(reaction-frontend 이슈).** `WeeklyCalendarScreen.weeklyToBlocks` 와
+`TodayScreen.weeklyBlockToTask` 를 한 헬퍼로: `finished` + `done`/`over_done`/`partial_done` → 완료,
+`finished` + `failed` → 실패, `scheduled`/`started` → 대기. 쓰이지 않는 `source === 'fixed'` 분기는
+지운다(서버 source 는 ai_plan/user_edit/recovery 뿐).
+
 ---
 
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)

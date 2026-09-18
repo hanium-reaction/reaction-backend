@@ -1872,6 +1872,8 @@ class FakeScheduledBlockRepo:
         self._blocks: dict[UUID, ScheduledBlock] = {}
         self._meta: dict[UUID, tuple[str, str, UUID | None]] = {}
         self._action_repo: FakeActionItemRepo | None = None
+        # 블록 → 마지막 체크인 결과 (실 repo 는 execution_events 를 읽는다).
+        self._completion: dict[UUID, str] = {}
 
     def link_actions(self, action_repo: FakeActionItemRepo) -> None:
         """재계획 조회(list_scheduled_between)가 ActionItem 을 되찾도록 action repo 를 연결."""
@@ -1900,6 +1902,15 @@ class FakeScheduledBlockRepo:
             and start_dt <= b.start_at < end_dt
         ]
         return sorted(rows, key=lambda r: r[0].start_at)
+
+    async def completion_by_block(self, user_id: UUID, block_ids: Any) -> dict[UUID, str]:
+        """블록별 마지막 체크인 결과 — `_completion` 에 시드한 값(진행 중은 실 repo 처럼 제외)."""
+        wanted = set(block_ids)
+        return {
+            bid: status
+            for bid, status in self._completion.items()
+            if bid in wanted and status != "in_progress" and self._blocks[bid].user_id == user_id
+        }
 
     async def get_block(self, user_id: UUID, block_id: UUID) -> ScheduledBlock | None:
         b = self._blocks.get(block_id)

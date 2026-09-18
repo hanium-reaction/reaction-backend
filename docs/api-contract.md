@@ -495,7 +495,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 | PATCH | `/plans/{planId}/blocks/{blockId}` | 15분 snap 직접 편집 (S15) — `startAt`(필수)/`endAt` 이동 + 선택 `category`/`title` 로 목표(색·분류)·제목 수정(블록의 action_item 갱신, 같은 액션 세션 공유; 미지원 category→`other`; 정책 검사는 새 category 로). 시작/끝낸 블록은 시간 이동 불가(422 `PLAN_INVALID_TIME`, v2.30-planA — 제목·목표만 편집 가능). ✅ #21-B |
 | POST | `/plans/{planId}/ai-edit` | 자연어 수정 (S16, P1) — diff 반환만, apply는 별도 |
 | POST | `/plans/{planId}/ai-edit/apply` | diff 적용 (사용자 승인 후) |
-| GET | `/plans/weekly?weekStart=YYYY-MM-DD` | 주간 그리드 (S14) — cancelled 블록(계획 교체로 취소 등)은 제외 ✅ #21-B. **v2.27**: 블록마다 `calendarConflict`(아직 시작 안 한 블록이 **지금** Google 캘린더 일정과 겹치는가) + 응답 최상단 `calendar: {status, checkedAt}` — §10 "캘린더 겹침" 과 같은 규칙 |
+| GET | `/plans/weekly?weekStart=YYYY-MM-DD` | 주간 그리드 (S14) — cancelled 블록(계획 교체로 취소 등)은 제외 ✅ #21-B. **v2.30-planA**: 블록마다 `completionStatus`(끝난 블록의 체크인 결과 done/partial_done/failed/over_done, 아니면 null). **v2.27**: 블록마다 `calendarConflict`(아직 시작 안 한 블록이 **지금** Google 캘린더 일정과 겹치는가) + 응답 최상단 `calendar: {status, checkedAt}` — §10 "캘린더 겹침" 과 같은 규칙 |
 
 > ⚠️ **블록은 날짜를 넘을 수 있다** (#252) — 활동 시간대가 자정을 넘는 사용자(예: 22:00~02:00)는
 > `22:00` 시작 → 다음 날 `01:00` 종료 같은 블록을 받는다. 주간 그리드에서는 `startAt` 기준 날짜에
@@ -591,7 +591,11 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 #21-B 구현 메모 (S14/S15 — 영속 `scheduled_blocks` 읽기/이동):
 - Plan 테이블 없음 — `planId` 는 주(週) 논리 식별자(`plan_<weekStart>`). 편집 권한은 `blockId`.
 - `GET /plans/weekly?weekStart=` — 그 주 월요일로 정규화(생략 시 이번 주). 7일 × `blocks[]`
-  (blockId/actionId/title/category/**goalId**/startAt/endAt/blockStatus/source/**calendarConflict**(v2.27)), KST 직렬화. 최상단 `calendar`(v2.27, §10 "캘린더 겹침").
+  (blockId/actionId/title/category/**goalId**/startAt/endAt/blockStatus/source/**calendarConflict**(v2.27)/**completionStatus**(v2.30-planA)), KST 직렬화. 최상단 `calendar`(v2.27, §10 "캘린더 겹침").
+  `blockStatus` 는 `scheduled`/`started`/`finished` 뿐이다(`done`/`failed` 는 없다) — 체크인은 결과와
+  무관하게 블록을 `finished` 로 닫는다. 완료·실패 구분은 `completionStatus`
+  (`done`/`partial_done`/`failed`/`over_done`, 끝난 블록의 마지막 체크인 결과 — **블록 단위**라
+  나뉜 회차마다 다를 수 있다. `finished` 가 아니거나 기록이 없으면 null).
   `goalId` = 블록이 매달린 action_item 의 goal FK(`goal_<uuid>`, 미연결이면 null) — FE 가
   블록을 목표 분류(집중/유지)·색상과 연결할 수 있게 한다 (마이그레이션 없음, 기존 컬럼 노출).
 - `PATCH /plans/{planId}/blocks/{blockId}` — `{ startAt, endAt? }`. **15분 snap**(가장 가까운 경계),

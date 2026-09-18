@@ -398,11 +398,18 @@ class _BlockFields(CamelModel):
     source: str
 
 
+# 체크인 결과 중 '끝남' 값 — `execution_events.completion_status` 에서 진행 중(in_progress)을 뺀 것.
+BlockCompletionStatus = Literal["done", "partial_done", "failed", "over_done"]
+
+
 class WeeklyBlock(_BlockFields):
     """주간 그리드의 스케줄 블록 한 칸."""
 
     # 아직 시작 안 한 이 블록이 **지금** Google 캘린더 일정과 겹치는가 (`domain/calendar_conflict`).
     calendar_conflict: bool = False
+    # 끝난 블록(`blockStatus='finished'`)의 체크인 결과 (planA-10, additive). `finished` 는
+    # 완료·실패 모두에 쓰여 그것만으로는 구분이 안 된다. 아직 안 끝났거나 기록이 없으면 null.
+    completion_status: BlockCompletionStatus | None = None
 
 
 class WeeklyPlanDay(CamelModel):

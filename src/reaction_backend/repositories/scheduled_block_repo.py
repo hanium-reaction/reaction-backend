@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
@@ -19,6 +20,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import ActionItem
+from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.session import get_db
 
@@ -53,6 +55,34 @@ class ScheduledBlockRepo:
         return [
             (block, title, category, goal_id) for block, title, category, goal_id in result.all()
         ]
+
+    async def completion_by_block(
+        self, user_id: UUID, block_ids: Collection[UUID]
+    ) -> dict[UUID, str]:
+        """블록별 **마지막 체크인 결과**(done/partial_done/failed/over_done) — 진행 중 제외.
+
+        블록 상태(`finished`)만으로는 끝냈는지 못 했는지 알 수 없다 — 체크인은 결과와 무관하게
+        블록을 `finished` 로 닫는다. 주간 그리드가 완료·실패를 구분해 그리려면 실행 기록의
+        결과가 필요하다(planA-10). 카드가 아니라 **블록** 단위다 — 긴 카드는 여러 세션 블록으로
+        나뉘고(#115) 회차마다 결과가 다르다. 한 블록에 기록이 여럿이면 가장 늦은 것.
+        """
+        if not block_ids:
+            return {}
+        stmt = (
+            select(ExecutionEvent.scheduled_block_id, ExecutionEvent.completion_status)
+            .where(
+                ExecutionEvent.user_id == user_id,
+                ExecutionEvent.scheduled_block_id.in_(list(block_ids)),
+                ExecutionEvent.completion_status != "in_progress",
+            )
+            .order_by(
+                ExecutionEvent.actual_end_at.asc().nulls_first(),
+                ExecutionEvent.created_at.asc(),
+            )
+        )
+        result = await self._session.execute(stmt)
+        # 오름차순이라 같은 블록의 늦은 기록이 앞선 것을 덮는다.
+        return dict(result.tuples().all())
 
     async def get_block(self, user_id: UUID, block_id: UUID) -> ScheduledBlock | None:
         stmt = select(ScheduledBlock).where(

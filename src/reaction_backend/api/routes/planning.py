@@ -126,6 +126,7 @@ from reaction_backend.schemas.mandala import (
 )
 from reaction_backend.schemas.planning import (
     ActionItemDraft,
+    BlockCompletionStatus,
     BlockEditRequest,
     BlockEditResponse,
     FirstPlanApproveRequest,
@@ -602,6 +603,7 @@ def _block_view(
     goal_id: UUID | None,
     *,
     calendar_conflict: bool = False,
+    completion_status: str | None = None,
 ) -> WeeklyBlock:
     return WeeklyBlock(
         block_id=f"{_BLOCK_PREFIX}{block.id}",
@@ -615,6 +617,7 @@ def _block_view(
         block_status=block.block_status,
         source=block.source,
         calendar_conflict=calendar_conflict,
+        completion_status=cast(BlockCompletionStatus | None, completion_status),
     )
 
 
@@ -642,6 +645,10 @@ async def get_weekly_plan(
         blocks=[(block.id, block.block_status, block.start_at, block.end_at) for block, *_ in rows],
         now=now_kst(),
     )
+    # 끝난 블록의 체크인 결과 — `finished` 만으로는 완료·실패가 구분되지 않는다(planA-10).
+    completion = await repo.completion_by_block(
+        user.id, [block.id for block, *_ in rows if block.block_status == "finished"]
+    )
     # 조회가 토큰을 갱신·회수했으면 확정한다 — freebusy 는 commit 하지 않는다(호출자 몫).
     await session.commit()
 
@@ -660,6 +667,9 @@ async def get_weekly_plan(
                     category,
                     goal_id,
                     calendar_conflict=block.id in calendar.keys,
+                    completion_status=(
+                        completion.get(block.id) if block.block_status == "finished" else None
+                    ),
                 )
             )
 
