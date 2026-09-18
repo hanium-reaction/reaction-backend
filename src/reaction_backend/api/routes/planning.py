@@ -1758,22 +1758,32 @@ _REPLAN_TUNING = replan.ReplanTuning(
 )
 
 
-async def _replan_tuning_for(user: User, repo: InterviewRepo) -> replan.ReplanTuning:
+async def _replan_outcome(user: User, repo: InterviewRepo) -> InterviewOutcome | None:
+    """재계획이 First Plan 과 같은 개인화를 쓰도록 최근 '정상 종료' 인터뷰 outcome 을 복구한다.
+
+    설정에서 고친 활동 시간대(`_apply_edited_availability`)까지 얹은 값이다. 완료 인터뷰가
+    없거나 투영이 실패하면 None — 호출부가 기본값으로 폴백한다(재계획을 막지 않는다).
+    튜닝과 활동 시간대(busy)가 **같은 outcome 하나**를 봐야 해서 한 번만 구해 둘 다에 쓴다.
+    """
+    latest = await repo.get_latest_finished(user.id)
+    if latest is None:
+        return None
+    try:
+        return _apply_edited_availability(await _project_session_outcome(latest, repo), user)
+    except Exception:  # noqa: BLE001 — 투영 실패 시 재계획을 막지 말고 기본값으로 진행
+        return None
+
+
+def _replan_tuning_for(outcome: InterviewOutcome | None) -> replan.ReplanTuning:
     """재계획 스케줄러 튜닝을 **First Plan 과 동일하게** outcome 에서 유도한다.
 
     재계획이 세션 길이(goals.session_length)·선호 시간(goals.preferred_time)을 무시하고
     60분 청크·free-time 아무데나 배치하면, First Plan 에서 넣은 개인화가 매주 리셋된다.
-    최근 '정상 종료' 인터뷰 outcome 을 복구해 `schedule_blocks` 와 같은 헬퍼로 튜닝을 조립한다.
-    outcome 을 못 얻으면(완료 인터뷰 없음·투영 실패) 기존 기본값으로 폴백한다.
+    `schedule_blocks` 와 같은 헬퍼로 튜닝을 조립한다. outcome 이 없으면 기본값으로 폴백한다.
 
     density 는 재계획 시점에 요청 본문이 없어 알 수 없으므로 daily cap 은 기본(standard)을 쓴다.
     """
-    latest = await repo.get_latest_finished(user.id)
-    if latest is None:
-        return _REPLAN_TUNING
-    try:
-        outcome = _apply_edited_availability(await _project_session_outcome(latest, repo), user)
-    except Exception:  # noqa: BLE001 — 투영 실패 시 재계획을 막지 말고 기본 튜닝으로 진행
+    if outcome is None:
         return _REPLAN_TUNING
     return replan.ReplanTuning(
         peak_windows=tuple(first_plan_adapter.peak_windows_for_plan(outcome)),
@@ -1797,6 +1807,42 @@ def _active_or_default_policies(rows: list[Any]) -> list[Any]:
     if rows:
         return list(rows)
     return [_RulePolicy("sleep", {"start_time": "23:00", "end_time": "08:00"})]
+
+
+def _edited_window_sleep(user: User) -> list[Any] | None:
+    """설정에서 정한 활동 시간대(`focus_mode_preferences`)의 여집합을 수면으로 — 인터뷰가 없을 때.
+
+    인터뷰 outcome 이 있으면 `time_policies_from_outcome` 이 같은 값을 이미 반영한다
+    (`_apply_edited_availability`). 인터뷰 없이 설정만 해 둔 사용자가 23~08 기본값에 묶이지
+    않게 하는 폴백이다. "24:00" 은 자정(00:00)으로 읽는다(설정 검증의 자정 계약).
+    설정이 없으면 None(→ 기본값), 하루 종일(시작=끝)이면 빈 목록 — 사용자가 정한 대로 둔다.
+    """
+    fmp = user.focus_mode_preferences or {}
+    start, end = fmp.get("activity_start"), fmp.get("activity_end")
+    if not isinstance(start, str) or not isinstance(end, str) or not start or not end:
+        return None
+    start = "00:00" if start == "24:00" else start
+    end = "00:00" if end == "24:00" else end
+    if start == end:
+        return []
+    return [_RulePolicy("sleep", {"start_time": end, "end_time": start})]
+
+
+def _replan_policies(db_rows: list[Any], outcome: InterviewOutcome | None, user: User) -> list[Any]:
+    """재계획이 피할 시간 정책 — **첫 계획과 같은 조립**(planA-5/calendar-4).
+
+    첫 계획은 `time_policies_from_outcome(outcome)`(활동 시간대의 여집합 = 수면, no_touch)에
+    DB 정책을 더한다. 재계획은 DB 정책만 보고, 없으면 23:00~08:00 기본값을 썼다 — FE 에는
+    time_policies 를 만드는 경로가 없어 실사용자는 **늘 기본값**이었다. 그래서 저녁에만 된다고
+    답한 학생도, 새벽형도 재계획만 누르면 08시부터 블록이 깔렸다. outcome 이 있으면 첫 계획과
+    똑같이 조립하고, 없으면 설정의 활동 시간대 → 그마저 없으면 기본값 순으로 폴백한다.
+    """
+    if outcome is not None:
+        return [*first_plan_adapter.time_policies_from_outcome(outcome), *db_rows]
+    edited = _edited_window_sleep(user)
+    if edited is not None:
+        return [*edited, *db_rows]
+    return _active_or_default_policies(db_rows)
 
 
 def _block_minutes(block: ScheduledBlock) -> int:
@@ -1925,7 +1971,8 @@ async def generate_replan(
 
     - 대상: 다음 주 이후 미착수 블록의 액션 + 활성 블록 없는 planned 백로그(수락한 회복 포함).
       과거·시작/완료·user_edit 블록은 불변. 실패 원본은 미래 블록이 없어 자동 제외.
-    - busy = 확정(시작/완료·user_edit) 블록 + DB 시간정책 + **고정일정(#112 정합)**
+    - busy = 확정(시작/완료·user_edit) 블록 + **활동 시간대 밖(인터뷰·설정, 첫 계획과 같은
+      조립 — `_replan_policies`)** + DB 시간정책 + **고정일정(#112 정합)**
       + **Google 캘린더 일정**(첫 계획과 같은 다섯 번째 소스, ADR-0009 D4).
     - 각 새 블록에 '교체할 옛 블록 id'(replacesBlockId)를 실어, 승인이 blanket-cancel 없이
       그 블록만 현재 상태로 재조정 취소하게 한다(#117). 산출물은 Draft — 자동 적용 금지.
@@ -2059,7 +2106,8 @@ async def generate_replan(
         # 않도록 스캔 창(1년)으로 상한. 그보다 먼 카드는 다음 재계획이 다시 당겨온다.
         deadline = min(deadline, window_start + timedelta(days=365))
 
-        policies = _active_or_default_policies(await policy_repo.list_active(user.id))
+        outcome = await _replan_outcome(user, repo)
+        policies = _replan_policies(list(await policy_repo.list_active(user.id)), outcome, user)
         fixed: list[Any] = list(await fixed_repo.list_active(user.id))
         committed = replan.committed_busy_from_blocks(
             [(b.start_at, b.end_at) for b in committed_blocks]
@@ -2086,7 +2134,7 @@ async def generate_replan(
             horizon_day=deadline,
             candidates=candidates,
             committed_busy=committed,
-            tuning=await _replan_tuning_for(user, repo),
+            tuning=_replan_tuning_for(outcome),
         )
         # 연결해 둔 사용자에게만 알린다 — 연결 안 한 사용자에게 매번 말하면 알림 피로다.
         calendar_limit = window_start + timedelta(days=freebusy.MAX_RANGE_DAYS)
