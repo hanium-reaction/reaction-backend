@@ -1484,6 +1484,49 @@ def horizon_coverage_notice(
     )
 
 
+def same_day_deadline_notice(
+    horizon: str | None,
+    *,
+    start_day: date,
+    today: date,
+    placed: int,
+    unplaced: int,
+) -> str | None:
+    """마감이 계획 첫날(대개 오늘)이라 그 하루에 몰아 잡았거나 다 못 넣었을 때의 안내 (planB-10).
+
+    지난 마감(#231)은 창을 펴서 따라잡게 하지만 **마감 = 첫날** 은 그 안전장치 밖이었다.
+    창이 그 하루로 줄어, 사용자가 '주 3회' 를 골랐어도 오늘 밤에 세 번을 연달아 잡거나
+    (미러: 18:00~20:55), 활동 시간이 이미 지났으면 블록 0개에 "'…' — 배치할 가용 시간을
+    찾지 못했어요. 다른 시간으로 옮겨볼까요?" 만 세 줄 나갔다 — 옮길 일정이 없는데 옮기라는 말이다.
+
+    마감 날짜는 날짜 선택기에서도, '이번 달' 같은 말을 정규화한 값에서도 올 수 있어 사용자가
+    의도한 게 아닐 수 있다. 그래서 나무라지 않고 무슨 일이 있었는지와 새 마감을 정하는 길만
+    말한다(`overdue_deadline_notice` 와 같은 결). 한 장만 잡히고 빠진 게 없으면 말할 게 없다.
+    """
+    if not horizon:
+        return None
+    try:
+        deadline = date.fromisoformat(horizon)
+    except ValueError:
+        return None
+    if deadline != start_day or (unplaced <= 0 and placed <= 1):
+        return None
+    because = (
+        "마감이 오늘이라"
+        if start_day == today
+        else f"마감({ko_date(deadline, today=today)})이 계획을 시작하는 날이라"
+    )
+    ask = "언제까지 끝내고 싶은지 새로 정해 주시면 그 기준으로 다시 세울게요."
+    if placed <= 0:
+        return f"{because} 그날 남은 활동 시간 안에는 세션을 잡을 자리가 없었어요 — {ask}"
+    if unplaced > 0:
+        return (
+            f"{because} 그날 남은 활동 시간에 들어가는 {placed}개만 잡았고 {unplaced}개는 "
+            f"자리가 없었어요 — {ask}"
+        )
+    return f"{because} {placed}개 세션을 그날 안에 이어서 잡았어요 — 부담되면 {ask}"
+
+
 def overdue_deadline_notice(
     horizon: str | None, *, start_day: date, last_planned_day: date | None
 ) -> str | None:

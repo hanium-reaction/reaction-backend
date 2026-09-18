@@ -1176,3 +1176,59 @@ async def test_overload_notice_uses_the_same_cap_as_the_scheduler() -> None:
     overload = [w for w in new_state["schedule_warnings"] if "평소 기준" in w]
     assert overload, new_state["schedule_warnings"]
     assert "평소 기준(3시간)" in overload[0]
+
+
+# ── planB-10 마감이 계획 첫날이면 몰아넣거나 '옮겨볼까요?' 만 되풀이하지 않는다 ─────────
+
+
+async def test_deadline_today_with_no_time_left_says_one_thing(monkeypatch: Any) -> None:
+    """마감=오늘 + 활동 시간이 이미 끝났으면 블록 0개에 경고는 원인을 말하는 한 줄뿐이다.
+
+    미러 실측: "'LC 취약 유형 집중 분석' 을(를) 배치할 가용 시간을 찾지 못했어요. 다른
+    시간으로 옮겨볼까요?" 가 세 줄 — 옮길 블록이 하나도 없는데 옮기라고 했다.
+    """
+    monkeypatch.setattr(first_plan, "now_kst", lambda: _at(TUE, 23, 40))  # 활동창 06:00~23:30 뒤
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+
+    new_state = await first_plan.schedule_blocks(
+        _freq_state(deadline=TUE.isoformat(), sessions=3), config
+    )
+
+    assert new_state["scheduled_blocks"] == []
+    warnings = new_state["schedule_warnings"]
+    assert len(warnings) == 1, warnings
+    assert "마감이 오늘이라" in warnings[0] and "새로 정해 주시면" in warnings[0]
+    assert "옮겨볼까요" not in warnings[0]
+
+
+async def test_deadline_today_crammed_into_tonight_is_disclosed(monkeypatch: Any) -> None:
+    """마감=오늘이면 고른 빈도와 달리 오늘 안에 몰아 잡은 사실을 말한다(예전엔 경고 0개)."""
+    monkeypatch.setattr(first_plan, "now_kst", lambda: _at(TUE, 17, 50))
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+
+    new_state = await first_plan.schedule_blocks(
+        _freq_state(deadline=TUE.isoformat(), sessions=3), config
+    )
+
+    blocks = new_state["scheduled_blocks"]
+    assert len(blocks) == 3 and {b.start.astimezone(KST).date() for b in blocks} == {TUE}
+    notice = [w for w in new_state["schedule_warnings"] if "마감이 오늘이라" in w]
+    assert len(notice) == 1 and "3개 세션을 그날 안에" in notice[0]
+
+
+def test_same_day_deadline_notice_is_silent_otherwise() -> None:
+    """마감이 첫날이 아니거나, 한 장만 잡히고 빠진 게 없으면 말하지 않는다."""
+    kwargs: dict[str, Any] = {"start_day": TUE, "today": TUE}
+    notice = first_plan_adapter.same_day_deadline_notice
+    assert notice(None, placed=0, unplaced=3, **kwargs) is None
+    assert notice(THU.isoformat(), placed=0, unplaced=3, **kwargs) is None
+    assert notice(TUE.isoformat(), placed=1, unplaced=0, **kwargs) is None
+    partial = notice(TUE.isoformat(), placed=2, unplaced=1, **kwargs)
+    assert partial is not None and "2개만 잡았고 1개는" in partial
+    # 미래 첫날이면 '오늘' 이라고 하지 않는다.
+    future = first_plan_adapter.same_day_deadline_notice(
+        THU.isoformat(), start_day=THU, today=TUE, placed=0, unplaced=2
+    )
+    assert future is not None and "오늘" not in future and "7월 16일" in future

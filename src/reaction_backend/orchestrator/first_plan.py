@@ -927,12 +927,24 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
     # 세션 하나가 활동창의 연속 가용 길이보다 길어 어디에도 안 들어간 경우(#252):
     # 배치 실패는 **전부 같은 원인**이므로, 항목마다 같은 문장을 반복하는 대신 원인과 다음
     # 행동을 담은 한 줄로 바꾼다(실측: 같은 경고 12줄 → 1줄). 실패가 없으면 아무것도 안 한다.
+    unplaced_count = sum(1 for w in warnings if _UNPLACED_MARKER in w)
     narrow_window = first_plan_adapter.narrow_activity_window_notice(outcome)
     if narrow_window and warnings:
         warnings = [
             narrow_window,
             *(w for w in warnings if _UNPLACED_MARKER not in w),
         ]
+    # 마감이 계획 첫날이면 창이 그 하루로 줄어 전부 몰리거나 못 들어간다(planB-10). 없는
+    # 블록을 '옮겨볼까요?' 로 되풀이하지 않고 원인과 다음 행동을 한 줄로 말한다 — 위와 같은 수법.
+    same_day = first_plan_adapter.same_day_deadline_notice(
+        outcome.horizon,
+        start_day=start_day,
+        today=now.date(),
+        placed=len(placed),
+        unplaced=unplaced_count,
+    )
+    if same_day:
+        warnings = [same_day, *(w for w in warnings if _UNPLACED_MARKER not in w)]
 
     # 캘린더를 연결해 뒀는데 못 읽은 경우만 알린다 (ADR-0009 D4). 연결하지 않은 사용자
     # (대다수)에게는 아무 말도 하지 않는다 — 캘린더는 선택 기능이라 매번 권유가 되면
