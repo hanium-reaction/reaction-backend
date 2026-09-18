@@ -599,14 +599,20 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
   `goalId` = 블록이 매달린 action_item 의 goal FK(`goal_<uuid>`, 미연결이면 null) — FE 가
   블록을 목표 분류(집중/유지)·색상과 연결할 수 있게 한다 (마이그레이션 없음, 기존 컬럼 노출).
 - `PATCH /plans/{planId}/blocks/{blockId}` — `{ startAt, endAt? }`. **15분 snap**(가장 가까운 경계),
-  `endAt` 생략 시 기존 길이 보존. 시간 충돌 422 `PLAN_BLOCK_CONFLICT`(cancelled·자기 제외),
-  정책 위반 422 `POLICY_VIOLATION`(sleep/lunch/late_night_block 윈도우), 잘못된 시각 422
+  `endAt` 생략 시 기존 길이 보존. 시간 충돌 422 `PLAN_BLOCK_CONFLICT`(cancelled·자기 제외,
+  v2.30-planA 부터 **고정 일정(`fixed_schedules`)과의 겹침도** — "그 시간에는 '<수업>' 고정 일정이
+  있어요…"), 정책 위반 422 `POLICY_VIOLATION`(sleep/lunch/late_night_block 윈도우 + v2.30-planA
+  **no_touch**(요일 포함). 메시지는 한국어 — 정책 코드를 그대로 싣지 않는다), 잘못된 시각 422
   `PLAN_INVALID_TIME`, 블록 없음 404 `PLAN_BLOCK_NOT_FOUND`. 적용 시 `source='user_edit'`.
   **이미 시작/끝낸 블록(`blockStatus` started/finished)은 시간을 못 옮긴다**(v2.30-planA) — 다른
   시각이면 422 `PLAN_INVALID_TIME`("이미 시작했거나 끝낸 일정은 옮길 수 없어요…"). 지금 시각을
   그대로 보내고 `title`/`category` 만 바꾸는 편집은 200 이며, 이때 시각·`source` 는 그대로다.
-- 정책 판정은 순수 함수 `orchestrator/plan_edit.py`. `no_touch`/`break_min`/freebusy·fixed_schedule
-  충돌은 후속. DB 마이그레이션 없음.
+- 정책 판정은 순수 함수 `orchestrator/plan_edit.py`. 고정 일정·`no_touch` 는 생성·승인과 같은 busy
+  전개(`fixed_schedules_to_busy`/`time_policies_to_busy`)로 본다(v2.30-planA). `break_min`·캘린더
+  겹침은 편집 때 막지 않는다(캘린더는 `calendarConflict` 로 표시). DB 마이그레이션 없음.
+- `GET /plans/weekly` 의 `days[].fixedSchedules`(v2.30-planA, additive): 그날의 고정 일정
+  `[{title, startAt, endAt}]`(KST, 자정을 넘는 일정은 그날 안의 조각으로). 편집이 막는 시간을
+  그리드에 보이게 하려는 것 — FE 는 옮길 수 없는 칸으로 그린다.
 - `generate`/`mandala/subgoals`/`mandala/generate`(LLM 호출) 은 사용자별 일일 호출
   상한 대상(module="planning" 공유) — 초과 시 429 `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(§1.10, #325).
 

@@ -129,6 +129,17 @@ AI 원안이 그대로 저장됐다 — 사용자는 캘린더에서야 알게 �
 9/22(화) 19:00" 처럼 보여 준다. `windowStart` 는 "9월 21일(월)부터" 로 쓰고, 승인 응답의
 `skippedBlocks > 0` 이면 "이미 시작했거나 옮긴 N개는 그대로 뒀어요" 를 알린다.
 
+### 주간 캘린더 — 고정 일정이 보이고, 그 위로는 블록을 못 옮긴다
+
+- `GET /plans/weekly`: `days[].fixedSchedules: [{title, startAt, endAt}]` (additive) — 그날의 고정
+  일정(수업·알바). 예전엔 그리드에 안 보여 사용자가 수업 시간 위로 블록을 끌었다.
+- `PATCH /plans/{planId}/blocks/{blockId}`: 고정 일정과 겹치면 422 `PLAN_BLOCK_CONFLICT`("그 시간에는
+  '자료구조 수업' 고정 일정이 있어요…"), 노터치 시간과 겹치면 422 `POLICY_VIOLATION`. 예전엔 200 이었고
+  그 블록은 `user_edit` 이라 재계획도 고치지 않았다. 정책 위반 메시지에 영문 정책 코드('sleep')를
+  싣던 것도 한국어로 바꿨다. 기존 에러 코드 재사용.
+- **FE(reaction-frontend 이슈)**: `fixedSchedules` 를 끌 수 없는 칸으로 그린다. `source === 'fixed'`
+  분기는 지운다(서버 블록에는 그런 source 가 없다).
+
 ---
 
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)

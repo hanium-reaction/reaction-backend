@@ -450,12 +450,25 @@ class WeeklyBlock(_BlockFields):
     completion_status: BlockCompletionStatus | None = None
 
 
+class WeeklyFixedSchedule(CamelModel):
+    """그날의 고정 일정(수업·알바) 한 칸 — 옮길 수 없는 시간 (planA-13, additive).
+
+    블록 편집은 이 시간과 겹치면 422 로 막는다. 그리드에 안 보이면 사용자는 막히는 이유를 모른다.
+    자정을 넘는 일정은 그날 안의 조각으로 나뉘어 온다(예: 22:00~02:00 → 00:00~02:00, 22:00~24:00).
+    """
+
+    title: str
+    start_at: KstDatetime
+    end_at: KstDatetime
+
+
 class WeeklyPlanDay(CamelModel):
     """하루치 — 그리드/네비게이터 단위."""
 
     date: date
     weekday: str  # monday..sunday
     blocks: list[WeeklyBlock] = Field(default_factory=list)
+    fixed_schedules: list[WeeklyFixedSchedule] = Field(default_factory=list)
 
 
 class WeeklyPlanResponse(CamelModel):

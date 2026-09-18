@@ -143,6 +143,7 @@ from reaction_backend.schemas.planning import (
     ReplanResponse,
     ScheduledBlockPreview,
     WeeklyBlock,
+    WeeklyFixedSchedule,
     WeeklyPlanDay,
     WeeklyPlanResponse,
     WeeklyReplanApproveResponse,
@@ -704,6 +705,7 @@ def _block_view(
 async def get_weekly_plan(
     user: CurrentUser,
     repo: BlockRepoDep,
+    fixed_repo: FixedRepoDep,
     session: SessionDep,
     week_start: Annotated[str | None, Query(alias="weekStart")] = None,
 ) -> WeeklyPlanResponse:
@@ -731,8 +733,17 @@ async def get_weekly_plan(
     # 조회가 토큰을 갱신·회수했으면 확정한다 — freebusy 는 commit 하지 않는다(호출자 몫).
     await session.commit()
 
+    # 고정 일정(수업·알바)도 그날 칸에 싣는다 (planA-13) — 블록 편집이 막는 시간을 보이게.
+    fixed: list[Any] = list(await fixed_repo.list_active(user.id))
     days = [
-        WeeklyPlanDay(date=monday + timedelta(days=offset), weekday=_WEEKDAY_NAMES[offset])
+        WeeklyPlanDay(
+            date=monday + timedelta(days=offset),
+            weekday=_WEEKDAY_NAMES[offset],
+            fixed_schedules=[
+                WeeklyFixedSchedule(title=b.label, start_at=b.interval.start, end_at=b.interval.end)
+                for b in fixed_schedules_to_busy(monday + timedelta(days=offset), fixed)
+            ],
+        )
         for offset in range(7)
     ]
     by_date = {d.date: d for d in days}
@@ -761,6 +772,49 @@ async def get_weekly_plan(
     )
 
 
+# 정책 종류 → 사용자에게 보여 줄 말 (영문 코드를 그대로 내보내지 않는다).
+_POLICY_LABELS = {"sleep": "수면", "lunch": "점심", "late_night_block": "심야 휴식"}
+
+
+async def _ensure_clear_of_fixed_and_no_touch(
+    start: datetime,
+    end: datetime,
+    *,
+    policies: list[Any],
+    fixed_repo: FixedScheduleRepo,
+    user: User,
+) -> None:
+    """옮길 자리가 고정 일정(수업·알바)·노터치 시간과 겹치면 422 (planA-13).
+
+    예전엔 다른 블록과의 겹침과 수면·점심·심야 정책만 봤다. 주간 그리드엔 고정 일정이 안
+    보여서 사용자가 수업 시간 위로 블록을 끌어도 200 이었고, 그 블록은 `user_edit` 이라
+    재계획도 다시는 안 고쳤다. 생성·승인 때 쓰는 것과 같은 busy 전개로 본다.
+    """
+    fixed: list[Any] = list(await fixed_repo.list_active(user.id))
+    no_touch = [p for p in policies if p.policy_type == "no_touch"]
+    for day in spanned_days(start, end):
+        hit = first_busy_overlap(
+            start,
+            end,
+            [*fixed_schedules_to_busy(day, fixed), *time_policies_to_busy(day, no_touch)],
+        )
+        if hit is None:
+            continue
+        if hit.source == "fixed_schedule":
+            raise ApiError(
+                ErrorCode.PLAN_BLOCK_CONFLICT,
+                f"그 시간에는 '{hit.label}' 고정 일정이 있어요. 다른 시간으로 옮겨 주세요.",
+                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                field="startAt",
+            )
+        raise ApiError(
+            ErrorCode.POLICY_VIOLATION,
+            "이 시간대는 비워 두기로 한 시간과 겹쳐요. 다른 시간으로 옮겨 주세요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="startAt",
+        )
+
+
 @router.patch("/{plan_id}/blocks/{block_id}")
 async def edit_block(
     plan_id: str,  # noqa: ARG001 — 논리 식별자(주). 편집 권한은 blockId.
@@ -770,11 +824,13 @@ async def edit_block(
     repo: BlockRepoDep,
     action_repo: ActionRepoDep,
     policy_repo: PolicyRepoDep,
+    fixed_repo: FixedRepoDep,
     session: SessionDep,
 ) -> BlockEditResponse:
     """블록 15분 snap 이동 + 목표(category)/제목 수정 (S15).
 
-    충돌 422 `PLAN_BLOCK_CONFLICT` / 정책 422 `POLICY_VIOLATION`. `category`/`title` 을 주면
+    충돌 422 `PLAN_BLOCK_CONFLICT`(다른 블록 **또는 고정 일정**) / 정책 422 `POLICY_VIOLATION`
+    (수면·점심·심야 차단 **·노터치**). `category`/`title` 을 주면
     블록이 매달린 action_item 을 갱신한다(같은 액션의 모든 세션 블록 공유). 정책 검사는
     **변경된 category** 로 수행하고, 변경 반영은 성공 commit 시에만 영속된다(422 면 롤백).
     """
@@ -839,10 +895,14 @@ async def edit_block(
         if violated is not None:
             raise ApiError(
                 ErrorCode.POLICY_VIOLATION,
-                f"이 시간대는 '{violated}' 정책과 겹쳐요.",
+                f"이 시간대는 {_POLICY_LABELS.get(violated, '쉬는')} 시간과 겹쳐요. "
+                "다른 시간으로 옮겨 주세요.",
                 http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
                 field="startAt",
             )
+        await _ensure_clear_of_fixed_and_no_touch(
+            to_kst(new_start), to_kst(new_end), policies=policies, fixed_repo=fixed_repo, user=user
+        )
         block.start_at = new_start
         block.end_at = new_end
         block.source = "user_edit"
