@@ -28,6 +28,19 @@
 - 422 문구가 화면 이름으로 바뀐다 — `Focus 목표는…` → `집중 목표는 최대 3개까지예요. …`.
   코드·`field="goalTier"` 는 그대로. category 오류 문구도 영문 enum 목록 대신 "목표 분류 값이 올바르지 않아요."
 
+### 인박스 옮기기 — 한 메모는 한 번만 옮겨진다
+
+- `convert-to-goal` / `convert-to-action` 이 **멱등**이 된다 — 같은 쪽으로 다시 누르면 새로 만들지
+  않고 지금 항목을 200 으로(두 번 탭·재시도로 카드·목표가 하나씩 더 생기던 경로). 다른 쪽으로
+  옮기려 하면 409 `INBOX_ALREADY_PROMOTED`(기존 코드 — 발생 지점만 생겼다, FE 는 문구를 이미 매핑).
+  동시에 온 두 요청은 항목 행 잠금으로 직렬화된다.
+- `convert-to-goal` 의 목표 제목은 메모 앞 200자(`goals.title` 길이, 넘으면 `…`). 예전엔 200자 넘는
+  메모가 500 이었고 다시 눌러도 영영 안 됐다. 원문은 인박스 항목에 그대로 남는다.
+- `restore` — 이미 옮긴 항목은 `promoted` 로 돌아온다(예전엔 옮기기 버튼이 다시 떴다).
+- `PATCH /inbox/{id}` — 옮긴 항목을 `captured`/`classified` 로 되돌리면 409 `INBOX_ALREADY_PROMOTED`.
+  `status="archived"` 는 `archive` 와 같은 보관(`archivedAt` 까지).
+- `GET /inbox?status=<없는 값>` 은 500 대신 422 `COMMON_VALIDATION_ERROR`.
+
 ---
 
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)

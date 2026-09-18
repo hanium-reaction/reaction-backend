@@ -819,6 +819,9 @@ class FakeInboxRepo:
 
     def __init__(self) -> None:
         self._items: dict[UUID, InboxItem] = {}
+        # 실 repo 는 "이 항목에서 만든 카드가 있는가" 를 action_items 로 확인한다(restore).
+        # fake 는 action repo 를 모르므로 convert-to-action 으로 옮긴 id 를 따로 기억한다.
+        self._promoted_to_action: set[UUID] = set()
 
     async def list_by_status(self, user_id: UUID, status: str | None = None) -> list[InboxItem]:
         mine = [i for i in self._items.values() if i.user_id == user_id]
@@ -836,6 +839,10 @@ class FakeInboxRepo:
             return None
         return i
 
+    async def get_by_id_for_update(self, user_id: UUID, inbox_id: UUID) -> InboxItem | None:
+        # 행 잠금은 fake 에서 의미가 없다 — 실 SQL 의 FOR UPDATE 는 test_inbox_repo_sql 이 고정.
+        return await self.get_by_id(user_id, inbox_id)
+
     async def get_by_id_any(self, user_id: UUID, inbox_id: UUID) -> InboxItem | None:
         i = self._items.get(inbox_id)
         if i is None or i.user_id != user_id:
@@ -846,7 +853,10 @@ class FakeInboxRepo:
         if item.archived_at is None:
             return item
         item.archived_at = None
-        item.status = "classified" if item.ai_category_guess is not None else "captured"
+        if item.promoted_goal_id is not None or item.id in self._promoted_to_action:
+            item.status = "promoted"
+        else:
+            item.status = "classified" if item.ai_category_guess is not None else "captured"
         return item
 
     async def create(
@@ -903,6 +913,7 @@ class FakeInboxRepo:
 
     async def mark_promoted_to_action(self, item: InboxItem) -> InboxItem:
         item.status = "promoted"
+        self._promoted_to_action.add(item.id)
         return item
 
     async def soft_delete(self, item: InboxItem) -> None:

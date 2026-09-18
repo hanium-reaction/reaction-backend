@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from reaction_backend.orchestrator._common import user_agent_lock
 from reaction_backend.repositories.goal_repo import GoalRepo
 from reaction_backend.schemas.errors import ApiError, ErrorCode
+from reaction_backend.schemas.goals import GOAL_TITLE_MAX_LENGTH
 
 TIER_LIMITS: dict[str, int] = {"focus": 3, "maintain": 5}  # parked 자유 (DevBaseline §1.4)
 TIER_LABEL_KO: dict[str, str] = {"focus": "집중", "maintain": "유지", "parked": "보류"}
@@ -84,9 +85,24 @@ async def enforce_tier_limit(
         raise tier_limit_error(tier, limit)
 
 
+def clip_goal_title(text: str) -> str:
+    """서버가 **사용자 글에서** 만드는 목표 제목을 `goals.title` 길이에 맞춘다.
+
+    요청 스키마가 막는 건 사용자가 직접 적는 제목뿐이다. 인박스 메모(→ 목표)나 궁극목표
+    인터뷰 문장처럼 길이 제한이 없는 글을 제목으로 옮기는 경로는 그대로 200자를 넘겨
+    `StringDataRightTruncation` → 500 이 났고, 다시 눌러도 영영 성공할 수 없었다.
+    원문은 각자의 자리(인박스 항목·인터뷰 기록)에 그대로 남으니 제목만 줄인다.
+    """
+    text = text.strip()
+    if len(text) <= GOAL_TITLE_MAX_LENGTH:
+        return text
+    return text[: GOAL_TITLE_MAX_LENGTH - 1].rstrip() + "…"
+
+
 __all__ = [
     "TIER_LABEL_KO",
     "TIER_LIMITS",
+    "clip_goal_title",
     "enforce_tier_limit",
     "hold_tier_lock",
     "tier_label",

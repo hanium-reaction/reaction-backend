@@ -1191,13 +1191,13 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 
 | Method | Path | 설명 |
 | --- | --- | --- |
-| GET | `/inbox` | 내 inbox 항목. `?status=captured\|classified\|archived\|promoted` 필터 |
+| GET | `/inbox` | 내 inbox 항목. `?status=captured\|classified\|archived\|promoted` 필터. 없는 값은 422 `COMMON_VALIDATION_ERROR`(`field=status`, v2.30-goals — 예전엔 500) |
 | POST | `/inbox` | 1줄 캡처 — `{ rawText }`. `aiClient.run("inbox/classify")` 동기 호출(8s timeout) + 룰 fallback. 응답 시 `aiCategoryGuess` 채워짐 (`status=classified`) |
-| PATCH | `/inbox/{id}` | `userCategory` override (6종 enum) 또는 `status` 변경 |
-| POST | `/inbox/{id}/convert-to-goal` | Goal 생성 (tier=`maintain`, 한도 enforce → 422 `GOAL_TIER_LIMIT_EXCEEDED`) + inbox `status=promoted` + `promotedGoalId` 연결 (`promotedTo="goal"`) |
-| POST | `/inbox/{id}/convert-to-action` | ActionItem 생성 (`source=inbox`, `targetDate=today`) + inbox `status=promoted` (`promotedTo="action"`) |
+| PATCH | `/inbox/{id}` | `userCategory` override (6종 enum) 또는 `status` 변경. (v2.30-goals) 옮긴(`promoted`) 항목을 `captured`/`classified` 로 되돌리려 하면 409 `INBOX_ALREADY_PROMOTED` — 옮기기 버튼이 다시 살아나 같은 메모로 목표·카드가 또 생기던 경로다. `status="archived"` 는 `POST /inbox/{id}/archive` 와 같은 보관(`archivedAt` 도 찍힌다 — 예전엔 status 만 바뀌어 활성 목록과 보관함에 동시에 떴다) |
+| POST | `/inbox/{id}/convert-to-goal` | Goal 생성 (tier=`maintain`, 한도 enforce → 422 `GOAL_TIER_LIMIT_EXCEEDED`) + inbox `status=promoted` + `promotedGoalId` 연결 (`promotedTo="goal"`). (v2.30-goals) **멱등** — 이미 목표로 옮긴 항목이면 새 목표를 만들지 않고 지금 항목을 200 으로(같은 `promotedGoalId`). 할 일로 옮긴 항목이면 409 `INBOX_ALREADY_PROMOTED`(`field=inboxId`). 두 번 탭이 동시에 와도 항목 행 잠금 + 사용자 단위 tier lock 으로 목표는 하나다. 목표 제목은 메모 앞 200자(`goals.title` 길이, 넘으면 끝에 `…`) — 원문은 인박스 항목에 그대로 남는다(예전엔 200자 넘는 메모가 500) |
+| POST | `/inbox/{id}/convert-to-action` | ActionItem 생성 (`source=inbox`, `targetDate=today`) + inbox `status=promoted` (`promotedTo="action"`). (v2.30-goals) **멱등** — 이미 할 일로 옮긴 항목이면 카드를 또 만들지 않고 지금 항목을 200 으로. 목표로 옮긴 항목이면 409 `INBOX_ALREADY_PROMOTED`(`field=inboxId`) |
 | POST | `/inbox/{id}/archive` | soft delete (`archived_at` + `status=archived`). 이후 `?status=archived` 로 조회, `restore` 로 복원 |
-| POST | `/inbox/{id}/restore` | 보관 취소 — `archived_at` 클리어 + `status`→classified/captured. 활성 항목이면 멱등. 없으면 404 `INBOX_NOT_FOUND` |
+| POST | `/inbox/{id}/restore` | 보관 취소 — `archived_at` 클리어 + `status`→classified/captured. **이미 목표·할 일로 옮긴 항목은 `promoted` 로 돌아온다**(v2.30-goals — `promotedGoalId` 가 있거나 이 항목에서 만든 카드가 있으면. 예전엔 되살리면 옮기기 버튼이 다시 떠 카드·목표가 또 생겼다). 활성 항목이면 멱등. 없으면 404 `INBOX_NOT_FOUND` |
 | GET | `/inbox/resources/{slug}` | 시스템 항목이 가리키는 정적 자료 본문 — `{ slug, title, markdown, steps }`. **인증만 필요하고 소유권 검사는 하지 않는다**(레포에 커밋된 공용 콘텐츠라 소유권 개념이 없다). 없으면 404 `COMMON_NOT_FOUND` |
 | GET | `/inbox/coaching-advice` | 내 활성 목표·습관·오늘/어제 실행 기록을 서버에서 조합한 개인화 조언 최대 3건. 각 항목은 `adviceId`, `category`, `title`, `body`, `rationale`, `evidence`, `action`, `generatedAt`, `source`, `fallbackUsed` 를 반환. 기록이 없으면 빈 배열 |
 | POST | `/inbox/{id}/adopt-step` | 자료가 제안한 한 걸음을 오늘 할 일로 채택 — `{ stepIndex }` → `{ actionId, title, targetDate, resourceSlug }`. `ActionItem(source=inbox)` 생성 + `inbox_item_id` 로 자료에 연결. 카드의 `category` 는 **자료의 카테고리**(9종 원본) — `userCategory` 재분류가 있으면 그게 우선. **자료 항목은 promoted 로 바뀌지 않는다**(다른 걸음을 또 채택하거나 다시 읽을 수 있다). **도메인 멱등(#213)**: 같은 걸음(`stepIndex` 동일)을 오늘 다시 채택하면 새 카드를 만들지 않고 기존 활성 카드의 `actionId` 를 200 으로 반환 — 날짜가 바뀌거나 카드가 보관된 뒤에는 다시 새 카드가 생긴다. 없거나 보관된 항목이면 404 `INBOX_NOT_FOUND`, 자료 파일이 사라졌으면 404 `COMMON_NOT_FOUND`, system 항목이 아니면 422 `COMMON_VALIDATION_ERROR`(`field=inboxId`), 없는 인덱스면 422(`field=stepIndex`) |

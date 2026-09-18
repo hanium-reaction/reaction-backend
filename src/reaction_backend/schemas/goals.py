@@ -10,6 +10,10 @@ from reaction_backend.schemas.common import CamelModel, KstDatetime
 
 GoalTier = Literal["focus", "maintain", "parked"]
 
+# `goals.title` 컬럼 길이(db/models/goal.py `String(200)`) — 요청 검증과 서버가 만드는 제목
+# (인박스 → 목표, 궁극목표 문장) 자르기가 같은 숫자를 쓴다. 넘으면 DB 가 500 을 낸다.
+GOAL_TITLE_MAX_LENGTH = 200
+
 
 class Goal(CamelModel):
     """목표 — GET 응답 항목, POST/PATCH/park 응답."""
