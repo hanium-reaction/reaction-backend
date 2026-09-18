@@ -108,6 +108,20 @@ async def _has_plan(repo: GoalRepo, goal: GoalModel) -> bool:
     return goal.id in await repo.goal_ids_with_plan([goal.id])
 
 
+async def _sync_mandala_center(repo: GoalRepo, goal: GoalModel) -> None:
+    """궁극목표 문장이 바뀌면 만다라 **중앙 칸**(core) 제목도 같은 문장으로.
+
+    중앙 칸 제목은 만다라 승인 때 한 번 복사되고 끝이라(`mandala_adapter.persist_mandala`),
+    목표 화면에서 문장을 고치면 만다라 머리(`statement`)와 가운데 칸이 서로 다른 글을
+    보여줬다. 일반 목표·만다라가 없는 궁극목표는 할 일이 없다.
+    """
+    if not goal.is_ultimate:
+        return
+    for n in await repo.list_nodes(goal.id, tree_kind="mandala"):
+        if n.parent_node_id is None:
+            n.title = goal.title
+
+
 def _parse_goal_id(goal_id: str) -> UUID:
     if not goal_id.startswith(_ID_PREFIX):
         raise _not_found()
@@ -253,6 +267,7 @@ async def upsert_ultimate_goal(
         goal = await ultimate_adapter.materialize_ultimate_goal(
             session, user_id=user.id, outcome=outcome
         )
+        await _sync_mandala_center(repo, goal)  # 재인터뷰로 다듬은 문장 → 중앙 칸도
         await session.commit()
         await session.refresh(goal)
     return _to_schema(goal, has_plan=await _has_plan(repo, goal))
@@ -292,6 +307,8 @@ async def update_goal(
         goal_tier=body.goal_tier,
         clear_deadline=deadline_sent and deadline is None,
     )
+    if body.title is not None:
+        await _sync_mandala_center(repo, updated)
     await session.commit()
     await session.refresh(updated)
     return _to_schema(updated, has_plan=await _has_plan(repo, updated))
@@ -440,14 +457,17 @@ async def get_mandala_tree(
     for n in rows:
         node_progress, node_coverage = progress_map.get(n.id, (None, None))
         linked_habit = habits_by_node.get(n.id)
-        nodes.append(
-            _to_mandala_node(
-                n,
-                progress=node_progress,
-                coverage=node_coverage,
-                habit_id=linked_habit.id if linked_habit is not None else None,
-            )
+        node = _to_mandala_node(
+            n,
+            progress=node_progress,
+            coverage=node_coverage,
+            habit_id=linked_habit.id if linked_habit is not None else None,
         )
+        if n.parent_node_id is None:
+            # 중앙 칸은 **목표 문장 그대로** — 이 수정 전에 문장을 고쳐 둘이 어긋난 트리도
+            # 머리(`statement`)와 같은 글을 보여준다(쓰기 없음).
+            node = node.model_copy(update={"title": goal.title})
+        nodes.append(node)
     root_progress, root_coverage = progress_map.get(root.id, (0.0, 0.0)) if root else (0.0, 0.0)
     return MandalaTreeResponse(
         goal_id=goal_id,
@@ -559,6 +579,11 @@ async def update_mandala_node(
             )
         node.title = body.title
         touched = True
+        if node.depth == 0:
+            # 중앙 칸 = 궁극목표 문장 — 한쪽만 바꾸면 머리와 가운데가 다시 어긋난다.
+            goal = await repo.get_by_id(user.id, node.goal_id)
+            if goal is not None:
+                goal.title = body.title
     if body.why_text is not None:
         node.why_text = body.why_text
         touched = True

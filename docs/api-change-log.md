@@ -72,6 +72,8 @@
   (예전엔 `proposed` 가 `active` 로 승격돼 계획 승인·tier 한도를 건너뛰었다).
 - 단건 목표 응답의 `hasPlan` 이 실제 값이다 — `POST /goals` 는 `false`, `PATCH`·`park`·`complete`·`promote`·
   `ultimate` 는 그 목표의 계획 트리를 물어 채운다(예전엔 늘 `true`).
+- 만다라 중앙 칸 = 궁극목표 문장 — 목표 제목을 고치면(또는 재인터뷰) 중앙 칸도, 중앙 칸을 고치면 목표 제목도
+  바뀐다. 이미 어긋난 트리도 `GET /goals/{id}/mandala` 가 중앙 칸에 `statement` 를 싣는다.
 
 ---
 

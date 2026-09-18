@@ -452,3 +452,51 @@ def test_list_goal_nodes_includes_additive_fields(
     assert node["orderIndex"] == 0
     assert node["nodeType"] == "core"
     assert node["isLeaf"] is False
+
+
+# ── 중앙 칸 = 궁극목표 문장 (goals-18) ─────────────────────────────────────────
+
+
+def test_editing_the_ultimate_title_updates_the_center_cell(
+    client: TestClient, fake_goal_repo: FakeGoalRepo
+) -> None:
+    goal = _goal(title="옛 문장")
+    goal.priority_level = 3
+    ids = _seed_full_tree(fake_goal_repo, goal)
+
+    resp = client.patch(f"/goals/goal_{goal.id}", json={"title": "새 문장"})
+    assert resp.status_code == 200, resp.text
+
+    tree = client.get(f"/goals/goal_{goal.id}/mandala").json()
+    core = next(n for n in tree["nodes"] if n["depth"] == 0)
+    assert tree["statement"] == "새 문장"
+    assert core["title"] == "새 문장"
+    assert ids["root"].title == "새 문장"  # 저장된 칸도 같이
+
+
+def test_center_cell_shows_the_goal_statement_even_if_they_drifted(
+    client: TestClient, fake_goal_repo: FakeGoalRepo
+) -> None:
+    """이 수정 전에 문장을 고쳐 이미 어긋난 트리도 가운데가 머리와 같은 글을 보인다."""
+    goal = _goal(title="지금 문장")
+    ids = _seed_full_tree(fake_goal_repo, goal)
+    ids["root"].title = "승인 때 문장"
+
+    tree = client.get(f"/goals/goal_{goal.id}/mandala").json()
+
+    core = next(n for n in tree["nodes"] if n["depth"] == 0)
+    assert core["title"] == tree["statement"] == "지금 문장"
+
+
+def test_editing_the_center_cell_updates_the_goal_statement(
+    client: TestClient, fake_goal_repo: FakeGoalRepo
+) -> None:
+    goal = _goal(title="옛 문장")
+    ids = _seed_full_tree(fake_goal_repo, goal)
+
+    resp = client.patch(
+        f"/goals/mandala/nodes/node_{ids['root'].id}", json={"title": "가운데서 고친 문장"}
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert goal.title == "가운데서 고친 문장"
