@@ -107,6 +107,17 @@ def test_derived_weekly_hours_are_not_quoted_as_the_users_words() -> None:
     assert "주 4시간" not in daily_short
 
 
+def test_derived_weekly_hours_are_shown_with_one_decimal() -> None:
+    """길이×빈도가 딱 떨어지지 않아도(20분 × 매일 = 140분) '주 2.33333시간' 으로 말하지 않는다."""
+    outcome = _outcome(weekly_hours=2, frequency=7, session_length=20)
+    warning = first_plan_adapter.volume_shortfall_warning(
+        outcome, planned_minutes=60 * 4, span_days=28
+    )
+    assert warning is not None
+    assert "매일 20분씩(주 2.3시간)" in warning
+    assert "2.33" not in warning
+
+
 def test_directly_answered_weekly_hours_are_still_quoted() -> None:
     """직접 답한 주 5시간 + 주 3회 + 1시간은 진짜 모순이라 종전대로 5시간을 인용한다."""
     outcome = _outcome(weekly_hours=5, frequency=3, session_length=60)

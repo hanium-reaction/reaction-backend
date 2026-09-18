@@ -461,7 +461,9 @@ def volume_shortfall_warning(
     # 사용자가 고른 칩 그대로 되읽는다 — '매일' 을 고른 사람에게 '주 7회' 라고 하지 않는다.
     cadence = "매일" if freq == 7 else f"주 {freq}회"
     said = (
-        f"{cadence} {length}분씩(주 {stated_min / 60:g}시간) 하고 싶다고 하셨는데"
+        # 시간 표기는 소수 한 자리까지 — 자유 입력 길이(20·40분)면 길이×빈도가 딱 안 떨어져
+        # `:g` 로는 '주 2.33333시간' 이 나갔다.
+        f"{cadence} {length}분씩(주 {_hours_label(stated_min)}) 하고 싶다고 하셨는데"
         if derived
         else f"주 {hours}시간 쓸 수 있다고 하셨는데"
     )
