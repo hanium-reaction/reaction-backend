@@ -158,6 +158,26 @@ _TEXT = {"type": "text", "raw": "x"}  # 대표 자유서술 raw (내용은 norma
             3,
             ({"type": "text", "raw": "그냥 뭐라도"}, True),
         ),
+        # ── interview-11: 상한에서 '모르겠어요' 류는 목표로 채택하지 않는다 ──
+        # 고치기 전엔 '음 잘 모르겠어요' 가 Focus 목표 제목으로 영속됐다.
+        (
+            "goals.list",
+            "text",
+            {"type": "text", "raw": "음 잘 모르겠어요"},
+            "",
+            0.1,
+            3,
+            (_SKIP_MARKER, True),
+        ),
+        (
+            "goals.heaviest",
+            "select",
+            {"type": "text", "raw": "모르겠어요"},
+            None,
+            0.1,
+            3,
+            (_SKIP_MARKER, True),
+        ),
     ],
 )
 def test_decide_storage(

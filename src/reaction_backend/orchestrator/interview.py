@@ -1137,8 +1137,13 @@ def _decide_storage(
         # 스킵하는 것과 같은 탈출구를 핵심 슬롯에도 열어준다 — `is_filled_answer` 가
         # 스킵 마커를 '충족'으로 읽고, `build_outcome` 이 `unresolved_slots` 에 기록해
         # First Plan 이 보완 질문으로 이어받는다(핵심 슬롯도 이미 이 경로로 설계돼 있다).
+        #
+        # '모르겠어요'·'딱히 없어요' 같은 **스킵 의사는 채택하지 않는다** — 세 번 솔직하게
+        # 답한 학생에게 '음 잘 모르겠어요' 라는 Focus 목표가 생기고, 그 이름으로 목표별
+        # 질문과 계획까지 만들어졌다(미러 실측). 스킵 마커로 두면 `unresolved_slots` 에 남아
+        # outcome 은 자리표시자 목표를 쓰고, 그 자리표시자는 영속되지 않는다(#88).
         if attempts >= MAX_SLOT_ATTEMPTS:
-            if answer_text.strip():
+            if answer_text.strip() and not _looks_like_skip(answer_text):
                 return {"type": "text", "raw": answer_text.strip()}, True
             return _SKIP_MARKER, True
         return _pending(attempts), False
