@@ -1971,8 +1971,9 @@ async def generate_replan(
 
     - 대상: 다음 주 이후 미착수 블록의 액션 + 활성 블록 없는 planned 백로그(수락한 회복 포함).
       과거·시작/완료·user_edit 블록은 불변. 실패 원본은 미래 블록이 없어 자동 제외.
-    - busy = 확정(시작/완료·user_edit) 블록 + **활동 시간대 밖(인터뷰·설정, 첫 계획과 같은
-      조립 — `_replan_policies`)** + DB 시간정책 + **고정일정(#112 정합)**
+    - busy = 교체하지 않고 **남는 모든 블록**(확정 + 보존 카드의 예정 회차, planA-7)
+      + **활동 시간대 밖(인터뷰·설정, 첫 계획과 같은 조립 — `_replan_policies`)**
+      + DB 시간정책 + **고정일정(#112 정합)**
       + **Google 캘린더 일정**(첫 계획과 같은 다섯 번째 소스, ADR-0009 D4).
     - 각 새 블록에 '교체할 옛 블록 id'(replacesBlockId)를 실어, 승인이 blanket-cancel 없이
       그 블록만 현재 상태로 재조정 취소하게 한다(#117). 산출물은 Draft — 자동 적용 금지.
@@ -1995,7 +1996,6 @@ async def generate_replan(
         )
         scheduled_pairs = await block_repo.list_scheduled_between(user.id, scan_start, scan_end)
         backlog = await action_repo.list_planned_without_block(user.id)
-        committed_blocks = await block_repo.list_committed_between(user.id, scan_start, scan_end)
         # **밀린 일** — 시작 시각이 이미 지났는데 한 번도 착수 안 된 블록. 위 세 조회 중
         # 어느 것에도 안 잡히고 만료 cron 도 못 쓸어내던 구멍이다(`list_stale_scheduled_before`
         # docstring 의 표 참고). "계획만 세워두고 그냥 안 한" 카드가 재계획 후보에서 통째로
@@ -2059,6 +2059,18 @@ async def generate_replan(
                 ),
             )
         candidates = list(cand.values())
+
+        # 회피할 기존 블록 = 창 안의 **이번 재계획이 교체하지 않는** 모든 블록 (planA-7).
+        # 예전엔 '확정'(시작/완료·user_edit)만 넣었는데, 위 루프가 **남겨 두기로 한** 예정
+        # 블록 — 형제 세션을 착수한 카드·사용자가 옮긴 카드의 나머지 회차, 이미 충분히 배정된
+        # 카드 — 도 그대로 살아남는다. 그걸 빼면 새 블록이 그 위에 겹쳐 잡혀, 승인 후 캘린더에
+        # 같은 시간 블록 두 개가 생겼다. 교체될 옛 블록만 비워 준다(그 자리는 새 배치가 쓴다).
+        replaced_ids = {bid for bids in old_blocks_by_action.values() for bid in bids}
+        committed_blocks = [
+            b
+            for b in await block_repo.list_busy_between(user.id, scan_start, scan_end)
+            if b.id not in replaced_ids
+        ]
 
         # 규칙이 마감까지 채워 둔 '이어가기' 자리표시자에 **지금의 진행 상황으로** 내용을
         # 넣는다 (#454). 첫 계획 때 내용을 비워 둔 건 그때 사용자가 어디까지 갈지 몰랐기
