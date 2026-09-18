@@ -10,7 +10,8 @@ Issue #17 (Alpha MVP)은 캘린더 OAuth 자체를 P1 로 미뤘었다. **그 �
 
 `GOOGLE_CALENDAR_ENABLED=false`(기본)면 연결 엔드포인트는 501 로 남는다 — Cloud 콘솔
 셋업(client_secret·리디렉션 URI)은 사람 손이 필요해서, 준비 전에 배포돼도 사용자가
-깨진 동의 화면을 만나지 않게 하는 안전핀이다.
+깨진 동의 화면을 만나지 않게 하는 안전핀이다. 해제(`DELETE /connect`)만은 예외다 —
+동의 철회는 기능이 꺼져 있어도 돼야 한다.
 """
 
 import logging
@@ -22,8 +23,12 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
+from reaction_backend.db.models.calendar_connection import (
+    CalendarConnection as CalendarConnectionModel,
+)
 from reaction_backend.db.session import get_db
 from reaction_backend.integrations.google_calendar import freebusy, oauth, token_store
+from reaction_backend.safety.encryption import EncryptionError
 from reaction_backend.schemas.calendar import (
     ApproveInsertResult,
     BusyInterval,
@@ -73,8 +78,28 @@ def _connect_failed(reason: str) -> ApiError:
     )
 
 
-def _connection_response(connected: bool, scopes: str = "") -> CalendarConnection:
-    return CalendarConnection(provider="google", connected=connected, scopes=scopes.split())
+def _connection_response(
+    connected: bool, scopes: str = "", *, needs_reconnect: bool = False
+) -> CalendarConnection:
+    return CalendarConnection(
+        provider="google",
+        connected=connected,
+        scopes=scopes.split(),
+        needs_reconnect=needs_reconnect,
+    )
+
+
+def _refresh_token_for_remote_revoke(connection: CalendarConnectionModel) -> str | None:
+    """원격 회수에 쓸 refresh token — 복호화할 수 없으면 None(원격 회수만 건너뛴다).
+
+    해제는 기능 스위치·암호화 키와 무관하게 돼야 한다(동의 철회). 키가 빠졌거나 바뀐 서버에서
+    여기서 500 이 나면 사용자는 연결을 끊을 방법이 없다 — 우리 DB 의 회수가 먼저다.
+    """
+    try:
+        return token_store.refresh_token_of(connection)
+    except EncryptionError as exc:
+        logger.warning("calendar_revoke_skipped reason=%s", type(exc).__name__)
+        return None
 
 
 def _parse_range(from_: str, to: str) -> tuple[date, date]:
@@ -114,11 +139,17 @@ async def get_calendar_connection(user: CurrentUser, session: SessionDep) -> Cal
     연결이 없으면 404 가 아니라 `connected: false` 다. "아직 연결 안 함" 은 오류가 아니라
     이 화면의 기본 상태다. 기능이 꺼져 있으면 connect 와 똑같이 501 — FE 는 그걸 보고
     '준비 중' 을 그린다.
+
+    연결이 Google 쪽에서 끊겼으면(권한 철회·refresh token 만료) `needsReconnect: true` 다 —
+    예전엔 앱에서 해제한 것과 똑같이 `connected: false` 만 내려가, 설정 카드가 조용히 기본
+    '연결' 문구로 돌아갔고 사용자는 끊긴 줄 몰랐다.
     """
     _require_enabled()
     connection = await token_store.get_active(session, user_id=user.id)
     if connection is None:
-        return _connection_response(False)
+        return _connection_response(
+            False, needs_reconnect=await token_store.needs_reconnect(session, user_id=user.id)
+        )
     return _connection_response(True, connection.scopes)
 
 
@@ -179,17 +210,26 @@ async def disconnect_calendar(user: CurrentUser, session: SessionDep) -> None:
 
     우리 DB 를 먼저 확정하고 원격 회수는 그 뒤에 한다. 순서를 뒤집으면 Google 은
     끊겼는데 우리는 연결됐다고 믿는 상태가 생긴다.
+
+    **기능 스위치와 무관하다(501 없음).** 해제는 동의 철회다 — 예전엔 운영이 기능을 꺼 둔
+    동안 해제도 501 이라, 사용자가 연결을 끊을 방법이 없었다. 원격 회수는 client secret 이
+    필요 없고, 토큰을 복호화할 수 없으면 그것만 건너뛴다.
+
+    Google 쪽에서 이미 끊긴 연결(`needsReconnect`)에 부르면 재연결 안내를 거둔다 — 다시
+    연결하지 않기로 한 사용자에게 계획마다 같은 안내를 반복하지 않게.
     """
-    _require_enabled()
     connection = await token_store.get_active(session, user_id=user.id)
     if connection is None:
+        await token_store.dismiss_reconnect(session, user_id=user.id)
+        await session.commit()
         return None
 
-    refresh_token = token_store.refresh_token_of(connection)
+    refresh_token = _refresh_token_for_remote_revoke(connection)
     await token_store.mark_revoked(session, connection)
     await session.commit()
     freebusy.clear_screen_cache(user.id)  # 해제 직후 화면에 옛 겹침 표시가 남지 않게
-    await oauth.revoke(refresh_token)
+    if refresh_token is not None:
+        await oauth.revoke(refresh_token)
     return None
 
 

@@ -1920,6 +1920,8 @@ async def generate_replan(
         calendar_limit = window_start + timedelta(days=freebusy.MAX_RANGE_DAYS)
         if calendar_status == "failed":
             warnings = [first_plan.CALENDAR_FAILED_WARNING, *warnings]
+        elif calendar_status == "reconnect_required":
+            warnings = [freebusy.CALENDAR_RECONNECT_WARNING, *warnings]
         elif calendar_status == "ok" and deadline > calendar_limit:
             warnings = [
                 f"캘린더 일정은 {calendar_limit.month}월 {calendar_limit.day}일까지만 "

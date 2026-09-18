@@ -7,6 +7,50 @@
 
 ---
 
+## v2.30-calendar — 2026-09-18 (캘린더 연결이 조용히 끊기지 않게 — 재연결 안내·해제 상시 허용)
+
+**additive + 동작 변경 — `GET`/`POST`/`DELETE /calendar/connect` · 계획 생성/재계획 `warnings`.**
+마이그레이션 없음. 기존 필드·에러 코드 무변경.
+
+### 무엇이 잘못됐었나
+
+- 토큰 갱신이 **어떤 이유로든** 실패하면 계획·화면이 `not_connected`(조용히)로 봤다. Google 쪽에서
+  권한이 사라진 경우(`invalid_grant` — 계정에서 앱 권한 철회, 테스트 모드 refresh token 7일 만료)는
+  연결이 soft 회수된 뒤 아무 안내가 없었고, 설정 카드는 기본 '연결' 문구로 돌아갔다. 사용자는 수업
+  위에 계획이 잡히는 걸 보고서야 알 수 있었다. 일시적 실패(네트워크·5xx)도 경고 없이 넘어갔다.
+- 토큰 엔드포인트의 **4xx 전부**를 사용자 권한 철회로 봤다 — client secret 오타 하나
+  (`401 invalid_client`)로 그 사이 캘린더를 읽은 모든 사용자의 연결이 끊기고, 설정을 고쳐도 복구되지
+  않았다.
+- 기능 스위치를 꺼도 계획 생성·재계획은 캘린더를 계속 읽었는데, 해제(`DELETE`)는 501 이라 사용자가
+  동의를 철회할 수 없었다.
+
+### 이제
+
+- `GET /calendar/connect` 응답에 **`needsReconnect: boolean`**(additive) — `connected: false` 인데
+  Google 쪽에서 끊긴 경우만 `true`. 앱에서 해제했거나 연결한 적이 없으면 `false`. 다시 연결하거나
+  `DELETE` 하면 `false`. `POST` 응답에도 같은 필드가 있고 항상 `false`.
+- `POST /plans/generate`(·`mandala/next-cycle`) · `POST /plans/replan` 의 `warnings` 맨 앞에, Google
+  쪽에서 끊긴 사용자에게 "Google 캘린더 연결이 끊겨서 이번 계획에는 캘린더 일정을 반영하지 못했어요.
+  설정에서 다시 연결하면 다음 계획부터 반영돼요." — 다시 연결하거나 해제할 때까지 매 계획에.
+  토큰 갱신의 일시적 실패는 기존 "캘린더 일정을 불러오지 못해서…" 문구로 알린다.
+- 연결 회수는 토큰 엔드포인트가 `invalid_grant` 라고 할 때만이다. `invalid_client`·`unauthorized_client`·
+  429·JSON 아닌 응답은 서버 쪽 문제로 보고 연결을 그대로 둔다(경고 로그).
+- `DELETE /calendar/connect` 는 **기능 스위치와 무관하게 204**(501 이 아니다). 토큰을 복호화할 수 없으면
+  원격 회수만 건너뛴다. 스위치가 꺼져 있으면 계획·재계획을 포함해 **어떤 경로도** 캘린더를 읽지 않는다.
+- 화면(`GET /today/agenda`·`GET /plans/weekly`)의 `calendar.status` enum 은 그대로다 — Google 쪽에서
+  끊긴 연결은 `not_connected`, 토큰 갱신의 일시적 실패는 `failed`. 화면 조회는 토큰 행이 계획 생성
+  트랜잭션에 잠겨 있으면 1초 이상 기다리지 않는다(예전엔 그 커밋까지 수십 초 멈췄다).
+
+### FE 가 할 일
+
+- `CalendarConnectCard`: `needsReconnect: true` 면 "Google 캘린더 연결이 끊겼어요. 다시 연결해 주세요"
+  같은 문구 + [다시 연결] 과 함께 **[해제]** 도 보여 줄 것(다시 연결하지 않기로 한 사용자가 안내를 거둘
+  수 있게 — `DELETE` 가 `needsReconnect` 를 끈다).
+- 스위치가 꺼져 `GET` 이 501 이어도 `DELETE` 는 된다 — '준비 중' 상태에서도 이미 연결한 사용자에게 해제
+  경로를 둘지 검토.
+
+---
+
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)
 
 **동작 완화 — `POST /auth/google`.** 요청·응답 스키마 무변경, 마이그레이션 없음. 기존 사용자

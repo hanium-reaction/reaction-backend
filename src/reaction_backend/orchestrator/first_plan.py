@@ -870,6 +870,8 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
     # 계획이 잡혔다" 를 스스로 알아챌 방법이 없다.
     if calendar_status == "failed":
         warnings = [CALENDAR_FAILED_WARNING, *warnings]
+    elif calendar_status == "reconnect_required":
+        warnings = [freebusy.CALENDAR_RECONNECT_WARNING, *warnings]
 
     blocks = [
         ScheduledBlockPreview(

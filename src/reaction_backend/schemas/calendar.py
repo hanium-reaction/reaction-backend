@@ -21,11 +21,18 @@ class CalendarConnectRequest(CamelModel):
 
 
 class CalendarConnection(CamelModel):
-    """캘린더 연결 상태 — POST /calendar/connect 응답."""
+    """캘린더 연결 상태 — GET/POST /calendar/connect 응답.
+
+    `needs_reconnect` — 연결이 없는데(`connected=false`) 그게 **Google 쪽에서 끊겨서**다
+    (권한 철회·refresh token 만료로 갱신이 실패). 앱에서 직접 해제했거나 연결한 적이 없으면
+    false 다. FE 는 true 일 때 '연결이 끊겼어요 · 다시 연결' 을 그린다. 다시 연결하거나
+    DELETE(해제)하면 false 로 돌아간다.
+    """
 
     provider: str
     connected: bool
     scopes: list[str]
+    needs_reconnect: bool = False
 
 
 class BusyInterval(CamelModel):
