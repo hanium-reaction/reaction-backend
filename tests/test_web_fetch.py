@@ -11,11 +11,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import http.server
 import ipaddress
 import socket
 import threading
+import time
 from collections.abc import Callable
 from typing import Any, ClassVar
 from urllib.parse import urlsplit
@@ -205,7 +207,7 @@ def _route(monkeypatch: pytest.MonkeyPatch, handler: Callable[..., _FakeResponse
     calls = _Calls()
 
     class _Session:
-        def __init__(self, addresses: tuple[str, ...]) -> None:
+        def __init__(self, addresses: tuple[str, ...], watch: object = None) -> None:
             self._addresses = addresses
 
         def __enter__(self) -> _Session:
@@ -502,6 +504,84 @@ async def test_timeout_becomes_a_reason_not_an_exception(monkeypatch: pytest.Mon
     _route(monkeypatch, _timeout)
     result = await fetcher.fetch_text("https://slow.example/")
     assert result.reason == fetcher.REASON_TIMEOUT
+
+
+async def test_fetch_runs_on_its_own_bounded_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """공용 기본 풀(`asyncio.to_thread`)에서 돌면 느린 링크가 web push·캘린더까지 멈춘다
+    (inbox-8). 전용 풀의 스레드에서 도는지를 이름으로 확인한다."""
+    names: list[str] = []
+
+    def _record(url: str, watch: object) -> fetcher.FetchResult:
+        names.append(threading.current_thread().name)
+        return fetcher.FetchResult("ok", None)
+
+    monkeypatch.setattr(fetcher, "_fetch_sync", _record)
+    result = await fetcher.fetch_text("https://example.com/")
+    assert result.ok
+    assert names and names[0].startswith("web_fetch"), names
+    assert fetcher._EXECUTOR._max_workers == fetcher._MAX_WORKERS
+
+
+def test_read_stops_at_the_deadline_even_while_data_keeps_coming() -> None:
+    """청크가 계속 와도 시한이 지나면 읽기를 멈춘다 — 상한(512KB)까지 끌려가지 않는다."""
+    response = _FakeResponse(body=b"a" * (fetcher._MAX_BYTES * 2))
+    assert fetcher._read_capped(response, deadline=time.monotonic() - 1) is None
+    assert response.served == 8192, "시한이 지났는데도 다음 청크를 읽었다"
+
+
+async def test_hard_timeout_frees_the_worker_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """1바이트씩 흘리는 서버 — 코루틴은 시한에 돌아오고, **스레드도** 곧 풀로 돌아와야 한다.
+
+    예전엔 `wait_for` 가 코루틴만 멈춰서, 사용자에게 '시간 초과' 를 돌려준 뒤에도 스레드가
+    서버가 멈출 때까지 계속 읽었다(재현: 8초 뒤에도 12초 넘게 살아 있었다). 소켓 읽기
+    하나하나는 read timeout 안에 끝나므로 소켓 timeout 으로는 못 끊는다.
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(5)
+    port = listener.getsockname()[1]
+    stop = threading.Event()
+
+    def _drip() -> None:
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return
+        with conn, contextlib.suppress(OSError):
+            conn.recv(4096)
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 100000\r\n\r\n"
+            )
+            for _ in range(200):  # 최대 20초 — 끊기지 않으면 테스트가 먼저 실패한다
+                if stop.is_set():
+                    break
+                conn.sendall(b"a")
+                time.sleep(0.1)
+
+    server = threading.Thread(target=_drip, daemon=True)
+    server.start()
+    finished = threading.Event()
+    real_fetch_sync = fetcher._fetch_sync
+
+    def _tracked(url: str, watch: pinned_http.SocketWatch) -> fetcher.FetchResult:
+        try:
+            return real_fetch_sync(url, watch)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(fetcher, "_fetch_sync", _tracked)
+    monkeypatch.setattr(fetcher, "_HARD_TIMEOUT", 0.5)
+    try:
+        _local_only_dns(monkeypatch, port)
+        result = await fetcher.fetch_text(f"http://pinned-host.invalid:{port}/slow")
+        freed = await asyncio.to_thread(finished.wait, 3.0)
+    finally:
+        stop.set()
+        listener.close()
+
+    assert result.reason == fetcher.REASON_TIMEOUT
+    assert freed, "시한이 지난 뒤에도 스레드가 느린 서버를 계속 읽고 있다"
 
 
 async def test_unexpected_exception_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
