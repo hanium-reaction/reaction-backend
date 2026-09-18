@@ -249,7 +249,8 @@ async def _resolve_outcome(
         return await _project_session_outcome(latest, repo), latest.ended_at
     raise ApiError(
         ErrorCode.COMMON_VALIDATION_ERROR,
-        "완료된 인터뷰가 없어요. 인터뷰를 먼저 진행하거나 outcome/interviewSessionId 를 보내주세요.",
+        # 화면에 그대로 뜨는 문구다 — 요청 필드 이름 같은 개발자용 말을 넣지 않는다 (planA-16).
+        "목표 인터뷰를 먼저 마쳐 주세요. 인터뷰가 끝나면 계획을 만들어 드릴게요.",
         http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
     )
 
