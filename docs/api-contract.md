@@ -235,6 +235,7 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 | 트리거 endpoint | from | to |
 | --- | --- | --- |
+| 계획 인터뷰 종료 — `POST /interview/sessions/{id}/answers`(마지막 답)·`/finish`·`/next-question`·`POST /interview/sessions`(시드로 마감), **목표가 1개 이상 저장됐을 때만** (v2.30-interview) | `WELCOME` / `ONBOARDING_INTERVIEW` | `ONBOARDING_CONFIRM` |
 | `POST /fixed-schedules` | `ONBOARDING_CALENDAR` / `ONBOARDING_MANUAL_SCHEDULE` | `ONBOARDING_POLICIES` |
 | `POST /time-policies` | `ONBOARDING_POLICIES` | `ONBOARDING_FIRST_PLAN` |
 | `POST /plans/{planId}/approve` | 온보딩 단계 전체 (`WELCOME` … `ONBOARDING_NOTIFICATIONS`) | `ACTIVE` |

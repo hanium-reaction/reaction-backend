@@ -840,3 +840,91 @@ def test_reinterview_asks_again_what_an_early_exit_left_unanswered(
     # 역할 하나만 이월된다 — 나머지 필수 17칸은 그대로 열려 있다.
     assert again["ambiguityScore"] == 17
     assert client.get("/settings/profile").json()["interaction"] is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 온보딩 진행 상태 — 목표를 남긴 계획 인터뷰 종료가 WELCOME 을 벗어나게 한다 (critic-3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_finishing_the_onboarding_interview_moves_to_goal_confirm(
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
+) -> None:
+    """⚠️ 인터뷰를 끝낸 온보딩 사용자는 ONBOARDING_CONFIRM 이 된다 (critic-3).
+
+    고치기 전엔 WELCOME 에서 나가는 전이가 아무 데도 없어, 계획 생성을 기다리다 앱을 껐다
+    켜면 소개 화면과 새 인터뷰부터 다시 해야 했다. 두 번 불러도(종료 응답 재조회) 그대로다.
+    """
+    monkeypatch.setattr(aiClient, "run", _stub(echo_normalized=True))
+    demo_user_orm.onboarding_state = "WELCOME"
+
+    body = _complete_plan_interview(client)
+    assert body["endReason"] == "completed"
+    assert demo_user_orm.onboarding_state == "ONBOARDING_CONFIRM"
+    assert client.get("/auth/me").json()["onboardingState"] == "ONBOARDING_CONFIRM"
+
+    again = client.post(f"/interview/sessions/{body['sessionId']}/finish")
+    assert again.status_code == 200
+    assert demo_user_orm.onboarding_state == "ONBOARDING_CONFIRM"
+
+
+def test_early_finish_with_goals_also_moves_to_goal_confirm(
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
+) -> None:
+    """[충분해요] 로 끝내도 목표가 저장됐으면 분류 단계에서 이어간다."""
+    monkeypatch.setattr(aiClient, "run", _stub(echo_normalized=True))
+    demo_user_orm.onboarding_state = "ONBOARDING_INTERVIEW"
+
+    body = client.post("/interview/sessions").json()
+    sid = body["sessionId"]
+    turn, answered = 0, ""
+    while answered != "goals.list":  # 목표를 적은 직후 [충분해요]
+        question = body["currentQuestion"]
+        answered = question["slotKey"]
+        turn += 1
+        body = client.post(
+            f"/interview/sessions/{sid}/answers",
+            json={"slotKey": answered, "value": _answer_for(question), "clientTurn": turn},
+        ).json()
+        assert turn <= 10
+    assert client.post(f"/interview/sessions/{sid}/finish").json()["endReason"] == "early_user"
+    assert demo_user_orm.onboarding_state == "ONBOARDING_CONFIRM"
+
+
+def test_early_finish_without_goals_keeps_welcome(
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
+) -> None:
+    """목표 없이 끝난 인터뷰(역할만 답하고 종료)는 이어갈 게 없다 — 상태를 올리지 않는다."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    demo_user_orm.onboarding_state = "WELCOME"
+
+    sid = client.post("/interview/sessions").json()["sessionId"]
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.role", "value": ["3학년"], "clientTurn": 1},
+    )
+    assert client.post(f"/interview/sessions/{sid}/finish").status_code == 200
+    assert demo_user_orm.onboarding_state == "WELCOME"
+
+
+def test_reinterview_by_active_user_keeps_active(
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
+) -> None:
+    """온보딩을 마친 사용자의 재인터뷰는 상태를 되돌리지 않는다."""
+    monkeypatch.setattr(aiClient, "run", _stub(echo_normalized=True))
+    demo_user_orm.onboarding_state = "ACTIVE"
+
+    assert _complete_plan_interview(client)["endReason"] == "completed"
+    assert demo_user_orm.onboarding_state == "ACTIVE"
+
+
+def test_ultimate_interview_does_not_touch_onboarding_state(
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
+) -> None:
+    """궁극목표 인터뷰 종료는 계획 온보딩 단계와 무관하다."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    demo_user_orm.onboarding_state = "WELCOME"
+
+    sid = client.post("/interview/sessions", json={"kind": "ultimate"}).json()["sessionId"]
+    assert client.post(f"/interview/sessions/{sid}/finish").status_code == 200
+    assert demo_user_orm.onboarding_state == "WELCOME"

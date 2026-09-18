@@ -41,6 +41,17 @@
   인터뷰 원답을 이월해 그 값을 되돌리지 않는다 — 그 슬롯은 열린 채 남아(필수면 다시 묻는다)
   답하지 않으면 설정 값이 유지된다.
 
+### 온보딩 중 계획 인터뷰를 끝내면 `ONBOARDING_CONFIRM` 이 된다
+
+- `users.onboarding_state` 를 `WELCOME` 에서 옮기는 전이가 아무 데도 없어, 인터뷰·일정
+  설정을 다 마치고 계획 생성(20~50초)을 기다리다 앱이 다시 열리면 `GET /auth/me` 가 여전히
+  `WELCOME` 이라 소개 화면과 새 인터뷰부터 다시 해야 했다.
+- 이제 계획 인터뷰가 **목표를 1개 이상 저장하고** 끝나면(완료·[충분해요]·재개·시드 마감 모두)
+  `WELCOME`/`ONBOARDING_INTERVIEW` → `ONBOARDING_CONFIRM`(목표 분류 S03). 목표 없이 끝난
+  종료, 궁극목표 인터뷰, 이미 더 진행된 상태(`ACTIVE` 등)는 그대로다(멱등).
+- 그 뒤 단계(`ONBOARDING_CALENDAR`…)는 기존 트리거 그대로이고, 계획 승인은 어느 단계에서든
+  `ACTIVE` 로 마감한다.
+
 ### FE 에 미치는 것
 
 - `next-question` 응답에 `endReason` 이 올 수 있다 — `answers` 의 종료 응답과 같은 분기로
@@ -48,6 +59,8 @@
 - 화면 진입 때 저장된 세션을 `finish` 로 닫지 말고 `next-question` 으로 이어가거나 새로
   `POST /interview/sessions` 를 부르면 된다(restart-wins 가 부수효과 없이 닫는다). `finish` 는
   사용자의 [충분해요] 에만 — 그래야 몇 문항만 답한 세션이 '조기 종료' 로 굳지 않는다.
+- 앱을 다시 열어 `onboardingState=ONBOARDING_CONFIRM` 으로 목표 분류 화면에 들어오면, 메모리의
+  outcome 이 없을 수 있다 — `GET /goals`(인터뷰가 저장한 잠정 목표)로 채우면 된다.
 
 ---
 

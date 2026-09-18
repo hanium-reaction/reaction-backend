@@ -61,6 +61,7 @@ from reaction_backend.orchestrator.interview_catalog import (
 from reaction_backend.repositories.goal_repo import GoalRepo, get_goal_repo
 from reaction_backend.repositories.interview_repo import InterviewRepo, get_interview_repo
 from reaction_backend.repositories.profile_repo import ProfileRepo, get_profile_repo
+from reaction_backend.repositories.user_repo import UserRepo
 from reaction_backend.safety import endpoint_rate_limit
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.interview import (
@@ -456,6 +457,18 @@ async def _finalize_and_respond(
         # 계획에만 쓰이고 버려지던 Policy Snapshot 레이어를 채운다. 설정에서 편집(#A-2).
         # best-effort: 프로필 영속 실패가 인터뷰 완료를 깨지 않게 (#130 리뷰).
         await _persist_profile_best_effort(session, user=user, outcome=result.outcome)
+        # 온보딩 중에 목표를 하나라도 남기고 계획 인터뷰를 끝냈으면 '목표 분류' 단계로 올린다.
+        # 그동안 WELCOME 에서 나가는 전이가 아무 데도 없어, 인터뷰·일정 설정을 다 마치고 계획
+        # 생성(20~50초)을 기다리다 앱을 껐다 켜면 소개 화면과 **새 인터뷰**부터 다시 해야
+        # 했다. 이제 목표가 저장된 분류 화면에서 이어간다. 목표가 없는 종료(역할만 답하고
+        # [충분해요] 등)는 이어갈 게 없어 그대로 둔다. 궁극목표 인터뷰는 이 블록 밖이고,
+        # 이미 더 진행된 상태(ACTIVE 등)는 `advance_onboarding` 이 no-op 이다(멱등).
+        if goal_rows:
+            await UserRepo(session).advance_onboarding(
+                user,
+                expected_from=("WELCOME", "ONBOARDING_INTERVIEW"),
+                to="ONBOARDING_CONFIRM",
+            )
     await session.commit()
     return _response(
         row.id,
