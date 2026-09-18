@@ -6,14 +6,21 @@ sweep 이 활성 사용자만 골라 per-user job 을 호출하고, 한 사용�
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 from uuid import uuid4
 
 import pytest
 
 from reaction_backend.db.models.user import User
+from reaction_backend.orchestrator.weekly_review import ExecutionStat
 from reaction_backend.scheduler import sweeps
+from reaction_backend.scheduler.weekly_review_precompute import (
+    is_final_summary,
+    run_weekly_review_for_user,
+    week_final_at,
+)
+from reaction_backend.schemas.common import KST
 from tests.conftest import (
     FakeActionItemRepo,
     FakeDailyBriefRepo,
@@ -101,6 +108,97 @@ async def test_weekly_review_sweep_noop_on_non_sunday() -> None:
     assert len(review_repo._summaries) == 0
 
 
+def _stat(status: str, when: datetime) -> ExecutionStat:
+    return ExecutionStat(completion_status=status, category="study", plan_start_at=when)
+
+
+# 2026-06-01(월) ~ 06-07(일) 주.
+_WEEK = datetime(2026, 6, 1, tzinfo=KST).date()
+
+
+@pytest.mark.asyncio
+async def test_weekly_review_sunday_polls_refresh_the_snapshot() -> None:
+    """일요일 18:00 폴 뒤에 체크인한 결과가 21:30 폴에서 저장본에 들어간다.
+
+    회귀: `force=False` 라 18:00 첫 폴의 스냅샷이 그 주 내내 잠겼다 — 21:00 회고 알림을 받고
+    [못 함] 을 눌러도 저장된 준수율은 100% 그대로였다.
+    """
+    user_repo = FakeUserRepo()
+    user = _user()
+    _seed_users(user_repo, [user])
+    review_repo = FakeReviewRepo()
+    review_repo.seed_execution(_stat("done", datetime(2026, 6, 1, 9, 0, tzinfo=KST)))
+
+    at_18 = datetime(2026, 6, 7, 18, 0, tzinfo=KST)
+    await sweeps.run_weekly_review_sweep(
+        at_18, user_repo=user_repo, review_repo=review_repo, session=_FakeSession()
+    )
+    assert float(review_repo._summaries[(user.id, _WEEK)].adherence_rate) == 1.0
+
+    review_repo.seed_execution(_stat("failed", datetime(2026, 6, 7, 14, 0, tzinfo=KST)))
+    at_2130 = datetime(2026, 6, 7, 21, 30, tzinfo=KST)
+    await sweeps.run_weekly_review_sweep(
+        at_2130, user_repo=user_repo, review_repo=review_repo, session=_FakeSession()
+    )
+
+    summary = review_repo._summaries[(user.id, _WEEK)]
+    assert float(summary.adherence_rate) == 0.5
+    assert summary.generated_at == at_2130
+
+
+@pytest.mark.asyncio
+async def test_weekly_review_finalize_sweep_rewrites_the_week_after_its_window_closes() -> None:
+    """월·화의 늦은 회고가 확정 집계(목요일 04:30)로 `period_summaries` 에 들어간다."""
+    user_repo = FakeUserRepo()
+    user = _user()
+    _seed_users(user_repo, [user])
+    review_repo = FakeReviewRepo()
+    review_repo.seed_execution(_stat("done", datetime(2026, 6, 1, 9, 0, tzinfo=KST)))
+    sunday_night = datetime(2026, 6, 7, 23, 30, tzinfo=KST)
+    await run_weekly_review_for_user(user.id, _WEEK, sunday_night, repo=review_repo, force=True)
+    # 화요일에 일요일 카드를 뒤늦게 회고.
+    review_repo.seed_execution(_stat("failed", datetime(2026, 6, 7, 20, 0, tzinfo=KST)))
+
+    thursday = datetime.combine(_WEEK + timedelta(days=10), time(4, 30), tzinfo=KST)
+    session = _FakeSession()
+    result = await sweeps.run_weekly_review_finalize_sweep(
+        thursday, user_repo=user_repo, review_repo=review_repo, session=session
+    )
+
+    assert result == sweeps.SweepResult(total=1, ok=1, failed=0)
+    summary = review_repo._summaries[(user.id, _WEEK)]
+    assert float(summary.adherence_rate) == 0.5
+    assert is_final_summary(summary, _WEEK)
+    assert session.commit_count == 1
+
+    # 다음 날 재실행 — 이미 확정본이라 다시 쓰지 않는다(idempotent, 확정 시각 유지).
+    friday = thursday + timedelta(days=1)
+    again = _FakeSession()
+    await sweeps.run_weekly_review_finalize_sweep(
+        friday, user_repo=user_repo, review_repo=review_repo, session=again
+    )
+    assert review_repo._summaries[(user.id, _WEEK)].generated_at == thursday
+    assert again.commit_count == 0
+
+
+@pytest.mark.asyncio
+async def test_weekly_review_finalize_sweep_leaves_a_week_still_open_for_reflection() -> None:
+    """월~수에는 지난주 창이 아직 열려 있다 — 그 주는 건드리지 않고 2주 전 주를 본다."""
+    user_repo = FakeUserRepo()
+    user = _user()
+    _seed_users(user_repo, [user])
+    review_repo = FakeReviewRepo()
+    wednesday = datetime.combine(_WEEK + timedelta(days=9), time(4, 30), tzinfo=KST)
+    assert wednesday < week_final_at(_WEEK)
+
+    await sweeps.run_weekly_review_finalize_sweep(
+        wednesday, user_repo=user_repo, review_repo=review_repo, session=_FakeSession()
+    )
+
+    assert (user.id, _WEEK) not in review_repo._summaries
+    assert (user.id, _WEEK - timedelta(days=7)) in review_repo._summaries
+
+
 @pytest.mark.asyncio
 async def test_sweep_isolates_one_user_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     user_repo = FakeUserRepo()
@@ -178,6 +276,7 @@ def test_build_scheduler_registers_expected_jobs() -> None:
     assert job_ids == {
         "morning_brief",
         "weekly_review",
+        "weekly_review_finalize",
         "interruption_resolver",
         "expire_drafts",
         "expire_reflections",
@@ -284,6 +383,25 @@ def test_weekly_review_job_is_wired_to_the_right_function_and_time() -> None:
     assert fields["minute"] == "*/30", f"주간 리뷰가 30분 폴이 아니다: {fields}"
     assert str(job.trigger.timezone) == "Asia/Seoul"
     assert job.misfire_grace_time == 600
+
+
+def test_weekly_review_finalize_job_is_wired_to_the_right_function_and_time() -> None:
+    """확정 집계가 **매일 04:30 KST** 에 돈다 — 04:00 만료 배치 뒤, 목요일에 처음 일을 한다.
+
+    이 job 이 빠지면 일요일 밤 이후의 늦은 회고가 `period_summaries`(정책 제안 입력)에 영영
+    안 들어가는데 CI 는 초록이다 — 다른 cron 과 같은 이유로 함수·시각을 여기서 고정한다.
+    """
+    from reaction_backend.scheduler import runtime
+
+    job = next(j for j in runtime.build_scheduler().get_jobs() if j.id == "weekly_review_finalize")
+
+    assert job.func is runtime._weekly_review_finalize_job
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"] == "4", f"확정 집계가 04시가 아니다: {fields}"
+    assert fields["minute"] == "30", f"확정 집계가 30분이 아니다: {fields}"
+    assert fields["day_of_week"] == "*", f"확정 집계가 매일이 아니다: {fields}"
+    assert str(job.trigger.timezone) == "Asia/Seoul"
+    assert job.misfire_grace_time == 3600
 
 
 def test_evening_notify_job_is_wired_to_the_right_function_and_time() -> None:

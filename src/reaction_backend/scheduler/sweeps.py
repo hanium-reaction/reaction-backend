@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING
 
 from reaction_backend.scheduler.morning_brief import run_morning_brief_for_user
 from reaction_backend.scheduler.weekly_review_precompute import (
+    is_final_summary,
+    latest_final_week_start,
     run_weekly_review_for_user,
     week_start_of,
 )
@@ -100,7 +102,12 @@ async def run_weekly_review_sweep(
     review_repo: ReviewRepo,
     session: AsyncSession,
 ) -> SweepResult:
-    """일요일 18~23시 30분 폴 — 활성 사용자별 주간 리뷰 precompute(idempotent).
+    """일요일 18~23시 30분 폴 — 활성 사용자별 이번 주 리뷰를 매 폴 다시 집계(idempotent).
+
+    `force=True` — 예전엔 `force=False` 라 18:00 첫 폴의 스냅샷이 그 주 내내 잠겨, 21:00 회고
+    알림을 받고 체크인한 결과가 리포트에 영영 안 들어갔다. 룰 기반 결정적 upsert 라(LLM 없음)
+    매 폴 덮어써도 같은 입력이면 같은 행이다. 이 행은 아직 **확정본이 아니다** — 늦은 회고까지
+    담는 확정은 `run_weekly_review_finalize_sweep` 이 한다.
 
     일요일이 아니면 즉시 no-op(쿼리 없이 반환) — 이 함수가 계산하는 주(`week_start_of`
     (오늘))는 아직 진행 중인 주라, 월~토에 돌면 그 주의 일부만 본 스냅샷이 남는다.
@@ -115,11 +122,51 @@ async def run_weekly_review_sweep(
     ok = failed = 0
     for user_id in user_ids:
         try:
-            await run_weekly_review_for_user(user_id, week_start, now_kst_dt, repo=review_repo)
+            await run_weekly_review_for_user(
+                user_id, week_start, now_kst_dt, repo=review_repo, force=True
+            )
             await session.commit()  # 사용자 단위 commit — 모듈 docstring
             ok += 1
         except Exception:  # noqa: BLE001
             failed += 1
             _log.exception("weekly_review sweep failed for user %s", user_id)
+            await session.rollback()
+    return SweepResult(total=len(user_ids), ok=ok, failed=failed)
+
+
+async def run_weekly_review_finalize_sweep(
+    now_kst_dt: datetime,
+    *,
+    user_repo: UserRepo,
+    review_repo: ReviewRepo,
+    session: AsyncSession,
+) -> SweepResult:
+    """매일 04:30 — 회고 창까지 닫힌 가장 최근 주를 확정 집계로 덮는다(idempotent).
+
+    일요일 저녁 폴은 그 주의 일요일 밤까지만 본다. 그 뒤 월·화에 지난 카드를 회고하면 실행
+    상태가 바뀌는데, 이 확정 집계가 없으면 `period_summaries`(정책 제안의 입력, `GET`
+    의 과거 주 저장본)에는 그 결과가 영영 안 들어간다.
+
+    대상 주는 `latest_final_week_start(now)` — 목요일 04:30 에 지난주가 처음 확정되고, 그 뒤
+    며칠은 이미 확정본이 있어 사용자당 조회 1번으로 끝난다. 매일 도는 이유는 `habit_instances`
+    와 같다(MemoryJobStore 라 주 1회 job 은 재기동 한 번에 그 주가 통째로 빠진다) — 목요일을
+    놓쳐도 다음 날 자가치유한다.
+    """
+    week_start = latest_final_week_start(now_kst_dt)
+    users = await user_repo.list_active()
+    user_ids = [u.id for u in users]  # rollback 뒤에도 읽을 수 있게 원시값으로
+    ok = failed = 0
+    for user_id in user_ids:
+        try:
+            existing = await review_repo.get_weekly(user_id, week_start)
+            if existing is None or not is_final_summary(existing, week_start):
+                await run_weekly_review_for_user(
+                    user_id, week_start, now_kst_dt, repo=review_repo, force=True
+                )
+                await session.commit()  # 사용자 단위 commit — 모듈 docstring
+            ok += 1
+        except Exception:  # noqa: BLE001
+            failed += 1
+            _log.exception("weekly_review finalize failed for user %s", user_id)
             await session.rollback()
     return SweepResult(total=len(user_ids), ok=ok, failed=failed)

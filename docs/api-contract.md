@@ -888,7 +888,7 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
 
 | Method | Path | 설명 | 상태 |
 | --- | --- | --- | --- |
-| GET | `/reviews/weekly?weekStart=YYYY-MM-DD` | 이번 주 리뷰 (일요일 18~23시 precomputed) | ✅ #21-A |
+| GET | `/reviews/weekly?weekStart=YYYY-MM-DD` | 주간 리뷰 (회고 창이 닫힌 주는 확정 집계, 그 전엔 즉석 계산 — v2.30) | ✅ #21-A |
 | POST | `/reviews/weekly/generate` | 수동 재생성 (디버그) | ✅ #21-A |
 | GET | `/reviews/habit-penalty` | 3주 미달 빈도 재설계 후보 (S22) | ✅ #21-C |
 | POST | `/reviews/habit-penalty/{habitId}/accept` | 3주 미달 페널티 수락 (Idempotency) | ✅ #21-C |
@@ -934,8 +934,13 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 #21-A 구현 메모 (룰 기반, LLM 한 줄 평은 P2):
 - `weekStart` 는 해당 주 **월요일**로 정규화(아무 날 넣어도 그 주로 스냅). 생략 시 이번 주.
   형식 오류 → 422 `REVIEW_INVALID_WEEK`.
-- `GET` 은 precomputed `period_summaries`(period_type=`weekly`) 우선 반환, 없으면 **즉석 계산
-  (쓰기 X)** — cron 미실행 환경(데모)에서도 빈 화면 방지. `POST generate` 만 영속화(덮어쓰기).
+- `GET` 은 그 주의 **확정본**만 저장값으로 쓴다(v2.30) — 확정본 = 회고 창이 닫힌 뒤, 즉
+  **다음 주 목요일 00:00 KST 이후에 집계된** `period_summaries`(period_type=`weekly`) 행. 그 전에는
+  (진행 중인 주, 늦은 회고가 아직 들어올 수 있는 지난주, 확정본이 없는 과거 주) 저장된 행이
+  있어도 무시하고 **즉석 계산(쓰기 X)** 한다. 예전엔 저장된 행이면 무조건 반환해 일요일 18:00
+  폴의 스냅샷이 그 주 내내 잠겼고, 같은 응답의 `effort`·`mandala` 는 매번 새로 세어 한 화면에서
+  두 시점의 숫자가 섞였다. `POST generate` 는 종전대로 즉시 영속화(덮어쓰기)하고 방금 집계한
+  값을 돌려준다. 응답 스키마는 그대로.
 - 집계 소스: `execution_events`(완료/실패), `recovery_attempts`(수락=resilience 분자),
   `action_items.category`. 집계는 순수 함수 `orchestrator/weekly_review.py`.
 - `resilienceRate` = 실패(`failed`/`partial_done`) 중 회복 카드 **수락** 비율(#21-A 정의).
@@ -943,7 +948,9 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 - `restartSuccessRate`·`repeatedFailureCount`(interruption·failure_tag 조인) / `policyUpdateCandidates`(P2)
   는 #21-A 에서 `null`/`[]`.
 - 일요일 18~23시 30분 폴 KST precompute cron = `scheduler/weekly_review_precompute.py`
-  (idempotent). 예전엔 일요일 03:00 고정 1회였다 — `week_window()` 가 재는 주 경계
+  (idempotent, v2.30 부터 매 폴 다시 집계 `force=True`) + **매일 04:30 확정 집계**
+  (`weekly_review_finalize` — 회고 창까지 닫힌 가장 최근 주를 덮고, 이미 확정본이면 skip).
+  예전엔 일요일 03:00 고정 1회였다 — `week_window()` 가 재는 주 경계
   `[월 00:00, 다음 월 00:00)` 라 03:00 시점엔 그 주 일요일 활동 대부분이 아직 안 일어난
   상태였다. 18시 이후로 옮겨 그날 활동 대부분을 반영한다(ADR-0008 §4.1). 고정 1회 대신
   폴로 바꾼 이유는 `habit_instances` 와 같다 — jobstore 가 MemoryJobStore 라 그 시간대에

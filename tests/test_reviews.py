@@ -6,6 +6,7 @@ LLM 미사용(룰 기반)이라 외부 의존 없음.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, time, timedelta
 from uuid import uuid4
 
@@ -22,7 +23,10 @@ from reaction_backend.orchestrator.weekly_review import (
 )
 from reaction_backend.repositories.review_repo import TopFailureContext
 from reaction_backend.scheduler.weekly_review_precompute import (
+    is_final_summary,
+    latest_final_week_start,
     run_weekly_review_for_user,
+    week_final_at,
     week_start_of,
 )
 from reaction_backend.schemas.common import KST
@@ -219,6 +223,74 @@ def test_generate_persists_then_get_returns(
     assert (DEMO_USER_UUID, WEEK) in fake_review_repo._summaries
     got = _get(client, WEEK.isoformat())
     assert got.json()["adherenceRate"] == 1.0
+
+
+# ──────────── 확정 전 저장본은 믿지 않는다 (일요일 18:00 스냅샷 잠김 회귀) ────────────
+
+
+def test_week_final_at_is_thursday_after_the_reflection_window() -> None:
+    """일요일 카드는 월·화까지 회고할 수 있다 — 확정은 다음 주 목요일 00:00 KST."""
+    final = week_final_at(WEEK)
+    assert final == datetime.combine(WEEK + timedelta(days=10), time.min, tzinfo=KST)
+    assert final.weekday() == 3  # 목요일
+
+
+def test_latest_final_week_start_skips_the_week_still_open_for_reflection() -> None:
+    next_monday = WEEK + timedelta(days=7)
+    # 다음 주 수요일 23:59 — WEEK 의 창이 아직 열려 있으니 그 전주가 최근 확정 주.
+    wed = datetime.combine(next_monday + timedelta(days=2), time(23, 59), tzinfo=KST)
+    assert latest_final_week_start(wed) == WEEK - timedelta(days=7)
+    # 목요일 04:30 — WEEK 가 처음 확정된다.
+    thu = datetime.combine(next_monday + timedelta(days=3), time(4, 30), tzinfo=KST)
+    assert latest_final_week_start(thu) == WEEK
+
+
+def test_get_weekly_recomputes_while_the_stored_snapshot_is_not_final(
+    client: TestClient, fake_review_repo: FakeReviewRepo
+) -> None:
+    """일요일 18:00 에 저장된 행이 있어도, 그 뒤의 체크인이 점수에 들어간다.
+
+    회귀: GET 이 저장된 행이면 무조건 반환해서 18:00 스냅샷이 그 주 내내 잠겼다 — 21:00 회고
+    알림을 받고 [못 함] 을 눌러도 준수율은 100% 그대로였고, 같은 응답의 `effort` 만 바뀌었다.
+    """
+    sunday_18 = datetime.combine(WEEK + timedelta(days=6), time(18, 0), tzinfo=KST)
+    fake_review_repo.seed_execution(_exec("done", "study", 0, 9, planned_minutes=30))
+
+    async def _snapshot() -> None:
+        await run_weekly_review_for_user(DEMO_USER_UUID, WEEK, sunday_18, repo=fake_review_repo)
+
+    asyncio.run(_snapshot())
+    stored = fake_review_repo._summaries[(DEMO_USER_UUID, WEEK)]
+    assert float(stored.adherence_rate) == 1.0
+    assert not is_final_summary(stored, WEEK)
+
+    # 21:00 이후 회고 — 일요일 카드 하나를 [못 함] 으로 체크인.
+    fake_review_repo.seed_execution(_exec("failed", "study", 6, 14, planned_minutes=30))
+
+    body = _get(client, WEEK.isoformat()).json()
+    assert body["adherenceRate"] == 0.5
+    # 한 화면 안의 두 준수율이 같은 시점을 본다.
+    assert body["effort"]["adherenceRate"] == 0.5
+
+
+def test_get_weekly_trusts_the_final_snapshot(
+    client: TestClient, fake_review_repo: FakeReviewRepo
+) -> None:
+    """회고 창이 닫힌 뒤 집계한 확정본은 그대로 쓴다 — 지난 주 기록이 흔들리지 않는다."""
+    fake_review_repo.seed_execution(_exec("done", "study", 0, 9))
+    after_final = week_final_at(WEEK) + timedelta(hours=4, minutes=30)
+
+    async def _finalize() -> None:
+        await run_weekly_review_for_user(
+            DEMO_USER_UUID, WEEK, after_final, repo=fake_review_repo, force=True
+        )
+
+    asyncio.run(_finalize())
+    assert is_final_summary(fake_review_repo._summaries[(DEMO_USER_UUID, WEEK)], WEEK)
+    # 확정 뒤에 생긴 데이터(있어서는 안 되지만)가 있어도 확정본이 이긴다 — 저장값 경로임을 증명.
+    fake_review_repo.seed_execution(_exec("failed", "study", 1, 9))
+
+    assert _get(client, WEEK.isoformat()).json()["adherenceRate"] == 1.0
 
 
 # ──────────── GET /reviews/weekly — 만다라 절 (ADR-0008 §8 "E") ────────────

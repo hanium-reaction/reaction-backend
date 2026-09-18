@@ -1,13 +1,14 @@
 """Review — Weekly Review (S21). Issue #21-A.
 
-MVP 룰 기반 (LLM 한 줄 평 P2 — 이슈 #21). 일요일 03:00 cron 이 `period_summaries` 를
-precompute 하고, 라우트는 그 행을 읽는다. 아직 없으면 GET 은 즉석 계산해 보여준다(쓰기 X) —
-cron 미실행 환경(데모)에서도 빈 화면이 안 나오도록.
+MVP 룰 기반 (LLM 한 줄 평 P2 — 이슈 #21). cron 이 `period_summaries` 를 precompute 하고,
+GET 은 그 주의 **확정본**(회고 창이 닫힌 뒤 집계한 행)만 저장값으로 믿는다. 확정 전이면 —
+진행 중인 주, 또는 늦은 회고가 아직 들어올 수 있는 지난주 — 매번 즉석 계산한다(쓰기 X).
+cron 미실행 환경(데모)에서도 빈 화면이 안 나오는 것도 같은 경로다.
 
 집계/영속화 로직은 `scheduler/weekly_review_precompute.py` 단일 소스를 재사용한다.
 
 endpoint:
-- GET  /reviews/weekly?weekStart=YYYY-MM-DD       — 주간 리뷰 (precomputed 우선, 없으면 즉석 계산)
+- GET  /reviews/weekly?weekStart=YYYY-MM-DD       — 주간 리뷰 (확정본 우선, 아니면 즉석 계산)
 - POST /reviews/weekly/generate                   — 수동 재생성 + 영속화 (디버그)
 - GET  /reviews/habit-penalty                     — 3주 미달 빈도 재설계 후보 (S22, #21-C)
 - POST /reviews/habit-penalty/{habitId}/accept    — 빈도 다운 수락 (Idempotency-Key, #21-C)
@@ -43,6 +44,7 @@ from reaction_backend.repositories.habit_repo import (
 from reaction_backend.repositories.review_repo import ReviewRepo, get_review_repo
 from reaction_backend.scheduler.weekly_review_precompute import (
     compute_weekly_review,
+    is_final_summary,
     run_weekly_review_for_user,
     week_start_of,
     week_window,
@@ -376,7 +378,13 @@ async def get_weekly_review(
     session: SessionDep,
     week_start: Annotated[str | None, Query(alias="weekStart")] = None,
 ) -> WeeklyReviewResponse:
-    """이번 주(또는 지정 주차) 리뷰. precomputed 우선, 없으면 즉석 계산(쓰기 없음)."""
+    """이번 주(또는 지정 주차) 리뷰. 확정본이 있으면 그것, 아니면 즉석 계산(쓰기 없음).
+
+    확정본 = 그 주의 회고 창이 닫힌 뒤 집계한 행(`is_final_summary`). 예전엔 저장된 행이면
+    무조건 믿었는데, 일요일 18:00 폴이 만든 행이 그 주 내내 잠겨 21:00 회고 알림을 받고 체크인한
+    결과가 점수·한 줄 평에 안 들어갔다 — 같은 응답의 `effort`·`mandala` 는 매번 새로 세므로
+    한 화면 안에서 두 시점의 숫자가 섞였다. 확정 전에는 저장본을 건너뛰고 즉석 계산한다.
+    """
     monday = _parse_week_start(week_start)
     mandala = await _mandala_weekly_summary(user.id, monday, goal_repo=goal_repo, session=session)
     proposals, completions = await _cycle_proposals(user.id, goal_repo=goal_repo, session=session)
@@ -384,7 +392,7 @@ async def get_weekly_review(
     top_failures = await _top_failure_contexts(user.id, monday + timedelta(days=6), repo=repo)
     effort = await _effort_minutes(user.id, monday, repo=repo)
     existing = await repo.get_weekly(user.id, monday)
-    if existing is not None:
+    if existing is not None and is_final_summary(existing, monday):
         return _from_summary(
             existing,
             effort=effort,
