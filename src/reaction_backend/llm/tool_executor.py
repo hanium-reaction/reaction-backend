@@ -84,6 +84,7 @@ from reaction_backend.safety.llm_budget import (
     record as record_run,
 )
 from reaction_backend.safety.tone_gate import check_structured as tone_gate_check
+from reaction_backend.safety.user_echo import UserText
 
 _log = logging.getLogger(__name__)
 
@@ -209,6 +210,10 @@ class LLMToolExecutor:
         started = time.monotonic()
         prompt_version = "unknown"
         resolved_prompt_id = prompt_id
+        # 이 호출에 들어간 입력(사용자 답·목표 제목 등). LLM·룰 폴백이 그 문구를 **그대로
+        # 옮겨 쓴 자리**만 금지어 치환·톤 게이트에서 뺀다(llm-1·llm-2, `safety/user_echo`).
+        # AI 가 스스로 쓴 말은 전과 똑같이 걸린다 — 필터를 끄는 게 아니다(AGENTS §2).
+        user_texts = UserText.of((variables or {}).values())
 
         # ── 1) 프롬프트 ─────────────────────────────────────────────
         try:
@@ -220,6 +225,7 @@ class LLMToolExecutor:
                 fallback,
                 module=module,
                 schema=schema,
+                protected=user_texts,
                 prompt_id=resolved_prompt_id,
                 prompt_version=prompt_version,
                 reason="no_prompt",
@@ -243,6 +249,7 @@ class LLMToolExecutor:
                     fallback,
                     module=module,
                     schema=schema,
+                    protected=user_texts,
                     prompt_id=resolved_prompt_id,
                     prompt_version=prompt_version,
                     reason="budget",
@@ -298,6 +305,7 @@ class LLMToolExecutor:
                 fallback,
                 module=module,
                 schema=schema,
+                protected=user_texts,
                 prompt_id=resolved_prompt_id,
                 prompt_version=prompt_version,
                 reason=last_reason or "provider_error",
@@ -311,12 +319,15 @@ class LLMToolExecutor:
             )
 
         # ── 4) 금지어 후처리 (명사 치환 — 톤 게이트는 다음 단계) ──────
-        sanitized_payload, blocked, hits = enforce_structured(validated.model_dump())
+        sanitized_payload, blocked, hits = enforce_structured(
+            validated.model_dump(), protected=user_texts
+        )
         if blocked:
             return await self._fallback(
                 fallback,
                 module=module,
                 schema=schema,
+                protected=user_texts,
                 prompt_id=resolved_prompt_id,
                 prompt_version=prompt_version,
                 reason="banned",
@@ -339,12 +350,13 @@ class LLMToolExecutor:
         # ── 5) 톤 게이트 (근거 대장 §4 S6) ──────────────────────────
         # banned_words 는 명사 1:1 치환이라 "당신이 게을러서" 류의 문장 구조 문제는 못
         # 고친다 — 안전한 대체 표현이 없으므로 치환하지 않고 곧장 fallback 한다.
-        tone_blocked, tone_hits = tone_gate_check(sanitized.model_dump())
+        tone_blocked, tone_hits = tone_gate_check(sanitized.model_dump(), protected=user_texts)
         if tone_blocked:
             return await self._fallback(
                 fallback,
                 module=module,
                 schema=schema,
+                protected=user_texts,
                 prompt_id=resolved_prompt_id,
                 prompt_version=prompt_version,
                 reason="tone_gate",
@@ -768,6 +780,7 @@ class LLMToolExecutor:
         input_summary: str | None = None,
         output_summary: str | None = None,
         banned_hits: tuple[str, ...] = (),
+        protected: UserText | None = None,
     ) -> RunResult[T]:
         value = await _resolve_fallback(fallback, schema=schema)
 
@@ -777,7 +790,11 @@ class LLMToolExecutor:
         # 잠금 결정(AGENTS.md §1 금지어 필터 강제)에 구멍이 난다.
         # 여기서는 치환만 하고 blocked 는 무시한다: fallback 의 fallback 은 없고,
         # 치환된 문구가 원문보다 항상 낫기 때문(무한 재귀 방지).
-        sanitized_fallback, _, fallback_hits = enforce_structured(value.model_dump())
+        # 룰 폴백이 되돌려주는 **사용자 원문**('{목표 제목} 1회차')은 성공 경로와 같은 규칙으로
+        # 치환하지 않는다(llm-2) — 폴백이라서 사용자 목표 제목이 깨져 저장되면 안 된다.
+        sanitized_fallback, _, fallback_hits = enforce_structured(
+            value.model_dump(), protected=protected or ()
+        )
         if fallback_hits:
             value = schema.model_validate(sanitized_fallback)
 
