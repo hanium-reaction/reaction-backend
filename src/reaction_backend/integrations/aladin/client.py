@@ -41,6 +41,17 @@ REASON_EMPTY: Final = "empty"
 REASON_NOT_FOUND: Final = "not_found"
 
 
+def _describe(e: requests.RequestException) -> str:
+    """로그에 남길 실패 요약 — 예외 **유형과 상태 코드만**.
+
+    `requests` 예외 문자열엔 요청 URL 전체가 들어 있고, 그 쿼리에 `ttbkey` 가 평문으로
+    실린다("... for url: ...ItemSearch.aspx?ttbkey=ttb...&Query=..."). `exc_info=True` 나
+    `str(e)` 로 남기면 서버 로그에 API 키가 그대로 쌓인다(inbox-7).
+    """
+    status = e.response.status_code if e.response is not None else None
+    return f"{type(e).__name__} status={status}"
+
+
 @dataclass(frozen=True, slots=True)
 class BookResult:
     """검색 후보 1건 — 목차·페이지 없음(이 단계에서는 조회하지 않는다)."""
@@ -85,8 +96,8 @@ def _search_sync(query: str, key: str, limit: int) -> SearchResult:
         response.raise_for_status()
     except requests.Timeout:
         return SearchResult(reason=REASON_TIMEOUT)
-    except requests.RequestException:
-        logger.warning("aladin search failed", exc_info=True)
+    except requests.RequestException as e:
+        logger.warning("aladin search failed: %s", _describe(e))
         return SearchResult(reason=REASON_UNAVAILABLE)
 
     try:
@@ -167,8 +178,8 @@ def _lookup_sync(isbn13: str, key: str) -> LookupResult:
         response.raise_for_status()
     except requests.Timeout:
         return LookupResult(reason=REASON_TIMEOUT)
-    except requests.RequestException:
-        logger.warning("aladin lookup failed", exc_info=True)
+    except requests.RequestException as e:
+        logger.warning("aladin lookup failed: %s", _describe(e))
         return LookupResult(reason=REASON_UNAVAILABLE)
 
     try:

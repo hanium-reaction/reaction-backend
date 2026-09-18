@@ -309,3 +309,46 @@ async def test_detail_missing_playlist_meta_does_not_fail_the_whole_call(
     assert result.detail is not None
     assert result.detail.title == ""
     assert len(result.detail.curriculum) == 1
+
+
+# ───────────────── 로그에 API 키가 남지 않는다 (inbox-7) ─────────────────
+
+_SECRET = "AIzaSECRET123"
+
+
+def _leak(url: str) -> requests.ConnectionError:
+    """`requests` 예외 문자열엔 요청 URL 전체(`key=` 포함)가 담긴다 — 실측 형식 그대로."""
+    return requests.ConnectionError(f"Max retries exceeded with url: {url}?key={_SECRET}&q=x")
+
+
+async def test_search_failure_log_does_not_leak_the_api_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def _get(url: str, **k: Any) -> Any:
+        raise _leak(url)
+
+    monkeypatch.setattr(client.requests, "get", _get)
+    with caplog.at_level("DEBUG"):
+        result = await client.search_playlists("토익", key=_SECRET, limit=3)
+    assert result.reason == client.REASON_UNAVAILABLE
+    assert "youtube search failed" in caplog.text
+    assert _SECRET not in caplog.text
+
+
+@pytest.mark.parametrize("failing_url", [client._PLAYLIST_ITEMS_URL, client._VIDEOS_URL])
+async def test_detail_failure_log_does_not_leak_the_api_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failing_url: str
+) -> None:
+    router = _RoutedResponses()
+
+    def _get(url: str, *, params: dict[str, Any], timeout: Any = None) -> _FakeResponse:
+        if url == failing_url:
+            raise _leak(url)
+        return router.get(url, params=params, timeout=timeout)
+
+    monkeypatch.setattr(client.requests, "get", _get)
+    with caplog.at_level("DEBUG"):
+        result = await client.get_playlist_detail("PL1", key=_SECRET)
+    assert result.reason == client.REASON_UNAVAILABLE
+    assert "failed" in caplog.text
+    assert _SECRET not in caplog.text

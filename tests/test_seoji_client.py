@@ -174,3 +174,29 @@ def test_text_before_the_first_header_is_kept_as_its_own_entry() -> None:
     """머리말처럼 첫 헤더 앞에 오는 부분은 예전처럼 따로 한 항목으로 남는다."""
     entries = client._split_toc_entries("머리말···3 DAY 01 인사···10 DAY 02 날씨···20")
     assert entries == ["머리말···3", "DAY 01 인사···10", "DAY 02 날씨···20"]
+
+
+@pytest.mark.parametrize("kind", ["connection", "http"])
+async def test_failure_log_does_not_leak_the_api_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, kind: str
+) -> None:
+    """`requests` 예외 문자열엔 요청 URL 전체(`cert_key` 포함)가 담긴다 — 로그에 남기면
+    API 키가 평문으로 쌓인다(inbox-7)."""
+    secret = "SECRET123"
+    leaky_url = f"https://seoji.nl.go.kr/landingPage/SearchApi.do?cert_key={secret}&isbn=1"
+
+    class _HttpErrorResponse(_FakeResponse):
+        def raise_for_status(self) -> None:
+            raise requests.HTTPError(f"503 Server Error for url: {leaky_url}", response=self)
+
+    def _get(*a: Any, **k: Any) -> Any:
+        if kind == "connection":
+            raise requests.ConnectionError(f"Max retries exceeded with url: {leaky_url}")
+        return _HttpErrorResponse(status=503)
+
+    monkeypatch.setattr(client.requests, "get", _get)
+    with caplog.at_level("DEBUG"):
+        result = await client.lookup_toc("9788994492049", key=secret)
+    assert result.reason == client.REASON_UNAVAILABLE
+    assert "seoji lookup failed" in caplog.text
+    assert secret not in caplog.text

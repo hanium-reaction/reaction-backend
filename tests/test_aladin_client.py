@@ -144,3 +144,50 @@ async def test_lookup_timeout_is_reported_without_raising(monkeypatch: pytest.Mo
     result = await client.lookup_book("9788965424765", key="ttbtest")
     assert not result.ok
     assert result.reason == client.REASON_TIMEOUT
+
+
+# ───────────────── 로그에 API 키가 남지 않는다 (inbox-7) ─────────────────
+
+_SECRET = "ttbSECRET123"
+
+
+def _leaky_failures() -> list[Any]:
+    """`requests` 예외는 문자열에 요청 URL 전체(키 포함)를 담는다 — 실제 형식 그대로."""
+
+    def _connection_error(*a: Any, **k: Any) -> Any:
+        raise requests.ConnectionError(
+            f"HTTPSConnectionPool: Max retries exceeded with url: /ttb/api/ItemSearch.aspx?ttbkey={_SECRET}&Query=a"
+        )
+
+    class _HttpErrorResponse(_FakeResponse):
+        def raise_for_status(self) -> None:
+            raise requests.HTTPError(
+                f"503 Server Error for url: https://www.aladin.co.kr/ttb/api/ItemLookUp.aspx?ttbkey={_SECRET}",
+                response=self,
+            )
+
+    return [_connection_error, lambda *a, **k: _HttpErrorResponse(status=503)]
+
+
+@pytest.mark.parametrize("failure", _leaky_failures())
+async def test_search_failure_log_does_not_leak_the_api_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure: Any
+) -> None:
+    monkeypatch.setattr(client.requests, "get", failure)
+    with caplog.at_level("DEBUG"):
+        result = await client.search_books("토익", key=_SECRET, limit=3)
+    assert result.reason == client.REASON_UNAVAILABLE
+    assert "aladin search failed" in caplog.text, "실패 사실 자체는 남아야 한다"
+    assert _SECRET not in caplog.text
+
+
+@pytest.mark.parametrize("failure", _leaky_failures())
+async def test_lookup_failure_log_does_not_leak_the_api_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure: Any
+) -> None:
+    monkeypatch.setattr(client.requests, "get", failure)
+    with caplog.at_level("DEBUG"):
+        result = await client.lookup_book("9788965422389", key=_SECRET)
+    assert result.reason == client.REASON_UNAVAILABLE
+    assert "aladin lookup failed" in caplog.text
+    assert _SECRET not in caplog.text

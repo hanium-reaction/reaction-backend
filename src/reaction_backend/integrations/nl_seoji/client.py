@@ -201,8 +201,11 @@ def _lookup_sync(isbn13: str, key: str) -> TocResult:
         response.raise_for_status()
     except requests.Timeout:
         return TocResult(reason=REASON_TIMEOUT)
-    except requests.RequestException:
-        logger.warning("seoji lookup failed", exc_info=True)
+    except requests.RequestException as e:
+        # 예외 문자열엔 요청 URL 전체(`cert_key` 쿼리 포함)가 들어 있다 — 유형·상태 코드만
+        # 남긴다(inbox-7). `exc_info=True` 로 남기면 서버 로그에 API 키가 평문으로 쌓인다.
+        status = e.response.status_code if e.response is not None else None
+        logger.warning("seoji lookup failed: %s status=%s", type(e).__name__, status)
         return TocResult(reason=REASON_UNAVAILABLE)
 
     try:

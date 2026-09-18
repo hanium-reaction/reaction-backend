@@ -48,6 +48,16 @@ REASON_EMPTY: Final = "empty"
 REASON_NOT_FOUND: Final = "not_found"
 
 
+def _describe(e: requests.RequestException) -> str:
+    """로그에 남길 실패 요약 — 예외 **유형만**.
+
+    `requests` 예외 문자열엔 요청 URL 전체가 들어 있고, 그 쿼리에 `key=` 가 평문으로
+    실린다("Max retries exceeded with url: /youtube/v3/search?key=AIza..."). `exc_info=True`
+    나 `str(e)` 로 남기면 서버 로그에 API 키가 그대로 쌓인다(inbox-7).
+    """
+    return type(e).__name__
+
+
 @dataclass(frozen=True, slots=True)
 class PlaylistResult:
     """검색 후보 1건 — 커리큘럼(영상 제목)·분량(재생시간) 없음(이 단계에서는 조회하지 않는다)."""
@@ -100,8 +110,8 @@ def _search_sync(query: str, key: str, limit: int) -> SearchResult:
         )
     except requests.Timeout:
         return SearchResult(reason=REASON_TIMEOUT)
-    except requests.RequestException:
-        logger.warning("youtube search failed", exc_info=True)
+    except requests.RequestException as e:
+        logger.warning("youtube search failed: %s", _describe(e))
         return SearchResult(reason=REASON_UNAVAILABLE)
 
     if not response.ok:
@@ -252,8 +262,8 @@ def _playlist_detail_sync(playlist_id: str, key: str) -> DetailResult:
             )
         except requests.Timeout:
             return DetailResult(reason=REASON_TIMEOUT)
-        except requests.RequestException:
-            logger.warning("youtube playlistItems failed", exc_info=True)
+        except requests.RequestException as e:
+            logger.warning("youtube playlistItems failed: %s", _describe(e))
             return DetailResult(reason=REASON_UNAVAILABLE)
 
         if not response.ok:
@@ -296,8 +306,8 @@ def _playlist_detail_sync(playlist_id: str, key: str) -> DetailResult:
             )
         except requests.Timeout:
             return DetailResult(reason=REASON_TIMEOUT)
-        except requests.RequestException:
-            logger.warning("youtube videos failed", exc_info=True)
+        except requests.RequestException as e:
+            logger.warning("youtube videos failed: %s", _describe(e))
             return DetailResult(reason=REASON_UNAVAILABLE)
         if not response.ok:
             return DetailResult(reason=_error_reason(response))
