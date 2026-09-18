@@ -248,3 +248,97 @@ def test_every_tier_write_goes_through_the_locked_check(
     )
 
     assert calls == ["maintain", "focus", "maintain"]
+
+
+# ── ④ 축 승격 — 멱등 판정을 lock 뒤에서 다시 읽는다 (goals-23) ─────────────
+
+
+@pytest.mark.skipif(not DB_AVAILABLE, reason="DATABASE_URL not set")
+async def test_concurrent_axis_promotions_make_one_goal() -> None:
+    """같은 축을 두 요청이 동시에 올려도(두 번 탭, promote 와 next-cycle 동시) 목표는 하나.
+
+    두 요청 모두 lock **전에** 축을 읽어 둔다(`next-cycle` 이 실제로 그렇다). 뒤 요청이 lock
+    뒤에서 다시 읽지 않으면 "아직 승격 전" 을 그대로 믿고 같은 축으로 목표를 하나 더 만든다.
+    """
+    from sqlalchemy import select
+
+    from reaction_backend.db.models.goal_node import GoalNode
+    from reaction_backend.repositories.goal_repo import GoalRepo
+
+    agen = _sessionmaker()
+    sm = await anext(agen)
+    uid = uuid.uuid4()
+    try:
+        async with sm() as s:
+            s.add(User(id=uid, email=f"axis+{uid}@test.local", name="axis promote"))
+            await s.flush()
+            ultimate = Goal(
+                user_id=uid,
+                title="궁극",
+                category="other",
+                goal_tier="parked",
+                is_ultimate=True,
+            )
+            s.add(ultimate)
+            await s.flush()
+            root = GoalNode(
+                goal_id=ultimate.id,
+                title="궁극",
+                node_type="core",
+                depth=0,
+                order_index=0,
+                is_leaf=False,
+                tree_kind="mandala",
+            )
+            s.add(root)
+            await s.flush()
+            axis = GoalNode(
+                goal_id=ultimate.id,
+                parent_node_id=root.id,
+                title="체력",
+                node_type="subgoal",
+                depth=1,
+                order_index=0,
+                is_leaf=False,
+                tree_kind="mandala",
+            )
+            s.add(axis)
+            await s.commit()
+            axis_id = axis.id
+
+        async def promote() -> bool:
+            async with sm() as s:
+                node = (
+                    await s.execute(select(GoalNode).where(GoalNode.id == axis_id))
+                ).scalar_one()
+                _, created = await goal_policy.promote_axis(
+                    s, GoalRepo(s), node=node, user_id=uid, goal_tier="focus"
+                )
+                await asyncio.sleep(0.3)
+                await s.commit()
+                return created
+
+        results = await asyncio.wait_for(asyncio.gather(promote(), promote()), timeout=30)
+
+        async with sm() as s:
+            promoted = (
+                await s.execute(
+                    text("SELECT count(*) FROM goals WHERE user_id = :u AND NOT is_ultimate"),
+                    {"u": uid},
+                )
+            ).scalar_one()
+    finally:
+        async with sm() as s:
+            await s.execute(
+                text(
+                    "DELETE FROM goal_nodes WHERE goal_id IN (SELECT id FROM goals WHERE user_id = :u)"
+                ),
+                {"u": uid},
+            )
+            await s.execute(text("DELETE FROM goals WHERE user_id = :u"), {"u": uid})
+            await s.execute(text("DELETE FROM users WHERE id = :u"), {"u": uid})
+            await s.commit()
+        await agen.aclose()
+
+    assert sorted(results) == [False, True], results
+    assert promoted == 1

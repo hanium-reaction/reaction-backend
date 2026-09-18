@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import date
 from http import HTTPStatus
 from typing import Annotated, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -674,9 +674,9 @@ async def promote_mandala_node(
     번 승격해 중복 목표가 쌓이면 안 된다.
 
     멱등 판정(`promoted_goal_id`)은 tier lock **뒤에서** 읽는다 — 먼저 읽으면 두 번 탭한 두
-    요청이 모두 "아직 승격 전" 을 보고 같은 축으로 목표를 두 개 만든다.
+    요청이 모두 "아직 승격 전" 을 보고 같은 축으로 목표를 두 개 만든다. 목표 만들기 규칙은
+    `/plans/mandala/next-cycle` 과 한 벌이다(`goal_policy.promote_axis`).
     """
-    await goal_policy.hold_tier_lock(session, user.id)
     node = await _load_mandala_node(repo, user.id, node_id)
     if node.depth != 1:
         raise ApiError(
@@ -685,35 +685,13 @@ async def promote_mandala_node(
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="nodeId",
         )
-    if node.promoted_goal_id is not None:
-        existing = await repo.get_by_id(user.id, node.promoted_goal_id)
-        if existing is not None:
-            return _to_schema(
-                existing,
-                promoted_from_axis=node.title,
-                has_plan=await _has_plan(repo, existing),
-            )
-
-    await goal_policy.enforce_tier_limit(session, repo, user.id, body.goal_tier)
-    goal = GoalModel()
-    # id 는 flush 로 받지 않고 여기서 채운다(PR5 `persist_mandala` 와 같은 이유) — 곧바로
-    # `node.promoted_goal_id = goal.id` 로 써야 하고, DB 왕복(flush) 없이도 항상 값이 있어야
-    # 한다(테스트의 fake session 포함).
-    goal.id = uuid4()
-    goal.user_id = user.id
-    goal.title = node.title
-    goal.category = "other"  # 만다라 축엔 category 개념이 없다 — 승격 후 PATCH 로 사용자가 조정
-    goal.goal_tier = body.goal_tier
-    goal.status = "proposed"
-    goal.priority_level = 3
-    goal.is_ultimate = False  # 승격된 goal 은 축의 파생물이지 궁극목표 자체가 아니다
-    goal.why_now = node.why_text
-    session.add(goal)
-    await session.flush()
-    node.promoted_goal_id = goal.id
+    goal, created = await goal_policy.promote_axis(
+        session, repo, node=node, user_id=user.id, goal_tier=body.goal_tier
+    )
+    has_plan = False if created else await _has_plan(repo, goal)  # 방금 만든 잠정 목표는 계획 없음
     await session.commit()
     await session.refresh(goal)
-    return _to_schema(goal, promoted_from_axis=node.title, has_plan=False)  # 방금 만든 잠정 목표
+    return _to_schema(goal, promoted_from_axis=node.title, has_plan=has_plan)
 
 
 @router.post("/mandala/nodes/{node_id}/habit", status_code=status.HTTP_201_CREATED)

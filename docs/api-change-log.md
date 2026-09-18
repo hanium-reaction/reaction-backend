@@ -79,6 +79,8 @@
 - `POST /plans/mandala/next-cycle` 의 칸 → 마일스톤에서 반복형(습관 링크) 칸과 규칙 자리표시 칸(`source="rule"`)을 뺀다.
 - 주간 리뷰 `mandala.untouchedAxisTitles`·`staleAxisProposals` — 칸을 다 끝낸 축은 "손 못 댄 축" 이 아니다.
 - `GET /inbox/coaching-advice` 의 마지막 안내는 진행 중·보류 아님·궁극목표 아님인 목표에서만(없으면 생략).
+- 축 승격(`promote`)과 `POST /plans/mandala/next-cycle` 이 같은 승격 규칙을 쓴다 — 같은 축을 두 요청이 동시에
+  올려도 목표는 하나(두 번째는 첫 목표를 그대로 돌려준다). 응답 형태는 그대로.
 
 ---
 

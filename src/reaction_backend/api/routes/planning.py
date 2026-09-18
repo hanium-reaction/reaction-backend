@@ -36,7 +36,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from typing import Annotated, Any, Literal, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from langchain_core.runnables import RunnableConfig
@@ -1400,28 +1400,10 @@ async def _promote_axis_for_cycle(
     반환: (Goal, 이 호출이 새로 승격했는지). tier 한도는 **새로 만들 때만** 잰다 — 이미 있는
     목표를 다시 여는 데 한도를 걸면 Focus 가 꽉 찬 사용자가 자기 목표의 다음 주기를 못 연다.
     """
-    if node.promoted_goal_id is not None:
-        existing = await goal_repo.get_by_id(user_id, node.promoted_goal_id)
-        if existing is not None:
-            return existing, False
-
-    # 한도 판정은 `POST /goals` 와 같은 한 벌(lock → 세기 → 한국어 문구, goal_policy 참고).
-    await goal_policy.enforce_tier_limit(session, goal_repo, user_id, goal_tier)
-
-    goal = Goal()
-    goal.id = uuid4()
-    goal.user_id = user_id
-    goal.title = node.title
-    goal.category = "other"  # 만다라 축엔 category 개념이 없다(`promote_mandala_node` 와 동일)
-    goal.goal_tier = goal_tier
-    goal.status = "proposed"
-    goal.priority_level = 3
-    goal.is_ultimate = False
-    goal.why_now = node.why_text
-    session.add(goal)
-    await session.flush()
-    node.promoted_goal_id = goal.id
-    return goal, True
+    # 승격 규칙(멱등 판정을 lock 뒤에서 다시 읽기·한도·목표 만들기)은 `promote` 와 한 벌이다.
+    return await goal_policy.promote_axis(
+        session, goal_repo, node=node, user_id=user_id, goal_tier=goal_tier
+    )
 
 
 async def _cycle_seed_outcome(

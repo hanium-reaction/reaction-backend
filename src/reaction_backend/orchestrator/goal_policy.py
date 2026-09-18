@@ -19,10 +19,12 @@ FE 가 그대로 띄우면 앱 어디에도 없는 영어 이름이 나왔다.
 from __future__ import annotations
 
 from http import HTTPStatus
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from reaction_backend.db.models.goal import Goal
+from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.orchestrator._common import user_agent_lock
 from reaction_backend.repositories.goal_repo import GoalRepo
 from reaction_backend.schemas.errors import ApiError, ErrorCode
@@ -85,6 +87,56 @@ async def enforce_tier_limit(
         raise tier_limit_error(tier, limit)
 
 
+async def promote_axis(
+    session: AsyncSession,
+    repo: GoalRepo,
+    *,
+    node: GoalNode,
+    user_id: UUID,
+    goal_tier: str,
+) -> tuple[Goal, bool]:
+    """만다라 축(depth=1) → 이번 학기 `Goal(status="proposed")`. 반환: (목표, 새로 만들었나).
+
+    `POST /goals/mandala/nodes/{id}/promote` 와 `POST /plans/mandala/next-cycle` 이 **같은
+    규칙**을 쓴다 — 예전엔 두 라우터가 목표 만들기를 각자 복제했다.
+
+    - **멱등** — 이미 승격돼 그 목표가 살아 있으면 그 행을 그대로(새로 안 만든다, tier 도 안
+      잰다: 이미 있는 목표의 다음 주기를 여는 데 한도를 걸면 Focus 가 꽉 찬 사용자가 자기 목표를
+      못 연다). 지웠으면(보관) 새로 만든다.
+    - 멱등 판정(`promoted_goal_id`)은 tier lock **뒤에서 다시 읽는다** — lock 전에 읽은 값은 앞
+      요청이 커밋하기 전이라, 두 번 탭한 두 요청이 모두 "아직 승격 전" 을 보고 같은 축으로
+      목표를 두 개 만든다.
+    - 새로 만들 때만 한도(Focus≤3/Maintain≤5)를 잰다. category 는 `other`(만다라 축엔 분류
+      개념이 없다 — 승격 뒤 사용자가 PATCH), 우선순위 3, 이유는 축의 `why_text`.
+
+    commit 은 호출자 몫이다(lock 도 그때 풀린다).
+    """
+    await hold_tier_lock(session, user_id)
+    await session.refresh(node)
+    if node.promoted_goal_id is not None:
+        existing = await repo.get_by_id(user_id, node.promoted_goal_id)
+        if existing is not None:
+            return existing, False
+
+    await enforce_tier_limit(session, repo, user_id, goal_tier)
+    goal = Goal()
+    # id 는 flush 로 받지 않고 여기서 채운다 — 곧바로 `node.promoted_goal_id` 로 써야 하고,
+    # DB 왕복 없이도(테스트의 fake session 포함) 항상 값이 있어야 한다.
+    goal.id = uuid4()
+    goal.user_id = user_id
+    goal.title = node.title
+    goal.category = "other"
+    goal.goal_tier = goal_tier
+    goal.status = "proposed"
+    goal.priority_level = 3
+    goal.is_ultimate = False  # 승격된 목표는 축의 파생물이지 궁극목표 자체가 아니다
+    goal.why_now = node.why_text
+    session.add(goal)
+    await session.flush()
+    node.promoted_goal_id = goal.id
+    return goal, True
+
+
 def clip_goal_title(text: str) -> str:
     """서버가 **사용자 글에서** 만드는 목표 제목을 `goals.title` 길이에 맞춘다.
 
@@ -105,6 +157,7 @@ __all__ = [
     "clip_goal_title",
     "enforce_tier_limit",
     "hold_tier_lock",
+    "promote_axis",
     "tier_label",
     "tier_limit_error",
 ]
