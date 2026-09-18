@@ -269,6 +269,105 @@ async def test_detail_reports_truncation_instead_of_silently_cutting(
     assert result.detail.video_count == 2  # 상한에 잘려도 실제 총 개수는 정확하다
 
 
+async def test_detail_skips_private_and_deleted_videos(monkeypatch: pytest.MonkeyPatch) -> None:
+    """볼 수 없는 영상은 커리큘럼에도, 영상 수에도 넣지 않는다 (journey-14).
+
+    실측: 재생목록에 비공개 영상이 섞이면 `playlistItems` 가 제목 "Private video" 로 주고
+    `videos.list` 는 재생시간을 안 준다 — 그대로 두면 "Private video (0분)" 이 단원처럼 보였다.
+    """
+    router = _RoutedResponses()
+    router.item_pages = [
+        {
+            "items": [
+                _video_item("v1", "1강 오리엔테이션"),
+                {
+                    "contentDetails": {"videoId": "vp"},
+                    "snippet": {"title": "Private video"},
+                    "status": {"privacyStatus": "private"},
+                },
+                {
+                    "contentDetails": {"videoId": "vd"},
+                    "snippet": {"title": "Deleted video"},
+                    "status": {"privacyStatus": "privacyStatusUnspecified"},
+                },
+                # 상태는 공개로 남았지만 실제로는 볼 수 없는 영상 — 재생시간이 안 온다.
+                _video_item("vx", "3강 (내려감)"),
+                _video_item("v2", "2강 자료구조"),
+            ],
+            "pageInfo": {"totalResults": 5},
+        }
+    ]
+    router.videos_body = {
+        "items": [
+            {"id": "v1", "contentDetails": {"duration": "PT10M"}},
+            {"id": "v2", "contentDetails": {"duration": "PT20M"}},
+        ]
+    }
+    monkeypatch.setattr(client.requests, "get", router.get)
+
+    result = await client.get_playlist_detail("PL1", key="AIzatest")
+
+    assert result.ok
+    assert result.detail is not None
+    assert [c.title for c in result.detail.curriculum] == ["1강 오리엔테이션", "2강 자료구조"]
+    assert result.detail.video_count == 2
+    assert result.detail.total_seconds == 30 * 60
+
+
+async def test_detail_with_only_unavailable_videos_is_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = _RoutedResponses()
+    router.item_pages = [
+        {
+            "items": [
+                {
+                    "contentDetails": {"videoId": "vp"},
+                    "snippet": {"title": "Private video"},
+                    "status": {"privacyStatus": "private"},
+                }
+            ],
+            "pageInfo": {"totalResults": 1},
+        }
+    ]
+    monkeypatch.setattr(client.requests, "get", router.get)
+
+    result = await client.get_playlist_detail("PL1", key="AIzatest")
+
+    assert not result.ok
+    assert result.reason == client.REASON_NOT_FOUND
+
+
+async def test_detail_never_exceeds_the_curriculum_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """걸러낸 항목 때문에 페이지가 덜 차도 상한을 넘겨 쌓이지 않는다(스키마 상한 보호)."""
+    monkeypatch.setattr(client, "_MAX_CURRICULUM_ITEMS", 3)
+    router = _RoutedResponses()
+    router.item_pages = [
+        {
+            "items": [_video_item("v1", "1강"), _video_item("v2", "2강")],
+            "pageInfo": {"totalResults": 4},
+            "nextPageToken": "1",
+        },
+        {
+            "items": [_video_item("v3", "3강"), _video_item("v4", "4강")],
+            "pageInfo": {"totalResults": 4},
+        },
+    ]
+    router.videos_body = {
+        "items": [
+            {"id": v, "contentDetails": {"duration": "PT10M"}} for v in ("v1", "v2", "v3", "v4")
+        ]
+    }
+    monkeypatch.setattr(client.requests, "get", router.get)
+
+    result = await client.get_playlist_detail("PL1", key="AIzatest")
+
+    assert result.detail is not None
+    assert len(result.detail.curriculum) == 3
+    assert result.detail.truncated is True
+    assert result.detail.video_count == 4
+
+
 async def test_detail_empty_playlist_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     router = _RoutedResponses()
     router.item_pages = [{"items": [], "pageInfo": {"totalResults": 0}}]

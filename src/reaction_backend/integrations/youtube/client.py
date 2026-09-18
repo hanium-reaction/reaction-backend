@@ -198,8 +198,8 @@ class PlaylistDetail:
     title: str
     channel_title: str
     video_count: int
-    """재생목록의 **실제** 총 영상 수(API `pageInfo.totalResults`) — `curriculum` 이 상한에
-    잘려도 이 값은 정확하다."""
+    """재생목록에서 **볼 수 있는** 영상 수 — 비공개·삭제된 영상은 뺀다. `curriculum` 이 상한에
+    잘렸으면 API 총수(`pageInfo.totalResults`)에서 지금까지 걸러낸 수를 뺀 값이다."""
     total_seconds: int
     """`curriculum` 에 담긴 영상들의 재생시간 합. 상한에 잘렸으면 실제 총합보다 작다."""
     curriculum: list[CurriculumItem] = field(default_factory=list)
@@ -239,18 +239,32 @@ def _playlist_meta_sync(playlist_id: str, key: str) -> tuple[str, str] | None:
     return str(snippet.get("title", "")), str(snippet.get("channelTitle", ""))
 
 
+# 재생목록에 남아 있지만 볼 수 없는 항목 — 제목이 영어 고정 문구("Private video")로 오고
+# 재생시간도 없다. 커리큘럼에 넣으면 "Private video (0분)" 이 단원처럼 보이고 강의 수도
+# 부풀어 진도 계산이 틀어진다(journey-14, 실측: 수제비 재생목록에 2건).
+_UNAVAILABLE_TITLES: Final[frozenset[str]] = frozenset({"Private video", "Deleted video"})
+_UNAVAILABLE_PRIVACY: Final[frozenset[str]] = frozenset({"private", "privacyStatusUnspecified"})
+
+
+def _is_unavailable_item(item: dict[str, Any]) -> bool:
+    privacy = (item.get("status") or {}).get("privacyStatus")
+    title = (item.get("snippet") or {}).get("title")
+    return privacy in _UNAVAILABLE_PRIVACY or title in _UNAVAILABLE_TITLES
+
+
 def _playlist_detail_sync(playlist_id: str, key: str) -> DetailResult:
     meta = _playlist_meta_sync(playlist_id, key)
     title, channel_title = meta if meta else ("", "")
 
     ordered: list[tuple[str, str]] = []  # (videoId, title)
     total_results = 0
+    skipped = 0  # 볼 수 없어 걸러낸 항목 수 — 잘린 재생목록의 영상 수 추정에 쓴다
     page: str | None = None
     truncated = False
     while True:
         params: dict[str, str] = {
             "key": key,
-            "part": "snippet,contentDetails",
+            "part": "snippet,contentDetails,status",
             "playlistId": playlist_id,
             "maxResults": "50",
         }
@@ -279,16 +293,22 @@ def _playlist_detail_sync(playlist_id: str, key: str) -> DetailResult:
 
         total_results = int((body.get("pageInfo") or {}).get("totalResults") or total_results)
         for item in body.get("items") or []:
+            if _is_unavailable_item(item):
+                skipped += 1
+                continue
             video_id = (item.get("contentDetails") or {}).get("videoId")
             video_title = (item.get("snippet") or {}).get("title")
             if video_id and video_title:
                 ordered.append((str(video_id), str(video_title)))
 
         page = body.get("nextPageToken")
-        if not page:
-            break
-        if len(ordered) >= _MAX_CURRICULUM_ITEMS:
+        # 걸러낸 항목 때문에 페이지가 50개보다 적게 차면 상한을 넘겨 쌓일 수 있다 — 잘라서
+        # 스키마 상한(`MAX_CURRICULUM_ITEMS`)을 지킨다.
+        if len(ordered) > _MAX_CURRICULUM_ITEMS or (page and len(ordered) >= _MAX_CURRICULUM_ITEMS):
             truncated = True
+            ordered = ordered[:_MAX_CURRICULUM_ITEMS]
+            break
+        if not page:
             break
 
     if not ordered:
@@ -320,15 +340,22 @@ def _playlist_detail_sync(playlist_id: str, key: str) -> DetailResult:
             if duration:
                 seconds[item["id"]] = parse_iso8601_duration(duration)
 
+    # `videos.list` 가 재생시간을 주지 않은 영상은 볼 수 없는 영상이다(비공개·삭제 — 상태
+    # 표시가 늦게 반영된 경우 포함). 0분짜리 단원으로 넣지 않고 뺀다.
     curriculum = [
-        CurriculumItem(title=video_title, seconds=seconds.get(vid, 0))
+        CurriculumItem(title=video_title, seconds=seconds[vid])
         for vid, video_title in ordered
+        if vid in seconds
     ]
+    skipped += len(ordered) - len(curriculum)
+    if not curriculum:
+        return DetailResult(reason=REASON_NOT_FOUND)
+    video_count = max(len(curriculum), total_results - skipped) if truncated else len(curriculum)
     return DetailResult(
         detail=PlaylistDetail(
             title=title,
             channel_title=channel_title,
-            video_count=total_results or len(ordered),
+            video_count=video_count,
             total_seconds=sum(c.seconds for c in curriculum),
             curriculum=curriculum,
             truncated=truncated,
