@@ -511,7 +511,7 @@ async def _run_first_plan(
         final = await graph.ainvoke(state, config=config)
 
         gp = final["goal_plan"]
-        ai_source: Literal["llm", "rule"] = "rule" if final["used_fallback"] else "llm"
+        ai_source: Literal["llm", "rule"] = first_plan.plan_ai_source(final)
         payload = _build_payload(
             outcome=outcome,
             goal_nodes=gp.goal_nodes if gp is not None else [],

@@ -537,7 +537,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
   "milestones": [{"title": "기초 문법", "summary": "변수·조건문·반복문"}]
 }
 ```
-> `planId` 는 `plan_drafts` 에 저장된 Draft 의 실제 UUID (#62) — `GET /plans/{planId}` 로 재조회, `POST /plans/{planId}/approve` 로 승인. `aiSource` 는 LLM 분해/검토가 룰 fallback 됐으면 `"rule"`.
+> `planId` 는 `plan_drafts` 에 저장된 Draft 의 실제 UUID (#62) — `GET /plans/{planId}` 로 재조회, `POST /plans/{planId}/approve` 로 승인. `aiSource` 는 **보여 주는 계획의 분해**가 룰 fallback 이면 `"rule"` — 검토(④층)만 폴백한 건 세지 않는다(v2.30-planB, 검토 폴백은 '그대로 승인' 이라 계획 내용과 무관하다). 분해가 폴백했으면 `warnings[0]` 이 "이번엔 AI가 세부 내용을 만들지 못해 칸만 잡아 뒀어요 …"(예산 소진이면 "…내일 다시 만들어 보세요") 이고, 그 계획에는 '이어가기'·지평·확정 마일스톤 안내가 붙지 않는다(앞쪽에 내용이 있다는 전제의 문장이라). 분해가 타임아웃·예산·금지어/톤 게이트 등 **다시 불러도 같은** 사유로 폴백했거나 그래프가 이미 90초를 넘겼으면 검토·재분해를 새로 시작하지 않는다(최악 대기 단축).
 
 `milestones` 는 additive(ADR-0007 PR-2) — 요청에 실어 보낸 확정 마일스톤을 그대로 되비출
 뿐(생략하면 `[]`), `goalNodes`(이번 4주 분해)와는 별개다. **이 Draft 를 승인하면 서버가

@@ -367,9 +367,25 @@ def test_generate_falls_back_to_rule_on_timeout(client: TestClient, monkeypatch:
     assert res.json()["aiSource"] == "rule"
 
 
+def _force_provider_error(monkeypatch: Any) -> None:
+    """provider 가 일시 오류(`provider_error`)로 실패 — 다시 불러 볼 가치가 있는 폴백."""
+    from reaction_backend.llm.provider import ProviderError
+
+    monkeypatch.setenv("LLM_MAX_RETRIES", "1")
+    get_settings.cache_clear()
+
+    async def _boom(**kwargs: Any) -> Any:
+        raise ProviderError("boom")
+
+    monkeypatch.setattr("reaction_backend.llm.tool_executor.generate_structured", _boom)
+
+
 def test_generate_logs_each_llm_call_to_llm_runs(client: TestClient, monkeypatch: Any) -> None:
-    """LLM 호출(decompose·review) 각각 llm_runs 1행 기록 — module/fallback_used 포함 (DoD)."""
-    _force_provider_timeout(monkeypatch)
+    """LLM 호출(decompose·review) 각각 llm_runs 1행 기록 — module/fallback_used 포함 (DoD).
+
+    일시 오류 폴백이라 검토가 그대로 돈다(`first_plan.after_schedule`).
+    """
+    _force_provider_error(monkeypatch)
     cap = _CapturingSession()
     _use_session(client, cap)
 
@@ -381,6 +397,61 @@ def test_generate_logs_each_llm_call_to_llm_runs(client: TestClient, monkeypatch
     assert all(r.module == "planning" for r in runs)
     assert all(r.fell_back for r in runs)
     assert {r.prompt_id for r in runs} == {"planning/goal_decompose", "planning/plan_quality"}
+
+
+def test_timed_out_decompose_skips_the_review_and_says_the_plan_is_empty(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """분해가 타임아웃으로 폴백하면 검토를 부르지 않고, 칸만 잡았다고 밝힌다 (planB-4·5).
+
+    회귀: 자리표시자 계획도 검토에 넘겨 같은 타임아웃(최악 3×45초)을 또 기다렸고, 검토가
+    반려하면 재분해까지 돌아 스피너가 몇 분을 돌았다. 결과 화면엔 '오프라인 모드' 뿐이라
+    사용자는 계획이 비어 있는 이유를 몰랐다.
+    """
+    _force_provider_timeout(monkeypatch)
+    cap = _CapturingSession()
+    _use_session(client, cap)
+
+    res = client.post("/plans/generate", json=_body(_outcome()))
+    assert res.status_code == 200
+    body = res.json()
+    assert body["aiSource"] == "rule"
+    runs = [o for o in cap.added if isinstance(o, LlmRun)]
+    assert [r.prompt_id for r in runs] == ["planning/goal_decompose"]
+    assert "칸만 잡아 뒀어요" in body["warnings"][0]
+    assert not [w for w in body["warnings"] if "4주까지만" in w or "이어가기" in w]
+
+
+def test_review_fallback_alone_does_not_label_an_llm_plan_as_rule(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """분해는 LLM 이 했고 검토만 폴백했으면 aiSource 는 'llm' 이다 (planB-5).
+
+    검토 폴백은 '그대로 승인' 이라 계획 내용과 무관한데, 예전엔 그것만으로 화면에
+    '오프라인 모드(룰 기반)' 가 떴다.
+    """
+    action = ActionItemDraft(
+        node_id="n1", title="작업", estimated_minutes=30, category="study", first_step="시작"
+    )
+    ok = _stub(action_items=[action])
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        result = await ok(**kwargs)
+        if kwargs["schema"] is PlanReview:
+            return RunResult(
+                value=result.value,
+                fell_back=True,
+                reason="timeout",
+                prompt_id=kwargs["prompt_id"],
+                prompt_version="v1",
+            )
+        return result
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+    res = client.post("/plans/generate", json=_body(_outcome()))
+    assert res.status_code == 200
+    assert res.json()["aiSource"] == "llm"
+    assert not [w for w in res.json()["warnings"] if "칸만 잡아 뒀어요" in w]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -980,8 +1051,11 @@ def test_milestones_llm_run_is_committed_not_just_added(
 
 
 def test_generate_llm_runs_are_committed(client: TestClient, monkeypatch: Any) -> None:
-    """`/plans/generate` 도 같다 — 분해·검토 2행이 **커밋**돼야 한다."""
-    _force_provider_timeout(monkeypatch)
+    """`/plans/generate` 도 같다 — 분해·검토 2행이 **커밋**돼야 한다.
+
+    일시 오류 폴백으로 둔다 — 타임아웃이면 검토를 건너뛰어 1행이다(`after_schedule`).
+    """
+    _force_provider_error(monkeypatch)
     cap = _CapturingSession()
     _use_session(client, cap)
 

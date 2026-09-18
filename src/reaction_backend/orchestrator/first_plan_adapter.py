@@ -1340,6 +1340,29 @@ def overdue_deadline_notice(
     )
 
 
+def decompose_fallback_notice(reason: str | None) -> str | None:
+    """분해가 룰 폴백으로 끝났을 때 맨 앞에 싣는 안내. LLM 이 만들었으면(`reason is None`) None.
+
+    폴백 계획은 전부 '{목표} N회차' 자리표시자에 첫걸음도 같다. 예전엔 이 사실을 알리는
+    문장이 없어 `aiSource="rule"` 만 남았고, 화면은 그걸 '오프라인 모드(룰 기반)' 라는 알 수
+    없는 말로 보여 줬다(planB-5). 무엇이 비어 있고 사용자가 무엇을 할 수 있는지를 말한다.
+
+    예산 소진은 다시 눌러도 오늘은 같은 결과라 '내일' 을 말한다 — 그 밖의 사유(지연·일시
+    오류 등)는 잠시 뒤 다시 만들면 풀릴 수 있다.
+    """
+    if reason is None:
+        return None
+    if reason == "budget":
+        return (
+            "오늘은 AI가 쓸 수 있는 분량을 다 써서, 이번 계획은 세부 내용 없이 칸만 잡아 뒀어요 — "
+            "카드를 눌러 직접 채우거나 내일 다시 만들어 보세요."
+        )
+    return (
+        "이번엔 AI가 세부 내용을 만들지 못해 칸만 잡아 뒀어요 — "
+        "카드를 눌러 직접 채우거나 잠시 뒤 다시 만들어 보세요."
+    )
+
+
 def coverage_extended_warning(
     added: int, horizon: str | None, *, max_weeks: int = _MAX_PLAN_WEEKS
 ) -> str | None:
