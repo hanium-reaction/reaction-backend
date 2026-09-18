@@ -2225,10 +2225,16 @@ class FakePrivacyRepo:
 
     def __init__(self) -> None:
         self.anonymized_user: UUID | None = None
+        self.purged_user: UUID | None = None
 
     async def anonymize_user(self, user_id: UUID) -> int:
         self.anonymized_user = user_id
         return 3
+
+    async def purge_account_text(self, user_id: UUID) -> int:
+        """계정 삭제 전용 추가 마스킹 (auth-9) — 호출 기록만."""
+        self.purged_user = user_id
+        return 5
 
 
 class FakeUserRepo:

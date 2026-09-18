@@ -1170,6 +1170,15 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 - `GET /privacy/consent` — consent_type(`required`/`marketing`/`research`) 별 **최신 1행**(`{ consentType, isGranted, updatedAt }`). 미기록 시 `[]`.
 - `POST /privacy/consent` `{ consentType, granted }` — **append-only** 새 행 INSERT 후 갱신 현황 반환. 잘못된 type 422 `COMMON_VALIDATION_ERROR`.
 - `POST /settings/anonymize` — **2단계**: 본문 없으면 `confirmationToken` 발급(`status="confirmation_required"`, 5분 TTL, HMAC). 토큰 동봉 재요청 시 검증 후 `_encrypted` 컬럼 7종 + 이름을 `[anonymized]` 마스킹 + `is_anonymized`/`anonymized_at` set(`status="anonymized"`). 토큰 위조/만료 422 `PRIVACY_INVALID_CONFIRMATION`, 이미 익명화 409 `PRIVACY_ALREADY_ANONYMIZED`. hard delete 아님(행 보존).
+- **마스킹 범위(v2.30-auth)** — 익명화(수동·90일 cron·삭제 공통, `PrivacyRepo.anonymize_user`):
+  `_encrypted` 컬럼 7종 + 이름 + **그 평문 사본**(인박스에서 만든 할 일 `source=inbox` 과
+  인박스에서 승격한 목표의 제목·whyNow·firstStep) + **자유서술**(인터뷰 자유 입력 답 — 붙여넣은
+  자료 포함, 빈 답·선택지 답 제외 / 회복 결정 사유 `decision_reason`). 캘린더 연결은 `revoked_at`
+  까지 찍어 끊고, Google 쪽 권한도 원래 refresh token 으로 회수한다(best-effort, 커밋 뒤).
+  직접 만든 목표·습관·일정 같은 계획 구조와 push 구독은 남긴다(계정을 계속 쓰는 경우).
+- 2단계 확인 `message` 는 화면에 그대로 띄울 수 있는 문구다 — 무엇이 가려지는지·5분 안에 한 번
+  더 눌러야 한다는 것을 말한다. 만료·위조 422 문구는 "확인 시간이 지났어요. 처음부터 한 번 더
+  눌러 주세요." (FE: 이 코드면 확인 단계를 처음으로 되돌리면 된다.)
 - ⚠️ **새 마이그레이션** `c2d3e4f5a6b7`(user_consents) — AGENTS §8 팀 합의 동반.
 - 톤 prefix 의 `aiClient.run()` 배선은 **여전히 후속**(ADR-0003 addendum) — #23-B 범위 아님.
 
@@ -1179,6 +1188,10 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
   이름 `[anonymized]` + **email 을 `deleted-{userId}@reaction.invalid` 로 마스킹**(email
   에 hard UNIQUE 제약이 있어 원본을 남기면 그 주소로 재가입이 영구히 막힌다) + **`archivedAt`
   set(soft delete, hard delete 아님 — AGENTS §2)**.
+- 삭제는 익명화 범위에 더해 **나머지 텍스트도 가린다**(`PrivacyRepo.purge_account_text`,
+  v2.30-auth): 목표·할 일·습관·고정 일정·만다라 노드의 제목과 설명, 회복 제안 문구, 브리프·
+  리뷰 문구, 중단 지점 메모, 계획 초안 스냅샷(`{}`), push 구독(NULL). 상태·카테고리·시각·숫자는
+  통계용으로 남긴다. 행은 전부 보존(UPDATE 만).
 - `archivedAt` 이 서기 되는 순간 `UserRepo.get_by_id`/`get_by_email` 의 기존
   `archived_at IS NULL` 필터에 걸린다 — 이미 발급된 **access token 은 다음 요청부터**
   `get_current_user` 에서 401 `AUTH_INVALID_TOKEN`(새 블랙리스트 불필요). **refresh

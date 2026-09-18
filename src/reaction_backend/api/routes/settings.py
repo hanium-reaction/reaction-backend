@@ -17,8 +17,8 @@
 톤 모드 영속화(PATCH)와 prefix 헬퍼까지.
 
 자동 익명화(90일 비활성, 04:00 KST cron)는 `scheduler/anonymize_inactive.py` — 이 파일의
-`anonymize` 와 **같은 정의**의 익명화를 시간 트리거로 돌린다(#24). 마스킹 로직은 양쪽 다
-`PrivacyRepo.anonymize_user` 단일 소스.
+`anonymize` 와 **같은 정의**의 익명화를 시간 트리거로 돌린다(#24). 순서(캘린더 해제 → 마스킹 →
+플래그)는 세 진입점 모두 `privacy_repo.anonymize_account` 단일 소스.
 """
 
 from __future__ import annotations
@@ -38,15 +38,20 @@ from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.user import User
 from reaction_backend.db.models.user_consent import UserConsent
 from reaction_backend.db.session import get_db
+from reaction_backend.integrations.google_calendar import freebusy
 from reaction_backend.repositories.consent_repo import ConsentRepo, get_consent_repo
 from reaction_backend.repositories.notification_repo import (
     NotificationRepo,
     get_notification_repo,
 )
-from reaction_backend.repositories.privacy_repo import PrivacyRepo, get_privacy_repo
+from reaction_backend.repositories.privacy_repo import (
+    PrivacyRepo,
+    anonymize_account,
+    get_privacy_repo,
+    revoke_calendar_grant,
+)
 from reaction_backend.repositories.profile_repo import ProfileRepo, get_profile_repo
 from reaction_backend.repositories.user_repo import UserRepo, get_user_repo
-from reaction_backend.safety.encryption import ANONYMIZED_SENTINEL
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.settings import (
@@ -81,6 +86,23 @@ _ANONYMIZE_PURPOSE = "anonymize"
 # 계정 삭제 전용 (#321) — anonymize 와 토큰을 섞어 쓰지 않는다(서로 다른 되돌릴 수 없는
 # 작업이라 한쪽 확인 토큰으로 다른 쪽을 실행할 수 있으면 안 된다).
 _DELETE_ACCOUNT_PURPOSE = "delete_account"
+
+# 2단계 확인 문구 — 화면에 그대로 뜬다(DeleteAccountControl 이 message 를 표시). 예전엔
+# "확인 토큰으로 한 번 더 요청해 주세요" 라는 API 설명이 사용자에게 보였다. 무엇이 사라지는지를
+# 말하되, 실제로 가리는 범위(`privacy_repo` 모듈 docstring)보다 넓게 약속하지 않는다.
+_ANONYMIZE_CONFIRM_MESSAGE = (
+    "정말 익명화할까요? 지금까지 적은 메모·인박스·인터뷰 답변을 알아볼 수 없게 가리고, "
+    "캘린더 연결도 해제해요. 되돌릴 수 없어요. 5분 안에 한 번 더 누르면 익명화돼요."
+)
+_ANONYMIZE_DONE_MESSAGE = (
+    "익명화를 마쳤어요. 지금까지 적은 메모·인박스·인터뷰 답변은 더 이상 알아볼 수 없어요."
+)
+_DELETE_CONFIRM_MESSAGE = (
+    "정말 계정을 삭제할까요? 목표·계획·기록을 다시 볼 수 없게 되고 되돌릴 수 없어요. "
+    "캘린더 연결도 해제돼요. 5분 안에 한 번 더 누르면 삭제돼요."
+)
+# 5분이 지나 확인이 풀린 경우가 대부분이다 — 처음부터 다시 하면 된다고만 알려 준다.
+_CONFIRM_EXPIRED_MESSAGE = "확인 시간이 지났어요. 처음부터 한 번 더 눌러 주세요."
 
 
 def _notif_summary(setting: NotificationSetting | None) -> NotificationSummary | None:
@@ -296,8 +318,9 @@ async def anonymize(
     """즉시 익명화 — 2단계 확인.
 
     - `confirmationToken` 없으면 step1: 확인 토큰 발급(미적용).
-    - `confirmationToken` 있으면 step2: 검증 후 `_encrypted` 필드 마스킹 + 이름 마스킹 +
-      `is_anonymized`/`anonymized_at` set. hard delete 아님(행 보존).
+    - `confirmationToken` 있으면 step2: 검증 후 `anonymize_account` — 캘린더 연결 해제 +
+      텍스트 마스킹(`PrivacyRepo.anonymize_user` 범위) + 이름 마스킹 + `is_anonymized`/
+      `anonymized_at` set. hard delete 아님(행 보존).
     """
     if user.is_anonymized:
         raise ApiError(
@@ -310,7 +333,7 @@ async def anonymize(
         token, expires_at = issue_confirmation_token(user.id, _ANONYMIZE_PURPOSE)
         return AnonymizeResponse(
             status="confirmation_required",
-            message="정말 익명화할까요? 이 작업은 되돌릴 수 없어요. 확인 토큰으로 한 번 더 요청해 주세요.",
+            message=_ANONYMIZE_CONFIRM_MESSAGE,
             confirmation_token=token,
             expires_at=expires_at,
         )
@@ -318,23 +341,23 @@ async def anonymize(
     if not verify_confirmation_token(body.confirmation_token, user.id, _ANONYMIZE_PURPOSE):
         raise ApiError(
             ErrorCode.PRIVACY_INVALID_CONFIRMATION,
-            "확인 토큰이 유효하지 않거나 만료됐어요. 다시 시도해 주세요.",
+            _CONFIRM_EXPIRED_MESSAGE,
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="confirmationToken",
         )
 
-    masked = await privacy_repo.anonymize_user(user.id)
     anonymized_at = now_kst()
-    user.is_anonymized = True
-    user.anonymized_at = anonymized_at
-    user.name = ANONYMIZED_SENTINEL
+    outcome = await anonymize_account(session, user, privacy_repo=privacy_repo, now=anonymized_at)
     await session.commit()
+    # 우리 DB 를 먼저 확정하고 원격 정리는 그 뒤에 (disconnect_calendar 와 같은 순서).
+    freebusy.clear_screen_cache(user.id)
+    await revoke_calendar_grant(outcome.calendar_refresh_token)
 
     return AnonymizeResponse(
         status="anonymized",
-        message="익명화를 완료했어요. 개인정보는 더 이상 식별되지 않아요.",
+        message=_ANONYMIZE_DONE_MESSAGE,
         anonymized_at=anonymized_at,
-        masked_count=masked,
+        masked_count=outcome.masked,
     )
 
 
@@ -349,7 +372,9 @@ async def delete_account(
 
     `anonymize`(S28, 계정은 유지한 채 과거 텍스트만 마스킹)와는 다른 작업이다 — 이건 앱에
     다시 들어올 수 없게 만드는 것까지 포함한다. hard delete 는 하지 않는다(AGENTS §2) —
-    같은 `anonymize_user()` PII 마스킹 위에 `archived_at` 을 얹어 **soft delete** 한다.
+    같은 `anonymize_user()` 마스킹에 `purge_account_text()`(목표·할 일·습관·일정 제목, push
+    구독 등 나머지 텍스트)를 더하고 `archived_at` 을 얹어 **soft delete** 한다. 캘린더 연결은
+    우리 쪽에서 끊고 Google 쪽 권한도 회수한다(`anonymize_account`).
 
     `archived_at` 을 세우는 순간 `UserRepo.get_by_id`/`get_by_email` 의 `archived_at IS NULL`
     필터에 걸려, 이미 발급된 access token 은 다음 요청의 `get_current_user` 에서 그대로
@@ -365,7 +390,7 @@ async def delete_account(
         token, expires_at = issue_confirmation_token(user.id, _DELETE_ACCOUNT_PURPOSE)
         return DeleteAccountResponse(
             status="confirmation_required",
-            message="정말 계정을 삭제할까요? 이 작업은 되돌릴 수 없어요. 확인 토큰으로 한 번 더 요청해 주세요.",
+            message=_DELETE_CONFIRM_MESSAGE,
             confirmation_token=token,
             expires_at=expires_at,
         )
@@ -373,19 +398,18 @@ async def delete_account(
     if not verify_confirmation_token(body.confirmation_token, user.id, _DELETE_ACCOUNT_PURPOSE):
         raise ApiError(
             ErrorCode.PRIVACY_INVALID_CONFIRMATION,
-            "확인 토큰이 유효하지 않거나 만료됐어요. 다시 시도해 주세요.",
+            _CONFIRM_EXPIRED_MESSAGE,
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="confirmationToken",
         )
 
-    await privacy_repo.anonymize_user(user.id)
     deleted_at = now_kst()
-    user.is_anonymized = True
-    user.anonymized_at = deleted_at
-    user.name = ANONYMIZED_SENTINEL
-    user.email = f"deleted-{user.id}@reaction.invalid"
-    user.archived_at = deleted_at
+    outcome = await anonymize_account(
+        session, user, privacy_repo=privacy_repo, now=deleted_at, delete=True
+    )
     await session.commit()
+    freebusy.clear_screen_cache(user.id)
+    await revoke_calendar_grant(outcome.calendar_refresh_token)
 
     return DeleteAccountResponse(
         status="deleted",
