@@ -18,7 +18,7 @@ from urllib.parse import urljoin
 
 import requests
 
-from reaction_backend.integrations.web_fetch import extract, url_guard
+from reaction_backend.integrations.web_fetch import extract, pinned_http, url_guard
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,9 @@ REASON_UNSUPPORTED_TYPE: Final = "unsupported_type"
 REASON_EMPTY: Final = "empty_body"
 REASON_TIMEOUT: Final = "timeout"
 REASON_UNAVAILABLE: Final = "unavailable"
+
+# 테스트가 네트워크 없이 갈아 끼우는 지점 — 실제로는 `pin` 이 확인한 IP 로만 접속하는 세션.
+_pinned_session = pinned_http.session
 
 
 @dataclass(frozen=True)
@@ -76,46 +79,49 @@ def _fetch_sync(url: str) -> FetchResult:
     """리다이렉트를 **직접** 따라간다 — 매 홉마다 목적지를 다시 검사하기 위해서다.
 
     `requests` 의 자동 추적(`allow_redirects=True`)을 쓰면 공개 URL 이 `127.0.0.1` 로
-    302 하는 순간 우리 가드를 그냥 통과한다. 그래서 302 를 우리가 받아 `validate_url`
-    을 다시 태운다.
+    302 하는 순간 우리 가드를 그냥 통과한다. 그래서 302 를 우리가 받아 `url_guard.pin`
+    을 다시 태운다. 접속은 매 홉 `pin` 이 확인한 IP 로만 한다(`pinned_http`, inbox-1).
     """
     current = url
     for _ in range(_MAX_REDIRECTS + 1):
         try:
-            safe = url_guard.validate_url(current)
+            target = url_guard.pin(current)
         except url_guard.UnsafeUrl as e:
             return FetchResult(None, e.reason)
-        try:
-            response = requests.get(
-                safe,
-                headers={"User-Agent": _USER_AGENT, "Accept-Language": "ko,en;q=0.8"},
-                timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT),
-                allow_redirects=False,
-                stream=True,
-            )
-        except requests.Timeout:
-            return FetchResult(None, REASON_TIMEOUT)
-        except requests.RequestException:
-            return FetchResult(None, REASON_UNAVAILABLE)
-
-        with response:
-            if response.is_redirect or response.is_permanent_redirect:
-                location = response.headers.get("Location")
-                if not location:
-                    return FetchResult(None, REASON_UNAVAILABLE)
-                current = urljoin(safe, location)
-                continue
-            if response.status_code in (401, 403):
-                return FetchResult(None, REASON_LOGIN_REQUIRED)
-            if response.status_code == 404:
-                return FetchResult(None, REASON_NOT_FOUND)
-            if response.status_code >= 400:
+        with _pinned_session(target.addresses) as session:
+            try:
+                response = session.get(
+                    target.url,
+                    headers={"User-Agent": _USER_AGENT, "Accept-Language": "ko,en;q=0.8"},
+                    timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT),
+                    allow_redirects=False,
+                    stream=True,
+                )
+            except requests.Timeout:
+                return FetchResult(None, REASON_TIMEOUT)
+            except requests.RequestException:
                 return FetchResult(None, REASON_UNAVAILABLE)
 
-            content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
-            if content_type and not content_type.startswith(_TEXT_TYPES):
-                return FetchResult(None, REASON_UNSUPPORTED_TYPE)
-            body = _read_capped(response)
+            with response:
+                if response.is_redirect or response.is_permanent_redirect:
+                    location = response.headers.get("Location")
+                    if not location:
+                        return FetchResult(None, REASON_UNAVAILABLE)
+                    current = urljoin(target.url, location)
+                    continue
+                if response.status_code in (401, 403):
+                    return FetchResult(None, REASON_LOGIN_REQUIRED)
+                if response.status_code == 404:
+                    return FetchResult(None, REASON_NOT_FOUND)
+                if response.status_code >= 400:
+                    return FetchResult(None, REASON_UNAVAILABLE)
+
+                content_type = (
+                    response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                )
+                if content_type and not content_type.startswith(_TEXT_TYPES):
+                    return FetchResult(None, REASON_UNSUPPORTED_TYPE)
+                body = _read_capped(response)
 
         text = extract.html_to_text(body) if "html" in content_type else body.strip()
         return FetchResult(text, None) if text else FetchResult(None, REASON_EMPTY)
