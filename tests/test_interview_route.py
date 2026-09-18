@@ -928,3 +928,22 @@ def test_ultimate_interview_does_not_touch_onboarding_state(
     sid = client.post("/interview/sessions", json={"kind": "ultimate"}).json()["sessionId"]
     assert client.post(f"/interview/sessions/{sid}/finish").status_code == 200
     assert demo_user_orm.onboarding_state == "WELCOME"
+
+
+def test_reinterview_asks_the_season_again(
+    client: TestClient, fake_profile_repo: Any, monkeypatch: Any
+) -> None:
+    """학기 중/방학은 재인터뷰에서 다시 묻는다 — 역할은 그대로 이월된다 (interview-19).
+
+    고치기 전엔 8월에 '방학' 이라 답하면 9월 재인터뷰에서도 묻지 않고, 고칠 곳도 없어 계획이
+    계속 방학 맥락으로 만들어졌다.
+    """
+    from reaction_backend.orchestrator import profile_memory
+
+    monkeypatch.setattr(aiClient, "run", _stub(echo_normalized=True))
+    monkeypatch.setattr(profile_memory, "ProfileRepo", lambda _session: fake_profile_repo)
+
+    assert _complete_plan_interview(client)["endReason"] == "completed"
+
+    again = client.post("/interview/sessions").json()
+    assert again["currentQuestion"]["slotKey"] == "identity.season"  # 역할은 이월, 학기는 다시
