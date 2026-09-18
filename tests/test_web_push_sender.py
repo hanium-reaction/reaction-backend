@@ -55,6 +55,20 @@ async def test_ok_passes_timeout_and_payload(monkeypatch: pytest.MonkeyPatch) ->
     assert kw["subscription_info"] == _SUBSCRIPTION
     assert json.loads(kw["data"]) == _PAYLOAD  # payload 가 JSON 그대로 실린다
     assert kw["vapid_private_key"] == "priv"
+    # TTL 0(pywebpush 기본)이면 절전 기기 몫이 버려진다 — 항상 양수 TTL 과 Urgency 를 싣는다.
+    assert kw["ttl"] > 0
+    assert kw["headers"]["Urgency"] == "normal"
+
+
+async def test_ttl_and_urgency_are_passed_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(sender_module, "webpush", lambda **kw: calls.append(kw))
+
+    await _sender().send(_SUBSCRIPTION, _PAYLOAD, ttl=420, urgency="high")
+
+    (kw,) = calls
+    assert kw["ttl"] == 420
+    assert kw["headers"] == {"Urgency": "high"}
 
 
 @pytest.mark.parametrize("status", [404, 410])

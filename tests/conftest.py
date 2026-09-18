@@ -441,13 +441,23 @@ class FakeWebPushSender:
     def __init__(self, outcome: str = "ok") -> None:
         self.outcome = outcome
         self.calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        # 호출별 전달 옵션(ttl·urgency) — 게이트가 클래스별 값을 싣는지 검증용 (sched-2)
+        self.options: list[dict[str, Any]] = []
 
     @property
     def is_configured(self) -> bool:
         return self.outcome != "unconfigured"
 
-    async def send(self, subscription: dict[str, Any], payload: dict[str, Any]) -> str:
+    async def send(
+        self,
+        subscription: dict[str, Any],
+        payload: dict[str, Any],
+        *,
+        ttl: int | None = None,
+        urgency: str | None = None,
+    ) -> str:
         self.calls.append((subscription, payload))
+        self.options.append({"ttl": ttl, "urgency": urgency})
         return self.outcome
 
 

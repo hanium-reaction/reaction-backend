@@ -28,6 +28,16 @@ _log = logging.getLogger(__name__)
 # unconfigured=VAPID 키 미설정 (발송 불가 환경)
 SendOutcome = Literal["ok", "gone", "error", "unconfigured"]
 
+# RFC 8030 §5.3 Urgency. 기기가 절전(Doze) 중일 때 push 서비스가 깨워서라도 전달할지를 가른다.
+PushUrgency = Literal["very-low", "low", "normal", "high"]
+
+# RFC 8030 §5.2 TTL(초) 기본값 — push 서비스가 기기가 오프라인일 때 메시지를 붙들고 있는 시간.
+# pywebpush 기본은 **0**("지금 못 전하면 버려라")이다. push 서비스는 201 로 받아 놓고 절전·
+# 오프라인 기기 몫을 즉시 버리는데, 게이트는 201 을 보고 발송으로 기록해 주 3건 예산을 쓴다
+# → 사용자는 한 건도 못 받았는데 서버는 3건 보냈다고 믿는 주가 생긴다. 호출자(게이트)가 클래스별
+# 값을 넘기고, 이 기본값은 어떤 경로로도 0 이 나가지 않게 하는 안전값이다.
+DEFAULT_PUSH_TTL_SECONDS = 60 * 60
+
 _GONE_STATUSES = (404, 410)
 
 # 푸시 서비스 응답 대기 상한(초, requests 로 전달). endpoint 는 사용자 제공 URL 이라
@@ -75,8 +85,18 @@ class WebPushSender:
     def is_configured(self) -> bool:
         return bool(self._private_key and self._subject)
 
-    async def send(self, subscription: dict[str, Any], payload: dict[str, Any]) -> SendOutcome:
-        """`{endpoint, keys:{p256dh, auth}}` 구독으로 payload(JSON) 1건 발송."""
+    async def send(
+        self,
+        subscription: dict[str, Any],
+        payload: dict[str, Any],
+        *,
+        ttl: int = DEFAULT_PUSH_TTL_SECONDS,
+        urgency: PushUrgency = "normal",
+    ) -> SendOutcome:
+        """`{endpoint, keys:{p256dh, auth}}` 구독으로 payload(JSON) 1건 발송.
+
+        `ttl`(초)·`urgency` 는 RFC 8030 헤더 — 값은 게이트가 알림 클래스별로 정한다.
+        """
         if not self.is_configured:
             return "unconfigured"
         endpoint = subscription.get("endpoint")
@@ -95,6 +115,8 @@ class WebPushSender:
                     vapid_private_key=self._private_key,
                     vapid_claims={"sub": self._subject},
                     timeout=_SEND_TIMEOUT_SECONDS,
+                    ttl=max(int(ttl), 1),
+                    headers={"Urgency": urgency},
                     requests_session=_NoRedirectSession(),
                 ),
                 timeout=_SEND_HARD_TIMEOUT_SECONDS,

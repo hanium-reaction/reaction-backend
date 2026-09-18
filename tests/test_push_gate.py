@@ -362,3 +362,41 @@ async def test_unconfigured_sender_degrades_quietly() -> None:
     assert result == PushResult(sent=False, reason="sender_unconfigured")
     assert setting.push_subscription == _SUBSCRIPTION
     assert send_repo._sends == []
+
+
+# ── 전달 유효 시간(TTL)·Urgency (sched-2) ──
+#
+# pywebpush 기본 TTL 은 0 — push 서비스가 절전·오프라인 기기 몫을 즉시 버린다. 그런데 게이트는
+# 201 을 보고 발송으로 기록해 주 3건 예산을 쓴다. 클래스별로 의미 있는 시간만큼 붙들게 한다.
+
+
+async def test_pre_card_ttl_is_short_and_urgent() -> None:
+    _, _, sender = await _send(_setting(), klass="pre_card", now=NOW.replace(hour=9))
+
+    (opts,) = sender.options
+    assert 0 < opts["ttl"] <= 7 * 60  # 카드가 시작되면 의미 없다
+    assert opts["urgency"] == "high"
+
+
+async def test_evening_ttl_lasts_until_quiet_hours_start() -> None:
+    _, _, sender = await _send(_setting(), klass="evening_reflection", now=NOW)  # 21:00
+
+    (opts,) = sender.options
+    assert opts["ttl"] == 2 * 60 * 60  # 21:00 → 23:00
+    assert opts["urgency"] == "normal"
+
+
+async def test_ttl_never_reaches_into_quiet_hours() -> None:
+    late = datetime(2026, 7, 21, 22, 50, tzinfo=KST)
+    _, _, sender = await _send(_setting(), klass="evening_reflection", now=late)
+
+    (opts,) = sender.options
+    assert opts["ttl"] == 10 * 60  # 23:00 에 만료 — 늦게 깬 기기에 한밤중 알림 없음
+
+
+async def test_morning_brief_ttl_is_nonzero() -> None:
+    morning = datetime(2026, 7, 21, 8, 0, tzinfo=KST)
+    _, _, sender = await _send(_setting(), klass="morning_brief", now=morning)
+
+    (opts,) = sender.options
+    assert opts["ttl"] == 3 * 60 * 60

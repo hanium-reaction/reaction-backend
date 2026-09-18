@@ -31,6 +31,10 @@
   향하는 blind SSRF 를 막는다. 이미 저장된 목록 밖 구독은 발송 직전에 걸러져 정리되고(요청
   없음), push 서비스의 리다이렉트는 따라가지 않는다. FE 할 일 없음 — 브라우저가 만든 구독은
   전부 목록 안이다.
+- **Web Push 에 전달 유효 시간(TTL)·Urgency 를 싣는다.** 예전엔 TTL 0(pywebpush 기본)이라
+  절전(Doze)·오프라인 기기 몫을 push 서비스가 즉시 버렸는데, 서버는 201 을 보고 발송으로 기록해
+  주 3건 예산을 썼다. 이제 pre_card 7분·high, evening_reflection 23시까지, morning_brief 3시간 —
+  모두 23:00(quiet hours 시작)을 넘지 않게 자른다. FE 할 일 없음.
 
 ---
 

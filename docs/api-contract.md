@@ -1105,6 +1105,9 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
   **일요일은 문구·딥링크만 갈라진다**(`title`/`body`/`url: /reviews/weekly`) — 같은 클래스에
   주간 만다라 리포트를 얹는다. 새 클래스·새 발송 조건 없음(ADR-0008 §4, §8 "F")
 - pre_card 는 opt-in(`preCardEnabled`) + 시작 2~7분 전 (2분 리드 + 5분 폴)
+- 전달 유효 시간(RFC 8030 TTL)·Urgency — pre_card 7분·`high`, evening_reflection 23:00 까지,
+  morning_brief 3시간, 모두 23:00(quiet hours 시작)에서 자른다. 기기가 잠깐 꺼져 있어도 이
+  시간 안에 켜지면 받는다(예전 TTL 0 은 "즉시 못 전하면 버림"이었다 — v2.30-auth)
 - morning_brief 는 **재관여 대상이 있을 때만** — 오늘이 채택된 PARK/CARRY_OVER 회복의
   재관여 앵커 날짜인 사용자에게, `morning_brief` 클래스를 재사용해 발송한다(새 클래스
   아님, 근거 대장 §6.2 T2). 대상 없으면 그날은 발송 없음. `morningTime` 이 06:00~06:59

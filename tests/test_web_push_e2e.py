@@ -153,6 +153,9 @@ async def test_provision_workflow_keys_are_usable_by_pywebpush(push_service: str
     assert len(_Handler.received) == 1
     auth = _Handler.received[0]["headers"].get("authorization", "")
     assert public_key in auth, f"VAPID 헤더에 우리 public key 가 없다: {auth[:60]}"
+    # TTL 0 이면 push 서비스가 절전·오프라인 기기 몫을 즉시 버린다 (sched-2)
+    assert _Handler.received[0]["headers"].get("ttl") not in (None, "0")
+    assert _Handler.received[0]["headers"].get("urgency") == "normal"
 
 
 async def test_payload_is_encrypted_and_decryptable_by_the_browser(push_service: str) -> None:
