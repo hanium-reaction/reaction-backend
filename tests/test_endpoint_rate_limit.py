@@ -48,6 +48,8 @@ def _run(
     module: str = "planning",
     days_ago: int = 0,
     trace_id: str | None = None,
+    prompt_id: str | None = "planning/goal_decompose",
+    reason: str | None = None,
 ) -> LlmRun:
     """`llm_runs` 행 1개 = LLM 호출 1회. 같은 `trace_id` 를 준 행들은 **한 번의 실행**이다.
 
@@ -58,16 +60,17 @@ def _run(
         user_id=user_id,
         module=module,
         model="gemini-3.5-flash-lite",
-        prompt_id="planning/goal_decompose",
+        prompt_id=prompt_id,
         prompt_version="1",
         tokens_in=100,
         tokens_out=200,
         latency_ms=1_000,
         cost_cents=0,
         cost_micro_usd=10,
-        success=True,
-        fell_back=False,
+        success=reason is None,
+        fell_back=reason is not None,
         trace_id=trace_id,
+        reason=reason,
     )
     if days_ago:
         row.created_at = now_kst() - timedelta(days=days_ago)
@@ -156,6 +159,8 @@ async def test_enforce_converts_to_429_with_retry_after(real_db_session: AsyncSe
     assert err.http_status == 429
     assert err.headers is not None
     assert 0 < int(err.headers["Retry-After"]) <= 24 * 3600
+    # 사용자를 탓하지 않는다 — '너무 많이 하셨어요' 대신 준비된 횟수를 다 썼다고 말한다(llm-4).
+    assert err.message == "오늘 준비된 계획·만다라트 생성 횟수를 다 썼어요. 내일 다시 열려요."
 
 
 def test_seconds_until_kst_midnight_at_end_of_day() -> None:
@@ -257,3 +262,117 @@ def test_zero_base_limit_disables_every_module(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(settings, "llm_endpoint_daily_call_limit", 0, raising=False)
     assert settings.endpoint_call_limit_for_module("interview") == 0
     assert settings.endpoint_call_limit_for_module("planning") == 0
+
+
+# ── llm-4: 상한을 안 거는 호출은 planning 계수에 들어가지 않는다 ─────────────
+
+_UNGATED = (
+    "planning/materials_search",
+    "planning/plan_milestones",
+    "planning/study_method",
+    "planning/mandala_cells_branch",
+)
+
+
+async def test_refused_material_searches_do_not_block_plan_generation(
+    real_db_session: AsyncSession,
+) -> None:
+    """실측: 계획을 한 번도 안 만든 사용자가 자료 검색 20번(15번은 그라운딩 예산에 걸려
+    호출 없이 거절)으로 `/plans/generate` 429. 검색은 그라운딩 예산이 따로 막는다."""
+    user_id = await _seed_user(real_db_session)
+    await _seed(
+        real_db_session,
+        *[
+            _run(
+                user_id,
+                trace_id=f"search-{i}",
+                prompt_id="planning/materials_search",
+                reason="grounding_budget" if i >= 2 else None,
+            )
+            for i in range(10)
+        ],
+    )
+
+    await check(real_db_session, user_id=user_id, module="planning")  # raise 없음
+
+
+@pytest.mark.parametrize("prompt_id", [*_UNGATED, "planning/study_method@v2"])
+async def test_ungated_planning_prompts_are_not_counted(
+    real_db_session: AsyncSession, prompt_id: str
+) -> None:
+    """마일스톤 초안·학습 방식·링 재생성은 상한을 안 거는 엔드포인트다 — 세지 않는다.
+    `@v2` 는 프롬프트 렌더 실패 행이 호출부 id 를 그대로 남기는 모양."""
+    user_id = await _seed_user(real_db_session)
+    await _seed(
+        real_db_session,
+        *[_run(user_id, trace_id=f"u-{i}", prompt_id=prompt_id) for i in range(5)],
+    )
+
+    await check(real_db_session, user_id=user_id, module="planning")  # raise 없음
+
+
+async def test_gated_requests_still_count_alongside_ungated_ones(
+    real_db_session: AsyncSession,
+) -> None:
+    """분해 2건 + 무관한 호출 여럿 = 2회(통과), 분해 1건 더 = 3회(차단)."""
+    user_id = await _seed_user(real_db_session)
+    await _seed(
+        real_db_session,
+        _run(user_id, trace_id="gen-1"),
+        _run(user_id, trace_id="gen-2"),
+        *[_run(user_id, trace_id=f"other-{p}", prompt_id=p) for p in _UNGATED],
+    )
+    await check(real_db_session, user_id=user_id, module="planning")  # raise 없음
+
+    await _seed(real_db_session, _run(user_id, trace_id="gen-3", prompt_id="planning/plan_quality"))
+    with pytest.raises(EndpointCallLimitExceeded) as exc:
+        await check(real_db_session, user_id=user_id, module="planning")
+    assert exc.value.used == 3
+
+
+async def test_gated_request_that_also_ran_an_ungated_prompt_counts_once(
+    real_db_session: AsyncSession,
+) -> None:
+    """같은 요청 안에서 분해와 마일스톤을 같이 불렀어도 그 요청은 1회로 잡힌다."""
+    user_id = await _seed_user(real_db_session)
+    await _seed(
+        real_db_session,
+        *[
+            row
+            for i in range(3)
+            for row in (
+                _run(user_id, trace_id=f"gen-{i}"),
+                _run(user_id, trace_id=f"gen-{i}", prompt_id="planning/plan_milestones"),
+            )
+        ],
+    )
+
+    with pytest.raises(EndpointCallLimitExceeded) as exc:
+        await check(real_db_session, user_id=user_id, module="planning")
+    assert exc.value.used == 3
+
+
+async def test_rows_without_prompt_id_are_still_counted(real_db_session: AsyncSession) -> None:
+    """출처를 모르는 행은 빡빡한 쪽으로 — 센다."""
+    user_id = await _seed_user(real_db_session)
+    await _seed(
+        real_db_session, *[_run(user_id, trace_id=f"n-{i}", prompt_id=None) for i in range(3)]
+    )
+
+    with pytest.raises(EndpointCallLimitExceeded):
+        await check(real_db_session, user_id=user_id, module="planning")
+
+
+async def test_other_modules_keep_counting_every_prompt(real_db_session: AsyncSession) -> None:
+    """제외 목록은 planning 에만 있다 — recovery 등은 종전대로 모든 행을 센다."""
+    user_id = await _seed_user(real_db_session)
+    await _seed(
+        real_db_session,
+        *[
+            _run(user_id, module="recovery", trace_id=f"r-{i}", prompt_id="planning/study_method")
+            for i in range(3)
+        ],
+    )
+
+    with pytest.raises(EndpointCallLimitExceeded):
+        await check(real_db_session, user_id=user_id, module="recovery")

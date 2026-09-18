@@ -126,6 +126,13 @@ body 해시가 같아 mismatch 409 로도 안 걸러지고, 다른 사용자의 
   (`LLM_ENDPOINT_DAILY_CALL_LIMIT_INTERVIEW`, 기본 60) — 계획 인터뷰는 필수 슬롯이 18개라
   완주 한 번에 요청이 19건 이상 들기 때문이다.
 
+  계획·만다라트 상한(`planning`)은 **상한을 거는 엔드포인트의 요청만** 센다(v2.30-llm) —
+  `/plans/generate`·`/plans/mandala/subgoals`·`/plans/mandala/generate`·
+  `/plans/mandala/next-cycle`·`/plans/replan`. 상한이 없는 `/plans/milestones`·
+  `/plans/materials/search`(그라운딩 예산이 따로 있다)·`/plans/materials/study-method`·
+  `/plans/mandala/{planId}/regenerate-branch` 는 이 계수에 들어가지 않는다. 429 메시지는
+  "오늘 준비된 {기능} 횟수를 다 썼어요. 내일 다시 열려요." (코드·헤더 무변경).
+
   모든 응답에 서버가 생성한 **`X-Request-ID`** 헤더가 실린다. 문의·장애 추적용 식별자이며,
   요청 헤더로 보낸 값은 **무시된다**(이 값이 위 상한의 계수 키라서 클라이언트가 고르면
   상한을 우회할 수 있다).
