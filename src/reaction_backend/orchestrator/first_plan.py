@@ -213,8 +213,7 @@ def _rule_decomposition(state: FirstPlanState) -> GoalDecomposition:
     회차 세션을 만들어 빈 계획으로 떨어지지 않게 한다. category 는 영속화(approve) 시
     `_normalize_category` 가 enum 으로 정규화한다.
     """
-    goals = state["outcome"].core_goals
-    heaviest = next((g for g in goals if g.is_heaviest), goals[0])
+    heaviest = first_plan_adapter.heaviest_goal(state["outcome"])
     # LLM 경로와 동일하게, 주당 가용 시간(weekly_hours)이 있으면 그 시간 기반으로 세션 수를 잡고
     # 없으면 density 프리셋으로 폴백 — 룰 폴백도 사용자의 실제 시간에 맞춘 분량을 낸다.
     session_count = first_plan_adapter.target_sessions_per_week(state["outcome"], state["density"])
@@ -415,10 +414,7 @@ async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> Firs
     # 참고 자료를 링크로만 줬으면 여기서 한 번 열어본다 (#226). I/O 는 이 노드가 하고
     # 컨텍스트 조립은 순수 함수로 남긴다. 실패해도 예외는 안 나오고, 그때는 예전처럼
     # '(없음)' 으로 내려가 프롬프트의 지어내기 방지 가드가 그대로 작동한다.
-    heaviest = next(
-        (g for g in outcome.core_goals if g.is_heaviest),
-        outcome.core_goals[0] if outcome.core_goals else None,
-    )
+    heaviest = first_plan_adapter.heaviest_goal_or_none(outcome)
     materials = await materials_resolver.resolve(heaviest.materials_note if heaviest else None)
     # 목표 해석은 **한 번만** 한다 — 아래 세 조회가 같은 goal_id 를 쓴다.
     session = _session(config)
@@ -554,9 +550,11 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
     # 과다 생성해도, 밴드로 가두고 주당 시간만큼으로 잘라 이번 주 분량이 weekly_hours 에 맞게
     # 한다(#per-goal). 목표별 입력이 없으면 no-op.
     goal_plan = result.value
-    heaviest_goal = next(
-        (g for g in state["outcome"].core_goals if g.is_heaviest),
-        state["outcome"].core_goals[0] if state["outcome"].core_goals else None,
+    # 분해 결과가 없으면(값 없는 폴백) 목표를 볼 일도 없다 — 그때는 outcome 을 읽지 않는다.
+    heaviest_goal = (
+        first_plan_adapter.heaviest_goal_or_none(state["outcome"])
+        if goal_plan is not None
+        else None
     )
     if goal_plan is not None and heaviest_goal is not None:
         # 금지어 치환이 사용자가 쓴 목표 제목·확정 마일스톤 제목까지 바꿔 놓았으면 원문으로

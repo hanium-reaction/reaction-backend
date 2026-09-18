@@ -358,7 +358,10 @@ async def _max_plan_weeks(session: AsyncSession, user_id: UUID, outcome: Intervi
     (ADR-0008 §3). `first_plan_adapter`/`first_plan` 은 DB 무관을 지키므로 이 판정은
     여기(라우터)에서 한다 — 만다라 축에서 왔으면 2주, 아니면 전역 기본(4주).
     """
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), None)
+    # 계획이 실제로 다루는 목표와 **같은 규칙**(is_heaviest 없으면 첫 목표)으로 고른다 —
+    # 예전엔 is_heaviest 가 없으면 None 으로 떨어져, 첫 목표가 만다라 승격 목표여도 4주로
+    # 잡혔다(planB-18).
+    heaviest = first_plan_adapter.heaviest_goal_or_none(outcome)
     if heaviest is None:
         return first_plan_adapter.max_plan_weeks_for(is_mandala_derived=False)
     promoted_titles = await mandala_adapter.fetch_promoted_goal_titles_for_user(session, user_id)

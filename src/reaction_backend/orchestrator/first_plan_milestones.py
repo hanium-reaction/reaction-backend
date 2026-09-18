@@ -19,6 +19,8 @@ from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator import materials_resolver
 from reaction_backend.orchestrator.first_plan_adapter import (
     context_from_outcome,
+    heaviest_goal,
+    heaviest_goal_or_none,
     restore_user_phrases_in_milestones,
 )
 from reaction_backend.schemas.common import now_kst
@@ -28,8 +30,7 @@ from reaction_backend.schemas.planning import MilestoneDraft, MilestonePlan
 
 def _rule_milestones(outcome: InterviewOutcome) -> MilestonePlan:
     """LLM 실패 시 룰 폴백 — heaviest 목표를 준비→진행→마무리 3단계로 환원(빈 응답 방지)."""
-    goals = outcome.core_goals
-    heaviest = next((g for g in goals if g.is_heaviest), goals[0])
+    heaviest = heaviest_goal(outcome)
     title = heaviest.title
     return MilestonePlan(
         milestones=[
@@ -75,10 +76,7 @@ async def generate_milestones(
     않는다 — 별도 사용자 액션이고, 공유하려면 저장소가 필요하다(#226 step 2).
     """
     settings = get_settings()
-    heaviest = next(
-        (g for g in outcome.core_goals if g.is_heaviest),
-        outcome.core_goals[0] if outcome.core_goals else None,
-    )
+    heaviest = heaviest_goal_or_none(outcome)
     materials = await materials_resolver.resolve(heaviest.materials_note if heaviest else None)
     # `target_date` 를 넘기지 않으면 마감까지 남은 기간을 계산할 기준이 없어
     # `total_capacity`(ADR-0007 §11)가 "마감 없음" 으로 읽힌다 — 마일스톤 크기를 재는
