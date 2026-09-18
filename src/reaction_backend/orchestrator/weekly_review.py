@@ -9,7 +9,7 @@ MVP 는 **룰 기반** (LLM 한 줄 평은 P2 — 이슈 #21 본문). DB/ORM 비
 - adherence_rate       완료(done/over_done) / 종결 실행
 - consistency_days     완료 실행이 있는 날의 최장 연속 일수
 - resilience_rate      실패(failed/partial_done) 중 회복 카드를 **수락**한 비율 (#21-A 정의)
-- avg_delay_minutes    계획 대비 실제 시작 지연 평균
+- avg_delay_minutes    계획 대비 실제 시작 지연 평균 (일찍 시작 = 지연 0)
 - average_recovery_minutes  수락된 회복의 평균 소요 (대부분 #20-B 후 채워짐)
 - category_success_rate     카테고리별 완료율
 - peak/drain_point_window   (요일×시간대) 성공률 최고/최저 버킷
@@ -43,7 +43,7 @@ _WEEKDAY_EN = (
     "sunday",
 )
 _WEEKDAY_KO = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
-_DAYPART_KO = {"morning": "오전", "afternoon": "오후", "evening": "저녁"}
+_DAYPART_KO = {"morning": "오전", "afternoon": "오후", "evening": "저녁", "night": "밤"}
 
 
 @dataclass(frozen=True)
@@ -115,19 +115,29 @@ class WeeklyKpi:
 
 
 def _daypart(hour: int) -> str:
-    """시(0~23) → 시간대 버킷. 저녁은 18~다음날 새벽."""
+    """시(0~23) → 시간대 버킷. 저녁은 18~23시, 0~4시는 '밤'(전날의 연장)."""
     if 5 <= hour < 12:
         return "morning"
     if 12 <= hour < 18:
         return "afternoon"
-    return "evening"
+    if hour >= 18:
+        return "evening"
+    return "night"
 
 
 def _kst_date_and_window(dt: datetime) -> tuple[date, str, str]:
-    """실행 시각 → (KST 날짜, 요일_en, 'weekday_daypart') 윈도우 키."""
+    """실행 시각 → (KST 날짜, 요일_en, 'weekday_daypart') 윈도우 키.
+
+    0~4시는 **전날 요일의 '밤'** 으로 묶는다(`monday_night`). 예전엔 달력 날짜 그대로 '저녁'
+    에 넣어, 월요일 밤 자정을 넘겨 공부한 걸 "화요일 저녁에 가장 잘 풀렸어요" 라고 17시간
+    엇나가게 말했다. 사람에게 월요일 새벽 1시는 월요일 밤의 끝이다. 날짜(연속 일수 계산용)는
+    달력 그대로 둔다 — 윈도우 이름만 사람의 하루 경계를 따른다.
+    """
     local = to_kst(dt)
-    weekday = _WEEKDAY_EN[local.weekday()]
-    return local.date(), weekday, f"{weekday}_{_daypart(local.hour)}"
+    part = _daypart(local.hour)
+    named_day = local - timedelta(days=1) if part == "night" else local
+    weekday = _WEEKDAY_EN[named_day.weekday()]
+    return local.date(), weekday, f"{weekday}_{part}"
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:
@@ -150,12 +160,17 @@ def _longest_streak(days: set[date], week_start: date) -> int:
 
 
 def _delay_minutes(stat: ExecutionStat) -> int | None:
-    """저장된 delay_minutes 우선, 없으면 actual-plan 으로 계산."""
+    """저장된 delay_minutes 우선, 없으면 actual-plan 으로 계산. **일찍 시작하면 0.**
+
+    `avg_delay_minutes` 는 "얼마나 늦게 시작했나" 다. 예전엔 음수를 그대로 평균에 넣어
+    오후 세션을 점심에 당겨 한 사용자가 "평균 지연 -3시간 20분" 을 봤고(무슨 뜻인지 모를
+    숫자), 일찍 시작한 날이 늦은 날을 상쇄해 정책 제안의 '여유 두기' 근거까지 가렸다.
+    """
     if stat.delay_minutes is not None:
-        return stat.delay_minutes
+        return max(0, stat.delay_minutes)
     if stat.actual_start_at is None:
         return None
-    return int((stat.actual_start_at - stat.plan_start_at).total_seconds() // 60)
+    return max(0, int((stat.actual_start_at - stat.plan_start_at).total_seconds() // 60))
 
 
 def _one_liner(peak_window: str | None) -> str:

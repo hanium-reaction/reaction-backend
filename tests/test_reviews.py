@@ -151,6 +151,53 @@ def test_peak_and_drain_window() -> None:
     assert "화요일 오전" in (kpi.one_liner or "")
 
 
+def test_after_midnight_counts_as_the_previous_days_night() -> None:
+    """월요일 밤 자정을 넘긴 공부(화 01:00)는 '월요일 밤' 이다 — '화요일 저녁' 이 아니다.
+
+    회귀: 0~4시를 달력 날짜 그대로 '저녁' 에 넣어 "화요일 저녁에 가장 잘 풀렸어요" 라고
+    17시간 엇나간 한 줄 평이 나왔다.
+    """
+    kpi = compute_weekly_kpis(
+        [_exec("done", "study", 1, 1), _exec("failed", "study", 2, 14)], [], WEEK
+    )
+    assert kpi.peak_point_window == "monday_night"
+    assert kpi.one_liner is not None and "월요일 밤" in kpi.one_liner
+    # 연속 일수는 달력 날짜 그대로 — 윈도우 이름만 사람의 하루 경계를 따른다.
+    assert kpi.consistency_days == 1
+
+
+def test_early_morning_is_still_that_days_morning() -> None:
+    kpi = compute_weekly_kpis([_exec("done", "study", 1, 6)], [], WEEK)
+    assert kpi.peak_point_window == "tuesday_morning"
+
+
+def _started(minutes_from_plan: int, *, stored: bool) -> ExecutionStat:
+    plan = datetime.combine(WEEK, time(15, 0), tzinfo=KST)
+    return ExecutionStat(
+        completion_status="done",
+        category="study",
+        plan_start_at=plan,
+        actual_start_at=plan + timedelta(minutes=minutes_from_plan),
+        delay_minutes=minutes_from_plan if stored else None,
+    )
+
+
+@pytest.mark.parametrize("stored", [True, False])
+def test_starting_early_is_zero_delay_not_negative(stored: bool) -> None:
+    """15:00 블록을 13:00 에 시작 — 평균 지연 0, "-2시간" 이 아니다.
+
+    회귀: 음수 지연을 그대로 평균해 리뷰에 "평균 지연 -3시간 20분" 이 떴고, 일찍 시작한 날이
+    늦은 날을 상쇄해 '여유 두기' 정책 제안의 근거도 가렸다.
+    """
+    kpi = compute_weekly_kpis([_started(-120, stored=stored)], [], WEEK)
+    assert kpi.avg_delay_minutes == 0.0
+
+    mixed = compute_weekly_kpis(
+        [_started(-120, stored=stored), _started(30, stored=stored)], [], WEEK
+    )
+    assert mixed.avg_delay_minutes == 15.0  # (0 + 30) / 2
+
+
 def test_average_recovery_minutes() -> None:
     kpi = compute_weekly_kpis(
         [_exec("done", "study", 0, 9)],

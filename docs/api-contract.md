@@ -970,6 +970,13 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
   값을 돌려준다. 응답 스키마는 그대로.
 - 집계 소스: `execution_events`(완료/실패), `recovery_attempts`(수락=resilience 분자),
   `action_items.category`. 집계는 순수 함수 `orchestrator/weekly_review.py`.
+- `peakWindow`/`drainWindow` = `"<요일>_<시간대>"`(예: `tuesday_afternoon`). 시간대는 `morning`
+  (05~11시)·`afternoon`(12~17시)·`evening`(18~23시)·`night`(00~04시, v2.30). **`night` 는 전날
+  요일로 붙는다** — 화요일 01:00 은 `monday_night`(사람에게는 월요일 밤의 끝). 예전엔 달력 날짜
+  그대로 `tuesday_evening` 으로 잡혀 한 줄 평이 17시간 엇나갔다. 기준 시각은 계획 시작 시각.
+- `avgDelayMinutes` = 계획 대비 실제 시작의 **늦은 정도** 평균(분). v2.30 부터 일찍 시작한 실행은
+  **0분**으로 센다(음수 없음) — 예전엔 음수를 그대로 평균해 "평균 지연 -3시간 20분" 이 나왔고,
+  일찍 시작한 날이 늦은 날을 상쇄했다.
 - `resilienceRate` = 실패(`failed`/`partial_done`) 중 회복 카드 **수락** 비율(#21-A 정의).
   "회복 후 24h 내 완료" 정밀화는 #20-B(replan 완료) 데이터 확보 후.
 - `restartSuccessRate`·`repeatedFailureCount`(interruption·failure_tag 조인) / `policyUpdateCandidates`(P2)
