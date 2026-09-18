@@ -7,13 +7,14 @@ Issue #19-B: 실행 쓰기 — `POST /today/actions/{id}/start` + `POST /today/c
   - 체크인 시 `action_item.status` 전이 — execution 레이어의 책임 (ActionItemRepo 합의).
   - pause/resume(interruption_events)은 #19-B-2 후속.
 
-agenda 데이터 출처: daily_briefs(Morning Brief, #19-C cron 이 채움) + action_items(오늘 target_date)
-+ habit_instances(이번 주) + fixed_schedules(오늘 요일). 모두 조회 — 쓰기 없음.
+agenda 데이터 출처: daily_briefs(Morning Brief, #19-C cron 이 채움) + action_items(오늘 target_date
++ 자정을 넘겨 아직 진행 중인 카드 `carriedOver`) + habit_instances(이번 주) + fixed_schedules(오늘
+요일). 모두 조회 — 쓰기 없음.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from http import HTTPStatus
 from typing import Annotated
 from uuid import UUID
@@ -44,6 +45,7 @@ from reaction_backend.repositories.habit_instance_repo import (
 from reaction_backend.repositories.habit_repo import current_week_start_kst
 from reaction_backend.repositories.recovery_repo import RecoveryRepo, get_recovery_repo
 from reaction_backend.safety.encryption import encrypt_memo
+from reaction_backend.scheduler.expire_reflections import pending_reflection_since
 from reaction_backend.schemas.calendar import CalendarCheck
 from reaction_backend.schemas.common import KST, now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
@@ -65,10 +67,6 @@ router = APIRouter(prefix="/today", tags=["today"])
 _ACTION_PREFIX = "action_"
 _EXEC_PREFIX = "exec_"
 _WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-
-
-def _today_kst() -> date:
-    return now_kst().date()
 
 
 def _parse_action_id(action_id: str) -> UUID:
@@ -113,6 +111,7 @@ def _card_schema(
     missed: bool,
     execution_id: UUID | None,
     calendar_conflict: bool = False,
+    carried_over: bool = False,
 ) -> AgendaCard:
     return AgendaCard(
         action_id=f"{_ACTION_PREFIX}{a.id}",
@@ -132,6 +131,7 @@ def _card_schema(
         missed_check_in=missed,
         execution_id=f"{_EXEC_PREFIX}{execution_id}" if execution_id else None,
         calendar_conflict=calendar_conflict,
+        carried_over=carried_over,
     )
 
 
@@ -179,17 +179,35 @@ async def today_agenda(
     블록이 그 뒤 생긴 약속과 겹치면 카드에 `calendarConflict` 를 단다(5분 캐시·2초 상한 —
     못 읽어도 어젠다는 뜬다, `calendar.status=failed`).
     """
-    today = _today_kst()
+    # '오늘' 과 '지금' 을 한 시각에서 뽑는다 — 따로 읽으면 자정 경계에서 서로 다른 날을 본다.
+    now = now_kst()
+    today = now.date()
     weekday = _WEEKDAY_KEYS[today.weekday()]
+    day_start = datetime.combine(today, time(0, 0), tzinfo=KST)
 
     brief = await brief_repo.get_by_date(user.id, today)
     cards = await action_repo.list_by_date(user.id, today)
+    # 자정을 넘겨도 아직 진행 중인 어제 카드는 오늘 카드 뒤에 이어 붙인다 (today-3).
+    # 창 경계는 `/reflection/pending` 과 같은 단일 소스 — 두 화면이 같은 카드를 본다.
+    today_ids = {c.id for c in cards}
+    carried = [
+        a
+        for a in await execution_repo.list_carried_over_actions(
+            user.id,
+            today=today,
+            day_start=day_start,
+            since=pending_reflection_since(today),
+            now=now,
+        )
+        if a.id not in today_ids
+    ]
+    carried_ids = {a.id for a in carried}
+    cards = [*cards, *carried]
     action_ids = [c.id for c in cards]
     # 카드마다 묻지 않는다 — 한 번에 받아 `cancellable` 판정에 쓴다 (#214).
     with_history = await execution_repo.action_ids_with_history(user.id, action_ids)
     latest_executions = await execution_repo.latest_execution_ids(user.id, action_ids)
     # T1 미체크 배지(근거 대장 §6.2) — 판정은 domain.missed_check_in, 재료만 여기서 배치 조회.
-    now = now_kst()
     active_blocks = await execution_repo.list_active_blocks_for_actions(user.id, action_ids)
     missed_ids = {
         action_item_id
@@ -207,7 +225,6 @@ async def today_agenda(
     fixed = await fixed_repo.list_active(user.id)
     todays_fixed = [s for s in fixed if weekday in (s.days_of_week or [])]
 
-    day_start = datetime.combine(today, time(0, 0), tzinfo=KST)
     calendar = await freebusy.screen_conflicts(
         session,
         user_id=user.id,
@@ -229,6 +246,7 @@ async def today_agenda(
                 missed=a.id in missed_ids,
                 execution_id=latest_executions.get(a.id),
                 calendar_conflict=a.id in calendar.keys,
+                carried_over=a.id in carried_ids,
             )
             for a in cards
         ],

@@ -1568,6 +1568,45 @@ class FakeExecutionRepo:
         )
         return {e.action_item_id: e.id for e in rows}
 
+    async def list_carried_over_actions(
+        self,
+        user_id: UUID,
+        *,
+        today: date,
+        day_start: datetime,
+        since: datetime,
+        now: datetime,
+    ) -> list[ActionItem]:
+        """자정을 넘겨 이어 보여줄 카드 (실 repo 규칙 미러 — today-3).
+
+        진행 중 실행이 회고 창 안(`reflectable_from() >= since`)이거나, 어제 시작한 미종결
+        블록이 아직 안 끝났거나(`start_at < day_start`, `end_at > now`). 보관 제외.
+        """
+        running = {
+            e.action_item_id
+            for e in self._executions.values()
+            if e.user_id == user_id
+            and e.completion_status == "in_progress"
+            and max(e.plan_start_at, e.actual_start_at or e.plan_start_at) >= since
+        }
+        crossing = {
+            b.action_item_id
+            for b in self._blocks.values()
+            if b.user_id == user_id
+            and b.block_status in ("scheduled", "started")
+            and b.start_at < day_start
+            and b.end_at > now
+        }
+        found = [
+            a
+            for a in self._actions.values()
+            if a.user_id == user_id
+            and a.target_date < today
+            and a.archived_at is None
+            and (a.id in running or a.id in crossing)
+        ]
+        return sorted(found, key=lambda a: (a.target_date, a.priority))
+
     async def find_open_block(self, user_id: UUID, action_item_id: UUID) -> ScheduledBlock | None:
         candidates = [
             b

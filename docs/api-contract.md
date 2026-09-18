@@ -650,6 +650,10 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 
 **#19-A 조회 (구현)**:
 - `GET /today/agenda` — KST 오늘 기준. `brief`(daily_briefs, Morning Brief cron #19-C 가 채움; 없으면 null), `cards`(action_items, 오늘 target_date, priority 오름차순), `habits`(이번 주 habit_instances 진행), `fixedSchedules`(오늘 요일에 걸린 것). ID prefix `action_`/`hinst_`/`habit_`/`fixed_`
+- **자정을 넘긴 카드 (v2.30-today)** — `cards` 는 오늘 target_date 카드 **뒤에**, 날짜는 지났지만 아직 손에서 놓지 않은 카드를 이어 붙이고 `AgendaCard.carriedOver=true` 로 표시한다(오늘 날짜 카드는 항상 `false`, 중복 없음). 대상은 보관 안 된 카드 중 둘 중 하나:
+  1. **진행 중(in_progress) 실행**이 회고 창 안에 있다 — 창 기준은 `/reflection/pending` 과 같다(§11, 계획·착수 시각 중 나중 ≥ 그제 0시). 23:40 에 시작한 카드가 00:00 에 화면에서 사라지지 않고, 창을 벗어나면 만료 cron 이 정리한다. `executionId` 가 실려 있어 그대로 체크인할 수 있다
+  2. **어제 시작해 아직 안 끝난 블록**(`startAt` < 오늘 0시 < `endAt`, 지금 < `endAt`, 미종결)이 있다 — 23:30~00:30 블록을 00:05 에 늦게라도 시작할 수 있게. 다음 날 세션 블록은 여기 안 걸린다
+  체크인으로 끝나면 다음 조회부터 빠진다. FE 는 '어제 이어서' 같은 표시만 얹으면 된다
 - `GET /today/actions/{id}` — `action_<uuid>`. 없으면 404 `COMMON_NOT_FOUND`
 **#19-B 실행 쓰기 (구현)**:
 - `POST /today/actions/{id}/start` — 미종결 scheduled_block 있으면 사용, 없으면 **즉석(ad-hoc) 블록 생성**(source=`user_edit`, §5.10)으로 NOT NULL 의존 해소. 응답 `{ executionId, actionId, completionStatus, actualStartAt }` (201)

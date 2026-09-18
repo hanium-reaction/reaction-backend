@@ -13,12 +13,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import ColumnElement, func, select, update
+from sqlalchemy import ColumnElement, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -156,6 +156,59 @@ class ExecutionRepo:
             (action_item_id, block_status, start_at, end_at)
             for action_item_id, block_status, start_at, end_at in result
         ]
+
+    async def list_carried_over_actions(
+        self,
+        user_id: UUID,
+        *,
+        today: date,
+        day_start: datetime,
+        since: datetime,
+        now: datetime,
+    ) -> list[ActionItem]:
+        """오늘 이전 날짜의 카드 중 **아직 손에서 놓지 않은** 것 — 어젠다가 자정에 놓치던 카드.
+
+        오늘 어젠다는 `target_date == 오늘` 만 보는데, `target_date` 는 블록의 KST 시작일이고
+        `plan_scheduler` 는 블록을 자정 너머로도 놓는다(#252). 그래서 23:30 에 시작한 카드는
+        00:00 이 되는 순간 오늘 화면에서 사라졌다 — 방금 하던 일을 어디서 완료할지 모르게
+        된다(today-3). 둘 중 하나면 이어서 보여준다:
+
+        1. **진행 중 실행**이 회고 창 안에 있다 — 창 기준은 `/reflection/pending` 과 같은
+           `reflectable_from() >= since`. 같은 식이어야 "오늘 화면엔 있는데 회고엔 없는"
+           (또는 반대) 카드가 안 생기고, 창을 벗어나면 만료 cron 이 정리한다.
+        2. 자정을 넘긴 블록이 **아직 안 끝났다**(`start_at < 오늘 0시`, `end_at > now`) —
+           23:30~00:30 블록을 00:05 에 늦게라도 시작하려는 경우. 다음 날 세션 블록은
+           `start_at` 이 오늘이라 여기 안 걸린다(분할 카드를 끌어오지 않는다).
+
+        보관된 카드는 제외. 날짜 오름차순 → priority 순.
+        """
+        running = select(ExecutionEvent.action_item_id).where(
+            ExecutionEvent.user_id == user_id,
+            ExecutionEvent.completion_status == "in_progress",
+            reflectable_from() >= since,
+        )
+        crossing_midnight = select(ScheduledBlock.action_item_id).where(
+            ScheduledBlock.user_id == user_id,
+            ScheduledBlock.block_status.in_(("scheduled", "started")),
+            ScheduledBlock.start_at < day_start,
+            ScheduledBlock.end_at > now,
+        )
+        stmt = (
+            select(ActionItem)
+            .where(
+                ActionItem.user_id == user_id,
+                ActionItem.target_date < today,
+                ActionItem.archived_at.is_(None),
+                or_(ActionItem.id.in_(running), ActionItem.id.in_(crossing_midnight)),
+            )
+            .order_by(
+                ActionItem.target_date.asc(),
+                ActionItem.priority.asc(),
+                ActionItem.created_at.asc(),
+            )
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
 
     async def find_open_block(self, user_id: UUID, action_item_id: UUID) -> ScheduledBlock | None:
         """이 카드의 미종결(scheduled/started) 블록 — 가장 이른 것."""
