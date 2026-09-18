@@ -62,7 +62,14 @@ def verify_confirmation_token(
     *,
     now: datetime | None = None,
 ) -> bool:
-    """서명·사용자·용도·만료 검증. 하나라도 어긋나면 False (상수시간 비교)."""
+    """서명·사용자·용도·만료 검증. 하나라도 어긋나면 False (상수시간 비교).
+
+    서버가 발급한 토큰은 항상 base64url(ASCII)이다. ASCII 가 아닌 문자가 섞이면 서명 계산
+    (`encode("ascii")`)과 `compare_digest`(비 ASCII str 은 TypeError)가 예외를 던져 422 대신
+    500 이 났다 — 검증 실패로 본다.
+    """
+    if not token.isascii():
+        return False
     parts = token.split(".")
     if len(parts) != 2:
         return False

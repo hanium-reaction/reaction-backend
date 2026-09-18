@@ -262,3 +262,20 @@ async def test_cron_applies_the_same_anonymization(monkeypatch: pytest.MonkeyPat
     assert privacy.purged_user is None
     assert spy.connection.revoked_at is not None
     assert spy.revoked_tokens == ["rt-original"]
+
+
+# ─────────────── 비 ASCII 확인 토큰 (auth-14) ───────────────
+
+
+@pytest.mark.parametrize("token", ["가.x", "abc.가", "é.é"])
+def test_non_ascii_confirmation_token_is_just_invalid(token: str) -> None:
+    """서버 토큰은 base64url(ASCII) — 다른 문자가 섞이면 예외가 아니라 '틀림' 이다."""
+    assert verify_confirmation_token(token, uuid4(), _PURPOSE) is False
+
+
+@pytest.mark.parametrize("path", ["/settings/anonymize", "/settings/delete-account"])
+def test_non_ascii_confirmation_token_returns_422_not_500(client: TestClient, path: str) -> None:
+    resp = client.post(path, json={"confirmationToken": "가.x"})
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "PRIVACY_INVALID_CONFIRMATION"
