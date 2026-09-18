@@ -1525,7 +1525,8 @@ async def open_mandala_next_cycle(
             for n in await goal_repo.list_nodes(node.goal_id, tree_kind="mandala")
             if n.parent_node_id == node.id and n.depth == 2
         ]
-        milestones = mandala_cycle.cells_as_milestones(cells) or None
+        repeat_cells = await mandala_adapter.fetch_habits_for_nodes(session, [c.id for c in cells])
+        milestones = mandala_cycle.cells_as_milestones(cells, exclude_ids=set(repeat_cells)) or None
 
     # 승격은 계획 생성 전에 커밋한다 — 분해(LLM)가 실패해도 축이 목표로 남아야 사용자가
     # 다시 눌렀을 때 중복 목표가 생기지 않는다(`_promote_axis_for_cycle` 의 멱등 전제).
