@@ -5,8 +5,8 @@
 - 원본 `action_item.status` 변경 금지 (AGENTS.md §2 — Resilience 지표 전제). 본 repo
   는 create + **read(by date/id)** + **soft delete** 만 노출. status 변경은
   execution_events 레이어(#19-B).
-- `cancel` 은 `archived_at` 만 세팅한다 — **status 는 건드리지 않는다**(#214). 조회가
-  전부 `archived_at IS NULL` 로 걸러 주므로 그것만으로 목록·지표에서 빠진다.
+- `cancel` 은 `archived_at` + 남은 미종결 블록 cancel 만 한다 — **status 는 건드리지 않는다**
+  (#214). 조회가 전부 `archived_at IS NULL` 로 걸러 주므로 그것만으로 목록·지표에서 빠진다.
 - commit 은 호출자 책임.
 """
 
@@ -17,7 +17,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import ActionItem
@@ -191,9 +191,28 @@ class ActionItemRepo:
         로 거르므로 오늘 어젠다와 백로그에서 자동으로 빠진다.
 
         이미 취소된 카드에 다시 호출해도 안전하다(호출자가 멱등 판정).
+
+        **남은 미종결 블록도 함께 cancel 한다**(data-2). 카드만 보관하면 블록이
+        `scheduled` 로 영원히 남는다 — 주간 그리드(`list_week` 는 `block_status` 만 본다)에
+        취소한 카드 제목으로 뜨고, 눌러 보면 카드는 404, 그 시간대는 계속 '바쁨' 이라 다른
+        블록을 옮겨 오면 `PLAN_BLOCK_CONFLICT` 로 막혔다. 정리해 주는 cron 도 없다
+        (`list_stale_scheduled_before` 는 보관 카드를 거른다). 계획 교체(supersede)·만료 cron 이
+        '카드 archived + 블록 cancelled' 를 짝으로 처리하는 것과 같은 규칙이다.
+        취소 가능한 카드는 실행 이력이 없으므로 finished 블록(수행 이력)은 애초에 없지만,
+        그래도 **미종결만** 건드린다 — 이력을 지우는 쓰기는 이 경로의 일이 아니다.
         """
         if action.archived_at is None:
             action.archived_at = datetime.now(UTC)
+        await self._session.execute(
+            update(ScheduledBlock)
+            .where(
+                ScheduledBlock.user_id == action.user_id,
+                ScheduledBlock.action_item_id == action.id,
+                ScheduledBlock.block_status.in_(("scheduled", "started")),
+            )
+            .values(block_status="cancelled")
+            .execution_options(synchronize_session=False)
+        )
 
     async def create_from_inbox(
         self,

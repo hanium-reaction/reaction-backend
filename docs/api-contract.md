@@ -664,6 +664,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 
 **카드 취소 (#214)**:
 - `POST /today/actions/{id}/cancel` → **204**. `archived_at` 만 세팅하고 **`status` 는 바꾸지 않는다**(AGENTS §2 — 원본 status 는 Resilience 지표의 전제). 조회가 전부 `archived_at IS NULL` 로 걸러 오늘 어젠다·백로그에서 빠진다
+- 카드에 걸린 **미종결 블록(`scheduled`/`started`)은 같은 트랜잭션에서 `cancelled`** 가 된다(v2.30-today). 예전엔 카드만 보관돼 블록이 주간 그리드(`GET /plans/weekly`)에 유령으로 남고(눌러 보면 404), 그 시간대로 다른 블록을 옮기면 422 `PLAN_BLOCK_CONFLICT` 로 막혔다. 계획 교체·만료 cron 이 '카드 보관 + 블록 취소' 를 짝으로 처리하는 것과 같은 규칙. `finished` 블록(수행 이력)은 건드리지 않는다
 - **취소 가능 조건 3개 전부**: `status='planned'` + 실행 이력 없음 + `source ∈ {inbox, manual}`. `recovery_*` 는 `resulting_action_item_id` 로 회복 지표와 얽혀 있고, `goal`/`habit` 파생은 계획 정합성이 걸려 있어 제외
 - 조건에 안 맞으면 422 `COMMON_VALIDATION_ERROR`(`field="actionId"`), **사유별로 다른 message** — '이미 시작한 일' 과 '계획에 묶임' 을 FE 가 구분해 안내할 수 있게
 - **이미 취소된 카드에 다시 호출해도 204**(멱등). 없는 카드는 404 `COMMON_NOT_FOUND`

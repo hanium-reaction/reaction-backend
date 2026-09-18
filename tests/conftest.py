@@ -973,9 +973,17 @@ class FakeActionItemRepo:
         return a
 
     async def cancel(self, action: ActionItem) -> None:
-        """`archived_at` 만 세팅 — status 는 건드리지 않는다 (실 repo 규칙 미러)."""
+        """`archived_at` + 미종결 블록 cancel — status 는 건드리지 않는다 (실 repo 규칙 미러)."""
         if action.archived_at is None:
             action.archived_at = datetime.now(UTC)
+        if self._block_repo is not None:
+            for b in self._block_repo._blocks.values():
+                if (
+                    b.user_id == action.user_id
+                    and b.action_item_id == action.id
+                    and b.block_status in ("scheduled", "started")
+                ):
+                    b.block_status = "cancelled"
 
     async def find_adopted_step(
         self,
