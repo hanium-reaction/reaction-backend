@@ -602,45 +602,13 @@ def test_proposal_lists_actually_reach_the_response_body() -> None:
     라우트 테스트는 `_FakeSession` 이라 판정이 항상 빈 결과다 — 둘 사이에 낀 이 조립
     단계가 어느 쪽에도 안 걸린다("쓰기만 하고 읽지 않는" 것과 같은 종류의 구멍이다).
 
-    `_from_kpi` 는 순수 조립이라 DB 없이 직접 부를 수 있다.
+    응답 조립은 저장본·즉석 계산 경로가 **같은 함수**(`_to_response`)라 한 번만 단언하면 된다.
+    예전엔 조립 함수가 두 벌이라 한쪽 배선을 끊어도 초록이었다(뮤테이션 확인).
     """
     from uuid import uuid4
 
-    from reaction_backend.api.routes.review import _from_kpi
+    from reaction_backend.api.routes.review import _ReadTimeSections, _to_response
     from reaction_backend.orchestrator.weekly_review import WeeklyKpi
-    from reaction_backend.schemas.reviews import (
-        EffortMinutes,
-        GoalCompletionProposal,
-        NextCycleProposal,
-    )
-
-    resp = _from_kpi(
-        WEEK,
-        WeeklyKpi(),
-        effort=EffortMinutes(),
-        mandala=None,
-        next_cycle_proposals=[NextCycleProposal(goal_id=uuid4(), goal_title="진행 중")],
-        goal_completion_proposals=[GoalCompletionProposal(goal_id=uuid4(), goal_title="끝낸 것")],
-        stale_axis_proposals=[],
-        top_failure_contexts=[],
-    )
-
-    body = resp.model_dump(by_alias=True, mode="json")
-    assert [p["goalTitle"] for p in body["goalCompletionProposals"]] == ["끝낸 것"]
-    assert [p["goalTitle"] for p in body["nextCycleProposals"]] == ["진행 중"]
-
-
-def test_precomputed_path_also_carries_the_proposal_lists() -> None:
-    """precomputed(`period_summaries` 적중) 경로도 같은 배선을 탄다.
-
-    응답 조립이 **두 벌**이라(`_from_kpi` / `_from_summary`) 한쪽만 단언하면 다른 쪽 배선을
-    끊어도 초록이다 — 실제로 그랬다(뮤테이션 확인). 주간 리뷰는 일요일 03:00 cron 이
-    선계산해 두므로 **평소에 사용자가 타는 건 이쪽**이다.
-    """
-    from uuid import uuid4
-
-    from reaction_backend.api.routes.review import _from_summary
-    from reaction_backend.db.models.period_summary import PeriodSummary
     from reaction_backend.schemas.common import now_kst
     from reaction_backend.schemas.reviews import (
         EffortMinutes,
@@ -648,26 +616,84 @@ def test_precomputed_path_also_carries_the_proposal_lists() -> None:
         NextCycleProposal,
     )
 
-    summary = PeriodSummary()
-    summary.start_date = WEEK
-    summary.end_date = WEEK + timedelta(days=6)
-    summary.category_success_rate = {}
-    summary.policy_update_candidates = []
-    summary.generated_at = now_kst()
-
-    resp = _from_summary(
-        summary,
-        effort=EffortMinutes(),
-        mandala=None,
-        next_cycle_proposals=[NextCycleProposal(goal_id=uuid4(), goal_title="진행 중")],
-        goal_completion_proposals=[GoalCompletionProposal(goal_id=uuid4(), goal_title="끝낸 것")],
-        stale_axis_proposals=[],
-        top_failure_contexts=[],
+    resp = _to_response(
+        WEEK,
+        WeeklyKpi(),
+        generated_at=now_kst(),
+        sections=_ReadTimeSections(
+            effort=EffortMinutes(),
+            mandala=None,
+            next_cycle_proposals=[NextCycleProposal(goal_id=uuid4(), goal_title="진행 중")],
+            goal_completion_proposals=[
+                GoalCompletionProposal(goal_id=uuid4(), goal_title="끝낸 것")
+            ],
+            stale_axis_proposals=[],
+            top_failure_contexts=[],
+        ),
     )
 
     body = resp.model_dump(by_alias=True, mode="json")
     assert [p["goalTitle"] for p in body["goalCompletionProposals"]] == ["끝낸 것"]
     assert [p["goalTitle"] for p in body["nextCycleProposals"]] == ["진행 중"]
+
+
+def test_stored_and_live_paths_return_the_same_body(
+    client: TestClient, fake_review_repo: FakeReviewRepo
+) -> None:
+    """같은 데이터면 확정 저장본 경로와 즉석 계산 경로의 응답이 (생성 시각 빼고) 같다.
+
+    저장본 → KPI 변환(`_kpi_from_summary`)에서 필드 하나를 빠뜨리면 여기서 갈라진다 — 평소
+    사용자가 지난주를 볼 때 타는 건 저장본 쪽이다.
+    """
+    for e in (
+        _exec("done", "study", 0, 9, planned_minutes=30, actual_minutes=25),
+        _exec("failed", "health", 1, 14, recovered=True, planned_minutes=60),
+        _exec("partial_done", "study", 2, 20, delay=15, planned_minutes=45),
+    ):
+        fake_review_repo.seed_execution(e)
+    fake_review_repo.seed_recovery(RecoveryStat(recovery_duration_minutes=20))
+
+    live = _get(client, WEEK.isoformat()).json()
+
+    async def _finalize() -> None:
+        await run_weekly_review_for_user(
+            DEMO_USER_UUID, WEEK, week_final_at(WEEK), repo=fake_review_repo, force=True
+        )
+
+    asyncio.run(_finalize())
+    stored = _get(client, WEEK.isoformat()).json()
+
+    assert stored["generatedAt"] != live["generatedAt"]  # 정말 저장본 경로를 탔다
+    live.pop("generatedAt")
+    stored.pop("generatedAt")
+    assert stored == live
+
+
+def test_get_weekly_reads_the_weeks_executions_once(
+    client: TestClient, fake_review_repo: FakeReviewRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """리뷰 탭 한 번 열 때 그 주 실행 표본은 한 번만 읽는다 — `effort` 와 KPI 가 같이 쓴다.
+
+    예전엔 `effort` 용으로 한 번, KPI 용으로 한 번 같은 창을 두 번 읽었다(두 표본 사이에
+    체크인이 끼면 한 응답 안의 두 준수율이 다른 시점을 보게 된다).
+    """
+    calls = 0
+    original = fake_review_repo.collect_execution_stats
+
+    async def _counting(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return await original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fake_review_repo, "collect_execution_stats", _counting)
+    fake_review_repo.seed_execution(_exec("done", "study", 0, 9))
+
+    assert _get(client, WEEK.isoformat()).status_code == 200
+    assert calls == 1
+
+    calls = 0
+    assert client.post("/reviews/weekly/generate", json={"weekStart": WEEK.isoformat()}).is_success
+    assert calls == 1
 
 
 # ─────────── 분 가중 요약 (ADR-0009 D5) ───────────

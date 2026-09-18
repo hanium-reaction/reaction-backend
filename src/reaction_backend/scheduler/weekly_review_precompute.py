@@ -105,6 +105,23 @@ async def run_weekly_review_for_user(
             return existing  # idempotent skip
 
     kpi = await compute_weekly_review(user_id, week_start, repo=repo)
+    return await persist_weekly_review(user_id, week_start, kpi, now_kst_dt, repo=repo)
+
+
+async def persist_weekly_review(
+    user_id: UUID,
+    week_start: date,
+    kpi: WeeklyKpi,
+    now_kst_dt: datetime,
+    *,
+    repo: ReviewRepo,
+) -> PeriodSummary:
+    """이미 계산한 KPI 를 그 주 행으로 upsert — 라우터가 모은 실행 표본을 다시 읽지 않게.
+
+    `POST /reviews/weekly/generate` 는 응답의 다른 절(`effort` 등)을 위해 이미 실행 표본을
+    모았다 — `run_weekly_review_for_user` 를 부르면 같은 표본을 한 번 더 읽는다.
+    commit 은 호출자 책임.
+    """
     return await repo.upsert_weekly(
         user_id=user_id,
         week_start=week_start,
