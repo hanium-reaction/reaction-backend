@@ -244,6 +244,16 @@ def _interview_not_found() -> ApiError:
     )
 
 
+def _goal_missing() -> ApiError:
+    """계획할 실제 목표가 없을 때(placeholder 만 남은 outcome) — LLM 을 부르기 전에 되돌린다."""
+    return ApiError(
+        ErrorCode.COMMON_VALIDATION_ERROR,
+        "계획을 세울 목표가 아직 없어요. 하고 싶은 일을 한 가지만 알려 주시면 거기서부터 세울게요.",
+        http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+        field="goals.list",
+    )
+
+
 def _tier_limit_exceeded() -> ApiError:
     return ApiError(
         ErrorCode.GOAL_TIER_LIMIT_EXCEEDED,
@@ -376,6 +386,8 @@ async def generate_milestones(
     부수 효과로 2주기 이후 이 endpoint 의 LLM 콜이 0 이 된다.
     """
     outcome = _apply_edited_availability(await _resolve_outcome(body, user.id, repo), user)
+    if first_plan.plannable_goal_missing(outcome):
+        raise _goal_missing()
     goal_id = await first_plan_adapter.heaviest_goal_id(session, user_id=user.id, outcome=outcome)
     if goal_id is not None:
         saved = await first_plan_adapter.fetch_confirmed_milestones(session, goal_id=goal_id)
@@ -460,6 +472,9 @@ async def _run_first_plan(
     호출자가 outcome 을 확정해서 넘긴다(rate limit·가용시간 덮어쓰기도 호출자 몫).
     """
     resolved_target = _resolve_target_date(target_date)
+    # 미입력 placeholder 만 있으면 분해할 목표가 없다 — 일반론 계획을 지어내지 않는다.
+    if first_plan.plannable_goal_missing(outcome):
+        raise _goal_missing()
     max_plan_weeks = await _max_plan_weeks(session, user.id, outcome)
 
     async with user_agent_lock(session, user.id, _LOCK_AGENT):

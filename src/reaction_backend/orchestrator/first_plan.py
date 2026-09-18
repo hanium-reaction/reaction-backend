@@ -45,6 +45,7 @@ from reaction_backend.orchestrator.goal_structuring import (
     pad_busy,
     time_policies_to_busy,
 )
+from reaction_backend.orchestrator.interview_adapter import is_placeholder_goal
 from reaction_backend.orchestrator.plan_scheduler import schedule_actions_multiday
 from reaction_backend.repositories.fixed_schedule_repo import FixedScheduleRepo
 from reaction_backend.repositories.recovery_repo import RecoveryOutcomeContext, RecoveryRepo
@@ -289,6 +290,17 @@ def tier_violation_for(outcome: InterviewOutcome) -> str | None:
     if maintain_count > 5:
         return "maintain_cap_exceeded"
     return None
+
+
+def plannable_goal_missing(outcome: InterviewOutcome) -> bool:
+    """계획을 세울 **실제 목표**가 하나도 없는가 — 미입력 placeholder(#88)만 남은 outcome.
+
+    `tier_violation_for` 와 같은 자리의 순수 판정이다. 첫 질문에서 [충분해요]를 누르면
+    outcome 에는 '(미입력 목표)' 하나만 남는데, 예전엔 그걸 그대로 분해해 LLM 이 일반론
+    20세션을 지어냈고(미러 실측), 승인하면 소속시킬 목표가 없어 0건이 저장되는데도 200 이
+    나가 온보딩이 텅 빈 채 끝났다. 라우트가 LLM 을 부르기 **전에** 이걸로 되돌려 보낸다.
+    """
+    return all(is_placeholder_goal(g) for g in outcome.core_goals)
 
 
 async def _failure_contexts(

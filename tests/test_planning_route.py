@@ -20,6 +20,7 @@ from reaction_backend.api.routes.planning import _max_plan_weeks
 from reaction_backend.config import get_settings
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionRow
+from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.models.llm_run import LlmRun
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.session import get_db
@@ -221,6 +222,17 @@ def test_generate_marks_rule_source_on_fallback(client: TestClient, monkeypatch:
     assert res.json()["aiSource"] == "rule"
 
 
+def _seed_goal_list(repo: FakeInterviewRepo, session_id: UUID) -> None:
+    """목표 하나를 답한 세션 — 목표가 없으면 generate 가 LLM 전에 422 로 되돌린다(planB-1)."""
+    ans = InterviewSlotAnswer()
+    ans.id = uuid4()
+    ans.session_id = session_id
+    ans.slot_key = "goals.list"
+    ans.value = {"type": "text", "raw": "토익 900", "normalized": ["토익 900"]}
+    ans.is_required = True
+    repo._answers[session_id]["goals.list"] = ans
+
+
 def test_generate_from_interview_session(
     client: TestClient, fake_interview_repo: FakeInterviewRepo, monkeypatch: Any
 ) -> None:
@@ -235,6 +247,7 @@ def test_generate_from_interview_session(
     row.ambiguity_final = 0.1
     fake_interview_repo._sessions[row.id] = row
     fake_interview_repo._answers[row.id] = {}
+    _seed_goal_list(fake_interview_repo, row.id)
 
     res = client.post("/plans/generate", json={"interviewSessionId": str(row.id)})
     assert res.status_code == 200
@@ -284,6 +297,7 @@ def _seed_finished_session(
     row.used_fallback = False
     repo._sessions[row.id] = row
     repo._answers[row.id] = {}
+    _seed_goal_list(repo, row.id)
     return row
 
 
@@ -590,17 +604,20 @@ def _placeholder_outcome() -> InterviewOutcome:
     )
 
 
-def test_approve_skips_placeholder_goal(client: TestClient, monkeypatch: Any) -> None:
+def test_approve_skips_placeholder_goal(
+    client: TestClient, fake_plan_draft_repo: FakePlanDraftRepo
+) -> None:
     """goals.list 미입력 시 '(미입력 목표)' placeholder 는 실제 Goal 로 영속되지 않는다 (#88).
 
     placeholder 만 있으면 소속시킬 goal 이 없어 트리/액션도 만들지 않는다 → 목표 관리
     화면에 정체불명 카드가 노출되지 않는다.
+
+    이제 `generate` 가 그런 outcome 을 422 로 되돌리므로(planB-1) 여기 닿는 건 그 게이트
+    이전에 저장된 Draft 뿐이다 — 그래서 Draft 를 직접 심는다.
     """
-    action = ActionItemDraft(
-        node_id="n1", title="작업", estimated_minutes=30, category="study", first_step="시작"
-    )
-    monkeypatch.setattr(aiClient, "run", _stub(action_items=[action]))
-    plan_id = client.post("/plans/generate", json=_body(_placeholder_outcome())).json()["planId"]
+    plan_id = _seed_draft(fake_plan_draft_repo, blocks=[])
+    draft = fake_plan_draft_repo._items[plan_id]
+    draft.payload = {**draft.payload, "outcome": _placeholder_outcome().model_dump(mode="json")}
 
     res = client.post(f"/plans/{plan_id}/approve")
     assert res.status_code == 200
@@ -609,6 +626,47 @@ def test_approve_skips_placeholder_goal(client: TestClient, monkeypatch: Any) ->
     assert j["activatedGoals"] == 0  # placeholder 제외 → 실제 Goal 0개
     assert j["activatedGoalNodes"] == 0
     assert j["activatedActionItems"] == 0
+
+
+def _counting_stub() -> tuple[Any, list[Any]]:
+    calls: list[Any] = []
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        calls.append(kwargs["schema"])
+        raise AssertionError("LLM 을 부르면 안 된다")
+
+    return stub_run, calls
+
+
+def test_generate_refuses_placeholder_only_outcome_before_the_llm(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """첫 질문에서 [충분해요]로 끝나 목표가 placeholder 뿐이면 422 — LLM 0회 (planB-1).
+
+    회귀(미러 실측): '(미입력 목표)' 로 LLM 이 일반론 20세션을 지어냈고, 승인은 0건을 저장하고도
+    200 을 돌려 온보딩이 목표·카드 없이 끝났다.
+    """
+    stub_run, calls = _counting_stub()
+    monkeypatch.setattr(aiClient, "run", stub_run)
+    res = client.post("/plans/generate", json=_body(_placeholder_outcome()))
+    assert res.status_code == 422
+    err = res.json()
+    assert err["code"] == "COMMON_VALIDATION_ERROR"
+    assert err["field"] == "goals.list"
+    assert "목표" in err["message"]
+    assert calls == []
+
+
+def test_milestones_refuses_placeholder_only_outcome_before_the_llm(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """Stage A 도 같은 게이트 — 없는 목표로 중간 목표를 지어내지 않는다 (planB-1)."""
+    stub_run, calls = _counting_stub()
+    monkeypatch.setattr(aiClient, "run", stub_run)
+    res = client.post("/plans/milestones", json=_body(_placeholder_outcome()))
+    assert res.status_code == 422
+    assert res.json()["field"] == "goals.list"
+    assert calls == []
 
 
 def test_approve_policy_violation_rolls_back(
