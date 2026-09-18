@@ -16,7 +16,13 @@
 - cron: 일요일 저녁 폴이 매번 다시 집계하고(`force=True`), 새 job `weekly_review_finalize`(매일
   04:30 KST)가 회고 창까지 닫힌 주를 확정 집계한다. 모닝 브리프 생성은 06:00 1회 → 06~10시
   15분 폴(이미 있는 날은 skip). 사용자 순회 cron 전부 사용자 단위 commit·rollback.
-- FE 할 일 없음.
+- **필드 추가 — `GET /reviews/weekly` · `POST /reviews/weekly/generate` 응답 `unstartedBlocks`
+  (int, 기본 0).** 그 주에 잡혀 있었지만 한 번도 시작하지 않고 지나간 블록 수. 준수율
+  (`adherenceRate`·`effort`)은 시작한 카드만 세므로 1장 하고 9장을 넘긴 주가 100% 로 보였다 —
+  준수율 정의는 그대로 두고 옆에 싣는다. 조회 시점 파생, 마이그레이션 없음.
+- FE 할 일: `unstartedBlocks` 가 종결 실행 수 이상이면 "이번 주, 잘 했어요" 대신 중립 헤드라인,
+  "시작 못 한 카드 N장" 표시, `adherenceRate` 가 null 이어도 `unstartedBlocks > 0` 이면
+  "집계할 활동이 없어요" 대신 시작하지 못한 카드가 있었다고 안내.
 
 ---
 

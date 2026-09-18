@@ -130,6 +130,10 @@ class WeeklyReviewResponse(CamelModel):
     # 같은 주를 분으로 다시 센 요약 (ADR-0009 D5). `period_summaries` 에 저장하지 않고
     # 조회 시점에 파생한다 — mandala/proposals 와 같은 방식이라 마이그레이션이 없다.
     effort: EffortMinutes = Field(default_factory=EffortMinutes)
+    # 그 주에 잡혀 있었지만 한 번도 시작하지 않고 지나간 블록(세션) 수 (v2.30). 준수율은
+    # 시작한 카드만 세므로 이 수는 그 분모 밖이다 — 준수율 정의는 그대로 두고 옆에 싣는다.
+    # 조회 시점 파생(저장 안 함).
+    unstarted_blocks: int = 0
 
     category_success_rate: dict[str, float] = Field(default_factory=dict)
     peak_window: str | None = None

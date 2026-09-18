@@ -1792,10 +1792,15 @@ class FakeReviewRepo:
         self._exec_stats: list[ExecutionStat] = []
         self._recovery_stats: list[RecoveryStat] = []
         self._top_failure_contexts: list[TopFailureContext] = []
+        # 시작 안 하고 지나간 블록 수 — 실 SQL 은 `test_review_repo_sql.py` 가 검증한다.
+        self._unstarted_blocks = 0
 
     # ── 테스트 보조 seed ──
     def seed_execution(self, stat: ExecutionStat) -> None:
         self._exec_stats.append(stat)
+
+    def seed_unstarted_blocks(self, count: int) -> None:
+        self._unstarted_blocks = count
 
     def seed_recovery(self, stat: RecoveryStat) -> None:
         self._recovery_stats.append(stat)
@@ -1830,6 +1835,11 @@ class FakeReviewRepo:
         self, user_id: UUID, d0: date, d1: date
     ) -> list[TopFailureContext]:
         return list(self._top_failure_contexts)
+
+    async def count_unstarted_blocks(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime, *, now: datetime
+    ) -> int:
+        return self._unstarted_blocks
 
     async def upsert_weekly(
         self,

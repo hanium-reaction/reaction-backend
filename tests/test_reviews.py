@@ -199,6 +199,38 @@ def test_get_weekly_carries_effort_on_both_response_paths(
     assert precomputed["effort"] == body["effort"]
 
 
+def test_get_weekly_reports_unstarted_blocks_next_to_an_unchanged_adherence(
+    client: TestClient, fake_review_repo: FakeReviewRepo
+) -> None:
+    """1장 끝내고 9장을 손도 안 댄 주 — 준수율은 100% 그대로, `unstartedBlocks` 가 9.
+
+    준수율 정의(시작한 카드만 셈)는 과거 주와의 비교 때문에 바꾸지 않는다(api-contract).
+    대신 FE 가 "이번 주, 잘 했어요" 를 띄우기 전에 볼 수 있게 옆에 싣는다. 확정 저장본
+    경로에서도 조회 시점에 파생되므로 같은 값이 나간다.
+    """
+    fake_review_repo.seed_execution(_exec("done", "study", 0, 9))
+    fake_review_repo.seed_unstarted_blocks(9)
+
+    live = _get(client, WEEK.isoformat()).json()
+    assert live["adherenceRate"] == 1.0
+    assert live["unstartedBlocks"] == 9
+
+    async def _finalize() -> None:
+        await run_weekly_review_for_user(
+            DEMO_USER_UUID, WEEK, week_final_at(WEEK), repo=fake_review_repo, force=True
+        )
+
+    asyncio.run(_finalize())
+    stored = _get(client, WEEK.isoformat()).json()
+    assert stored["unstartedBlocks"] == 9
+    generated = client.post("/reviews/weekly/generate", json={"weekStart": WEEK.isoformat()})
+    assert generated.json()["unstartedBlocks"] == 9
+
+
+def test_get_weekly_unstarted_blocks_defaults_to_zero(client: TestClient) -> None:
+    assert _get(client, WEEK.isoformat()).json()["unstartedBlocks"] == 0
+
+
 def test_get_weekly_invalid_week(client: TestClient) -> None:
     resp = _get(client, "2026-06")
     assert resp.status_code == 422

@@ -895,7 +895,18 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
 
 핵심 필드: `adherenceRate`, `consistencyDays`, `resilienceRate`, `categorySuccessRate`,
 `peakWindow`, `drainWindow`, `policyUpdateCandidates`, `topFailureContexts`(#301),
-`effort`(v1.99)
+`effort`(v1.99), `unstartedBlocks`(v2.30)
+
+`unstartedBlocks`(v2.30, int, 기본 0): 그 주(`[월 00:00, 다음 월 00:00)` KST)에 시작했어야
+하는데 **한 번도 [▶ 시작] 하지 않고 지나간** 블록(세션) 수. 조건: `block_status='scheduled'`,
+블록이 이미 끝남(`end_at <= now`), 카드가 보관되지 않았고 아직 결론이 안 남(`planned`/
+`in_progress`). 취소된 블록(옮기거나 지운 것)과 이미 완료·실패로 체크인한 카드의 남은 블록은
+세지 않는다. `adherenceRate`·`effort` 는 **시작한 카드(실행)만** 세므로 이 수는 그 분모
+밖이다 — 1장 끝내고 9장을 손도 안 댄 주는 `adherenceRate=1.0` 이면서 `unstartedBlocks=9`.
+⚠️ 준수율 정의는 바꾸지 않는다(과거 주와 비교 불가능해진다). `period_summaries` 에 저장하지
+않고 매 요청 파생한다(마이그레이션 없음, 확정 저장본 경로에서도 같은 값). FE 는 "잘 했어요"
+류 헤드라인을 이 값과 함께 판단하고, `adherenceRate` 가 null 이어도 이 값이 0보다 크면
+"활동 없음" 이 아니라 "시작 못 한 카드가 있었다" 로 안내해야 한다.
 
 `effort`(v1.99, ADR-0009 D5): 같은 주를 **분**으로 다시 센 요약 —
 `{ plannedMinutes, completedMinutes, actualMinutes, adherenceRate }`. `adherenceRate`(건수

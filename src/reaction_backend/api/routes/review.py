@@ -116,6 +116,7 @@ class _ReadTimeSections:
     goal_completion_proposals: list[GoalCompletionProposal]
     stale_axis_proposals: list[StaleAxisProposal]
     top_failure_contexts: list[TopFailureContext]
+    unstarted_blocks: int = 0
 
 
 def _kpi_from_summary(summary: PeriodSummary) -> WeeklyKpi:
@@ -155,6 +156,7 @@ def _to_response(
         repeated_failure_count=kpi.repeated_failure_count,
         average_recovery_minutes=kpi.average_recovery_minutes,
         effort=sections.effort,
+        unstarted_blocks=sections.unstarted_blocks,
         category_success_rate=kpi.category_success_rate,
         peak_window=kpi.peak_point_window,
         drain_window=kpi.drain_point_window,
@@ -403,6 +405,7 @@ async def _read_time_sections(
     """GET·POST generate 공통 — 매 요청 파생 절을 한 번씩만 읽어 모은다."""
     tree = await _load_mandala_tree(user_id, goal_repo=goal_repo, session=session)
     proposals, completions = await _cycle_proposals(user_id, goal_repo=goal_repo, session=session)
+    start_dt, end_dt = week_window(monday)
     return _ReadTimeSections(
         effort=_effort_minutes(executions),
         mandala=await _mandala_weekly_summary(tree, monday, session=session),
@@ -411,6 +414,11 @@ async def _read_time_sections(
         stale_axis_proposals=await _stale_axis_proposals(tree, session=session),
         top_failure_contexts=await _top_failure_contexts(
             user_id, monday + timedelta(days=6), repo=repo
+        ),
+        # 시작도 안 하고 지나간 블록 — 준수율(시작한 카드만 셈) 옆에 둔다. 조회 시점 파생이라
+        # 확정 저장본 경로에서도 같은 값이 나간다.
+        unstarted_blocks=await repo.count_unstarted_blocks(
+            user_id, start_dt, end_dt, now=now_kst()
         ),
     )
 
