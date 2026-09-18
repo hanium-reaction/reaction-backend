@@ -78,6 +78,7 @@
   `null` 로 나간다(예전엔 "이미 학기 목표로 올린 축" 배지가 남았다).
 - `POST /plans/mandala/next-cycle` 의 칸 → 마일스톤에서 반복형(습관 링크) 칸과 규칙 자리표시 칸(`source="rule"`)을 뺀다.
 - 주간 리뷰 `mandala.untouchedAxisTitles`·`staleAxisProposals` — 칸을 다 끝낸 축은 "손 못 댄 축" 이 아니다.
+- `GET /inbox/coaching-advice` 의 마지막 안내는 진행 중·보류 아님·궁극목표 아님인 목표에서만(없으면 생략).
 
 ---
 
