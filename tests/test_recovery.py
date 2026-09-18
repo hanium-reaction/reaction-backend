@@ -15,9 +15,12 @@ from fastapi.testclient import TestClient
 
 from reaction_backend.orchestrator.escalation import L3_REJECTED_STREAK_THRESHOLD
 from reaction_backend.orchestrator.recovery import (
+    ACKNOWLEDGMENT_MAX_LENGTH,
     COMEBACK_ACK_PREFIX,
+    COPING_TEXT_MAX_LENGTH,
     DOWNSCOPE_RETAIN_RATIO,
     RECOVERY_NIGHT_CUTOFF_HOUR,
+    clean_coping_text,
     re_engagement_anchor_at,
     recovery_action_minutes,
     recovery_target_date,
@@ -267,6 +270,97 @@ def test_generate_avoidance_tag_routes_to_v3_and_fills_coping_plan_on_leading_ca
         assert sibling["obstacle"] is None
         assert sibling["copingClause"] is None
         assert sibling["acknowledgment"] is None
+
+
+def test_generate_blanks_only_the_broken_coping_fields(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """깨진 코핑 문장은 그 필드만 비우고 if/then 개인화는 살린다 (recovery-12).
+
+    미러 실측 문자열 그대로 — acknowledgment 에 다른 문자권 글자 + 타임스탬프가 붙었다.
+    """
+    from reaction_backend.llm import RunResult, aiClient
+    from reaction_backend.schemas.recovery import RecoveryProposalLLMv3
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        return RunResult(
+            value=RecoveryProposalLLMv3(
+                strategy_code="downscope",
+                if_clause="책상 앞에 앉으면",
+                then_clause="GROUP BY 실습에서 예제 1절만 봐요",
+                rationale="",
+                obstacle="막상 앉아도 뭐부터 볼지 헷갈릴 수 있어요",
+                coping_clause="wait, let me rethink the coping step",
+                acknowledgment="처음 시작할 때는 누구나 조금 망설여져요ო2025-02-23T00:00:00Z",
+            ),
+            fell_back=False,
+            reason=None,
+            prompt_id="recovery/if_then_proposal",
+            prompt_version="v3",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AVOIDANCE", "HARD_TO_START"]
+    )
+    body = _generate(client, exec_id).json()
+
+    top = body["cards"][0]
+    assert top["suggestedActionText"] == "책상 앞에 앉으면 GROUP BY 실습에서 예제 1절만 봐요"
+    assert top["obstacle"] == "막상 앉아도 뭐부터 볼지 헷갈릴 수 있어요"
+    assert top["copingClause"] is None
+    assert top["acknowledgment"] is None
+    assert body["aiSource"] == "llm"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "처음 시작할 때는 누구나 조금 망설여져요ო2025-02-23T00:00:00Z",  # 미러 실측
+        "누구나 시작이 막막할 때가 있어요 2025-02-23",
+        "지금은 21:00:00 이라 조금 늦었어요",
+        "wait, let me think about the obstacle",  # 추론 문장 유출
+        "자연스러운 일이에요그나저나 시작이 막막할 때가 있어요 마음을 다독여봐요 "
+        "누구나 시작이 막막할 때가 있어요. 슬라이드 만들기가 부담스러울 수 있죠.",  # 메타 문단(60자 초과)
+        "힘내요 😊",
+        "",
+        "   ",
+        None,
+    ],
+)
+def test_clean_coping_text_rejects_broken_output(text: str | None) -> None:
+    assert (
+        clean_coping_text(
+            text, max_length=ACKNOWLEDGMENT_MAX_LENGTH, context_title="발표 슬라이드 만들기"
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "title"),
+    [
+        ("처음 시작할 때는 누구나 막막한 법이에요.", "영어 스피킹 연습"),
+        ("누구나 시작이 막막할 때가 있어요", "영어 스피킹 연습"),
+        # 카드 제목에 있는 영어는 그대로 둔다(대소문자 무관)
+        ("SQL 문법이 헷갈리면 예제 1절만 다시 봐요", "sql GROUP BY 실습"),
+        ("그마저 어려우면 5분만, 목차만 훑어봐요!", "알고리즘 2문제"),
+    ],
+)
+def test_clean_coping_text_keeps_normal_sentences(text: str, title: str) -> None:
+    assert clean_coping_text(text, max_length=COPING_TEXT_MAX_LENGTH, context_title=title) == text
+
+
+def test_clean_coping_text_normalizes_whitespace_and_enforces_length() -> None:
+    assert (
+        clean_coping_text("  누구나   그럴 때가 있어요 ", max_length=60, context_title="")
+        == "누구나 그럴 때가 있어요"
+    )
+    assert clean_coping_text("가" * 61, max_length=60, context_title="") is None
+    assert clean_coping_text("가" * 60, max_length=60, context_title="") == "가" * 60
 
 
 def test_generate_non_avoidance_tag_stays_on_v2_without_coping_plan(

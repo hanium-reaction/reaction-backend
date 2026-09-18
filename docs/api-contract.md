@@ -777,6 +777,10 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   가 있을 때만 personalize 가 v3 프롬프트로 라우팅되고, 그 배치의 **선두 카드에만** 값이
   실린다. 그 외 카드(형제·비-AVOIDANCE 배치·룰 폴백)는 셋 다 null. `acknowledgment` 는
   v3 안에서도 조건부라 obstacle/copingClause 만 있고 이건 null 인 경우가 있다.
+  **선두 카드여도 문장이 깨졌으면 그 필드만 null**(v2.30-recovery) — 비었거나, 길이 초과
+  (acknowledgment 60자, obstacle/copingClause 120자), 한글·영문·숫자·흔한 문장부호 밖의 글자,
+  날짜/시각 흔적, 카드 제목에 없는 3글자 이상 영단어. `suggestedActionText` 는 그대로다.
+  FE 는 값이 있을 때만 그리면 된다(없는 게 정상인 경우가 많다).
 - **`recoveryMode: "standard" | "goal_renegotiation"`(#328, 근거 대장 §5.2 L3)** — 동일
   목표 4회 연속 실패 또는 회복 2회 연속 rejected(skipped 포함)면 `goal_renegotiation` 이고,
   이때 `cards` 는 태그 매칭과 무관하게 **DOWNSCOPE/RESCHEDULE/PARK 각 1장, 정확히 3장**

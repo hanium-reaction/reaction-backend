@@ -15,6 +15,7 @@ LLM(Recovery Coach)은 선두 카드의 if-then 문구 personalize 에만 쓰이
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -493,3 +494,45 @@ def shift_to_recovery_day(
             start_at = morning + timedelta(days=1)
 
     return start_at, start_at + timedelta(minutes=estimated_minutes)
+
+
+# ── v3 코핑 플랜 보조 문장 검사 (recovery-12) ──────────────────────────────────
+#
+# obstacle/coping_clause/acknowledgment 는 선두 카드 아래 덧붙는 **짧은 한 문장**이다.
+# 실측(미러, AVOIDANCE)에서 LLM 이 여기에 타임스탬프·다른 문자권 글자·내부 메타 문장을
+# 흘렸다 — "…망설여져요ო2025-02-23T00:00:00Z", 같은 말을 되풀이한 200자 넘는 문단 등.
+# Pydantic LLM 스키마에 max_length 를 걸면 위반 하나로 개인화 **전체**(if/then 포함)가
+# 룰 폴백으로 버려지므로, 필드 단위로 검사해 그 필드만 비운다.
+ACKNOWLEDGMENT_MAX_LENGTH = 60  # 프롬프트 요구 "25자 안팎"의 두 배 남짓
+COPING_TEXT_MAX_LENGTH = 120  # obstacle/coping_clause — 프롬프트 예시는 20~40자
+
+# 허용 문자: 한글(음절·자모), 영문·숫자, 공백, 문장에 흔한 문장부호. 그 밖(다른 문자권·이모지·
+# 제어문자)이 하나라도 섞이면 생성이 깨진 것으로 본다.
+_COPING_TEXT_ALLOWED = re.compile(
+    r"[\uAC00-\uD7A3\u3131-\u318E0-9A-Za-z\s.,!?~'\"()\[\]·…\-:;%/+&‘’“”]*"
+)
+# 날짜·시각 흔적(2025-02-23, 00:00:00) — 사용자 문장에 올 이유가 없다.
+_TIMESTAMP_LIKE = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}:\d{2}")
+# 세 글자 이상 영단어 — 카드 제목에 없는 영어는 추론 문장이 새어 나온 흔적이다
+# ("wait", "let me" 등). 제목에 있는 영어("SQL", "GROUP BY")는 허용한다.
+_ASCII_WORD = re.compile(r"[A-Za-z]{3,}")
+
+
+def clean_coping_text(text: str | None, *, max_length: int, context_title: str) -> str | None:
+    """LLM 이 만든 코핑 플랜 보조 문장 하나를 검사해, 쓸 수 없으면 `None`.
+
+    `None` 이 되는 경우: 비었음 · `max_length` 초과 · 허용 밖 문자 · 날짜/시각 흔적 ·
+    `context_title`(원본 카드 제목)에 없는 3글자 이상 영단어. if/then 문구는 건드리지 않는다
+    — 이 필드들이 비어도 카드는 그대로 쓸 수 있다(FE 는 값이 있을 때만 그린다).
+    """
+    cleaned = " ".join((text or "").split())
+    if not cleaned or len(cleaned) > max_length:
+        return None
+    if _COPING_TEXT_ALLOWED.fullmatch(cleaned) is None:
+        return None
+    if _TIMESTAMP_LIKE.search(cleaned):
+        return None
+    title_words = {w.lower() for w in _ASCII_WORD.findall(context_title)}
+    if any(w.lower() not in title_words for w in _ASCII_WORD.findall(cleaned)):
+        return None
+    return cleaned

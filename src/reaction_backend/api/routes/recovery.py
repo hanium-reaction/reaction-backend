@@ -51,6 +51,9 @@ from reaction_backend.db.session import get_db
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator.escalation import EscalationLevel, compute_escalation_state
 from reaction_backend.orchestrator.recovery import (
+    ACKNOWLEDGMENT_MAX_LENGTH,
+    COPING_TEXT_MAX_LENGTH,
+    clean_coping_text,
     first_matching_tag,
     re_engagement_anchor_at,
     recovery_action_minutes,
@@ -462,10 +465,24 @@ async def generate_recovery_proposals(
             if personalized:
                 texts[top.strategy_type] = personalized
             # 코핑 플랜은 v3 스키마일 때만 존재 — RecoveryProposalLLMv3 로 좁힌 뒤에만 읽는다.
+            # 필드마다 검사해 깨진 문장(타임스탬프·다른 문자권·메타 문단)은 그 필드만 비운다
+            # — if/then 개인화는 그대로 살린다(`clean_coping_text`, recovery-12).
             if isinstance(result.value, RecoveryProposalLLMv3):
-                top_obstacle = result.value.obstacle or None
-                top_coping_clause = result.value.coping_clause or None
-                top_acknowledgment = result.value.acknowledgment or None
+                top_obstacle = clean_coping_text(
+                    result.value.obstacle,
+                    max_length=COPING_TEXT_MAX_LENGTH,
+                    context_title=action_title,
+                )
+                top_coping_clause = clean_coping_text(
+                    result.value.coping_clause,
+                    max_length=COPING_TEXT_MAX_LENGTH,
+                    context_title=action_title,
+                )
+                top_acknowledgment = clean_coping_text(
+                    result.value.acknowledgment,
+                    max_length=ACKNOWLEDGMENT_MAX_LENGTH,
+                    context_title=action_title,
+                )
 
     # COMEBACK 프리픽스(근거 대장 §4.1, D6) — 연속실패≥2(에스컬레이션 발생)일 때만 선두
     # 카드 문구 맨 앞에 얹는다. personalize 성패와 무관하게 적용(고정 문구, LLM 출력 아님).
