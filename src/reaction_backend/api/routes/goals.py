@@ -27,6 +27,7 @@ from reaction_backend.db.models.habit import Habit as HabitModel
 from reaction_backend.db.session import get_db
 from reaction_backend.orchestrator import (
     first_plan_adapter,
+    goal_policy,
     inbox_resources,
     mandala_adapter,
     ultimate_adapter,
@@ -75,7 +76,6 @@ from reaction_backend.schemas.ultimate_goal import UltimateGoalRequest
 router = APIRouter(prefix="/goals", tags=["goals"])
 
 _ID_PREFIX = "goal_"
-_TIER_LIMITS: dict[str, int] = {"focus": 3, "maintain": 5}  # parked 자유 (DevBaseline §1.4)
 _CATEGORIES = frozenset(GOAL_CATEGORY_VALUES)
 
 
@@ -132,27 +132,13 @@ def _parse_deadline(value: str | None) -> date | None:
 
 
 def _validate_category(category: str) -> None:
+    # 허용값 목록(영문 enum)을 문구에 싣지 않는다 — FE 가 message 를 그대로 띄운다.
     if category not in _CATEGORIES:
         raise ApiError(
             ErrorCode.COMMON_VALIDATION_ERROR,
-            f"category 값이 올바르지 않아요 ({sorted(_CATEGORIES)} 중에서).",
+            "목표 분류 값이 올바르지 않아요.",
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="category",
-        )
-
-
-async def _enforce_tier_limit(repo: GoalRepo, user_id: UUID, tier: str) -> None:
-    """Focus ≤ 3 / Maintain ≤ 5 한도. Parked 는 자유 (한도 X)."""
-    limit = _TIER_LIMITS.get(tier)
-    if limit is None:
-        return
-    current = await repo.count_by_tier(user_id, tier)
-    if current + 1 > limit:
-        raise ApiError(
-            ErrorCode.GOAL_TIER_LIMIT_EXCEEDED,
-            f"{tier.capitalize()} 목표는 최대 {limit}개까지 가질 수 있어요.",
-            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-            field="goalTier",
         )
 
 
@@ -209,8 +195,9 @@ async def create_goal(
     안에서 돌기 때문에 자료 삽입이 실패해도 목표 생성은 그대로 성공한다.
     """
     _validate_category(body.category)
-    await _enforce_tier_limit(repo, user.id, body.goal_tier)
     deadline = _parse_deadline(body.deadline)
+    # 세기 전에 사용자 단위 lock — '추가' 두 번 탭이 둘 다 통과하던 경로(goal_policy 참고).
+    await goal_policy.enforce_tier_limit(session, repo, user.id, body.goal_tier)
 
     goal = await repo.create(
         user_id=user.id,
@@ -272,7 +259,7 @@ async def update_goal(
         raise _not_found()
 
     if body.goal_tier is not None and body.goal_tier != goal.goal_tier:
-        await _enforce_tier_limit(repo, user.id, body.goal_tier)
+        await goal_policy.enforce_tier_limit(session, repo, user.id, body.goal_tier)
     if body.category is not None:
         _validate_category(body.category)
 
@@ -645,7 +632,11 @@ async def promote_mandala_node(
     이미 승격된 축을 다시 누르면(그 Goal 이 아직 살아있으면) **새로 만들지 않고 그 행을
     그대로 반환**(멱등) — U1 이 "사용자당 1개" 를 지키는 것과 같은 이유로, 같은 축을 두
     번 승격해 중복 목표가 쌓이면 안 된다.
+
+    멱등 판정(`promoted_goal_id`)은 tier lock **뒤에서** 읽는다 — 먼저 읽으면 두 번 탭한 두
+    요청이 모두 "아직 승격 전" 을 보고 같은 축으로 목표를 두 개 만든다.
     """
+    await goal_policy.hold_tier_lock(session, user.id)
     node = await _load_mandala_node(repo, user.id, node_id)
     if node.depth != 1:
         raise ApiError(
@@ -659,7 +650,7 @@ async def promote_mandala_node(
         if existing is not None:
             return _to_schema(existing, promoted_from_axis=node.title)
 
-    await _enforce_tier_limit(repo, user.id, body.goal_tier)
+    await goal_policy.enforce_tier_limit(session, repo, user.id, body.goal_tier)
     goal = GoalModel()
     # id 는 flush 로 받지 않고 여기서 채운다(PR5 `persist_mandala` 와 같은 이유) — 곧바로
     # `node.promoted_goal_id = goal.id` 로 써야 하고, DB 왕복(flush) 없이도 항상 값이 있어야
@@ -821,7 +812,7 @@ async def complete_goal(
     elif goal.status == "completed":
         # 되돌리면 다시 한도 집계 대상이 된다 — 여기서 안 재면 "완료 → 새 목표 생성 →
         # 완료 해제" 세 번으로 Focus≤3 을 넘길 수 있다(AGENTS §1 잠금 결정).
-        await _enforce_tier_limit(repo, user.id, goal.goal_tier)
+        await goal_policy.enforce_tier_limit(session, repo, user.id, goal.goal_tier)
     updated = await repo.set_completed(goal, completed=body.completed)
     if body.completed:
         # 끝냈다고 확인했는데 남은 카드가 계속 뜨면 "이제 그만 알려줘" 가 안 지켜진다.

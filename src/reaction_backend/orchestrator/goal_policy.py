@@ -1,0 +1,94 @@
+"""목표 tier 한도 — Focus ≤ 3 / Maintain ≤ 5 (DevBaseline §1.4 잠금 결정) 의 단일 구현.
+
+한도를 거는 경로가 다섯 곳이다 — 목표 추가(`POST /goals`), tier 변경(`PATCH /goals/{id}`),
+완료 되돌리기, 만다라 축 승격(`promote`·`/plans/mandala/next-cycle`), 인박스 → 목표.
+예전엔 라우터마다 "세고 → 넣기" 를 따로 적었는데 **잠금이 없었다.** 느린 모바일에서
+'추가' 를 두 번 누르면 두 요청이 같은 개수(2)를 읽고 둘 다 넣어 Focus 가 4개가 됐고,
+인박스 '목표로' 를 연달아 누르면 Maintain 이 9개까지 갔다(미러 재현). 잠금 결정이 한 번
+깨지면 되돌릴 방법이 없다.
+
+그래서 **세기 전에 사용자 단위 advisory lock** 을 잡는다(`user_agent_lock`, xact 범위).
+lock 은 호출자의 commit/rollback 까지 유지되므로 "세기 → 넣기 → commit" 이 한 덩어리가 되고,
+뒤 요청은 앞 요청이 commit 한 개수를 보고 평범한 422 를 받는다. 기다림은 최대 5초, 그 뒤엔
+기존 409 `AGENT_CONCURRENT_ACCESS`. 새 에러 코드·envelope 는 없다.
+
+문구는 화면이 쓰는 이름(집중/유지/보류)으로 적는다 — 예전 문구는 `Focus 목표는…` 이라
+FE 가 그대로 띄우면 앱 어디에도 없는 영어 이름이 나왔다.
+"""
+
+from __future__ import annotations
+
+from http import HTTPStatus
+from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from reaction_backend.orchestrator._common import user_agent_lock
+from reaction_backend.repositories.goal_repo import GoalRepo
+from reaction_backend.schemas.errors import ApiError, ErrorCode
+
+TIER_LIMITS: dict[str, int] = {"focus": 3, "maintain": 5}  # parked 자유 (DevBaseline §1.4)
+TIER_LABEL_KO: dict[str, str] = {"focus": "집중", "maintain": "유지", "parked": "보류"}
+
+# 한도를 거는 모든 쓰기 경로가 **같은 키**를 잡아야 서로 직렬화된다.
+_TIER_LOCK_AGENT = "goal_tier"
+
+# 한도가 찼을 때 무엇을 하면 되는지 — 비난 없이, 할 수 있는 일만 적는다.
+_HOW_TO_MAKE_ROOM: dict[str, str] = {
+    "focus": "하나를 유지·보류로 옮기거나 완료하면 새로 담을 수 있어요.",
+    "maintain": "하나를 보류로 옮기거나 완료하면 새로 담을 수 있어요.",
+}
+
+
+def tier_label(tier: str) -> str:
+    return TIER_LABEL_KO.get(tier, tier)
+
+
+def tier_limit_error(tier: str, limit: int) -> ApiError:
+    """422 `GOAL_TIER_LIMIT_EXCEEDED` — 코드·field 는 그대로, 문구만 화면 말로."""
+    how = _HOW_TO_MAKE_ROOM.get(tier, "")
+    message = f"{tier_label(tier)} 목표는 최대 {limit}개까지예요. {how}".strip()
+    return ApiError(
+        ErrorCode.GOAL_TIER_LIMIT_EXCEEDED,
+        message,
+        http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+        field="goalTier",
+    )
+
+
+async def hold_tier_lock(session: AsyncSession, user_id: UUID) -> None:
+    """이 사용자의 tier 한도 쓰기를 직렬화하는 lock 을 **트랜잭션 끝까지** 잡는다.
+
+    `pg_advisory_xact_lock` 이라 `async with` 블록을 나가도 풀리지 않는다 — 호출자의
+    commit/rollback 이 푼다. 같은 트랜잭션에서 다시 잡아도 즉시 통과한다(재진입).
+
+    멱등 판정(이미 승격한 축인가 등)을 lock **뒤에서** 읽어야 할 때 직접 부른다 — lock 전에
+    읽은 행은 앞 요청이 commit 하기 전 값이라 두 요청이 모두 "아직 없음" 을 본다.
+    """
+    async with user_agent_lock(session, user_id, _TIER_LOCK_AGENT):
+        return
+
+
+async def enforce_tier_limit(
+    session: AsyncSession, repo: GoalRepo, user_id: UUID, tier: str
+) -> None:
+    """tier 에 **하나 더** 담을 수 있는지 — 못 담으면 422. Parked 는 한도가 없다.
+
+    lock 을 잡은 **뒤에** 센다. 호출자는 이 호출 뒤 같은 트랜잭션 안에서 넣고 commit 한다.
+    """
+    limit = TIER_LIMITS.get(tier)
+    if limit is None:
+        return
+    await hold_tier_lock(session, user_id)
+    if await repo.count_by_tier(user_id, tier) + 1 > limit:
+        raise tier_limit_error(tier, limit)
+
+
+__all__ = [
+    "TIER_LABEL_KO",
+    "TIER_LIMITS",
+    "enforce_tier_limit",
+    "hold_tier_lock",
+    "tier_label",
+    "tier_limit_error",
+]

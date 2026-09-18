@@ -57,6 +57,7 @@ from reaction_backend.orchestrator import (
     first_plan_adapter,
     first_plan_milestones,
     goal_cycle,
+    goal_policy,
     inbox_resources,
     interview_adapter,
     interview_projection,
@@ -1385,8 +1386,6 @@ async def approve_mandala_draft(
 # 승격(멱등) → 시드 교체 → 같은 First Plan 경로 → Draft. 승인은 기존 approve 그대로다.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_MANDALA_TIER_LIMITS: dict[str, int] = {"focus": 3, "maintain": 5}  # parked 자유(§1.4)
-
 
 async def _promote_axis_for_cycle(
     session: AsyncSession,
@@ -1406,14 +1405,8 @@ async def _promote_axis_for_cycle(
         if existing is not None:
             return existing, False
 
-    limit = _MANDALA_TIER_LIMITS.get(goal_tier)
-    if limit is not None and await goal_repo.count_by_tier(user_id, goal_tier) + 1 > limit:
-        raise ApiError(
-            ErrorCode.GOAL_TIER_LIMIT_EXCEEDED,
-            f"{goal_tier.capitalize()} 목표는 최대 {limit}개까지 가질 수 있어요.",
-            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-            field="goalTier",
-        )
+    # 한도 판정은 `POST /goals` 와 같은 한 벌(lock → 세기 → 한국어 문구, goal_policy 참고).
+    await goal_policy.enforce_tier_limit(session, goal_repo, user_id, goal_tier)
 
     goal = Goal()
     goal.id = uuid4()

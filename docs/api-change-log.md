@@ -19,6 +19,15 @@
 - 궁극목표를 지우면 만다라 노드를 보관하고, 그 칸에서 만든 반복형 습관도 보관한다.
 - 보관된 궁극목표의 만다라 칸은 편집·승격·반복형 전환·다음 주기 모두 404 `GOAL_NOT_FOUND`.
 
+### Focus ≤ 3 / Maintain ≤ 5 가 동시 요청에서도 지켜진다
+
+- 한도를 거는 모든 쓰기(`POST /goals`, tier 를 바꾸는 `PATCH /goals/{id}`, 완료 되돌리기,
+  축 `promote`, `POST /plans/mandala/next-cycle`, 인박스 `convert-to-goal`)가 **세기 전에 사용자 단위
+  advisory lock** 을 잡는다. 두 번 탭이 둘 다 통과해 Focus 4개가 되던 경합이 막힌다. 뒤 요청은
+  보통 422 `GOAL_TIER_LIMIT_EXCEEDED`, 5초 안에 차례가 안 오면 기존 409 `AGENT_CONCURRENT_ACCESS`.
+- 422 문구가 화면 이름으로 바뀐다 — `Focus 목표는…` → `집중 목표는 최대 3개까지예요. …`.
+  코드·`field="goalTier"` 는 그대로. category 오류 문구도 영문 enum 목록 대신 "목표 분류 값이 올바르지 않아요."
+
 ---
 
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)
