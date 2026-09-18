@@ -301,7 +301,10 @@ async def batch_reflect(
     needs_tags: list[str] = []
     for execution, item, codes in resolved:
         # execution 종결 + 블록 finished — check-in 과 같은 전이 한 벌 (today-13).
-        await repo.close_execution(execution, status=item.completion_status, ended_at=ended_at)
+        # 저녁 회고는 소급 종결 — 실제로 끝낸 시각을 모르므로 소요 시간을 지어내지 않는다(today-11).
+        await repo.close_execution(
+            execution, status=item.completion_status, ended_at=ended_at, retroactive=True
+        )
         if item.task_aversiveness is not None:
             execution.task_aversiveness = item.task_aversiveness
 

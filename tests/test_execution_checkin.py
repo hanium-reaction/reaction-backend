@@ -346,6 +346,84 @@ def test_resume_after_the_6h_resolver_still_resumes(
     assert _check_in(client, exec_id, "done").status_code == 200
 
 
+def _backdate_start(fake_execution_repo: FakeExecutionRepo, minutes: int) -> Any:
+    from datetime import timedelta
+
+    execution = next(iter(fake_execution_repo._executions.values()))
+    execution.actual_start_at = execution.actual_start_at - timedelta(minutes=minutes)
+    return execution
+
+
+def _backdate_pause(fake_execution_repo: FakeExecutionRepo, minutes: int) -> Any:
+    from datetime import timedelta
+
+    pause = next(iter(fake_execution_repo._interruptions.values()))
+    pause.created_at = pause.created_at - timedelta(minutes=minutes)
+    return pause
+
+
+def test_actual_duration_excludes_paused_time(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """60분 전에 시작해 30분 멈췄다 재개하고 완료 — 실제 소요는 30분 (today-11)."""
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    _backdate_start(fake_execution_repo, 60)
+    _pause(client, exec_id)
+    _backdate_pause(fake_execution_repo, 30)
+    assert _resume(client, exec_id).json()["pauseTotalMinutes"] == 30
+
+    body = _check_in(client, exec_id, "done").json()
+
+    assert body["actualDurationMinutes"] == 30
+
+
+def test_check_in_while_paused_closes_the_pause(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """정지 중에 바로 완료 — 그 정지를 닫고(재개 없이 끝냄) 정지 시간을 소요에서 뺀다 (today-11)."""
+    import asyncio
+
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    execution = _backdate_start(fake_execution_repo, 60)
+    _pause(client, exec_id)
+    pause = _backdate_pause(fake_execution_repo, 20)
+
+    body = _check_in(client, exec_id, "done").json()
+
+    assert body["actualDurationMinutes"] == 40
+    assert pause.resume_delay_minutes == 20
+    assert pause.resumed_after_interrupt is False
+    assert execution.pause_total_minutes == 20
+    assert asyncio.run(fake_execution_repo.get_open_pause(execution.id)) is None
+
+
+def test_evening_reflection_leaves_actual_duration_unknown(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """저녁 회고는 소급 종결 — 회고한 시각은 끝낸 시각이 아니라 소요 시간을 지어내지 않는다.
+
+    예전엔 13:00 에 시작한 30분짜리 카드를 21:30 에 '완료' 로 회고하면 510분이 기록됐다.
+    """
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    execution = _backdate_start(fake_execution_repo, 510)
+
+    resp = _batch(client, [{"executionId": exec_id, "completionStatus": "done"}])
+
+    assert resp.status_code == 200, resp.json()
+    assert execution.completion_status == "done"
+    assert execution.actual_end_at is not None
+    assert execution.actual_duration_minutes is None
+
+
 def test_pause_conflict_after_check_in(
     client: TestClient,
     fake_action_item_repo: FakeActionItemRepo,

@@ -298,6 +298,7 @@ class ExecutionRepo:
         *,
         status: str,
         ended_at: datetime,
+        retroactive: bool = False,
     ) -> None:
         """실행 1건 종결 — check-in 과 저녁 회고(batch)의 **단일 전이** (today-13).
 
@@ -305,16 +306,31 @@ class ExecutionRepo:
         들고 있었다. 한쪽만 고치면 '집중 화면에서 완료한 기록' 과 '저녁 회고로 완료한 기록' 이
         같은 결과인데 다르게 저장된다 — 취소 블록 가드가 실제로 한쪽에만 먼저 들어갔었다.
 
-        하는 일: completion_status·actual_end_at·actual_duration_minutes + 블록 finished
-        + (완료면) 이 카드의 남은 세션 블록 정리.
+        하는 일: 열린 정지 마감 + completion_status·actual_end_at·actual_duration_minutes
+        + 블록 finished + (완료면) 이 카드의 남은 세션 블록 정리.
         `action_item.status` 전이와 회복 완료 스탬프는 **호출자 몫**이다(카드·회복 repo 를
         라우터가 쥔다). commit 도 호출자.
+
+        `actual_duration_minutes` 는 주간 리뷰의 '실제로 쓴 시간' 재료라 **일한 시간만** 센다
+        (today-11). 예전엔 시작~종결 전체를 세서 09:20~18:00 정지한 실행이 550분, 13:00 에
+        시작하고 21:30 저녁 회고로 '완료' 한 30분짜리 카드가 510분이 됐다.
+        - 정지 중에 체크인하면 그 정지를 지금 닫는다(`resumed=False` — 재개 없이 끝냈다).
+          안 닫으면 정지 시간이 빠지지 않고, 열린 정지가 끝난 실행에 영원히 남는다.
+        - 실제 소요 = (종결 − 착수) − 정지 합계.
+        - `retroactive=True`(저녁 회고)는 **언제 끝났는지 모른다** — 회고한 시각은 끝낸 시각이
+          아니다. 지어내지 않고 None 으로 둔다(주간 리뷰는 None 을 0 으로 센다).
         """
+        pause = await self.get_open_pause(execution.id)
+        if pause is not None:
+            settle_pause(execution, pause, now=ended_at, resumed=False)
+
         execution.completion_status = status
         execution.actual_end_at = ended_at
-        if execution.actual_start_at is not None:
-            delta = ended_at - execution.actual_start_at
-            execution.actual_duration_minutes = max(int(delta.total_seconds() // 60), 0)
+        if retroactive:
+            execution.actual_duration_minutes = None
+        elif execution.actual_start_at is not None:
+            elapsed = int((ended_at - execution.actual_start_at).total_seconds() // 60)
+            execution.actual_duration_minutes = max(elapsed - execution.pause_total_minutes, 0)
 
         block = await self.get_block(execution.scheduled_block_id)
         if block is not None and block.block_status != "cancelled":

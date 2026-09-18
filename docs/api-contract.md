@@ -661,6 +661,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
   - **같은 카드가 이미 진행 중이면 그 실행을 200 으로 돌려준다**(v2.30-today, 종전 409 `TODAY_EXECUTION_ALREADY_ACTIVE`). 새 실행·블록을 만들지 않고 카드 상태도 안 건드린다. 응답 모양은 같고 `actualStartAt` 은 **처음 시작한 시각**이다 — 앱을 다시 열어 실행 id 를 잃은 FE 가 [이어서 하기] 로 start 를 다시 불러도 같은 실행을 이어받아 체크인할 수 있다. 끝난(체크인한) 실행은 되살리지 않는다 — 그 뒤 start 는 새 실행(201)
   - 다른 카드가 진행 중이어도 시작은 막지 않는다(종전과 같음). `TODAY_EXECUTION_ALREADY_ACTIVE` 코드는 남아 있지만 이 경로는 더 이상 내보내지 않는다
 - `POST /today/check-ins` — `{ executionId, completionStatus(4칩), userRating?, userFeedback? }`. execution 종결(actual_end_at·duration) + 블록 finished + **`action_item.status` 전이**(execution 레이어의 합의된 유일 지점). feedback 은 at-rest 암호화. 재체크인 409 `TODAY_ALREADY_CHECKED_IN`. 응답 `needsFailureTags=true`(failed/partial_done) → S18 → §11 태깅 → §12 Recovery 로 연결
+  - **`actualDurationMinutes` = 일한 시간(v2.30-today)** — (체크인 시각 − 착수 시각) − `pauseTotalMinutes`. 예전엔 정지 시간까지 셌다. 정지 중에 체크인하면 그 정지를 체크인 시각에 닫고(재개 없이 끝냄) 그 시간도 뺀다. 주간 리뷰 `effort.actualMinutes` 의 재료다
   - **`done`/`over_done` 이면 이 카드의 남은 세션 블록을 정리한다**(v2.30-today). 쪼갠 카드의 한 회차에서 '완료' 하면 카드는 끝난 것이라, 아직 `scheduled` 인 다른 회차 블록을 `cancelled` 로 바꾼다 — 주간 그리드에 할 일로 남지 않고 '곧 시작'(pre_card) 알림도 오지 않는다. `finished`(수행 이력)·`started` 블록과 사용자가 직접 옮긴 블록(`source=user_edit`)은 건드리지 않는다. `partial_done`/`failed` 는 '아직 남았다' 라 남은 회차를 그대로 둔다 — 다음 [▶ 시작] 은 가장 이른 미종결 블록을 잡는다. `POST /reflection/batch` 도 같은 규칙. pre_card 알림은 블록 상태와 별개로 **끝낸(done/over_done) 카드의 블록엔 보내지 않는다**(이중 방어)
 - `POST /today/focus/{executionId}/pause`·`/resume` — 응답 `{ executionId, actionItemId, startedAt, endedAt, status(paused|in_progress), pauseTotalMinutes }`. pause 는 user_pause 정지 구간을 열고, resume 은 그 구간을 닫아 정지 시작부터 지금까지를 `pauseTotalMinutes` 에 더한다. 체크인이 끝난 실행은 409 `TODAY_ALREADY_CHECKED_IN`, 없는 실행은 404 `TODAY_EXECUTION_NOT_FOUND`
   - **둘 다 멱등(v2.30-today)** — 이미 정지 중인데 pause 를 다시 보내면 새 구간을 열지 않고 200 `paused`, 정지 중이 아닌데 resume 을 보내면 아무것도 안 바꾸고 200 `in_progress`(종전 409 `TODAY_ALREADY_PAUSED`/`TODAY_NOT_PAUSED` — 코드 정의는 남아 있지만 이 경로는 더 이상 내보내지 않는다). 응답을 잃은 FE 의 재시도가 영영 실패하지 않게
@@ -726,7 +727,9 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 `POST /reflection/batch` — S17 저녁 일괄 회고. 요청 `{ items: [{ executionId, completionStatus(4칩),
 failureTags?(0~2), memo?, taskAversiveness? }] }` (빈 배열 no-op, 상한 50건). 각 항목을 `POST /today/check-ins` 와
 동일하게 종결(execution + 블록 finished + `action_item.status`)하고 failed/partial_done 항목엔
-실패 사유를 함께 기록한다. **전량 사전 검증 후 단일 트랜잭션 적용** — 하나라도 무효(없음
+실패 사유를 함께 기록한다. 단 **소급 종결이라 `actual_duration_minutes` 는 비워 둔다**(v2.30-today) —
+회고한 시각은 끝낸 시각이 아니다(예전엔 13:00 에 시작한 30분 카드를 21:30 에 회고하면 510분이 됐다).
+주간 리뷰 `effort.actualMinutes` 는 이 실행을 0 으로 센다. **전량 사전 검증 후 단일 트랜잭션 적용** — 하나라도 무효(없음
 404 `TODAY_EXECUTION_NOT_FOUND` · 이미 체크인 409 `TODAY_ALREADY_CHECKED_IN` · 중복 executionId 422
 `COMMON_VALIDATION_ERROR` · non-failure 에 태그 422 `REFLECT_NOT_FAILED` · 무효 태그 422 `REFLECT_INVALID_TAG`
 · non-failure 에 정서 문항 422 `REFLECT_NOT_FAILED` · non-failure 에 memo 422 `REFLECT_NOT_FAILED`
