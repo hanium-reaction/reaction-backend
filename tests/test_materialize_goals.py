@@ -383,6 +383,58 @@ async def test_supersede_proposed_goals_ignores_mandala_owned_goal() -> None:
     assert mandala_owner.status == "proposed" and mandala_owner.archived_at is None
 
 
+class _SqlCapturingSession:
+    """실 DB 처럼 WHERE 를 **적용해서** 돌려주는 fake — 쿼리 모양과 결과를 함께 본다(planB-16).
+
+    `goal_nodes` 조회는 goal_id 컬럼만 돌려준다(실제 `select(GoalNode.goal_id)` 결과처럼).
+    """
+
+    def __init__(self, goals: list[Goal], mandala_owner_ids: set[Any]) -> None:
+        self._goals = goals
+        self._mandala_owner_ids = mandala_owner_ids
+        self.sql: list[str] = []
+
+    async def execute(self, stmt: Any) -> _Result:
+        self.sql.append(str(stmt).lower())
+        if stmt.column_descriptions[0]["entity"] is Goal:
+            return _Result(self._goals)
+        return _Result(sorted(self._mandala_owner_ids, key=str))
+
+
+async def test_mandala_owner_lookup_is_scoped_to_the_users_goals() -> None:
+    """만다라 소유 판정이 **모든 사용자의 goal_nodes 전체**를 읽지 않는다 (planB-16).
+
+    예전 쿼리는 `select(GoalNode).where(archived_at IS NULL)` 뿐이라 가입자가 늘수록 계획
+    요청마다 모두의 노드(만다라 한 개가 73칸)를 ORM 행으로 몇 번씩 읽었다.
+    """
+    from reaction_backend.orchestrator.first_plan_adapter import _active_goals
+
+    uid = uuid4()
+    plan_goal, mandala_goal = Goal(), Goal()
+    for g, title in ((plan_goal, "토익"), (mandala_goal, "궁극목표")):
+        g.id = uuid4()
+        g.user_id = uid
+        g.title = title
+        g.status = "active"
+        g.archived_at = None
+    sess = _SqlCapturingSession([plan_goal, mandala_goal], {mandala_goal.id})
+
+    active = await _active_goals(sess, uid)  # type: ignore[arg-type]
+
+    assert active == [plan_goal]
+    node_sql = next(q for q in sess.sql if "goal_nodes" in q)
+    assert "tree_kind" in node_sql and " in " in node_sql
+    assert "goal_nodes.title" not in node_sql  # ORM 행 전체가 아니라 goal_id 만
+
+
+async def test_mandala_owner_lookup_skips_the_query_without_goals() -> None:
+    sess = _SqlCapturingSession([], set())
+    from reaction_backend.orchestrator.first_plan_adapter import _active_goals
+
+    assert await _active_goals(sess, uuid4()) == []  # type: ignore[arg-type]
+    assert not [q for q in sess.sql if "goal_nodes" in q]
+
+
 async def test_month_only_deadline_does_not_crash_the_interview() -> None:
     """월만 말한 마감(`2026-10-00`)이 인터뷰 마지막 턴을 500 으로 죽이던 회귀 (라이브 8/29).
 

@@ -3033,11 +3033,15 @@ def _node_depths(goal_nodes: Sequence[GoalNodeDraft]) -> dict[str, int]:
     return depths
 
 
-async def _mandala_owned_goal_ids(session: AsyncSession) -> frozenset[uuid.UUID]:
-    """만다라 트리(`tree_kind='mandala'`)를 소유한 goal 의 id 집합 (W3, `1ee508b967ba`).
+async def _mandala_owned_goal_ids(
+    session: AsyncSession, goal_ids: Sequence[uuid.UUID]
+) -> frozenset[uuid.UUID]:
+    """`goal_ids` 중 만다라 트리(`tree_kind='mandala'`)를 소유한 goal 의 id 집합 (W3, `1ee508b967ba`).
 
-    user_id 로 좁히지 않는다 — 호출자가 이미 user 범위 목표 목록에서 멤버십만 확인하므로
-    (`_active_goals`), goal_id 는 어차피 한 user 소속이라 cross-user 유출이 없다.
+    ⚠️ **후보 목표로 좁혀 goal_id 만 읽는다** (planB-16). 예전엔 조건 없이 `goal_nodes` 전체
+    (모든 사용자의 계획·만다라 노드, 만다라 하나가 73칸)를 ORM 행으로 읽고 tree_kind 를
+    파이썬에서 걸렀다. 계획 생성 한 번에 이 경로를 2~4번 타고, 그 요청은 advisory lock
+    트랜잭션을 쥔 채라 가입자가 늘수록 모두의 계획 만들기·승인이 느려졌다.
 
     이 집합에 들어간 goal 은 `_active_goals`(→ `materialize_goals`/`heaviest_goal_id`
     제목 매칭)에서 제외된다 — 궁극목표(§3.2, `status='active'`) 제목이 계획 인터뷰
@@ -3045,9 +3049,26 @@ async def _mandala_owned_goal_ids(session: AsyncSession) -> frozenset[uuid.UUID]
     만다라 73칸이 `_archive_goal_nodes`/`supersede_previous_plan` 에 통째로 삼켜진다
     (W1/W2 가 막는 사고의 **성립 조건** 자체를 여기서 끊는다).
     """
-    stmt = select(GoalNode).where(GoalNode.archived_at.is_(None))
-    rows = (await session.execute(stmt)).scalars().all()
-    return frozenset(n.goal_id for n in rows if n.tree_kind == "mandala")
+    if not goal_ids:
+        return frozenset()
+    stmt = (
+        select(GoalNode.goal_id)
+        .where(
+            GoalNode.tree_kind == "mandala",
+            GoalNode.archived_at.is_(None),
+            GoalNode.goal_id.in_(list(goal_ids)),
+        )
+        .distinct()
+    )
+    owned: set[uuid.UUID] = set()
+    for row in (await session.execute(stmt)).scalars().all():
+        if isinstance(row, GoalNode):
+            # 테스트의 fake session 은 WHERE 를 무시하고 행 전체를 돌려준다 — 같은 조건을 여기서.
+            if row.tree_kind == "mandala" and row.archived_at is None:
+                owned.add(row.goal_id)
+        else:
+            owned.add(row)
+    return frozenset(owned)
 
 
 async def _active_goals(session: AsyncSession, user_id: uuid.UUID) -> list[Goal]:
@@ -3067,7 +3088,7 @@ async def _active_goals(session: AsyncSession, user_id: uuid.UUID) -> list[Goal]
         Goal.status != "completed",
     )
     rows = (await session.execute(stmt)).scalars().all()
-    mandala_owner_ids = await _mandala_owned_goal_ids(session)
+    mandala_owner_ids = await _mandala_owned_goal_ids(session, [g.id for g in rows])
     return [g for g in rows if g.id not in mandala_owner_ids]
 
 
