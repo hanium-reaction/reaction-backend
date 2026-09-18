@@ -6,7 +6,8 @@
 핵심 결정 (AGENTS.md §1):
 - UX 4 그룹 (DOWNSCOPE / RESCHEDULE / CARRY_OVER / PARK) — 같은 그룹 동시 노출 1카드.
 - 내부 13 전략(원본 9 + 2026-08-17 gap-fill 4)은 `recovery_strategy_catalog` 기준, 통계/감사용 보존.
-- 8초 안에 LLM 응답 못 받으면 heuristic fallback (PRD §9) — 룰 선택 + 카탈로그 템플릿.
+- LLM 응답을 12초 1회 안에 못 받으면 heuristic fallback (PRD §9, ADR-0003 addendum #128·
+  recovery-13) — 룰 선택 + 카탈로그 템플릿. 재시도는 하지 않는다(최악 대기 12초).
 - 원본 `action_item.status` (FAILED 등)는 절대 변경 X — Resilience 지표 전제.
 - AI 출력 = Draft Layer (`is_draft=True`) → `/recovery/decisions` 에서만 확정.
 
@@ -275,7 +276,7 @@ async def generate_recovery_proposals(
     action_repo: ActionRepoDep,
     session: SessionDep,
 ) -> RecoveryProposalsResponse:
-    """실패 컨텍스트 기반 회복 옵션 2~4개 생성 (LLM thinking 0 + ≤ 12s, 룰 fallback — ADR-0003 addendum).
+    """실패 컨텍스트 기반 회복 옵션 2~4개 생성 (LLM thinking 0 + 12s × 1회, 룰 fallback — ADR-0003 addendum).
 
     이미 pending 카드가 있으면 재생성하지 않고 그대로 반환한다 (중복 INSERT 방지).
     """
@@ -407,6 +408,9 @@ async def generate_recovery_proposals(
             # timeout 여유.
             thinking_budget=0,
             timeout=12.0,
+            # 재시도하지 않는다 — 기본(llm_max_retries=3)이면 12s×3+backoff ≈ 37초 동안 사용자가
+            # 로딩만 본다(미러 실측 26.6초). 룰 카드가 이미 준비돼 있으니 한 번 실패하면 바로 낸다.
+            max_attempts=1,
             variables={
                 "failure_type": ", ".join(failure_tags) if failure_tags else "UNKNOWN",
                 "confidence": "n/a",

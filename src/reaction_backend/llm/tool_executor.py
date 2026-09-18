@@ -166,6 +166,7 @@ class LLMToolExecutor:
         tone_mode: str | None = None,
         thinking_budget: int | None = None,
         temperature: float | None = None,
+        max_attempts: int | None = None,
     ) -> RunResult[T]:
         """ADR-0003 동결 시그니처 (+ #23 tone_mode addendum + thinking_budget addendum).
 
@@ -199,6 +200,10 @@ class LLMToolExecutor:
         temperature:
             호출별 샘플링 온도. None(기본)이면 **아무것도 넘기지 않아** 제공자 기본값을
             쓴다 — 즉 기존 동작 그대로다. 분량 변동을 재는 실험(L1-8)이 이 손잡이를 쓴다.
+        max_attempts:
+            호출별 최대 시도 횟수. None(기본)이면 `settings.llm_max_retries` — 기존 동작 그대로.
+            사용자가 화면 앞에서 기다리고 결정적 fallback 이 있는 호출(회복 제안 등)은 1 을
+            넘겨 최악 대기를 `timeout` 1회로 묶는다(재시도 3회면 timeout×3+backoff).
         """
         # 호출자가 명시하지 않으면 현재 요청의 trace_id (#370). 한 요청 안의 모든 LLM
         # 호출이 같은 값을 달아야 `endpoint_rate_limit` 이 '실행 횟수'를 셀 수 있다.
@@ -260,7 +265,9 @@ class LLMToolExecutor:
         last_reason: str | None = None
         provider_resp: ProviderResponse | None = None
         validated: T | None = None
-        max_attempts = max(1, settings.llm_max_retries)
+        max_attempts = max(
+            1, max_attempts if max_attempts is not None else settings.llm_max_retries
+        )
 
         for attempt in range(1, max_attempts + 1):
             try:
