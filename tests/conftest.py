@@ -1752,8 +1752,7 @@ class FakeExecutionRepo:
             for p in self._interruptions.values()
             if p.execution_id == execution_id
             and p.interruption_type == "user_pause"
-            and p.resume_delay_minutes is None
-            and p.resumed_after_interrupt is None
+            and p.resume_delay_minutes is None  # 6h cron 의 False 표시와 무관 (실 repo 미러)
         ]
         return max(opens, key=lambda p: p.created_at) if opens else None
 

@@ -36,6 +36,26 @@ from reaction_backend.db.session import get_db
 _CARD_DONE_STATUSES = ("done", "over_done")
 
 
+def settle_pause(
+    execution: ExecutionEvent,
+    pause: InterruptionEvent,
+    *,
+    now: datetime,
+    resumed: bool,
+) -> None:
+    """정지 1건을 마감하고 그 시간을 실행의 `pause_total_minutes` 에 더한다.
+
+    [▶ 계속](`resumed=True`)과 정지 중 체크인(`resumed=False`, today-11)이 같이 쓴다.
+    `resumed_after_interrupt` 는 **비어 있을 때만** 채운다 — 6h cron 이 이미 False('6시간 안에
+    안 돌아옴')로 적었으면 그 사실은 그대로 두고, 지연분만 채워 넣는다(sched-14).
+    """
+    minutes = max(int((now - pause.created_at).total_seconds() // 60), 0)
+    pause.resume_delay_minutes = minutes
+    if pause.resumed_after_interrupt is None:
+        pause.resumed_after_interrupt = resumed
+    execution.pause_total_minutes += minutes
+
+
 def reflectable_from() -> ColumnElement[datetime]:
     """실행을 **회고할 수 있게 된 시각** = 계획 시각과 실제 착수 시각 중 나중 (#20).
 
@@ -340,8 +360,12 @@ class ExecutionRepo:
     async def get_open_pause(self, execution_id: UUID) -> InterruptionEvent | None:
         """아직 재개되지 않은(열린) user_pause 구간 — 가장 최근 것.
 
-        열림 = resume_delay_minutes IS NULL AND resumed_after_interrupt IS NULL
-        (재개되면 True+지연분, cron 이 방치분을 False 로 마감).
+        열림 = `resume_delay_minutes IS NULL` — 지연분은 [▶ 계속]·체크인이 정지를 닫을 때만
+        적는다(`settle_pause`). `resumed_after_interrupt` 는 보지 않는다: 6h cron
+        (`interruption_resolver`)이 방치분을 False 로 표시해도 사용자가 [▶ 계속] 을 누르기
+        전까지 실행은 **여전히 정지 중**이다. 예전엔 그 행을 닫힌 것으로 봐서, 아침에 멈추고
+        저녁에 돌아온 사용자의 [계속] 이 409 `TODAY_NOT_PAUSED` 로 영영 실패했고 그 몇 시간은
+        정지 시간에 한 번도 안 들어갔다(today-5, sched-14).
         """
         stmt = (
             select(InterruptionEvent)
@@ -349,7 +373,6 @@ class ExecutionRepo:
                 InterruptionEvent.execution_id == execution_id,
                 InterruptionEvent.interruption_type == "user_pause",
                 InterruptionEvent.resume_delay_minutes.is_(None),
-                InterruptionEvent.resumed_after_interrupt.is_(None),
             )
             .order_by(InterruptionEvent.created_at.desc())
         )

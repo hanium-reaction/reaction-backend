@@ -642,8 +642,8 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 | GET | `/today/actions/{actionItemId}` | 카드 상세 (S11) | ✅ #19-A |
 | POST | `/today/actions/{actionItemId}/start` | [▶ 시작] → `execution_events` 생성 | ✅ #19-B |
 | POST | `/today/actions/{actionItemId}/cancel` | 카드 취소 = soft delete (`archived_at`, **status 불변**) | ✅ #214 |
-| POST | `/today/focus/{executionId}/pause` | [⏸] + `interruption_events` INSERT | 🚧 #19-B-2 |
-| POST | `/today/focus/{executionId}/resume` | [▶ 계속] | 🚧 #19-B-2 |
+| POST | `/today/focus/{executionId}/pause` | [⏸] + `interruption_events` INSERT (이미 정지 중이면 200 멱등, v2.30-today) | ✅ #83 |
+| POST | `/today/focus/{executionId}/resume` | [▶ 계속] (정지 중이 아니면 200 멱등, v2.30-today) | ✅ #83 |
 | POST | `/today/check-ins` | Quick Check-in 4칩 | ✅ #19-B (context_snapshot 캡처는 #19-B-2) |
 
 `completion_status`: `done` / `partial_done` / `failed` / `over_done`
@@ -662,7 +662,10 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
   - 다른 카드가 진행 중이어도 시작은 막지 않는다(종전과 같음). `TODAY_EXECUTION_ALREADY_ACTIVE` 코드는 남아 있지만 이 경로는 더 이상 내보내지 않는다
 - `POST /today/check-ins` — `{ executionId, completionStatus(4칩), userRating?, userFeedback? }`. execution 종결(actual_end_at·duration) + 블록 finished + **`action_item.status` 전이**(execution 레이어의 합의된 유일 지점). feedback 은 at-rest 암호화. 재체크인 409 `TODAY_ALREADY_CHECKED_IN`. 응답 `needsFailureTags=true`(failed/partial_done) → S18 → §11 태깅 → §12 Recovery 로 연결
   - **`done`/`over_done` 이면 이 카드의 남은 세션 블록을 정리한다**(v2.30-today). 쪼갠 카드의 한 회차에서 '완료' 하면 카드는 끝난 것이라, 아직 `scheduled` 인 다른 회차 블록을 `cancelled` 로 바꾼다 — 주간 그리드에 할 일로 남지 않고 '곧 시작'(pre_card) 알림도 오지 않는다. `finished`(수행 이력)·`started` 블록과 사용자가 직접 옮긴 블록(`source=user_edit`)은 건드리지 않는다. `partial_done`/`failed` 는 '아직 남았다' 라 남은 회차를 그대로 둔다 — 다음 [▶ 시작] 은 가장 이른 미종결 블록을 잡는다. `POST /reflection/batch` 도 같은 규칙. pre_card 알림은 블록 상태와 별개로 **끝낸(done/over_done) 카드의 블록엔 보내지 않는다**(이중 방어)
-- pause/resume(interruption_events) + context_snapshot 캡처는 #19-B-2 후속
+- `POST /today/focus/{executionId}/pause`·`/resume` — 응답 `{ executionId, actionItemId, startedAt, endedAt, status(paused|in_progress), pauseTotalMinutes }`. pause 는 user_pause 정지 구간을 열고, resume 은 그 구간을 닫아 정지 시작부터 지금까지를 `pauseTotalMinutes` 에 더한다. 체크인이 끝난 실행은 409 `TODAY_ALREADY_CHECKED_IN`, 없는 실행은 404 `TODAY_EXECUTION_NOT_FOUND`
+  - **둘 다 멱등(v2.30-today)** — 이미 정지 중인데 pause 를 다시 보내면 새 구간을 열지 않고 200 `paused`, 정지 중이 아닌데 resume 을 보내면 아무것도 안 바꾸고 200 `in_progress`(종전 409 `TODAY_ALREADY_PAUSED`/`TODAY_NOT_PAUSED` — 코드 정의는 남아 있지만 이 경로는 더 이상 내보내지 않는다). 응답을 잃은 FE 의 재시도가 영영 실패하지 않게
+  - 6시간 넘게 재개 안 된 정지는 cron 이 '6시간 안에 안 돌아옴' 으로 **표시만** 한다 — 정지는 열린 채라, 저녁에 돌아와 [▶ 계속] 을 눌러도 재개되고 그 시간이 `pauseTotalMinutes` 에 들어간다
+- context_snapshot 캡처는 #19-B-2 후속
 
 **카드 취소 (#214)**:
 - `POST /today/actions/{id}/cancel` → **204**. `archived_at` 만 세팅하고 **`status` 는 바꾸지 않는다**(AGENTS §2 — 원본 status 는 Resilience 지표의 전제). 조회가 전부 `archived_at IS NULL` 로 걸러 오늘 어젠다·백로그에서 빠진다

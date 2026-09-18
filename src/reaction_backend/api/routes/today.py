@@ -33,7 +33,11 @@ from reaction_backend.domain import action_cancel, missed_check_in
 from reaction_backend.integrations.google_calendar import freebusy
 from reaction_backend.repositories.action_item_repo import ActionItemRepo, get_action_item_repo
 from reaction_backend.repositories.daily_brief_repo import DailyBriefRepo, get_daily_brief_repo
-from reaction_backend.repositories.execution_repo import ExecutionRepo, get_execution_repo
+from reaction_backend.repositories.execution_repo import (
+    ExecutionRepo,
+    get_execution_repo,
+    settle_pause,
+)
 from reaction_backend.repositories.fixed_schedule_repo import (
     FixedScheduleRepo,
     get_fixed_schedule_repo,
@@ -504,19 +508,18 @@ async def pause_focus(
 ) -> ExecutionEventResponse:
     """[⏸] 집중 세션 일시정지 (#83) — user_pause interruption 을 연다.
 
-    execution 은 in_progress 유지. 이미 정지 중이면 409. 재개 시 누적 시간이 반영된다.
+    execution 은 in_progress 유지. 재개 시 누적 시간이 반영된다.
+
+    **이미 정지 중이면 새 구간을 열지 않고 200 `paused`** 다(예전 409 `TODAY_ALREADY_PAUSED`).
+    정지는 서버에 들어갔는데 응답만 잃은 FE 가 다시 보내면 409 가 끝없이 반복돼 '저장되지
+    않았어요' 배너가 사라지지 않았다(today-5). 결과 상태가 같으니 멱등이 맞다.
     """
     execution = _require_in_progress(
         await execution_repo.get_by_id(user.id, _parse_execution_id(execution_id))
     )
-    if await execution_repo.get_open_pause(execution.id) is not None:
-        raise ApiError(
-            ErrorCode.TODAY_ALREADY_PAUSED,
-            "이미 일시정지 중이에요.",
-            http_status=HTTPStatus.CONFLICT,
-        )
-    await execution_repo.create_pause(user_id=user.id, execution_id=execution.id)
-    await session.commit()
+    if await execution_repo.get_open_pause(execution.id) is None:
+        await execution_repo.create_pause(user_id=user.id, execution_id=execution.id)
+        await session.commit()
     return _execution_event(execution, status="paused")
 
 
@@ -529,21 +532,18 @@ async def resume_focus(
 ) -> ExecutionEventResponse:
     """[▶ 계속] 집중 세션 재개 (#83) — 열린 정지 구간을 닫고 pause_total_minutes 누적.
 
-    정지 중이 아니면 409. 정지 시작(created_at)부터 지금까지를 지연분으로 기록한다.
+    정지 시작(created_at)부터 지금까지를 지연분으로 기록한다. 6h cron 이 '6시간 안에 안
+    돌아옴' 으로 표시한 정지도 아직 열린 정지다 — 아침에 멈추고 저녁에 돌아와 [계속] 을
+    눌러도 재개되고, 그 시간이 정지 시간에 들어간다(sched-14).
+
+    **정지 중이 아니면 아무것도 바꾸지 않고 200 `in_progress`** 다(예전 409
+    `TODAY_NOT_PAUSED`). 재개 응답을 잃은 FE 의 재시도가 영영 실패하지 않게(today-5).
     """
     execution = _require_in_progress(
         await execution_repo.get_by_id(user.id, _parse_execution_id(execution_id))
     )
     pause = await execution_repo.get_open_pause(execution.id)
-    if pause is None:
-        raise ApiError(
-            ErrorCode.TODAY_NOT_PAUSED,
-            "일시정지 상태가 아니에요.",
-            http_status=HTTPStatus.CONFLICT,
-        )
-    paused_minutes = max(int((now_kst() - pause.created_at).total_seconds() // 60), 0)
-    pause.resume_delay_minutes = paused_minutes
-    pause.resumed_after_interrupt = True
-    execution.pause_total_minutes += paused_minutes
-    await session.commit()
+    if pause is not None:
+        settle_pause(execution, pause, now=now_kst(), resumed=True)
+        await session.commit()
     return _execution_event(execution, status="in_progress")

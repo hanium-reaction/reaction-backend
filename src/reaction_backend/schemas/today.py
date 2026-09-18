@@ -148,6 +148,7 @@ class ExecutionEventResponse(CamelModel):
 
     pause 는 interruption_events(user_pause) 를 열고, resume 은 그 구간을 닫아
     execution.pause_total_minutes 에 누적한다. execution 자체는 in_progress 유지.
+    둘 다 멱등 — 이미 정지 중인 pause·정지 중이 아닌 resume 도 200 으로 현재 상태를 돌려준다.
     """
 
     execution_id: str

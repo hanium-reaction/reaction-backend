@@ -255,27 +255,95 @@ def test_resume_accumulates_pause_minutes(
     assert execution.pause_total_minutes == 10
 
 
-def test_pause_conflict_when_already_paused(
+def test_pause_twice_is_idempotent(
     client: TestClient,
     fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
 ) -> None:
+    """정지 응답을 잃은 FE 의 재전송 — 409 대신 200 `paused`, 정지 구간은 하나 (today-5)."""
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    assert _pause(client, exec_id).status_code == 200
+
+    resp = _pause(client, exec_id)
+
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["status"] == "paused"
+    assert len(fake_execution_repo._interruptions) == 1
+
+
+def test_resume_when_not_paused_is_a_no_op(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """재개 응답을 잃은 FE 의 재전송 — 409 대신 200 `in_progress`, 아무것도 안 바꾼다 (today-5)."""
     action = _seed_action(fake_action_item_repo)
     exec_id = _start(client, f"action_{action.id}").json()["executionId"]
     _pause(client, exec_id)
-    resp = _pause(client, exec_id)
-    assert resp.status_code == 409
-    assert resp.json()["code"] == "TODAY_ALREADY_PAUSED"
+    assert _resume(client, exec_id).status_code == 200
+    pause = next(iter(fake_execution_repo._interruptions.values()))
+    settled = (pause.resume_delay_minutes, pause.resumed_after_interrupt)
+
+    resp = _resume(client, exec_id)
+
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["status"] == "in_progress"
+    assert (pause.resume_delay_minutes, pause.resumed_after_interrupt) == settled
+    # 한 번도 정지 안 한 실행도 같다
+    other = _seed_action(fake_action_item_repo, title="다른 카드")
+    other_exec = _start(client, f"action_{other.id}").json()["executionId"]
+    assert _resume(client, other_exec).json()["status"] == "in_progress"
 
 
-def test_resume_conflict_when_not_paused(
+def test_resume_after_the_6h_resolver_still_resumes(
     client: TestClient,
     fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
 ) -> None:
+    """아침에 멈추고 저녁에 [계속] — 6h cron 이 마감 표시한 정지도 재개된다 (sched-14).
+
+    예전엔 409 `TODAY_NOT_PAUSED` 가 영영 반복됐고, 멈춘 시간은 정지 시간에 안 들어갔다.
+    cron 의 '6시간 안에 안 돌아옴'(False) 표시는 그대로 둔다.
+    """
+    import asyncio
+    from datetime import timedelta
+
+    from reaction_backend.repositories.interruption_event_repo import InterruptionEventRepo
+    from reaction_backend.scheduler.interruption_resolver import run_interruption_resolver
+    from reaction_backend.schemas.common import now_kst
+
     action = _seed_action(fake_action_item_repo)
     exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    _pause(client, exec_id)
+    pause = next(iter(fake_execution_repo._interruptions.values()))
+    pause.created_at = pause.created_at - timedelta(hours=10)
+
+    class _Session:  # 실 repo 의 mark_unresumed 는 flush 만 부른다
+        async def flush(self) -> None:
+            return None
+
+    repo = InterruptionEventRepo(_Session())  # type: ignore[arg-type]
+
+    async def _stale(*, before: Any) -> list[Any]:
+        return [pause] if pause.created_at < before else []
+
+    repo.list_stale_unresolved = _stale  # type: ignore[method-assign]
+    assert asyncio.run(run_interruption_resolver(now_kst(), repo=repo)) == 1
+    assert pause.resumed_after_interrupt is False
+
+    # 앱이 '정지 중' 이라고 믿고 다시 보낸 pause 도 새 구간을 열지 않는다.
+    assert _pause(client, exec_id).json()["status"] == "paused"
+    assert len(fake_execution_repo._interruptions) == 1
+
     resp = _resume(client, exec_id)
-    assert resp.status_code == 409
-    assert resp.json()["code"] == "TODAY_NOT_PAUSED"
+
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["status"] == "in_progress"
+    assert resp.json()["pauseTotalMinutes"] == 600
+    assert pause.resume_delay_minutes == 600
+    assert pause.resumed_after_interrupt is False  # cron 의 사실은 덮지 않는다
+    assert _check_in(client, exec_id, "done").status_code == 200
 
 
 def test_pause_conflict_after_check_in(
