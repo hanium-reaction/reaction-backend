@@ -235,3 +235,103 @@ def test_accept_bad_habit_id(client: TestClient) -> None:
     resp = _accept(client, "not-a-habit", key="x")
     assert resp.status_code == 404
     assert resp.json()["code"] == "HABIT_NOT_FOUND"
+
+
+# ───────────────────────── POST .../reject ('지금대로 유지') ─────────────────────────
+
+
+def _reject(client: TestClient, habit_id: str) -> Any:
+    return client.post(f"/reviews/habit-penalty/{habit_id}/reject")
+
+
+def test_reject_keeps_frequency_and_hides_the_candidate(
+    client: TestClient,
+    fake_habit_repo: FakeHabitRepo,
+    fake_habit_instance_repo: FakeHabitInstanceRepo,
+) -> None:
+    """'지금대로 유지' 뒤에는 같은 제안이 다시 뜨지 않는다.
+
+    회귀: 거절을 기록할 경로가 없어 FE 가 카드를 화면에서만 지웠고, 탭을 옮기거나 앱을 다시
+    열면 같은 제안이 매번 돌아왔다.
+    """
+    habit = _habit(freq=5)
+    fake_habit_repo.seed(habit)
+    _seed_3_weeks(fake_habit_instance_repo, habit, done=1, target=5)
+    assert len(client.get("/reviews/habit-penalty").json()["candidates"]) == 1
+
+    resp = _reject(client, f"habit_{habit.id}")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["habitId"] == f"habit_{habit.id}"
+    assert body["frequency"] == 5
+    assert "5회" in body["message"]
+    assert habit.frequency_per_week == 5  # 빈도는 그대로
+    assert habit.last_penalty_decision == "rejected"
+    assert client.get("/reviews/habit-penalty").json()["candidates"] == []
+    # cooldown 중엔 수락도 안 된다 — 화면에 없는 제안을 적용하지 않는다.
+    assert _accept(client, f"habit_{habit.id}", key="late").status_code == 422
+
+
+def test_reject_cooldown_ends_after_four_weeks(
+    client: TestClient,
+    fake_habit_repo: FakeHabitRepo,
+    fake_habit_instance_repo: FakeHabitInstanceRepo,
+) -> None:
+    from datetime import datetime
+
+    from reaction_backend.schemas.common import KST
+
+    habit = _habit(freq=5)
+    fake_habit_repo.seed(habit)
+    _seed_3_weeks(fake_habit_instance_repo, habit, done=1, target=5)
+    habit.last_penalty_decision = "rejected"
+    habit.last_penalty_evaluated_at = datetime.now(KST) - timedelta(days=29)
+
+    candidates = client.get("/reviews/habit-penalty").json()["candidates"]
+    assert [c["habitId"] for c in candidates] == [f"habit_{habit.id}"]
+
+
+def test_reject_twice_does_not_extend_the_cooldown(
+    client: TestClient,
+    fake_habit_repo: FakeHabitRepo,
+    fake_habit_instance_repo: FakeHabitInstanceRepo,
+) -> None:
+    """도메인 멱등 — 두 번 눌러도 기준 시각이 그대로다(Idempotency-Key 없이도 안전)."""
+    habit = _habit(freq=5)
+    fake_habit_repo.seed(habit)
+    _seed_3_weeks(fake_habit_instance_repo, habit, done=1, target=5)
+
+    assert _reject(client, f"habit_{habit.id}").status_code == 200
+    first_at = habit.last_penalty_evaluated_at
+    again = _reject(client, f"habit_{habit.id}")
+
+    assert again.status_code == 200
+    assert habit.last_penalty_evaluated_at == first_at
+
+
+def test_reject_does_not_overwrite_an_accept_in_the_same_cycle(
+    client: TestClient,
+    fake_habit_repo: FakeHabitRepo,
+    fake_habit_instance_repo: FakeHabitInstanceRepo,
+) -> None:
+    habit = _habit(freq=5)
+    fake_habit_repo.seed(habit)
+    _seed_3_weeks(fake_habit_instance_repo, habit, done=1, target=5)
+    assert _accept(client, f"habit_{habit.id}", key="a").status_code == 200
+
+    resp = _reject(client, f"habit_{habit.id}")
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "HABIT_PENALTY_NOT_ELIGIBLE"
+    assert habit.last_penalty_decision == "accepted"
+
+
+def test_reject_habit_not_found(client: TestClient) -> None:
+    resp = _reject(client, f"habit_{uuid4()}")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "HABIT_NOT_FOUND"
+
+
+def test_reject_requires_auth(unauthed_client: TestClient) -> None:
+    assert unauthed_client.post(f"/reviews/habit-penalty/habit_{uuid4()}/reject").status_code == 401

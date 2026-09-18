@@ -12,6 +12,7 @@ endpoint:
 - POST /reviews/weekly/generate                   — 수동 재생성 + 영속화 (디버그)
 - GET  /reviews/habit-penalty                     — 3주 미달 빈도 재설계 후보 (S22, #21-C)
 - POST /reviews/habit-penalty/{habitId}/accept    — 빈도 다운 수락 (Idempotency-Key, #21-C)
+- POST /reviews/habit-penalty/{habitId}/reject    — '지금대로 유지' (4주 동안 다시 안 물음)
 """
 
 from __future__ import annotations
@@ -64,6 +65,7 @@ from reaction_backend.schemas.reviews import (
     HabitPenaltyAcceptResponse,
     HabitPenaltyCandidate,
     HabitPenaltyListResponse,
+    HabitPenaltyRejectResponse,
     HabitWeekStat,
     MandalaHabitWeekStat,
     MandalaWeeklySummary,
@@ -525,6 +527,20 @@ def _already_decided(habit: Habit, reference_week: date) -> bool:
     return decided_at is not None and to_kst(decided_at).date() >= reference_week
 
 
+# '지금대로 유지'를 고른 습관은 4주 동안 다시 묻지 않는다 (db/models/habit.py 규칙 — "거절 시
+# 4주 cooldown"). 예전엔 거절을 기록할 경로가 없어, 매번 같은 제안이 다시 떠서 잔소리가 됐다.
+_REJECT_COOLDOWN = timedelta(weeks=4)
+
+
+def _in_reject_cooldown(habit: Habit, now: datetime) -> bool:
+    decided_at = habit.last_penalty_evaluated_at
+    return (
+        habit.last_penalty_decision == "rejected"
+        and decided_at is not None
+        and now - decided_at < _REJECT_COOLDOWN
+    )
+
+
 def _candidate_message(target: int, avg_done: float, suggested: int) -> str:
     """비난 없는 재설계 톤 (베이스라인 §1.4)."""
     return (
@@ -553,9 +569,10 @@ async def list_habit_penalty(
 ) -> HabitPenaltyListResponse:
     """3주 연속 미달(50% 미만) habit 의 빈도 재설계 제안 후보 (S22)."""
     reference = _last_completed_monday()
+    now = now_kst()
     candidates: list[HabitPenaltyCandidate] = []
     for habit in await habit_repo.list_active(user.id):
-        if _already_decided(habit, reference):
+        if _already_decided(habit, reference) or _in_reject_cooldown(habit, now):
             continue
         instances = await habit_inst_repo.list_recent_for_habit(habit.id, reference, 3)
         ev = evaluate_penalty(instances, habit.frequency_per_week)
@@ -580,7 +597,7 @@ async def accept_habit_penalty(
     reference = _last_completed_monday()
     instances = await habit_inst_repo.list_recent_for_habit(habit.id, reference, 3)
     ev = evaluate_penalty(instances, habit.frequency_per_week)
-    if ev is None or _already_decided(habit, reference):
+    if ev is None or _already_decided(habit, reference) or _in_reject_cooldown(habit, now_kst()):
         raise ApiError(
             ErrorCode.HABIT_PENALTY_NOT_ELIGIBLE,
             "지금은 빈도 재설계를 제안할 조건이 아니에요.",
@@ -598,4 +615,43 @@ async def accept_habit_penalty(
         previous_frequency=previous,
         new_frequency=ev.suggested_frequency,
         message=f"주 {previous}회에서 {ev.suggested_frequency}회로 조정했어요. 이 리듬으로 가봐요.",
+    )
+
+
+@router.post("/habit-penalty/{habit_id}/reject")
+async def reject_habit_penalty(
+    habit_id: str,
+    user: CurrentUser,
+    habit_repo: HabitRepoDep,
+    session: SessionDep,
+) -> HabitPenaltyRejectResponse:
+    """빈도 재설계 거절('지금대로 유지') → 빈도는 그대로, 4주 동안 다시 제안하지 않는다.
+
+    **도메인 멱등** — 이미 cooldown 중이면 아무것도 바꾸지 않고 같은 응답을 준다(두 번 눌러도
+    cooldown 이 늘어나지 않는다). 그래서 accept 와 달리 Idempotency-Key 를 요구하지 않는다.
+    제안 조건(3주 미달)을 다시 따지지도 않는다 — 카드를 본 뒤 주가 바뀌어 조건이 풀렸어도
+    '지금대로 유지'는 사용자의 뜻 그대로 기록하는 게 맞다(422 로 막으면 유지 버튼이 실패한다).
+    이번 사이클에 이미 **수락**했다면 거절로 덮지 않는다(422, accept 와 같은 코드).
+    """
+    habit = await habit_repo.get_by_id(user.id, _parse_habit_id(habit_id))
+    if habit is None:
+        raise _habit_not_found()
+
+    now = now_kst()
+    if habit.last_penalty_decision == "accepted" and _already_decided(
+        habit, _last_completed_monday()
+    ):
+        raise ApiError(
+            ErrorCode.HABIT_PENALTY_NOT_ELIGIBLE,
+            "이미 이번 주기에 빈도를 조정한 습관이에요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+        )
+    if not _in_reject_cooldown(habit, now):
+        await habit_repo.reject_penalty(habit, decided_at=now)
+        await session.commit()
+
+    return HabitPenaltyRejectResponse(
+        habit_id=f"{_HABIT_PREFIX}{habit.id}",
+        frequency=habit.frequency_per_week,
+        message=f"지금처럼 주 {habit.frequency_per_week}회로 가요. 한동안은 다시 묻지 않을게요.",
     )

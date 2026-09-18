@@ -23,6 +23,12 @@
 - FE 할 일: `unstartedBlocks` 가 종결 실행 수 이상이면 "이번 주, 잘 했어요" 대신 중립 헤드라인,
   "시작 못 한 카드 N장" 표시, `adherenceRate` 가 null 이어도 `unstartedBlocks > 0` 이면
   "집계할 활동이 없어요" 대신 시작하지 못한 카드가 있었다고 안내.
+- **엔드포인트 추가 — `POST /reviews/habit-penalty/{habitId}/reject`.** '지금대로 유지' 를 서버에
+  기록해 4주 동안 같은 제안을 다시 띄우지 않는다(GET 후보 제외, accept 422). 응답
+  `{ habitId, frequency, message }`. 도메인 멱등이라 Idempotency-Key 불필요. 마이그레이션 없음.
+- FE 할 일: '지금대로 유지' 에서 reject 를 호출(성공 전엔 카드를 되돌릴 수 있게). '조정' 은 응답을
+  기다려 서버 `message` 를 토스트로 보여주고, 실패하면 카드를 되돌리고 친절한 오류 문구를
+  보여준다(지금은 실패를 삼켜 조정된 줄 안다). accept 의 Idempotency-Key 는 시도마다 새로.
 
 ---
 

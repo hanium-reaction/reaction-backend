@@ -186,3 +186,11 @@ class HabitPenaltyAcceptResponse(CamelModel):
     previous_frequency: int
     new_frequency: int
     message: str
+
+
+class HabitPenaltyRejectResponse(CamelModel):
+    """POST /reviews/habit-penalty/{habitId}/reject — '지금대로 유지' 결과 (빈도 변화 없음)."""
+
+    habit_id: str
+    frequency: int
+    message: str

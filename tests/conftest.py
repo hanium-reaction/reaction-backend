@@ -715,6 +715,11 @@ class FakeHabitRepo:
         habit.consecutive_miss_weeks = 0
         return habit
 
+    async def reject_penalty(self, habit: Habit, *, decided_at: datetime) -> Habit:
+        habit.last_penalty_decision = "rejected"
+        habit.last_penalty_evaluated_at = decided_at
+        return habit
+
     async def soft_delete(self, habit: Habit) -> None:
         habit.archived_at = datetime.now(UTC)
 

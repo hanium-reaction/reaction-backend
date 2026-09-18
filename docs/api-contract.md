@@ -892,6 +892,7 @@ PARK_DEFAULT 는 여전히 정적 태그가 없다(동적 조건 overwhelm≥4 �
 | POST | `/reviews/weekly/generate` | 수동 재생성 (디버그) | ✅ #21-A |
 | GET | `/reviews/habit-penalty` | 3주 미달 빈도 재설계 후보 (S22) | ✅ #21-C |
 | POST | `/reviews/habit-penalty/{habitId}/accept` | 3주 미달 페널티 수락 (Idempotency) | ✅ #21-C |
+| POST | `/reviews/habit-penalty/{habitId}/reject` | '지금대로 유지' — 4주 동안 다시 제안 안 함 (도메인 멱등) | ✅ v2.30 |
 
 핵심 필드: `adherenceRate`, `consistencyDays`, `resilienceRate`, `categorySuccessRate`,
 `peakWindow`, `drainWindow`, `policyUpdateCandidates`, `topFailureContexts`(#301),
@@ -936,11 +937,19 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 - 감지: 직전 완료 주 기준 **최근 3주 연속** `done_count < target_count*0.5`. 순수 함수
   `orchestrator/habit_penalty.py`. `suggestedFrequency` = 3주 평균 달성(round, 최소 1, 현재보다 작게).
 - `GET /reviews/habit-penalty` — 후보(habitId/title/current·suggestedFrequency/recentWeeks/message).
-  이미 이번 사이클 결정한 habit(`last_penalty_evaluated_at` ≥ 직전 완료 주)은 제외.
+  이미 이번 사이클 결정한 habit(`last_penalty_evaluated_at` ≥ 직전 완료 주)과 **거절 후 4주 이내**
+  (`last_penalty_decision='rejected'` 이고 `last_penalty_evaluated_at` 이 28일 안)인 habit 은 제외.
 - `POST /reviews/habit-penalty/{habitId}/accept` — **Idempotency-Key 필수**(§1.7 미들웨어). 조건
   미충족/중복 시 422 `HABIT_PENALTY_NOT_ELIGIBLE`, 습관 없음 404 `HABIT_NOT_FOUND`. 수락 시
   `frequency_per_week`=`target_count`=suggested, `last_penalty_decision='accepted'`. DB 마이그레이션 없음.
-- reject(+4주 cooldown) 경로는 후속(현재 accept 만).
+- `POST /reviews/habit-penalty/{habitId}/reject`(v2.30) — '지금대로 유지'. 빈도는 그대로 두고
+  `last_penalty_decision='rejected'`·`last_penalty_evaluated_at=now` 를 기록해 **4주 cooldown**
+  (그동안 GET 후보에서 빠지고 accept 도 422). 응답 `{ habitId, frequency, message }`.
+  **도메인 멱등** — cooldown 중 재호출은 아무것도 바꾸지 않고 같은 응답(기준 시각 유지)이라
+  Idempotency-Key 를 **요구하지 않는다**(보내도 무해). 제안 조건(3주 미달)을 다시 따지지 않는다 —
+  카드를 본 뒤 주가 바뀌어도 유지 버튼이 실패하지 않게. 이번 사이클에 이미 수락했으면 422
+  `HABIT_PENALTY_NOT_ELIGIBLE`(수락을 거절로 덮지 않음), 습관 없음 404 `HABIT_NOT_FOUND`.
+  DB 마이그레이션 없음(컬럼·enum 값 기존).
 
 #21-A 구현 메모 (룰 기반, LLM 한 줄 평은 P2):
 - `weekStart` 는 해당 주 **월요일**로 정규화(아무 날 넣어도 그 주로 스냅). 생략 시 이번 주.
