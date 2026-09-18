@@ -1147,7 +1147,7 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 ```
 
 - `PATCH /settings/tone-mode` 요청 `{ "toneMode": "strict" }` → 갱신된 `GET /settings` 형태 반환. 그 외 값은 422 `COMMON_VALIDATION_ERROR`. onboarding 상태 전이 없음.
-- `/settings/profile` — 지속형 선호(에너지·시간·톤)의 **단일 진실 소스**. 온보딩 딥 인터뷰 완료 시 자동 영속(`behavioral_profiles`·`interaction_styles`), 이후 이 endpoint 로 조회/편집(#A). 인터뷰를 다시 하지 않아도 값 변경 가능. `PATCH` 는 부분 갱신(미지정 필드 유지), 행 없으면 생성.
+- `/settings/profile` — 지속형 선호(에너지·시간·톤)의 **단일 진실 소스**. 온보딩 딥 인터뷰 완료 시 자동 영속(`behavioral_profiles`·`interaction_styles`), 이후 이 endpoint 로 조회/편집(#A). 인터뷰를 다시 하지 않아도 값 변경 가능. `PATCH` 는 부분 갱신(미지정 필드 유지), 행 없으면 생성. **계획 반영(v2.30-planA)**: 인터뷰가 끝난 뒤에 고친 `attentionSpan`(5~240)·`energyCycle` 은 계획 생성·마일스톤·재계획·만다라 다음 주기가 인터뷰 답 대신 쓴다(인터뷰 답에서 나올 값과 다를 때만 — 집중 길이를 고치면 목표별 세션 길이 대신 이 값, 집중 시간대는 전역 피크만 바꾸고 목표별 선호 시간은 유지). `reminderFrequency` 는 아직 어느 알림에도 쓰이지 않는다.
 - 톤모드 적용: 시스템 프롬프트 prefix 1줄(`llm/prompt_compose.py`). `aiClient.run(tone_mode=...)` 배선 완료(ADR-0003 addendum 0003-llm-tool-executor.md) — **모든 LLM 호출**: inbox·recovery·morning_brief(#23-C) + interview·first_plan(#23-D, LangGraph는 config 채널).
 - S28 Privacy(anonymize·consent)는 #23-B — consent 는 append-only `user_consents` 테이블(마이그레이션 동반).
 - 자동 익명화: `last_active_at < now()-90d` 매일 04:00 KST cron — **구현 완료**(#24,

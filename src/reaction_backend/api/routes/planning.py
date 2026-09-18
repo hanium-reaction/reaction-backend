@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
 from reaction_backend.db.models.action_item import ACTION_CATEGORY_VALUES
+from reaction_backend.db.models.behavioral_profile import BehavioralProfile
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.db.models.plan_draft import PlanDraft
@@ -63,6 +64,7 @@ from reaction_backend.orchestrator import (
     mandala,
     mandala_adapter,
     mandala_cycle,
+    profile_memory,
     replan,
     ultimate_adapter,
 )
@@ -220,16 +222,19 @@ _project_session_outcome = interview_projection.project_session_outcome
 
 async def _resolve_outcome(
     body: FirstPlanGenerateRequest, user_id: UUID, repo: InterviewRepo
-) -> InterviewOutcome:
+) -> tuple[InterviewOutcome, datetime | None]:
     """요청에서 First Plan 시드 `InterviewOutcome` 을 확정한다.
 
     우선순위: ① 인라인 `outcome` → ② `interviewSessionId` 로 종료 세션 투영 →
     ③ **빈 본문이면 최근 '정상 종료' 인터뷰 세션으로 자동 복구** — FE 가 새로고침 등으로
     sessionId(메모리 보관)를 잃어도 계획 생성이 가능하도록 (abandoned 제외).
     셋 다 불가하면 422.
+
+    두 번째 값은 그 인터뷰가 끝난 시각 — 그 뒤에 설정에서 고친 프로필을 얹을지 가른다
+    (`_with_settings_edits`). 인라인 outcome 이면 알 수 없어 None.
     """
     if body.outcome is not None:
-        return body.outcome
+        return body.outcome, None
     if body.interview_session_id:
         try:
             session_uuid = UUID(body.interview_session_id)
@@ -238,10 +243,10 @@ async def _resolve_outcome(
         row = await repo.get_active(user_id, session_uuid)
         if row is None:
             raise _interview_not_found()
-        return await _project_session_outcome(row, repo)
+        return await _project_session_outcome(row, repo), row.ended_at
     latest = await repo.get_latest_finished(user_id)
     if latest is not None:
-        return await _project_session_outcome(latest, repo)
+        return await _project_session_outcome(latest, repo), latest.ended_at
     raise ApiError(
         ErrorCode.COMMON_VALIDATION_ERROR,
         "완료된 인터뷰가 없어요. 인터뷰를 먼저 진행하거나 outcome/interviewSessionId 를 보내주세요.",
@@ -356,6 +361,73 @@ def _apply_edited_availability(outcome: InterviewOutcome, user: User) -> Intervi
     return outcome.model_copy(update={"availability": availability})
 
 
+# 인터뷰 완료(finalize)는 같은 요청에서 프로필을 쓴다 — 그 쓰기와 '나중에 설정에서 고친 것'을
+# 가르는 여유. 설정 편집은 계획 화면을 지난 뒤라 분 단위로 늦다.
+_PROFILE_EDIT_SLACK = timedelta(minutes=1)
+
+
+def _apply_edited_profile(
+    outcome: InterviewOutcome,
+    behavioral: BehavioralProfile | None,
+    *,
+    interview_ended_at: datetime | None,
+) -> InterviewOutcome:
+    """'내 정보'에서 고친 **집중 길이·집중 시간대**를 outcome 에 얹는다 (critic-5).
+
+    설정 화면은 "여기서 바꾸면 인터뷰를 다시 하지 않아도 반영돼요" 라고 약속하는데, 계획은
+    인터뷰 outcome 만 읽어 `behavioral_profiles` 수정이 어디에도 안 닿았다(활동 시간대만
+    `_apply_edited_availability` 로 반영됐다).
+
+    **인터뷰가 끝난 뒤에 프로필이 바뀌었고, 그 값이 인터뷰 답에서 나올 값과 다를 때만** 덮는다.
+    인터뷰 완료가 쓴 프로필(같은 값)로 덮으면 목표별 세션 길이 같은 더 구체적인 답을 잃는다.
+    - 집중 길이(attention_span): 전역 집중 길이로 쓰고, 목표별 세션 길이는 비운다 — 설정의
+      '한 번에 집중하는 길이' 를 바꿨는데 목표별 값이 이기면 바꾼 게 안 보인다.
+    - 집중 시간대(energy_cycle): 전역 피크 칩으로. 목표별 선호 시간은 그대로(더 구체적인 답).
+    """
+    if behavioral is None or interview_ended_at is None:
+        return outcome
+    updated_at = behavioral.updated_at
+    if updated_at is None or updated_at <= interview_ended_at + _PROFILE_EDIT_SLACK:
+        return outcome
+    seed = profile_memory.seed_slots_from_profile(
+        behavioral=behavioral, interaction=None, focus_mode_prefs={}
+    )
+    update: dict[str, Any] = {}
+    span = behavioral.attention_span
+    # 설정 검증 범위(5~240분) 밖은 오염된 값이다 — 계획을 그 값으로 누르지 않는다.
+    if (
+        isinstance(span, int)
+        and 5 <= span <= 240
+        and span != (outcome.preferences.focus_duration_min or 30)
+    ):
+        update["preferences"] = outcome.preferences.model_copy(update={"focus_duration_min": span})
+        update["core_goals"] = [
+            g.model_copy(update={"session_length_min": None}) for g in outcome.core_goals
+        ]
+    peak = seed.get("time.peak_window", {}).get("values")
+    if peak and behavioral.energy_cycle != profile_memory.energy_cycle_from_peak(
+        outcome.availability.peak_window
+    ):
+        update["availability"] = outcome.availability.model_copy(update={"peak_window": list(peak)})
+    return outcome.model_copy(update=update) if update else outcome
+
+
+async def _with_settings_edits(
+    outcome: InterviewOutcome,
+    interview_ended_at: datetime | None,
+    *,
+    user: User,
+    profile_repo: ProfileRepo,
+) -> InterviewOutcome:
+    """설정에서 고친 값을 인터뷰 outcome 에 얹는다 — 활동 시간대 + 집중 길이·시간대."""
+    outcome = _apply_edited_availability(outcome, user)
+    return _apply_edited_profile(
+        outcome,
+        await profile_repo.get_behavioral(user.id),
+        interview_ended_at=interview_ended_at,
+    )
+
+
 async def _max_plan_weeks(session: AsyncSession, user_id: UUID, outcome: InterviewOutcome) -> int:
     """이 계획의 heaviest 목표가 만다라 축에서 승격됐는지에 따라 계획 지평 상한을 정한다
     (ADR-0008 §3). `first_plan_adapter`/`first_plan` 은 DB 무관을 지키므로 이 판정은
@@ -375,6 +447,7 @@ async def generate_milestones(
     body: FirstPlanGenerateRequest,
     user: CurrentUser,
     repo: RepoDep,
+    profile_repo: ProfileRepoDep,
     session: SessionDep,
 ) -> MilestoneListResponse:
     """Stage A(#milestones) — 목표를 중간 목표 3~5개로. 사용자가 확인·편집 후 generate 로 넘긴다.
@@ -388,7 +461,9 @@ async def generate_milestones(
     있다는 이유로 저장을 건너뛰므로 — DB 의 뼈대와 실제 계획이 갈라진 채 굳는다.
     부수 효과로 2주기 이후 이 endpoint 의 LLM 콜이 0 이 된다.
     """
-    outcome = _apply_edited_availability(await _resolve_outcome(body, user.id, repo), user)
+    outcome = await _with_settings_edits(
+        *await _resolve_outcome(body, user.id, repo), user=user, profile_repo=profile_repo
+    )
     goal_id = await first_plan_adapter.heaviest_goal_id(session, user_id=user.id, outcome=outcome)
     if goal_id is not None:
         saved = await first_plan_adapter.fetch_confirmed_milestones(session, goal_id=goal_id)
@@ -418,6 +493,7 @@ async def generate_plan(
     repo: RepoDep,
     goal_repo: GoalRepoDep,
     draft_repo: DraftRepoDep,
+    profile_repo: ProfileRepoDep,
     session: SessionDep,
 ) -> FirstPlanResponse:
     """첫 주간/horizon 계획 생성 — First Plan orchestrator(LangGraph) 실행 → Draft 저장.
@@ -439,7 +515,9 @@ async def generate_plan(
     동시성 lock(ADR-0005 §7.6): 다중 디바이스 동시 생성으로 인한 state race 방지.
     """
     await endpoint_rate_limit.enforce(session, user_id=user.id, module="planning")
-    outcome = _apply_edited_availability(await _resolve_outcome(body, user.id, repo), user)
+    outcome = await _with_settings_edits(
+        *await _resolve_outcome(body, user.id, repo), user=user, profile_repo=profile_repo
+    )
     if body.goal_id is not None:
         goal = await _load_plannable_goal(goal_repo, user.id, body.goal_id)
         outcome = goal_cycle.seed_outcome(base=outcome, goal=goal)
@@ -1651,7 +1729,10 @@ async def _cycle_seed_outcome(
     latest = await repo.get_latest_finished(user.id)
     if latest is not None:
         outcome = await _project_session_outcome(latest, repo)
-        return _apply_edited_availability(outcome, user), "interview"
+        edited = await _with_settings_edits(
+            outcome, latest.ended_at, user=user, profile_repo=profile_repo
+        )
+        return edited, "interview"
 
     behavioral = await profile_repo.get_behavioral(user.id)
     if not mandala_cycle.has_usable_profile(behavioral):
@@ -1787,20 +1868,26 @@ _REPLAN_TUNING = replan.ReplanTuning(
 )
 
 
-async def _replan_outcome(user: User, repo: InterviewRepo) -> InterviewOutcome | None:
+async def _replan_outcome(
+    user: User, repo: InterviewRepo, profile_repo: ProfileRepo
+) -> InterviewOutcome | None:
     """재계획이 First Plan 과 같은 개인화를 쓰도록 최근 '정상 종료' 인터뷰 outcome 을 복구한다.
 
-    설정에서 고친 활동 시간대(`_apply_edited_availability`)까지 얹은 값이다. 완료 인터뷰가
-    없거나 투영이 실패하면 None — 호출부가 기본값으로 폴백한다(재계획을 막지 않는다).
-    튜닝과 활동 시간대(busy)가 **같은 outcome 하나**를 봐야 해서 한 번만 구해 둘 다에 쓴다.
+    설정에서 고친 값(활동 시간대·집중 길이·집중 시간대, `_with_settings_edits`)까지 얹은
+    값이다. 완료 인터뷰가 없거나 투영이 실패하면 None — 호출부가 기본값으로 폴백한다(재계획을
+    막지 않는다). 튜닝과 활동 시간대(busy)가 **같은 outcome 하나**를 봐야 해서 한 번만 구해
+    둘 다에 쓴다.
     """
     latest = await repo.get_latest_finished(user.id)
     if latest is None:
         return None
     try:
-        return _apply_edited_availability(await _project_session_outcome(latest, repo), user)
+        outcome = await _project_session_outcome(latest, repo)
     except Exception:  # noqa: BLE001 — 투영 실패 시 재계획을 막지 말고 기본값으로 진행
         return None
+    return await _with_settings_edits(
+        outcome, latest.ended_at, user=user, profile_repo=profile_repo
+    )
 
 
 def _replan_tuning_for(outcome: InterviewOutcome | None) -> replan.ReplanTuning:
@@ -1998,6 +2085,7 @@ async def generate_replan(
     review_repo: ReviewRepoDep,
     goal_repo: GoalRepoDep,
     repo: RepoDep,
+    profile_repo: ProfileRepoDep,
     session: SessionDep,
 ) -> ReplanResponse:
     """주간 리포트를 작성하고, 남은 작업 + 수락한 회복을 **다음 주부터 마감까지** 다시 배치.
@@ -2169,7 +2257,7 @@ async def generate_replan(
         # 않도록 스캔 창(1년)으로 상한. 그보다 먼 카드는 다음 재계획이 다시 당겨온다.
         deadline = min(deadline, window_start + timedelta(days=365))
 
-        outcome = await _replan_outcome(user, repo)
+        outcome = await _replan_outcome(user, repo, profile_repo)
         policies = _replan_policies(list(await policy_repo.list_active(user.id)), outcome, user)
         fixed: list[Any] = list(await fixed_repo.list_active(user.id))
         committed = replan.committed_busy_from_blocks(
