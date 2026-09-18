@@ -16,7 +16,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.habit import Habit
@@ -129,18 +129,6 @@ class HabitRepo:
     async def soft_delete(self, habit: Habit) -> None:
         habit.archived_at = datetime.now(UTC)
         await self._session.flush()
-
-    async def count_active(self, user_id: UUID) -> int:
-        stmt = (
-            select(func.count())
-            .select_from(Habit)
-            .where(
-                Habit.user_id == user_id,
-                Habit.archived_at.is_(None),
-            )
-        )
-        result = await self._session.execute(stmt)
-        return int(result.scalar_one())
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
