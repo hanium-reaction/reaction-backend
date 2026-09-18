@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from pydantic import Field, field_validator
+from pydantic_core import PydanticCustomError
 
+from reaction_backend.integrations.web_push.endpoint import is_allowed_push_endpoint
 from reaction_backend.schemas.common import CamelModel
 
 # HH:MM 24시간 형식
@@ -50,8 +52,20 @@ class PushSubscribeRequest(CamelModel):
     알림을 못 받는다.
     """
 
-    endpoint: str = Field(min_length=1)
+    endpoint: str = Field(min_length=1, max_length=2048)
     keys: dict[str, str]
+
+    @field_validator("endpoint")
+    @classmethod
+    def _require_known_push_service(cls, v: str) -> str:
+        # 서버가 이 URL 로 POST 를 보낸다 — 알려진 push 서비스의 https 주소만 받는다
+        # (내부 주소·메타데이터 IP 로의 blind SSRF 차단, integrations/web_push/endpoint.py).
+        if not is_allowed_push_endpoint(v):
+            raise PydanticCustomError(
+                "push_endpoint_not_allowed",
+                "알림을 받을 수 없는 구독 정보예요. 알림을 한 번 껐다가 다시 켜 주세요.",
+            )
+        return v
 
     @field_validator("keys")
     @classmethod

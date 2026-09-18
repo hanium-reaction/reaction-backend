@@ -21,7 +21,10 @@ from reaction_backend.integrations.web_push.sender import (
     WebPushSender,
 )
 
-_SUBSCRIPTION = {"endpoint": "https://push.example.com/x", "keys": {"p256dh": "k", "auth": "a"}}
+_SUBSCRIPTION = {
+    "endpoint": "https://fcm.googleapis.com/fcm/send/x",
+    "keys": {"p256dh": "k", "auth": "a"},
+}
 _PAYLOAD = {"class": "evening_reflection", "title": "t", "body": "b"}
 
 
@@ -81,3 +84,47 @@ async def test_hard_timeout_returns_error(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(sender_module, "webpush", lambda **kw: time_module.sleep(1))
 
     assert await _sender().send(_SUBSCRIPTION, _PAYLOAD) == "error"
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://169.254.169.254/latest/meta-data/",  # 인스턴스 메타데이터
+        "http://127.0.0.1:2019/stop",  # 내부 서비스
+        "https://evil.example.com/push",  # 허용 목록 밖
+    ],
+)
+async def test_disallowed_stored_endpoint_is_gone_without_request(
+    monkeypatch: pytest.MonkeyPatch, endpoint: str
+) -> None:
+    """검증 도입 전에 저장된 구독도 발송 직전에 걸러진다 — 요청 없이 `gone`(→ 게이트가 정리).
+
+    sched-5 / abuse-10: 예전엔 어떤 URL 이든 5분마다 서버가 VAPID 서명 POST 를 보냈다.
+    """
+    calls: list[Any] = []
+    monkeypatch.setattr(sender_module, "webpush", lambda **kw: calls.append(kw))
+    bad = {"endpoint": endpoint, "keys": {"p256dh": "k", "auth": "a"}}
+
+    assert await _sender().send(bad, _PAYLOAD) == "gone"
+    assert calls == []
+
+
+async def test_send_uses_session_that_does_not_follow_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """허용된 호스트라도 응답의 리다이렉트는 따라가지 않는다 (리다이렉트 경유 SSRF 차단)."""
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(sender_module, "webpush", lambda **kw: calls.append(kw))
+
+    await _sender().send(_SUBSCRIPTION, _PAYLOAD)
+
+    (kw,) = calls
+    session = kw["requests_session"]
+    seen: dict[str, Any] = {}
+
+    def _capture(self: Any, method: str, url: str, *args: Any, **kwargs: Any) -> None:
+        seen.update(kwargs)
+
+    monkeypatch.setattr("requests.Session.request", _capture)
+    session.post("https://fcm.googleapis.com/fcm/send/x", data=b"x")
+    assert seen["allow_redirects"] is False

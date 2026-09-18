@@ -1084,6 +1084,11 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 ```
 
 - `keys.p256dh` / `keys.auth` 누락·빈 값 → 422 `COMMON_VALIDATION_ERROR` (발송 암호화에 필수)
+- `endpoint` 는 알려진 push 서비스의 **https** 주소만 받는다 — `fcm.googleapis.com`,
+  `updates.push.services.mozilla.com`(`*.push.services.mozilla.com`), `web.push.apple.com`
+  (`*.push.apple.com`), `*.notify.windows.com`. IP 리터럴·http·443 외 포트·목록 밖 호스트는
+  422 `COMMON_VALIDATION_ERROR`(`field: "endpoint"`) — 서버가 이 URL 로 요청을 보내기 때문
+  (SSRF 차단, v2.30-auth). 발송은 리다이렉트를 따라가지 않는다
 - 재구독은 덮어쓰기 (1 device 1 subscription — Issue #16)
 - 응답은 `GET /notifications/settings` 와 같은 형태. `pushSubscribed` 는 저장된 구독 유무에서 파생
 

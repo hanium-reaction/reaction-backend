@@ -24,6 +24,13 @@
   새 코드 아님). 예전엔 500 이었다(토큰 문제가 아니라 Google 쪽 일시 장애). 공개키 조회에
   5초 상한을 걸고(라이브러리 기본 120초), 검증을 이벤트 루프 밖 스레드로 옮겨 로그인 한 건이
   서버 전체를 붙잡지 않는다. FE: 503 은 "잠시 후 다시" 안내로 충분(메시지 그대로 표시 가능).
+- **`POST /notifications/subscribe` — `endpoint` 는 알려진 push 서비스의 https 주소만**
+  (`fcm.googleapis.com`, `*.push.services.mozilla.com`, `*.push.apple.com`,
+  `*.notify.windows.com`). IP 리터럴·http·다른 포트·목록 밖 호스트는 422
+  `COMMON_VALIDATION_ERROR`(`field: "endpoint"`). 서버가 이 URL 로 POST 를 보내므로 내부 주소로
+  향하는 blind SSRF 를 막는다. 이미 저장된 목록 밖 구독은 발송 직전에 걸러져 정리되고(요청
+  없음), push 서비스의 리다이렉트는 따라가지 않는다. FE 할 일 없음 — 브라우저가 만든 구독은
+  전부 목록 안이다.
 
 ---
 
