@@ -413,6 +413,43 @@ def test_suggested_answers_only_for_free_text_slots(client: TestClient, monkeypa
     assert body["currentQuestion"]["suggestedAnswers"] == ["캡스톤 마무리", "토익 900점"]
 
 
+def test_placeholder_suggested_answers_are_dropped(client: TestClient, monkeypatch: Any) -> None:
+    """LLM 이 이름을 몰라 채운 자리표시자 카드("ㅇㅇ 출판사", "ㅁㅁㅁ 채널")는 노출되지 않는다.
+
+    카드는 탭 한 번이 곧 사용자의 답이라, 지어낸 틀이 슬롯에 저장되고 계획까지 흘러간다
+    (2026-09-18 배포 미러에서 goals.materials 카드 4장 중 2장이 이 모양이었다).
+    """
+    monkeypatch.setattr(
+        aiClient,
+        "run",
+        _stub(
+            suggested=(
+                "정보처리기사 실기 수험서 (ㅇㅇ 출판사)",
+                "인터넷 강의 (유튜브 ㅁㅁㅁ 채널)",
+                "○○ 스터디 자료",
+                "스터디 그룹에서 공유받은 자료",
+            )
+        ),
+    )
+    start = client.post("/interview/sessions").json()
+    sid = start["sessionId"]
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.role", "value": ["3학년"], "clientTurn": 1},
+    )
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.season", "value": ["방학"], "clientTurn": 2},
+    )
+    body = client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "time.peak_window", "value": ["오전"], "clientTurn": 3},
+    ).json()
+
+    assert body["currentQuestion"]["slotKey"] == "goals.list"
+    assert body["currentQuestion"]["suggestedAnswers"] == ["스터디 그룹에서 공유받은 자료"]
+
+
 def test_slot_catalog_includes_options(client: TestClient) -> None:
     """슬롯 카탈로그가 chip 보기를 노출(텍스트 슬롯은 빈 배열)."""
     res = client.get("/interview/slot-catalog")
@@ -617,3 +654,22 @@ def test_carry_over_never_seeds_goal_slots() -> None:
         ultimate_adapter.ULTIMATE_CARRY_OVER_SLOT_KEYS,
     ):
         assert not [k for k in keys if k.startswith("goals.")]
+
+
+def test_drop_placeholder_cards_keeps_real_names() -> None:
+    """실제 이름·영문 약어는 남긴다 — 자리표시자 패턴만 뺀다."""
+    from reaction_backend.orchestrator.interview import drop_placeholder_cards
+
+    cards = [
+        "OO대학교 도서관 자료",
+        "XX 강의",
+        "시나공 정보처리기사 실기",
+        "OOP 개념 정리 노트",
+        "BOOK 챌린지",
+        "ㅋㅋ 그냥 해볼래요",
+    ]
+    assert drop_placeholder_cards(cards) == [
+        "시나공 정보처리기사 실기",
+        "OOP 개념 정리 노트",
+        "BOOK 챌린지",
+    ]

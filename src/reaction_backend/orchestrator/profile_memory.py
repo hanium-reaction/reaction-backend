@@ -36,10 +36,23 @@ _PEAK_TO_CYCLE: dict[str, str] = {
 }
 
 # recovery.tone 칩 → interaction_styles.recovery_tone enum(gentle/normal/encouraging).
+# ⚠️ 키는 **카탈로그 보기 문자열 그대로**여야 한다 — 보기는 "코치처럼" 인데 키가 "코치" 뿐이라
+# 그 칩을 고른 사용자가 전부 'normal' 로 저장되고 있었다. "코치" 는 예전 표기로 남겨 둔다.
 _TONE_TO_INTERACTION: dict[str, str] = {
     "따뜻": "gentle",
     "담백": "normal",
     "유머": "encouraging",
+    "코치처럼": "encouraging",
+    "코치": "encouraging",
+}
+
+# recovery.tone 칩 → users.tone_mode(gentle/strict/encouraging) — AI 말투 prefix 가 읽는 값
+# (`llm.prompt_compose`). 설정 화면의 '코칭 톤' 이 이 값이다. '담백' 은 prefix 없는 기본
+# 말투가 곧 담백이라 매핑하지 않는다(None 유지 → 설정에서 아무것도 안 고른 상태).
+_TONE_TO_USER_TONE_MODE: dict[str, str] = {
+    "따뜻": "gentle",
+    "유머": "encouraging",
+    "코치처럼": "encouraging",
     "코치": "encouraging",
 }
 
@@ -120,6 +133,11 @@ def recovery_tone_enum(raw: str) -> str:
     return _TONE_TO_INTERACTION.get(raw, "normal")
 
 
+def user_tone_mode_from_chip(raw: str) -> str | None:
+    """회복 톤 칩 → users.tone_mode. '담백'·미지원이면 None(기본 말투)."""
+    return _TONE_TO_USER_TONE_MODE.get(raw)
+
+
 def _parse_hhmm(value: str) -> time | None:
     """'HH:MM' → time. 파싱 실패면 None(해당 필드 미기록 → default 보존)."""
     try:
@@ -180,3 +198,12 @@ async def persist_profile_from_outcome(
     fmp["downscope_unit_min"] = prefs.downscope_unit_min
     fmp["rest_ok"] = prefs.rest_ok
     user.focus_mode_preferences = fmp
+
+    # 인터뷰에서 고른 톤 → AI 말투(users.tone_mode). 예전엔 이 답이 interaction_styles 에만
+    # 저장되고 실제 말투를 정하는 tone_mode 는 설정 화면에서만 바뀌어, "따뜻하게" 를 골라도
+    # 설정의 코칭 톤은 빈 칸이고 AI 말투도 기본값이었다. **비어 있을 때만** 채운다 — 사용자가
+    # 설정에서 직접 고른 톤을 재인터뷰가 덮어쓰면 안 된다.
+    if user.tone_mode is None:
+        seeded = user_tone_mode_from_chip(prefs.recovery_tone)
+        if seeded is not None:
+            user.tone_mode = seeded

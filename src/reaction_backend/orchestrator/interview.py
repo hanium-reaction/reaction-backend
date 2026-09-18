@@ -282,6 +282,22 @@ def _fill_goal(text: str, state: InterviewState) -> str:
     return text.replace("{goal}", _heaviest_goal_hint(state)) if "{goal}" in text else text
 
 
+# LLM 이 실제 이름을 모를 때 채워 넣는 자리표시자 — "수험서 (ㅇㅇ 출판사)", "유튜브 ㅁㅁㅁ
+# 채널", "○○ 강의", "OO대학교". 추천 답변 카드는 **탭 한 번이 곧 사용자의 답**이라, 이런
+# 카드를 누르면 지어낸 틀이 그대로 슬롯에 저장되고 계획 프롬프트까지 흘러간다(2026-09-18
+# 배포 미러에서 goals.materials 카드 4장 중 2장이 이 모양이었다).
+_PLACEHOLDER_CARD = re.compile(r"[ㄱ-ㅎ]{2,}|[○◯△□×]{2,}|(?<![A-Za-z])(?:OO|XX|xx)(?![A-Za-z])")
+
+
+def drop_placeholder_cards(cards: Sequence[str]) -> list[str]:
+    """자리표시자가 섞인 추천 답변 카드를 버린다 — 고칠 수 없으니 통째로 뺀다.
+
+    카드가 줄어드는 건 괜찮다(프롬프트도 "확신이 없으면 빈 배열"을 허용한다). 사용자는
+    언제든 직접 입력할 수 있고, 지어낸 틀을 답으로 고르게 두는 것보다 낫다.
+    """
+    return [c for c in cards if not _PLACEHOLDER_CARD.search(c)]
+
+
 def _rule_next_question(state: InterviewState, slot_key: str) -> NextQuestionSchema:
     """카탈로그 기본 질문으로 회귀 — LLM 죽어도 인터뷰가 끊기지 않는다."""
     catalog = CATALOGS[state["kind"]]
@@ -451,9 +467,13 @@ async def ask_question(state: InterviewState, config: RunnableConfig) -> Intervi
         session=_session(config),
         tone_mode=_tone_mode(config),
     )
+    question = result.value
+    cards = drop_placeholder_cards(question.suggested_answers)
+    if cards != question.suggested_answers:
+        question = question.model_copy(update={"suggested_answers": cards})
     return {
         **state,
-        "next_question": result.value,
+        "next_question": question,
         "next_slot_key": slot_key,
         "total_turns": state["total_turns"] + 1,
         "used_fallback": state["used_fallback"] or result.fell_back,

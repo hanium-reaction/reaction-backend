@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 
 from fastapi.testclient import TestClient
 
 from reaction_backend.orchestrator import profile_memory as pm
+from reaction_backend.orchestrator.interview_catalog import PLAN_CATALOG
 
 
 def test_seed_slots_from_profile_reverses_editable_fields() -> None:
@@ -58,7 +60,76 @@ def test_recovery_tone_enum() -> None:
     assert pm.recovery_tone_enum("따뜻") == "gentle"
     assert pm.recovery_tone_enum("담백") == "normal"
     assert pm.recovery_tone_enum("유머") == "encouraging"
+    assert pm.recovery_tone_enum("코치처럼") == "encouraging"
     assert pm.recovery_tone_enum("모르는값") == "normal"  # 폴백
+
+
+def test_every_tone_chip_is_mapped() -> None:
+    """카탈로그 보기가 전부 매핑표의 키다 — 보기 표기가 바뀌면 여기서 먼저 깨진다.
+
+    보기는 "코치처럼" 인데 키가 "코치" 뿐이라 그 칩이 조용히 'normal' 로 떨어지던 회귀 가드.
+    """
+    slot = next(s for s in PLAN_CATALOG.slots if s.slot_key == "recovery.tone")
+    assert slot.options
+    unmapped = [o for o in slot.options if o not in pm._TONE_TO_INTERACTION]
+    assert unmapped == []
+
+
+def test_user_tone_mode_from_chip() -> None:
+    """인터뷰 톤 칩 → users.tone_mode. '담백' 은 기본 말투라 None."""
+    assert pm.user_tone_mode_from_chip("따뜻") == "gentle"
+    assert pm.user_tone_mode_from_chip("유머") == "encouraging"
+    assert pm.user_tone_mode_from_chip("코치처럼") == "encouraging"
+    assert pm.user_tone_mode_from_chip("담백") is None
+    assert pm.user_tone_mode_from_chip("모르는값") is None
+
+
+class _FakeProfileRepo:
+    def __init__(self, session: Any) -> None:
+        self.session = session
+
+    async def upsert_behavioral(self, user_id: Any, *, fields: dict[str, Any]) -> None:
+        return None
+
+    async def upsert_interaction(self, user_id: Any, *, fields: dict[str, Any]) -> None:
+        return None
+
+
+def _outcome(tone: str) -> Any:
+    return SimpleNamespace(
+        availability=SimpleNamespace(
+            peak_window=["저녁"], activity_window=SimpleNamespace(start="08:00", end="22:00")
+        ),
+        preferences=SimpleNamespace(
+            focus_duration_min=60, downscope_unit_min=15, rest_ok=True, recovery_tone=tone
+        ),
+    )
+
+
+def _persist(monkeypatch: Any, user: Any, tone: str) -> None:
+    monkeypatch.setattr(pm, "ProfileRepo", _FakeProfileRepo)
+    asyncio.run(pm.persist_profile_from_outcome(cast(Any, None), user=user, outcome=_outcome(tone)))
+
+
+def test_interview_tone_seeds_empty_tone_mode(monkeypatch: Any) -> None:
+    """인터뷰에서 고른 톤이 AI 말투(users.tone_mode)로 이어진다 — 비어 있을 때만."""
+    user = cast(Any, SimpleNamespace(id="u1", tone_mode=None, focus_mode_preferences=None))
+    _persist(monkeypatch, user, "따뜻")
+    assert user.tone_mode == "gentle"
+
+
+def test_interview_tone_does_not_override_chosen_tone_mode(monkeypatch: Any) -> None:
+    """설정에서 직접 고른 톤은 재인터뷰가 덮어쓰지 않는다."""
+    user = cast(Any, SimpleNamespace(id="u1", tone_mode="strict", focus_mode_preferences={}))
+    _persist(monkeypatch, user, "유머")
+    assert user.tone_mode == "strict"
+
+
+def test_plain_tone_leaves_tone_mode_empty(monkeypatch: Any) -> None:
+    """'담백' 은 prefix 없는 기본 말투 — tone_mode 를 채우지 않는다."""
+    user = cast(Any, SimpleNamespace(id="u1", tone_mode=None, focus_mode_preferences={}))
+    _persist(monkeypatch, user, "담백")
+    assert user.tone_mode is None
 
 
 def test_recovery_speed_from_prefs() -> None:
