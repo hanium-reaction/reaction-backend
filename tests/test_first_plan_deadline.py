@@ -75,5 +75,14 @@ def test_fallback_notice_names_what_is_empty_and_what_to_do() -> None:
     assert generic is not None and "칸만 잡아 뒀어요" in generic and "잠시 뒤" in generic
     budget = first_plan_adapter.decompose_fallback_notice("budget")
     assert budget is not None and "내일" in budget
-    for text in (generic, budget):
+    # 다시 불러도 같은 사유면 다시 만들기를 권하지 않는다 — 하루 생성 횟수만 쓴다 (planB-5 리뷰).
+    futile = [
+        first_plan_adapter.decompose_fallback_notice(r)
+        for r in ("tone_gate", "banned", "no_prompt")
+    ]
+    for text in futile:
+        assert text is not None and "칸만 잡아 뒀어요" in text and "직접 채워" in text
+        assert "다시 만들어" not in text and "잠시 뒤" not in text
+    for text in (generic, budget, *futile):
+        assert text is not None
         assert "오프라인" not in text and "룰" not in text
