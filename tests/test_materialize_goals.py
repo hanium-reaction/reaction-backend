@@ -12,15 +12,21 @@ from uuid import uuid4
 
 import pytest
 
+from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.orchestrator.first_plan_adapter import (
+    ACTION_TITLE_MAX_CHARS,
+    GOAL_TITLE_MAX_CHARS,
+    NODE_TITLE_MAX_CHARS,
     _derive_goal_category,
+    fit_title,
+    heaviest_goal_id,
     materialize_goals,
     supersede_proposed_goals,
 )
 from reaction_backend.orchestrator.interview_adapter import PLACEHOLDER_GOAL_TITLE
-from reaction_backend.schemas.interview import GoalCandidate, normalize_deadline
+from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome, normalize_deadline
 
 
 class _Result:
@@ -419,3 +425,78 @@ def test_normalize_deadline_reads_only_real_dates() -> None:
     assert normalize_deadline("내년 봄쯤") is None
     assert normalize_deadline("") is None
     assert normalize_deadline(None) is None
+
+
+# ───────────────────── 긴 자유 답이 제목이 된 경우 (interview-10) ─────────────────────
+
+_LONG_ANSWER = (
+    "솔직히 제시된 선택지 중에는 딱 맞는 게 없는데 제일 신경 쓰이는 건 다음 달 토익 시험이고 "
+    "그 전에 학교 중간고사랑 동아리 발표 준비도 겹쳐서 매일 조금씩이라도 영어 공부 시간을 "
+    "확보하고 싶고 주말에는 모의고사를 한 번씩 풀어 보면서 점수를 확인하고 싶어요 그리고 "
+    "가능하면 운동도 조금씩 하고 싶은데 그건 나중 문제고 지금은 토익이 제일 급해요 정말로요 "
+    "이번에는 꼭 끝까지 해 보고 싶어요"
+)
+
+
+def test_title_limits_match_the_db_columns() -> None:
+    """상수가 모델 컬럼 길이와 같아야 자르기가 의미가 있다 — 갈리면 여기서 먼저 터진다."""
+    assert Goal.__table__.c.title.type.length == GOAL_TITLE_MAX_CHARS  # type: ignore[attr-defined]
+    assert GoalNode.__table__.c.title.type.length == NODE_TITLE_MAX_CHARS  # type: ignore[attr-defined]
+    assert ActionItem.__table__.c.title.type.length == ACTION_TITLE_MAX_CHARS  # type: ignore[attr-defined]
+
+
+def test_fit_title_leaves_short_titles_untouched() -> None:
+    """짧은 제목은 공백까지 그대로 — 기존 행과의 대조 키가 바뀌면 같은 목표가 두 번 생긴다."""
+    assert fit_title(" 토익 900 ", 200) == " 토익 900 "
+    cut = fit_title(_LONG_ANSWER, 200)
+    assert len(cut) <= 200 and cut.endswith("…")
+    assert fit_title(_LONG_ANSWER, 200) == cut  # 같은 원문 → 같은 키
+    assert len(fit_title("가" * 500, 200)) == 200  # 공백 없는 긴 낱말도 자른다
+
+
+async def test_long_free_text_goal_title_is_clipped_instead_of_crashing_the_interview() -> None:
+    """214자 답이 목표 제목이 돼도 VARCHAR(200) 을 넘기지 않는다 (interview-10).
+
+    회귀(미러 실측): goals.heaviest 를 긴 문장으로 세 번 답하자 finish 가 500 을 내고, 다시
+    눌러도 같은 INSERT 로 또 죽어 인터뷰 전체를 잃었다. 두 번째 호출(계획 승인)은 잘린
+    제목으로 같은 목표를 **재사용**해야 한다 — 대조 키도 같은 값이어야 한다.
+    """
+    assert len(_LONG_ANSWER) > GOAL_TITLE_MAX_CHARS
+    uid = uuid4()
+    sess = _FakeSession()
+    goals = [_goal(_LONG_ANSWER, heaviest=True, tier="focus"), _goal("운동")]
+    rows, heaviest = await materialize_goals(sess, user_id=uid, core_goals=goals)  # type: ignore[arg-type]
+    assert heaviest is not None
+    assert all(len(g.title) <= GOAL_TITLE_MAX_CHARS for g in rows)
+
+    for g in rows:
+        g.id = uuid4()
+        g.archived_at = None
+    again = _FakeSession(existing=list(rows))
+    _, heaviest_again = await materialize_goals(
+        again,  # type: ignore[arg-type]
+        user_id=uid,
+        core_goals=goals,
+        status="active",
+    )
+    assert again.added == []  # 재사용 — 같은 목표가 두 번 생기지 않는다
+    assert heaviest_again is heaviest
+
+    outcome = InterviewOutcome.model_validate(
+        {
+            "session_id": "t",
+            "generated_at": "2026-09-18T10:00:00+09:00",
+            "end_reason": "completed",
+            "ambiguity_final": 0.1,
+            "analysis_source": "llm",
+            "identity": {"role": "대3", "season": "학기중"},
+            "core_goals": [g.model_dump() for g in goals],
+            "availability": {
+                "activity_window": {"start": "09:00", "end": "23:00"},
+                "peak_window": [],
+            },
+            "preferences": {"recovery_tone": "담백", "rest_ok": True, "downscope_unit_min": 10},
+        }
+    )
+    found = await heaviest_goal_id(again, user_id=uid, outcome=outcome)  # type: ignore[arg-type]
+    assert found == heaviest.id

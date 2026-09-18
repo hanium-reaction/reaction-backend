@@ -2236,6 +2236,37 @@ def break_min_from_outcome(outcome: InterviewOutcome) -> int:
 
 MAX_SAVE_RETRIES = 3  # ADR-0005 §2.5.1 — DB Agent 최대 3회 재시도 후 PLAN_SAVE_FAILED.
 
+# 저장 컬럼 길이 — `goals.title`·`goal_nodes.title` 은 VARCHAR(200), `action_items.title` 은
+# VARCHAR(300). 모델과 갈리면 tests/test_materialize_goals.py 가 잡는다.
+GOAL_TITLE_MAX_CHARS = 200
+NODE_TITLE_MAX_CHARS = 200
+ACTION_TITLE_MAX_CHARS = 300
+
+
+def fit_title(text: str, limit: int) -> str:
+    """제목을 저장 컬럼 길이 안에 넣는다 — 넘치면 낱말 경계에서 자르고 '…' 를 붙인다.
+
+    인터뷰 답은 길이 제한이 없다. 선택지가 마음에 안 들어 '가장 무거운 목표' 를 세 번 길게
+    설명하거나 머릿속 일을 한 문단으로 쏟아내면 그 문장이 통째로 목표 제목이 된다. 그대로
+    INSERT 하면 VARCHAR 초과로 **인터뷰 마지막 턴이 500** 이 되고, 다시 눌러도 같은 행을
+    넣으려다 또 죽어 인터뷰 전체를 잃는다(미러 실측: 214자 답 → finish 500 반복).
+    잘라서라도 저장하는 게 낫다 — 제목은 목표 화면에서 사용자가 언제든 고칠 수 있다.
+
+    같은 원문은 항상 같은 결과를 낸다 — 재사용 대조(`materialize_goals`·`heaviest_goal_id`)가
+    이 값을 키로 쓰기 때문이다.
+    """
+    if len(text) <= limit:
+        return text  # 손대지 않는다 — 기존 행과의 대조 키가 바뀌면 같은 목표가 두 번 생긴다.
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    # 낱말 중간에서 끊지 않되, 공백이 너무 앞에 있으면(한 낱말이 긴 경우) 그냥 자른다.
+    space = cut.rfind(" ")
+    if space >= limit // 2:
+        cut = cut[:space]
+    return cut.rstrip() + "…"
+
 
 @dataclass(frozen=True, slots=True)
 class FirstPlanSaveResult:
@@ -2807,8 +2838,10 @@ async def heaviest_goal_id(
             break
     if heaviest_title is None:
         return None
+    # 저장할 때와 같은 키로 대조한다 — 긴 제목은 잘려 저장되므로(`fit_title`) 원문과는 안 맞는다.
+    key = fit_title(heaviest_title, GOAL_TITLE_MAX_CHARS)
     for g in await _active_goals(session, user_id):
-        if g.title == heaviest_title:
+        if g.title == key:
             return g.id
     return None
 
@@ -2844,17 +2877,19 @@ async def materialize_goals(
     for gc in core_goals:
         if is_placeholder_goal(gc):
             continue
-        g = existing.get(gc.title)
+        # 긴 자유 답이 제목이 된 경우 컬럼 길이로 자른다 — 대조 키도 같은 값이어야 재사용된다.
+        title = fit_title(gc.title, GOAL_TITLE_MAX_CHARS)
+        g = existing.get(title)
         if g is None:
             g = Goal()
             g.user_id = user_id
-            g.title = gc.title
+            g.title = title
             g.category = _normalize_goal_category(gc.category)
             g.goal_tier = _normalize_goal_tier(gc.tentative_tier)
             g.deadline = date.fromisoformat(gc.deadline) if gc.deadline else None
             g.status = status
             session.add(g)
-            existing[gc.title] = g
+            existing[title] = g
         elif status == "active" and g.status == "proposed":
             # 승인 = 이 목표를 실제로 하겠다는 결정 → 잠정에서 승격.
             g.status = "active"
@@ -3073,7 +3108,8 @@ async def _apply_once(
         for nd in goal_nodes:
             n = GoalNode()
             n.goal_id = heaviest.id
-            n.title = nd.title
+            # 분해 LLM 은 목표 제목을 root 에 그대로 옮겨 쓴다 — 긴 제목이면 여기서도 넘친다.
+            n.title = fit_title(nd.title, NODE_TITLE_MAX_CHARS)
             n.node_type = _NODE_TYPE_MAP.get(nd.node_type, "subgoal")
             n.depth = depths.get(nd.node_id, 0)
             n.order_index = nd.order_index
@@ -3106,7 +3142,8 @@ async def _apply_once(
         for item in action_items:
             row = ActionItem()
             row.user_id = user_id
-            row.title = item.title
+            # 룰 카드('{목표} N회차')도 목표 제목을 품는다 — 긴 제목이면 300자를 넘을 수 있다.
+            row.title = fit_title(item.title, ACTION_TITLE_MAX_CHARS)
             row.target_date = block_date_by_node.get(item.node_id, target_date)
             row.estimated_minutes = item.estimated_minutes
             row.category = _normalize_category(item.category)
