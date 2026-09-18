@@ -957,25 +957,46 @@ def attach_orphan_actions(goal_plan: GoalDecomposition) -> GoalDecomposition:
     return goal_plan.model_copy(update={"goal_nodes": nodes})
 
 
-def _user_phrase_pairs(phrases: Sequence[str | None]) -> list[tuple[str, str]]:
-    """사용자 문구 → (금지어 치환이 만든 모양, 원문) 쌍. 치환에 안 걸리는 문구는 빠진다.
+# 금지어 사전의 낱말(긴 것부터) — 사용자 문구에서 금지어를 걷어낸 '고유한 부분' 을 재는 데 쓴다.
+_BANNED_KEYS_RE = re.compile(
+    "|".join(re.escape(k) for k in sorted(banned_words.BANNED_REPLACEMENTS, key=len, reverse=True))
+)
+# 금지어·공백을 걷어내고 이만큼은 남아야 문구가 **어디에 나오든**(부분 문자열) 되돌린다.
+_MIN_OWN_CHARS = 2
+
+
+def _user_phrase_pairs(phrases: Sequence[str | None]) -> list[tuple[str, str, bool]]:
+    """사용자 문구 → (금지어 치환이 만든 모양, 원문, 제목 전체일 때만) 쌍. 치환에 안 걸리는
+    문구는 빠진다.
 
     긴 것부터 돌려준다 — 한 문구가 다른 문구를 품으면(목표 제목 ⊂ 마일스톤 제목) 긴 쪽을
     먼저 되돌려야 짧은 쪽이 긴 쪽의 일부만 바꿔 놓지 않는다.
+
+    ⚠️ **문구가 사실상 금지어 자체면**(예: 마일스톤 제목을 '포기' 로 적음) 부분 문자열로
+    되돌리지 않는다 — 그 치환 모양('잠깐 쉬어가는')은 LLM 이 제 말로 쓴 금지어를 치환한 결과와
+    구별되지 않아, 계획 안 모든 자리의 필터가 풀린다(planB-3 리뷰). 그런 문구는 제목 **전체**가
+    그 모양일 때만 되돌린다 — 사용자 제목을 그대로 옮겨 쓴 자리만 잡는다.
     """
-    pairs: list[tuple[str, str]] = []
+    pairs: list[tuple[str, str, bool]] = []
+    seen: set[tuple[str, str]] = set()
     for phrase in phrases:
         if not phrase:
             continue
         filtered = banned_words.enforce(phrase).text
-        if filtered != phrase and (filtered, phrase) not in pairs:
-            pairs.append((filtered, phrase))
+        if filtered == phrase or (filtered, phrase) in seen:
+            continue
+        seen.add((filtered, phrase))
+        own = _WS_RE.sub("", _BANNED_KEYS_RE.sub("", phrase))
+        pairs.append((filtered, phrase, len(own) < _MIN_OWN_CHARS))
     return sorted(pairs, key=lambda p: len(p[0]), reverse=True)
 
 
-def _restore(text: str, pairs: Sequence[tuple[str, str]]) -> str:
-    for filtered, original in pairs:
-        if filtered in text:
+def _restore(text: str, pairs: Sequence[tuple[str, str, bool]]) -> str:
+    for filtered, original, whole_only in pairs:
+        if whole_only:
+            if text.strip() == filtered:
+                return original
+        elif filtered in text:
             text = text.replace(filtered, original)
     return text
 

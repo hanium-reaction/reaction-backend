@@ -249,3 +249,63 @@ async def test_milestone_llm_text_is_still_filtered(monkeypatch: pytest.MonkeyPa
     assert fell_back is False
     assert milestones[0].title == f"{TITLE} 기초"
     assert "포기하고" not in milestones[0].summary
+
+
+def test_a_bare_banned_word_phrase_is_restored_only_as_a_whole_title() -> None:
+    """사용자 문구가 금지어 하나('포기')뿐이면 그 모양이 LLM 문장 곳곳에서 풀리지 않는다 (planB-3 리뷰).
+
+    '포기' 의 치환 모양('잠깐 쉬어가는')은 LLM 이 제 말로 쓴 '포기' 를 치환한 결과와 같다 —
+    부분 문자열로 되돌리면 계획 안 모든 LLM 문장의 필터가 풀린다. 제목 전체가 그 모양일
+    때(사용자 마일스톤 제목을 그대로 옮긴 branch)만 되돌린다.
+    """
+    llm_filtered = "잠깐 쉬어가는하지 마세요, 표현 3개만 소리 내 읽기"
+    plan = GoalDecomposition(
+        goal_nodes=[
+            {
+                "node_id": "root",
+                "parent_id": None,
+                "title": "영어 회화",
+                "node_type": "root",
+                "order_index": 0,
+                "is_leaf": False,
+            },
+            {
+                "node_id": "b1",
+                "parent_id": "root",
+                "title": "잠깐 쉬어가는",  # 사용자 마일스톤 '포기' 를 그대로 옮긴 자리
+                "node_type": "branch",
+                "order_index": 0,
+                "is_leaf": False,
+            },
+            {
+                "node_id": "leaf-1",
+                "parent_id": "b1",
+                "title": "기초 표현 익히기",
+                "node_type": "leaf",
+                "order_index": 0,
+                "is_leaf": True,
+            },
+        ],
+        action_items=[
+            {
+                "node_id": "leaf-1",
+                "title": "잠깐 쉬어가는 루틴 만들기",  # LLM 이 쓴 '포기 루틴 만들기'
+                "estimated_minutes": 40,
+                "category": "study",
+                "first_step": llm_filtered,
+            }
+        ],
+        policy_violations=[],
+    )
+
+    restored = first_plan_adapter.restore_user_phrases(plan, ["영어 회화", "포기"])
+
+    branch = next(n for n in restored.goal_nodes if n.node_id == "b1")
+    assert branch.title == "포기"
+    item = restored.action_items[0]
+    assert item.title == "잠깐 쉬어가는 루틴 만들기"
+    assert item.first_step == llm_filtered
+    # 금지어 말고도 고유한 말이 있는 문구는 종전대로 어디서든 되돌린다.
+    longer = first_plan_adapter.restore_user_phrases(plan, ["포기 루틴 만들기"])
+    assert longer.action_items[0].title == "포기 루틴 만들기"
+    assert longer.action_items[0].first_step == llm_filtered
