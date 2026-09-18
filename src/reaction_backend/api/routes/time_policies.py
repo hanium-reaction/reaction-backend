@@ -2,7 +2,8 @@
 
 Issue #17 실구현:
 - CRUD 실 DB (`time_policies` 테이블)
-- `prefill-from-interview` — InterviewSlotAnswer 룰 매칭 + default 후보 (DB 미저장)
+- `prefill-from-interview` — 기본 후보 (DB 미저장). 이름과 달리 지금은 인터뷰 답을 읽지 않는다
+  (`_build_prefill_candidates` 참조)
 - 첫 POST 시 onboarding_state 전이: POLICIES → FIRST_PLAN
 - soft delete (`archived_at` + `is_active=false`)
 """
@@ -15,12 +16,9 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
-from reaction_backend.db.models.interview_session import InterviewSession
-from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.models.time_policy import TimePolicy as TimePolicyModel
 from reaction_backend.db.session import get_db
 from reaction_backend.repositories.time_policy_repo import (
@@ -141,91 +139,26 @@ def _validate_policy_payload(policy_type: str, payload: Mapping[str, Any]) -> No
             )
 
 
-# ───── prefill 룰 ─────
+# ───── prefill 후보 ─────
 
 
-async def _fetch_user_slot_answers(
-    session: AsyncSession, user_id: UUID
-) -> dict[str, dict[str, Any]]:
-    """사용자의 모든 인터뷰 세션의 슬롯 답변. `slot_key → value` 형태로 평탄화.
+def _build_prefill_candidates() -> list[tuple[str, dict[str, Any]]]:
+    """(policy_type, payload) 기본 후보 — 수면 23:00–07:00 · 휴식 15분 · 22:00 이후 심야 차단.
 
-    여러 세션이 있으면 가장 최근 세션의 값이 우선 (created_at desc 로 정렬 후 첫 매칭 유지).
+    ⚠️ **인터뷰 답을 읽지 않는다.** 예전 구현은 `time.sleep_window`·`time.lunch`·`time.peak_hours`
+    슬롯을 찾았지만, 인터뷰 카탈로그에 그런 슬롯은 처음부터 없었다(지금은 `time.activity_window`·
+    `time.peak_window`·`time.fixed_blocks`, 레포 이력에도 앞의 세 키를 쓰는 곳이 없다). 그래서
+    언제나 이 기본값이 나갔고, 그 사실을 숨긴 채 인터뷰를 조회만 하고 있었다 — 조회와 죽은
+    분기를 걷어내 결과는 그대로 두고 코드가 하는 일을 정직하게 만든다.
+
+    인터뷰 활동 시간대로 개인화하려면(예: 활동창이 23:30 까지면 심야 차단 22:00 은 그와 어긋난다)
+    후보 규칙 자체를 정하는 제품 결정이 먼저다. 지금 이 endpoint 를 부르는 FE 화면은 없다.
     """
-    stmt = (
-        select(InterviewSlotAnswer.slot_key, InterviewSlotAnswer.value)
-        .join(InterviewSession, InterviewSession.id == InterviewSlotAnswer.session_id)
-        .where(InterviewSession.user_id == user_id)
-        .order_by(InterviewSlotAnswer.created_at.desc())
-    )
-    result = await session.execute(stmt)
-    flat: dict[str, dict[str, Any]] = {}
-    for slot_key, value in result.all():
-        if slot_key not in flat and isinstance(value, dict):
-            flat[slot_key] = value
-    return flat
-
-
-def _range_payload(value: dict[str, Any], default_start: str, default_end: str) -> dict[str, str]:
-    if value.get("type") == "range":
-        start = value.get("start")
-        end = value.get("end")
-        return {
-            "start_time": str(start) if isinstance(start, str) else default_start,
-            "end_time": str(end) if isinstance(end, str) else default_end,
-        }
-    return {"start_time": default_start, "end_time": default_end}
-
-
-def _build_prefill_candidates(
-    answers: dict[str, dict[str, Any]],
-) -> list[tuple[str, dict[str, Any]]]:
-    """슬롯 답변 → (policy_type, payload) 후보 리스트.
-
-    규칙 (Issue #17, prefill 단순화):
-    - time.sleep_window → sleep (필수 1개)
-    - time.lunch       → lunch
-    - time.peak_hours  → no_touch (평일 peak 외 보호)
-    - 항상 추가        → break_min 15 / late_night_block 22:00~
-    """
-    out: list[tuple[str, dict[str, Any]]] = []
-
-    sleep = answers.get("time.sleep_window")
-    out.append(
-        (
-            "sleep",
-            _range_payload(sleep, "23:00", "07:00")
-            if sleep
-            else {
-                "start_time": "23:00",
-                "end_time": "07:00",
-            },
-        )
-    )
-
-    lunch = answers.get("time.lunch")
-    if lunch:
-        out.append(("lunch", _range_payload(lunch, "12:00", "13:00")))
-
-    peak = answers.get("time.peak_hours")
-    if peak:
-        out.append(
-            (
-                "no_touch",
-                {
-                    **_range_payload(peak, "09:00", "18:00"),
-                    "days_of_week": ["mon", "tue", "wed", "thu", "fri"],
-                },
-            )
-        )
-
-    out.append(("break_min", {"min_minutes": 15}))
-    out.append(
-        (
-            "late_night_block",
-            {"start_time": "22:00", "blocked_categories": []},
-        )
-    )
-    return out
+    return [
+        ("sleep", {"start_time": "23:00", "end_time": "07:00"}),
+        ("break_min", {"min_minutes": 15}),
+        ("late_night_block", {"start_time": "22:00", "blocked_categories": []}),
+    ]
 
 
 # ───── endpoints ─────
@@ -264,13 +197,13 @@ async def create_policy(
 
 
 @router.post("/prefill-from-interview")
-async def prefill_from_interview(user: CurrentUser, session: SessionDep) -> list[TimePolicy]:
-    """인터뷰 답 기반 정책 후보 (DB 미저장).
+async def prefill_from_interview(user: CurrentUser) -> list[TimePolicy]:
+    """정책 기본 후보 (DB 미저장) — 이름과 달리 아직 인터뷰 답을 쓰지 않는다
+    (`_build_prefill_candidates`). `user` 는 인증만 요구한다.
 
     응답의 `policyId` 는 prefill 임시 식별자 — FE 는 사용자 선택 후 POST `/time-policies` 로 실제 저장.
     """
-    answers = await _fetch_user_slot_answers(session, user.id)
-    candidates = _build_prefill_candidates(answers)
+    candidates = _build_prefill_candidates()
     return [
         TimePolicy(
             policy_id=f"{_ID_PREFIX}prefill_{i}",

@@ -63,9 +63,15 @@
 - 제목은 앞뒤 공백을 걷어 저장하고, 비었거나 200자를 넘으면 422 `field="title"`(201자는 500 이었다).
   요일은 비면 422(PATCH 도), 중복은 한 번만 저장한다.
 
-FE 가 할 일: `SetupScreen.addSchedule` 은 422 를 `friendlyError` 로 바꿔 '입력값을 확인해 주세요' 만
+FE 가 할 일(고정 일정): `SetupScreen.addSchedule` 은 422 를 `friendlyError` 로 바꿔 '입력값을 확인해 주세요' 만
 보여 준다 — `CalendarConnectCard` 처럼 422 면 `err.message` 를 그대로 보여 줄 것(위 문구들이 그대로
 안내가 된다). [추가] 는 요청 중 비활성화. 시각 입력은 자유 텍스트보다 시각 선택기가 낫다.
+
+### 문서 정정 — `POST /time-policies/prefill-from-interview`
+
+동작 무변경. 이 endpoint 는 인터뷰 답을 읽는 척했지만 찾던 슬롯 키(`time.sleep_window` 등)가 카탈로그에
+없어 **언제나 기본 후보 세 개**(수면 23:00–07:00 · 휴식 15분 · 심야 22:00~)였다. 죽은 조회를 걷어내고
+계약 문구를 사실대로 고쳤다. FE 에서 부르는 화면은 없다.
 
 ---
 

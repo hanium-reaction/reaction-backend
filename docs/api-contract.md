@@ -296,7 +296,7 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | --- | --- | --- |
 | GET | `/time-policies` | 내 활성 정책 전체 |
 | POST | `/time-policies` | 신규 정책. payload는 type별 다름 |
-| POST | `/time-policies/prefill-from-interview` | S07 진입 시 인터뷰 답 → 정책 prefill |
+| POST | `/time-policies/prefill-from-interview` | S07 진입 시 정책 prefill 후보(DB 미저장). ⚠️ **이름과 달리 인터뷰 답을 반영하지 않는다** — 언제나 `sleep` 23:00–07:00 · `break_min` 15 · `late_night_block` 22:00~ 세 개다(v2.30 문서 정정 — 찾던 슬롯 키가 카탈로그에 없어 처음부터 그랬다). 활동 시간대로 개인화하는 건 후속 결정 |
 | PATCH | `/time-policies/{id}` | 부분 수정 |
 | DELETE | `/time-policies/{id}` | soft delete (`is_active=false`) |
 
