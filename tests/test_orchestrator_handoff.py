@@ -2357,7 +2357,6 @@ async def test_first_plan_graph_runs_to_approval(monkeypatch: pytest.MonkeyPatch
 
     assert final["goal_plan"] is not None
     assert final["review"].approved is True
-    assert final["missing_fields"] == []  # 모든 필수 슬롯 충족
     assert final["used_fallback"] is False
 
 

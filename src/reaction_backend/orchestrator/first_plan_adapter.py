@@ -4,12 +4,12 @@
 순수 함수 — LLM/DB 무관.
 
 - `context_from_outcome`: LLM 분해 프롬프트(`planning/goal_decompose`) 변수 + 룰
-  스케줄러(`goal_structuring.GoalStructuringInput`) 조립에 쓸 요약 dict.
-- `time_policies_from_outcome` / `action_placements`: 룰 스케줄러
-  (`goal_structuring.py`) 가 free/busy 계산·배치에 그대로 쓰는 구조적 입력으로 환원.
-  ORM 없이 Protocol(TimePolicyLike/HabitLike)만 만족시키므로 LLM/DB 무관.
-- 실제 DB 영속화(`db_apply_first_plan`)는 사용자 [수락] 후 라우터/SAVING 노드에서만
-  수행 (AGENTS.md §1.4 자동 적용 금지) — 본 베이스라인에서는 시그니처만 정의.
+  스케줄러 조립에 쓸 요약 dict.
+- `time_policies_from_outcome` / `plan_actions_from_decomposition`: 다일 스케줄러
+  (`plan_scheduler.py`)와 busy 계산(`goal_structuring.py`)이 그대로 쓰는 구조적 입력으로
+  환원. ORM 없이 Protocol(TimePolicyLike)만 만족시키므로 LLM/DB 무관.
+- 실제 DB 영속화(`db_apply_first_plan`)는 사용자 [수락] 후 승인 라우트에서만 수행한다
+  (AGENTS.md §1.4 자동 적용 금지). 이 부분은 DB 를 쓰는 예외 구간이다.
 """
 
 from __future__ import annotations
@@ -43,7 +43,6 @@ from reaction_backend.orchestrator.goal_structuring import (
     BusyBlock,
     DraftPlan,
     DraftScheduledBlock,
-    HabitLike,
     PolicyViolationError,
     TimeInterval,
     TimePolicyLike,
@@ -2118,7 +2117,7 @@ def _time_policy_summary(outcome: InterviewOutcome) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-# NOTE: TimePolicyLike/HabitLike Protocol 은 settable 속성을 요구하므로(ORM 모델이 만족하는
+# NOTE: TimePolicyLike Protocol 은 settable 속성을 요구하므로(ORM 모델이 만족하는
 # 형태) frozen 으로 두지 않는다. 어댑터가 만든 뒤 변형하지 않으므로 사실상 불변으로 쓴다.
 @dataclass(slots=True)
 class _RuleTimePolicy:
@@ -2127,24 +2126,6 @@ class _RuleTimePolicy:
     policy_type: str
     payload: Mapping[str, Any]
     is_active: bool = True
-
-
-@dataclass(slots=True)
-class _ActionPlacement:
-    """`HabitLike` 구조적 만족 — action_item 을 룰 스케줄러의 배치 단위로 환원.
-
-    `reserve_habit_sessions` 가 priority_level 오름차순 + time_preference 윈도우로
-    배치하므로, 분해 순서를 priority_level 로, estimated_minutes 를 세션 길이로 매핑한다.
-    """
-
-    id: uuid.UUID
-    title: str
-    category: str
-    minutes_per_session: int
-    time_preference: str
-    priority_level: int
-    # HabitLike 는 위 6개 필드만 요구. 배치 후 node_id 복원용 메타.
-    node_id: str = field(default="", compare=False)
 
 
 def _hhmm_to_min(value: str, *, as_end: bool = False) -> int:
@@ -2365,28 +2346,6 @@ def time_policies_from_outcome(outcome: InterviewOutcome) -> list[TimePolicyLike
             )
         )
     return policies
-
-
-def action_placements(action_items: list[ActionItemDraft]) -> list[HabitLike]:
-    """분해된 action_item → 룰 스케줄러 배치 단위(`HabitLike`).
-
-    분해 목록 순서를 priority_level(1=최우선)로, estimated_minutes 를 세션 길이로 매핑한다.
-    배치 결과 블록의 `origin_id` 로 다시 node_id 를 복원할 수 있도록 `node_id` 를 싣는다.
-    """
-    placements: list[HabitLike] = []
-    for index, item in enumerate(action_items):
-        placements.append(
-            _ActionPlacement(
-                id=uuid.uuid4(),
-                title=item.title,
-                category=item.category,
-                minutes_per_session=item.estimated_minutes,
-                time_preference="anytime",
-                priority_level=index + 1,
-                node_id=item.node_id,
-            )
-        )
-    return placements
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3348,7 +3307,6 @@ async def _apply_once(
         # 분해된 노드는 소속시킬 goal 이 없고(GoalNode.goal_id 는 NOT NULL) 의미도 없다.
         node_by_temp: dict[str, GoalNode] = {}
         action_by_node: dict[str, ActionItem] = {}
-        block_count = 0
         if heaviest is None:
             # 빈 계획도 승인 자체는 성립 — 부수 기록(Draft 승인 등)은 같은 트랜잭션으로.
             if on_success is not None:
@@ -3428,8 +3386,7 @@ async def _apply_once(
             row.status = "planned"  # 신규 카드 — 원본 status 변경 아님(AGENTS §2)
             row.source = "goal"
             row.first_step = item.first_step
-            if heaviest is not None:
-                row.goal_id = heaviest.id
+            row.goal_id = heaviest.id  # 위에서 heaviest 없음은 이미 반환했다
             node = node_by_temp.get(item.node_id)
             if node is not None:
                 row.goal_node_id = node.id

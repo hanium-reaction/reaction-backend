@@ -15,12 +15,11 @@
 - 입력은 Deep Interview(#6) 의 경계 계약 `InterviewOutcome` **하나**. InterviewState 를
   절대 import 하지 않는다 → 두 이슈 병렬 개발, 계약만 고정.
 - LLM(②③④)은 Node 안 `aiClient.run(...)` 만. 스케줄링은 **룰만**(LLM 0회) —
-  기존 `goal_structuring.py` 재사용(ADR-0005 §1.2). 8s timeout / rate limit → 룰 fallback.
-- 산출물은 비활성 Draft. 실제 영속화는 사용자 [수락] 후 SAVING 단일 트랜잭션
+  `plan_scheduler.schedule_actions_multiday` + `goal_structuring.py` busy 계산(ADR-0005
+  §1.2). 분해·검토는 호출마다 `config.llm_planning_timeout_seconds`(45초) × 재시도 —
+  타임아웃·예산·금지어/톤 게이트면 룰 fallback. 최악 대기 상한은 `after_schedule` 참고.
+- 산출물은 비활성 Draft. 실제 영속화는 사용자 [수락] 후 승인 라우트의 단일 트랜잭션
   (`first_plan_adapter.db_apply_first_plan`) — AGENTS.md §1.4 자동 적용 금지.
-
-본 파일은 **베이스라인 구조**다. LLM 프롬프트 연결·룰 스케줄러 통합·SAVING 트랜잭션의
-세부 구현은 #32 본 구현 PR 에서 노드 본문을 채운다.
 """
 
 from __future__ import annotations
@@ -124,8 +123,6 @@ class FirstPlanState(TypedDict):
     density_damped_from: str | None
     # 그래프가 시작된 시각(`time.monotonic()`) — 검토·재분해를 새로 시작할지 가르는 기준.
     started_at: float
-    missing_fields: list[str]
-    tier_violation: str | None  # Focus≤3 / Maintain≤5 초과 (DevBaseline §1.4)
     # 링크로만 준 참고 자료를 열어봤는가 (#226). 열었으면 되묻지 않고, 못 열었으면
     # 그 사유가 담긴 문구를 warnings 로 내보낸다.
     materials_fetched: bool
@@ -178,8 +175,6 @@ def initial_state(
         out_of_cycle_dropped=[],
         density_damped_from=None,
         started_at=_time.monotonic(),
-        missing_fields=[],
-        tier_violation=None,
         materials_fetched=False,
         materials_notice=None,
         planning_context={},
@@ -407,14 +402,15 @@ async def _goal_failure_streak(session: Any, user_id: UUID, goal_id: UUID | None
 
 
 async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> FirstPlanState:
-    """VALIDATING — 필수 슬롯 누락 + Focus/Maintain cap 검증.
+    """VALIDATING — 분해에 쓸 재료(자료·실패 이력·분량)를 모은다.
 
-    누락은 outcome.unresolved_slots 를 그대로 승계(인터뷰가 이미 결정적으로 계산).
-    Focus ≤ 3 / Maintain ≤ 5 초과 시 tier_violation 기록 (DevBaseline §1.4 잠금) —
-    라우터가 GOAL_TIER_LIMIT_EXCEEDED 422. cap 판정 자체는 `tier_violation_for`.
+    입력 검증은 라우트가 그래프에 들어오기 **전에** 한다 — Focus ≤ 3 / Maintain ≤ 5 초과
+    (`tier_violation_for` → 422 GOAL_TIER_LIMIT_EXCEEDED, DevBaseline §1.4 잠금)와 실제 목표
+    없음(`plannable_goal_missing` → 422). 예전엔 여기서 `missing_fields`·`tier_violation`
+    을 상태에 적었지만 아무도 읽지 않아, 검증처럼 보이는 죽은 값이 '목표 없음' 계획을
+    통과시킨 채 남아 있었다(planB-1·planB-17).
     """
     outcome = state["outcome"]
-    violation = tier_violation_for(outcome)
     target_date = date.fromisoformat(state["target_date"])
     # 참고 자료를 링크로만 줬으면 여기서 한 번 열어본다 (#226). I/O 는 이 노드가 하고
     # 컨텍스트 조립은 순수 함수로 남긴다. 실패해도 예외는 안 나오고, 그때는 예전처럼
@@ -448,8 +444,6 @@ async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> Firs
         **state,
         "density": density,
         "density_damped_from": requested_density if density != requested_density else None,
-        "missing_fields": list(outcome.unresolved_slots),
-        "tier_violation": violation,
         "materials_fetched": materials.ok,
         "materials_notice": materials.notice,
         "planning_context": first_plan_adapter.context_from_outcome(
