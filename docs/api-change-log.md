@@ -77,6 +77,7 @@
 - 만다라 축에서 올린 목표는 14일 잠정 목표 만료에서 빠진다. 올린 목표를 지우면 그 축의 `promotedGoalId` 는
   `null` 로 나간다(예전엔 "이미 학기 목표로 올린 축" 배지가 남았다).
 - `POST /plans/mandala/next-cycle` 의 칸 → 마일스톤에서 반복형(습관 링크) 칸과 규칙 자리표시 칸(`source="rule"`)을 뺀다.
+- 주간 리뷰 `mandala.untouchedAxisTitles`·`staleAxisProposals` — 칸을 다 끝낸 축은 "손 못 댄 축" 이 아니다.
 
 ---
 

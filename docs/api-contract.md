@@ -978,7 +978,8 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
   없거나 아직 만다라를 승인 안 했으면(트리 없음) `null`(응답에서 생략된 것처럼 취급).
 - 필드: `completedThisWeek`/`completedTotal`/`totalLeaves`(끝낸 칸, 이번 주/누적/전체),
   `touchedThisWeek`(이번 주에 손댄 칸 — 완료 체크 또는 습관 체크인), `untouchedAxisTitles`
-  (이번 주 아무 활동도 없던 축 제목 목록), `habits`(반복형 칸별 `axisTitle`/`cellTitle`/
+  (이번 주 아무 활동도 없던 축 제목 목록 — **칸을 다 끝낸 축은 빠진다**: 반복형 칸 없이 모든 칸이 완료
+  표시면 할 게 남지 않은 축이라 `staleAxisProposals` 대상도 아니다, v2.30-goals), `habits`(반복형 칸별 `axisTitle`/`cellTitle`/
   `doneCount`/`targetCount`).
 - `period_summaries` 에 저장하지 않고 `GET`/`POST generate` 둘 다 조회 시점에 파생
   (`mandala_adapter.compute_weekly_stat`, 순수 함수) — `goal_nodes.progress` 컬럼을 안
