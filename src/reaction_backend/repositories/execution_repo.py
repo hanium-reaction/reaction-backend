@@ -268,6 +268,36 @@ class ExecutionRepo:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def close_execution(
+        self,
+        execution: ExecutionEvent,
+        *,
+        status: str,
+        ended_at: datetime,
+    ) -> None:
+        """실행 1건 종결 — check-in 과 저녁 회고(batch)의 **단일 전이** (today-13).
+
+        예전엔 `POST /today/check-ins` 와 `POST /reflection/batch` 가 같은 쓰기를 각자 복사해
+        들고 있었다. 한쪽만 고치면 '집중 화면에서 완료한 기록' 과 '저녁 회고로 완료한 기록' 이
+        같은 결과인데 다르게 저장된다 — 취소 블록 가드가 실제로 한쪽에만 먼저 들어갔었다.
+
+        하는 일: completion_status·actual_end_at·actual_duration_minutes + 블록 finished.
+        `action_item.status` 전이와 회복 완료 스탬프는 **호출자 몫**이다(카드·회복 repo 를
+        라우터가 쥔다). commit 도 호출자.
+        """
+        execution.completion_status = status
+        execution.actual_end_at = ended_at
+        if execution.actual_start_at is not None:
+            delta = ended_at - execution.actual_start_at
+            execution.actual_duration_minutes = max(int(delta.total_seconds() // 60), 0)
+
+        block = await self.get_block(execution.scheduled_block_id)
+        if block is not None and block.block_status != "cancelled":
+            # 취소된 블록은 되살리지 않는다 — 회고 창을 넘겨 만료 cron(#20)이 카드와 함께
+            # 정리한 블록에 stale 한 executionId 로 체크인·회고가 들어오면, finished 로 덮어써서
+            # 주간 그리드에 유령 블록이 되살아난다(list_week 는 archived 를 안 보고 block_status 만 본다).
+            block.block_status = "finished"
+
     # ── pause / resume (interruption_events) — #83 Focus 일시정지/재개 ──
     async def get_open_pause(self, execution_id: UUID) -> InterruptionEvent | None:
         """아직 재개되지 않은(열린) user_pause 구간 — 가장 최근 것.

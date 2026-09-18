@@ -54,7 +54,7 @@ from reaction_backend.orchestrator.weekly_review import ExecutionStat, RecoveryS
 from reaction_backend.repositories.action_item_repo import get_action_item_repo
 from reaction_backend.repositories.consent_repo import get_consent_repo
 from reaction_backend.repositories.daily_brief_repo import get_daily_brief_repo
-from reaction_backend.repositories.execution_repo import get_execution_repo
+from reaction_backend.repositories.execution_repo import ExecutionRepo, get_execution_repo
 from reaction_backend.repositories.fixed_schedule_repo import get_fixed_schedule_repo
 from reaction_backend.repositories.goal_repo import get_goal_repo
 from reaction_backend.repositories.habit_instance_repo import get_habit_instance_repo
@@ -1681,6 +1681,10 @@ class FakeExecutionRepo:
 
     async def get_block(self, block_id: UUID) -> ScheduledBlock | None:
         return self._blocks.get(block_id)
+
+    # 종결 전이는 **실 구현을 그대로** 쓴다(today-13) — 이 fake 의 조회 메서드만 불러서
+    # 동작하므로, 복제본을 두면 라우트 테스트가 실 로직이 아닌 사본을 검증하게 된다.
+    close_execution = ExecutionRepo.close_execution
 
     async def list_blocks_starting_between(
         self, *, start: datetime, end: datetime

@@ -300,20 +300,10 @@ async def batch_reflect(
     tagged_count = 0
     needs_tags: list[str] = []
     for execution, item, codes in resolved:
-        execution.completion_status = item.completion_status
-        execution.actual_end_at = ended_at
+        # execution 종결 + 블록 finished — check-in 과 같은 전이 한 벌 (today-13).
+        await repo.close_execution(execution, status=item.completion_status, ended_at=ended_at)
         if item.task_aversiveness is not None:
             execution.task_aversiveness = item.task_aversiveness
-        if execution.actual_start_at is not None:
-            delta = ended_at - execution.actual_start_at
-            execution.actual_duration_minutes = max(int(delta.total_seconds() // 60), 0)
-
-        block = await repo.get_block(execution.scheduled_block_id)
-        if block is not None and block.block_status != "cancelled":
-            # 취소된 블록은 되살리지 않는다 — 회고 창을 넘겨 만료 cron(#20)이 카드와 함께
-            # 정리한 블록에 stale 한 executionId 로 batch 가 들어오면, finished 로 덮어써서
-            # 주간 그리드에 유령 블록이 되살아난다(list_week 는 archived 를 안 본다).
-            block.block_status = "finished"
 
         action = await action_repo.get_by_id(user.id, execution.action_item_id)
         if action is not None:
