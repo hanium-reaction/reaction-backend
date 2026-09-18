@@ -282,6 +282,8 @@ def _to_question(
 
     보기(options)는 카탈로그 고정 진실 소스. `suggested_answers`(LLM 추천 답변 카드)는
     고정 보기가 없는 자유서술 슬롯에서만 노출한다(chip/select 는 보기로 답하므로 제외).
+    자리표시자 카드("ㅇㅇ 출판사")는 여기 **응답 경계에서** 거른다 — 노드가 아니라 노출
+    지점에 두어야 룰 폴백·재개(next-question) 어느 경로로 만든 질문이든 같은 문을 지난다.
     """
     nq = state["next_question"]
     slot_key = state["next_slot_key"]
@@ -300,7 +302,7 @@ def _to_question(
         text=nq.question,
         answer_type=slot.answer_type if slot else "text",
         options=options,
-        suggested_answers=[] if options else list(nq.suggested_answers),
+        suggested_answers=[] if options else interview.drop_placeholder_cards(nq.suggested_answers),
     )
 
 

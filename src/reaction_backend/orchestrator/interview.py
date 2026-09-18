@@ -467,13 +467,9 @@ async def ask_question(state: InterviewState, config: RunnableConfig) -> Intervi
         session=_session(config),
         tone_mode=_tone_mode(config),
     )
-    question = result.value
-    cards = drop_placeholder_cards(question.suggested_answers)
-    if cards != question.suggested_answers:
-        question = question.model_copy(update={"suggested_answers": cards})
     return {
         **state,
-        "next_question": question,
+        "next_question": result.value,
         "next_slot_key": slot_key,
         "total_turns": state["total_turns"] + 1,
         "used_fallback": state["used_fallback"] or result.fell_back,
