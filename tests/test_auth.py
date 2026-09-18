@@ -713,3 +713,32 @@ def test_rejected_refresh_does_not_record_activity(
 
     assert resp.status_code == 401
     assert stored.last_active_at == stale
+
+
+def test_google_login_verifies_off_the_event_loop(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """id_token 검증(Google 공개키 HTTPS 조회, 동기)은 이벤트 루프 밖 스레드에서 돈다 (auth-7).
+
+    루프에서 그대로 부르면 조회가 끝날 때까지 다른 모든 사용자의 요청이 멈춘다(단일 워커).
+    """
+    import asyncio
+
+    from reaction_backend.api.routes import auth as auth_routes
+    from reaction_backend.integrations.google_oauth.verifier import GoogleClaims
+
+    ran_on_loop: list[bool] = []
+
+    def _fake_verify(token: str) -> GoogleClaims:
+        try:
+            asyncio.get_running_loop()
+            ran_on_loop.append(True)
+        except RuntimeError:
+            ran_on_loop.append(False)
+        return GoogleClaims(sub="s", email="thread@example.com", name="스레드")
+
+    monkeypatch.setattr(auth_routes, "verify_google_id_token", _fake_verify)
+    resp = auth_client.post("/auth/google", json={"idToken": "x"})
+
+    assert resp.status_code == 200
+    assert ran_on_loop == [False]

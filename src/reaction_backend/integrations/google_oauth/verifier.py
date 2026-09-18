@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any
 
+from google.auth import exceptions as g_exceptions
 from google.auth import jwt as g_jwt
 from google.auth.transport import requests as g_requests
 from google.oauth2 import id_token as g_id_token
@@ -42,6 +43,37 @@ _REJECTION_KINDS: tuple[tuple[str, str], ...] = (
     ("segment", "malformed"),
     ("padding", "malformed"),
 )
+
+
+# Google 공개키(certs) 조회 타임아웃(초). google-auth 기본값은 120초다 — 인증서 엔드포인트가
+# 느리면 로그인 한 건이 2분을 붙잡았다. 로그인 화면에서 기다릴 수 있는 만큼만 기다리고, 넘으면
+# "잠시 후 다시" 로 돌려보낸다(아래 TransportError 분기).
+_CERT_FETCH_TIMEOUT_SECONDS = 5.0
+
+
+def _request_with_timeout(
+    url: str,
+    method: str = "GET",
+    body: Any = None,
+    headers: Any = None,
+    timeout: float | None = None,  # noqa: ARG001 — 라이브러리 기본(120s)을 무시하고 상한을 건다
+    **kwargs: Any,
+) -> Any:
+    """`google.auth.transport.Request` 호출 규약을 그대로 받되 타임아웃만 짧게 강제한다.
+
+    `verify_oauth2_token` 은 이 콜러블을 `request(certs_url, method="GET")` 로만 부른다.
+    호출마다 새 `Request`(= 새 requests.Session) — 검증은 `asyncio.to_thread` 워커에서 돌아
+    스레드 간 세션 공유를 피한다.
+    """
+    request = g_requests.Request()
+    return request(
+        url,
+        method=method,
+        body=body,
+        headers=headers,
+        timeout=_CERT_FETCH_TIMEOUT_SECONDS,
+        **kwargs,
+    )
 
 
 def _client_tail(client_id: str) -> str:
@@ -130,7 +162,11 @@ def verify_google_id_token(token: str) -> GoogleClaims:
 
     Raises:
         ApiError(AUTH_INVALID_ID_TOKEN, 401): 서명/만료/aud 불일치/형식 오류.
+        ApiError(COMMON_INTERNAL_ERROR, 503): Google 공개키 조회 실패·지연 — 토큰 탓이 아니다.
         RuntimeError: CLIENT_ID 미설정 + stub mode 도 꺼진 misconfig.
+
+    **동기(블로킹) 함수다** — Google 공개키를 HTTPS 로 가져온다. async 핸들러에서는
+    `asyncio.to_thread` 로 불러야 이벤트 루프(단일 워커)를 막지 않는다.
     """
     cfg = get_settings()
 
@@ -153,9 +189,18 @@ def verify_google_id_token(token: str) -> GoogleClaims:
         # google-auth 함수가 py.typed 미배포 — mypy strict 에서 no-untyped-call 발생.
         info: dict[str, Any] = g_id_token.verify_oauth2_token(  # type: ignore[no-untyped-call]
             token,
-            g_requests.Request(),
+            _request_with_timeout,
             audience=audiences,
         )
+    except g_exceptions.TransportError as e:
+        # 공개키 조회가 실패·지연됐다 — 토큰은 멀쩡할 수 있다. ValueError 가 아니라서 예전엔
+        # 500 으로 샜다. 로그에는 예외 종류만(메시지에 URL·내부 정보가 섞일 수 있다).
+        logger.warning("google_id_token_cert_fetch_failed error=%s", type(e).__name__)
+        raise ApiError(
+            ErrorCode.COMMON_INTERNAL_ERROR,
+            "Google 로그인 확인이 잠시 늦어지고 있어요. 잠시 후 다시 시도해 주세요.",
+            http_status=HTTPStatus.SERVICE_UNAVAILABLE,
+        ) from e
     except ValueError as e:
         logger.warning("google_id_token_rejected %s", _rejection_summary(token, e, audiences))
         raise ApiError(

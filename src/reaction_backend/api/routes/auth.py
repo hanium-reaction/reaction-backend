@@ -28,6 +28,7 @@ Issue #324 — 신규 가입 게이트 (기존 사용자 로그인은 완전히 
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -197,7 +198,9 @@ async def login_with_google(
     기존 사용자(email 이미 존재)는 게이트를 전혀 거치지 않는다 — lock 도 신규 가입
     판정 이후에만 잡는다(로그인은 이미 가입한 사람이라 경합 대상이 아니다).
     """
-    claims = verify_google_id_token(body.id_token)
+    # 검증은 Google 공개키를 HTTPS 로 가져오는 **동기** 호출이다 — 이벤트 루프에서 그대로
+    # 부르면 그동안 다른 모든 사용자의 요청이 멈춘다(단일 워커). 스레드로 내린다.
+    claims = await asyncio.to_thread(verify_google_id_token, body.id_token)
     existing = await user_repo.get_by_email(claims.email)
 
     if existing is None:

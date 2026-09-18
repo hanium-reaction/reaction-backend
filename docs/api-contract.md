@@ -160,6 +160,10 @@ email)에만 순서대로 3중 검사가 적용된다:
 소비되며(재사용 불가), `scripts/manage_invite_codes.py` 로 운영자가 미리 발급한다(admin
 API 없음 — 이 레포의 다른 운영 작업과 같은 CLI 스크립트 관례).
 
+**Google 공개키 조회 실패(v2.30-auth)** — `POST /auth/google` 이 id_token 서명을 확인하려고
+Google 공개키를 가져오다 실패·지연(5초 상한)하면 503 `COMMON_INTERNAL_ERROR`("잠시 후 다시
+시도해 주세요"). 토큰 자체가 틀린 경우(401 `AUTH_INVALID_ID_TOKEN`)와 구분된다.
+
 **계정 삭제 후 refresh 차단(#321)** — `POST /auth/refresh` 는 이제 `decoded.user_id` 로
 사용자 존재를 조회하고, soft-delete(`archived_at` set, §16 `/settings/delete-account`)
 된 계정이면 401 `AUTH_INVALID_TOKEN`. 이전에는 jti revoke set 여부만 확인해, 계정을
