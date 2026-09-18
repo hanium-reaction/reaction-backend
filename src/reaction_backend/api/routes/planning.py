@@ -1845,6 +1845,10 @@ def _replan_policies(db_rows: list[Any], outcome: InterviewOutcome | None, user:
     return _active_or_default_policies(db_rows)
 
 
+# 재계획이 카드를 다시 배치하지 않는 목표 상태 — 보관(삭제)·완료 (planA-8).
+_RETIRED_GOAL_STATUSES = frozenset({"archived", "completed"})
+
+
 def _block_minutes(block: ScheduledBlock) -> int:
     """블록 길이(분) — 재계획이 '이미 배정된 몫'을 남은 분량에서 뺄 때 쓴다."""
     return max(0, int((block.end_at - block.start_at).total_seconds() // 60))
@@ -2001,6 +2005,24 @@ async def generate_replan(
         # docstring 의 표 참고). "계획만 세워두고 그냥 안 한" 카드가 재계획 후보에서 통째로
         # 빠지면, 가장 도움이 필요한 순간에 재계획이 빈손으로 돈다.
         stale_pairs = await block_repo.list_stale_scheduled_before(user.id, now_kst())
+
+        # 지운(보관)·완료한 목표의 카드는 다시 배치하지 않는다 (planA-8). 위 조회들은 카드의
+        # 보관 여부만 보고 목표 상태는 안 봐서, 목표를 지워도 남아 있던 카드(예: 삭제 정리 전
+        # 데이터)를 '남은 일' 로 다음 주부터 새로 깔았다. 목표 없는 카드(인박스 등)는 그대로다.
+        # 보류(parked)는 빼지 않는다 — 한도 초과로 자동 보류된 목표도 카드는 살아 있는 게
+        # 현재 계약이다(`first_plan_adapter._park_tier_overflow_on_approval`).
+        goals_by_id = {
+            g.id: g
+            for g in await goal_repo.list_active(user.id)
+            if g.status not in _RETIRED_GOAL_STATUSES
+        }
+
+        def _goal_is_live(action: Any) -> bool:
+            return action.goal_id is None or action.goal_id in goals_by_id
+
+        scheduled_pairs = [(b, a) for b, a in scheduled_pairs if _goal_is_live(a)]
+        stale_pairs = [(b, a) for b, a in stale_pairs if _goal_is_live(a)]
+        backlog = [a for a in backlog if _goal_is_live(a)]
 
         # 후보(action_id dedup) + 각 후보가 교체할 옛 블록 **전부**.
         # #115 스케줄러가 긴 액션을 여러 세션 블록으로 쪼개므로 한 액션에 옛 블록이 여러 개일
