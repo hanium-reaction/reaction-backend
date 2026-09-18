@@ -23,6 +23,7 @@ L0 스파이크(`docs/experiments/l0-materials-source-results.md` §3.1)가 확�
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import re
 from dataclasses import dataclass, field
@@ -56,11 +57,20 @@ _CHAPTER_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
+_HEADER_RE = re.compile("|".join(p.pattern for p in _CHAPTER_PATTERNS))
+
+
 def _split_toc_entries(raw_toc: str) -> list[str]:
-    """목차 원문에서 챕터 헤더를 경계로 항목을 끊는다. 못 끊으면 원문 그대로 1개."""
-    joined_pattern = "|".join(p.pattern for p in _CHAPTER_PATTERNS)
-    marker = re.compile(f"(?={joined_pattern})")
-    parts = [p.strip() for p in marker.split(raw_toc) if p.strip()]
+    """목차 원문에서 챕터 헤더를 경계로 항목을 끊는다. 못 끊으면 원문 그대로 1개.
+
+    헤더는 **겹치지 않게** 왼쪽부터 찾는다(`finditer`). 예전엔 모든 위치에서 앞을 내다보고
+    끊어서(`(?=...)` 로 split) "제10장" 하나가 '제'·'1'·'0장' 위치마다 잘렸다 — "제",
+    "1" 같은 가짜 챕터가 끼어 챕터 수가 두세 배로 부풀었다(inbox-5).
+    """
+    starts = [m.start() for m in _HEADER_RE.finditer(raw_toc)]
+    bounds = [0, *starts, len(raw_toc)]
+    parts = [raw_toc[a:b].strip() for a, b in itertools.pairwise(bounds)]
+    parts = [p for p in parts if p]
     return parts or ([raw_toc.strip()] if raw_toc.strip() else [])
 
 

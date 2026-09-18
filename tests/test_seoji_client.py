@@ -161,3 +161,16 @@ async def test_timeout_is_reported_without_raising(monkeypatch: pytest.MonkeyPat
     result = await client.lookup_toc("9788994492049", key="testkey")
     assert not result.ok
     assert result.reason == client.REASON_TIMEOUT
+
+
+def test_korean_chapter_headers_are_not_split_in_the_middle() -> None:
+    """ "제10장" 하나가 '제'·'1'·'0장' 으로 쪼개져 가짜 챕터가 끼던 회귀 (inbox-5)."""
+    entries = client._split_toc_entries("제1장 A···5 제2장 B···10 제10장 C···50")
+    assert [client._chapter_title(e) for e in entries] == ["제1장 A", "제2장 B", "제10장 C"]
+    assert client._chapter_end_pages(entries) == [5, 10, 50]
+
+
+def test_text_before_the_first_header_is_kept_as_its_own_entry() -> None:
+    """머리말처럼 첫 헤더 앞에 오는 부분은 예전처럼 따로 한 항목으로 남는다."""
+    entries = client._split_toc_entries("머리말···3 DAY 01 인사···10 DAY 02 날씨···20")
+    assert entries == ["머리말···3", "DAY 01 인사···10", "DAY 02 날씨···20"]

@@ -31,6 +31,7 @@ from reaction_backend.integrations.youtube import client as youtube_client
 from reaction_backend.orchestrator import first_plan_adapter
 from reaction_backend.schemas.interview import InterviewOutcome
 from reaction_backend.schemas.materials_spec import (
+    MAX_TOC_ENTRIES,
     BookChapter,
     BookDetailResponse,
     BookPace,
@@ -75,8 +76,12 @@ async def book_detail(isbn13: str, *, settings: Settings) -> BookDetailResponse:
     notice: str | None = None
     if toc_result.ok:
         assert toc_result.lookup is not None
+        # 스키마 상한(`MAX_TOC_ENTRIES`)까지만 — 하루 한 단원짜리 단어책은 목차 항목이 100개를
+        # 쉽게 넘는다. 넘긴 채로 응답을 만들면 검증에서 터져 도서 상세 전체가 500 이 됐다
+        # (inbox-5). 잘린 뒤쪽 분량은 진도 계산의 "목차 이후 나머지 분량" 항목이 받는다.
         chapters = [
-            BookChapter(title=c.title, end_page=c.end_page) for c in toc_result.lookup.chapters
+            BookChapter(title=c.title, end_page=c.end_page)
+            for c in toc_result.lookup.chapters[:MAX_TOC_ENTRIES]
         ]
         toc_source = "seoji"
     elif toc_result.reason != seoji_client.REASON_NO_TOC:
