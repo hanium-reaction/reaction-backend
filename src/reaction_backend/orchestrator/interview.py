@@ -1174,11 +1174,18 @@ def _answer_text(answer: dict[str, Any] | None) -> str:
     return ""
 
 
+# 러닝 요약의 값 하나당 최대 글자 수 — 붙여넣은 자료 원문(최대 2만 자)이 뒤이은 질문
+# 생성 호출마다 통째로 다시 실려, 호출당 토큰이 크게 늘고 8초 타임아웃에 가까워져 룰 폴백
+# 질문이 잦아졌다. 질문 말투를 이어가는 데는 앞부분이면 충분하다. 계획 파이프라인은 이
+# 요약이 아니라 슬롯 원문(`_materials_note`)을 읽으므로 자료 내용은 잃지 않는다.
+_CONTEXT_VALUE_MAX = 120
+
+
 def _answered_context(state: InterviewState) -> str:
     """앞서 채워진 슬롯 → 다음 질문용 짧은 러닝 요약("태그=값 / …").
 
     아직 답이 없으면 명시 문구. LLM 이 이전 답을 이어받아(맥락 반복 없이) 자연스럽게 묻게 한다.
-    태그 맵은 `state["kind"]` 로 카탈로그를 조회해 얻는다.
+    태그 맵은 `state["kind"]` 로 카탈로그를 조회해 얻는다. 값은 `_CONTEXT_VALUE_MAX` 자에서 자른다.
     """
     answers = state["slot_answers"]
     parts: list[str] = []
@@ -1187,6 +1194,8 @@ def _answered_context(state: InterviewState) -> str:
         if not _is_filled(value):
             continue
         text = _answer_text(value).strip()
+        if len(text) > _CONTEXT_VALUE_MAX:
+            text = text[:_CONTEXT_VALUE_MAX].rstrip() + "…"
         if text:
             parts.append(f"{tag}={text}")
     return " / ".join(parts) if parts else "(아직 답한 내용 없음)"

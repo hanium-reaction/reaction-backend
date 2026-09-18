@@ -2706,6 +2706,20 @@ def test_answered_context_summarizes_filled_slots() -> None:
     assert "목표=캡스톤, 토익" in ctx
 
 
+def test_answered_context_truncates_long_pasted_material() -> None:
+    """붙여넣은 자료 원문(최대 2만 자)이 뒤이은 질문 호출마다 통째로 실리지 않는다 (interview-18)."""
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = {
+        "identity.role": {"type": "chip", "values": ["3학년"]},
+        "goals.materials": {"type": "text", "raw": "x" * 20000},
+    }
+
+    ctx = interview._answered_context(state)
+    assert len(ctx) < 1000
+    assert "학년/시기=3학년" in ctx  # 짧은 값은 그대로
+    assert "x" * interview._CONTEXT_VALUE_MAX + "…" in ctx
+
+
 def test_answered_context_empty_when_no_answers() -> None:
     """아직 아무 답도 없으면 명시 문구 — 프롬프트가 빈 맥락을 오해하지 않게."""
     state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
