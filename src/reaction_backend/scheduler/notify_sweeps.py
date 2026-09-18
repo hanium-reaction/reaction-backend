@@ -76,6 +76,13 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
+# 알림을 누르면 열 FE 경로 — **FE 가 실제로 그리는 경로만** 쓴다. 지금 FE 라우터는 `/` 하나뿐
+# (`App.tsx` `<Route path="/">`)이라, 예전의 `/today`·`/reflection`·`/reviews/weekly` 는 빈
+# 화면이 떴다(설치형 PWA 는 주소창도 없어 앱을 죽여야 빠져나왔다). `/` 로 열면 앱이 계정 상태로
+# 첫 화면을 고르고, SW 가 붙이는 `?notificationId=` 로 열람 기록도 남는다. FE 가 화면별 경로를
+# 지원하면(이슈) 그때 클래스별 딥링크로 되돌린다.
+APP_ENTRY_URL = "/"
+
 # "카드 2분 전" (architecture.md §6). 5분 폴 간격과 짝 — 실제 리드타임은 2~7분.
 PRE_CARD_LEAD = timedelta(minutes=2)
 NOTIFY_POLL_INTERVAL = timedelta(minutes=5)
@@ -105,9 +112,10 @@ def _evening_payload(
     """일요일엔 같은 회고 알림에 주간 리포트를 얹는다 (ADR-0008 §4, §8 "F").
 
     새 알림 클래스를 만들지 않는다 — 발송 조건("회고할 카드가 있을 때만", 클래스 dedup,
-    주 ≤3건 예산)은 그대로고 **문구·딥링크만** 요일에 따라 갈라진다. 리포트 자체의 숫자는
-    여기서 계산하지 않는다 — 실제 내용은 `GET /reviews/weekly`(딥링크 도착지)가 보여주고,
-    push body 는 짧은 예고만 한다(사용자별 만다라 조회를 이 sweep 루프에 추가로 얹지 않음).
+    주 ≤3건 예산)은 그대로고 **문구만** 요일에 따라 갈라진다(링크는 FE 가 그리는 `/` 하나 —
+    `APP_ENTRY_URL`). 리포트 자체의 숫자는 여기서 계산하지 않는다 — 실제 내용은
+    `GET /reviews/weekly` 가 보여주고, push body 는 짧은 예고만 한다(사용자별 만다라 조회를 이
+    sweep 루프에 추가로 얹지 않음).
 
     `id`(문자열) — 이 알림의 `notification_sends` PK 를 미리 실어 보낸다(근거 대장 §6.1).
     FE 가 push `notificationclick` 에서 이 값을 그대로 되돌려주면 서버가 `opened_at` 을
@@ -119,14 +127,14 @@ def _evening_payload(
             "class": "evening_reflection",
             "title": "오늘의 회고 + 이번 주 리포트",
             "body": f"돌아볼 카드 {pending_count}장과 이번 주 만다라 리포트가 준비됐어요.",
-            "url": "/reviews/weekly",
+            "url": APP_ENTRY_URL,
         }
     return {
         "id": f"{NOTIFICATION_ID_PREFIX}{notification_id}",
         "class": "evening_reflection",
         "title": "오늘의 회고 시간이에요",
         "body": f"돌아볼 카드가 {pending_count}장 있어요.",
-        "url": "/reflection",
+        "url": APP_ENTRY_URL,
     }
 
 
@@ -136,7 +144,7 @@ def _pre_card_payload(notification_id: UUID, title: str, start_hhmm: str) -> dic
         "class": "pre_card",
         "title": "곧 시작할 카드가 있어요",
         "body": f"{start_hhmm} · {title}",
-        "url": "/today",
+        "url": APP_ENTRY_URL,
     }
 
 
@@ -272,7 +280,7 @@ def _morning_brief_payload(
         "class": "morning_brief",
         "title": "새로운 하루, 다시 시작해볼까요?",
         "body": body,
-        "url": "/today",
+        "url": APP_ENTRY_URL,
     }
 
 

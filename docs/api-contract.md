@@ -1113,8 +1113,12 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
   (알림 피로 최소화 — 베이스라인 §1.4 잠금의 문면 그대로, 해석 근거 ADR-0006 §2)
 - 같은 클래스 하루(KST) 1건 — "24h 중복 금지"의 달력일 구현 (래칫 방지, ADR-0006 §3)
 - 저녁 회고 알림은 **회고할 카드가 있을 때만** (경계는 `GET /reflection/pending` 과 동일).
-  **일요일은 문구·딥링크만 갈라진다**(`title`/`body`/`url: /reviews/weekly`) — 같은 클래스에
-  주간 만다라 리포트를 얹는다. 새 클래스·새 발송 조건 없음(ADR-0008 §4, §8 "F")
+  **일요일은 문구만 갈라진다**(`title`/`body`) — 같은 클래스에 주간 만다라 리포트 예고를
+  얹는다. 새 클래스·새 발송 조건 없음(ADR-0008 §4, §8 "F")
+- push payload 의 `url` 은 모든 클래스가 **`/`**(v2.30-auth). FE 라우터가 `/` 하나만 그려서
+  예전 `/today`·`/reflection`·`/reviews/weekly` 는 알림을 누르면 빈 화면이었다. SW 가
+  `?notificationId=` 를 붙여 열람 기록은 그대로 남는다. FE 가 화면별 경로를 지원하면 클래스별
+  딥링크로 되돌린다
 - pre_card 는 opt-in(`preCardEnabled`) + 시작 2~7분 전 (2분 리드 + 5분 폴)
 - 전달 유효 시간(RFC 8030 TTL)·Urgency — pre_card 7분·`high`, evening_reflection 23:00 까지,
   morning_brief 3시간, 모두 23:00(quiet hours 시작)에서 자른다. 기기가 잠깐 꺼져 있어도 이

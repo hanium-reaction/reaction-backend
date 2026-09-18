@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -225,7 +226,7 @@ async def test_evening_sunday_attaches_weekly_report_text_and_deeplink() -> None
     assert payload["class"] == "evening_reflection"  # 새 클래스 아님
     assert "3장" in payload["body"]
     assert "리포트" in payload["title"] or "리포트" in payload["body"]
-    assert payload["url"] == "/reviews/weekly"
+    assert payload["url"] == "/"  # FE 가 그리는 유일한 경로 (sched-1)
 
 
 async def test_evening_non_sunday_keeps_reflection_deeplink() -> None:
@@ -237,7 +238,7 @@ async def test_evening_non_sunday_keeps_reflection_deeplink() -> None:
 
     assert result.sent == 1
     payload = h.sender.calls[0][1]
-    assert payload["url"] == "/reflection"
+    assert payload["url"] == "/"
     assert "리포트" not in payload["title"]
     assert "리포트" not in payload["body"]
 
@@ -571,7 +572,7 @@ async def test_morning_brief_sends_for_due_park_with_original_title() -> None:
     payload = h.sender.calls[0][1]
     assert payload["class"] == "morning_brief"
     assert "밀린 리포트" in payload["body"]
-    assert payload["url"] == "/today"
+    assert payload["url"] == "/"
     # PARK 는 새 카드를 안 만든다 — target 은 원본이 아니라 None(카드 자체가 없다).
     assert h.send_repo._sends[0].target_action_item_id is None
 
@@ -686,3 +687,24 @@ async def test_morning_brief_isolates_one_user_failure(monkeypatch: pytest.Monke
     assert result.failed == 1
     assert result.sent == 1
     assert h.session.rollback_count == 1
+
+
+# ───── 알림 링크는 FE 가 실제로 그리는 경로만 (sched-1) ─────
+#
+# FE 라우터는 `/` 하나뿐이다(reaction-frontend `App.tsx`). 예전 `/today`·`/reflection`·
+# `/reviews/weekly` 는 알림을 누르면 빈 화면이 떴다. 새 딥링크를 넣으려면 FE 가 먼저 그 경로를
+# 지원해야 한다 — 그때 이 집합을 함께 늘린다.
+FE_ROUTABLE_URLS = frozenset({"/"})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        notify_sweeps._evening_payload(uuid4(), 2, is_sunday=True),
+        notify_sweeps._evening_payload(uuid4(), 2, is_sunday=False),
+        notify_sweeps._pre_card_payload(uuid4(), "영어 단어", "09:00"),
+        notify_sweeps._morning_brief_payload(uuid4(), 1, title="밀린 리포트"),
+    ],
+)
+def test_every_push_links_to_a_route_the_fe_renders(payload: dict[str, Any]) -> None:
+    assert payload["url"] in FE_ROUTABLE_URLS
