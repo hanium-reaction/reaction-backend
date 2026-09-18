@@ -28,10 +28,33 @@ __all__ = ["parse_date", "parse_time_range"]
 
 # ── 날짜 ────────────────────────────────────────────────────────────────────
 
-_ISO = re.compile(r"(?<!\d)(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)")
+# 4자리 연도는 `-`·`/`·`.` 어느 구분자든 받는다. "2028/03/01" 을 연도 없는 `M/D` 로 읽으면
+# 앞의 2028 이 버려지고 "3/1" 만 남아 가까운 해로 옮겨졌다(2027-03-01).
+_ISO = re.compile(r"(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)")
 _YMD = re.compile(r"(?<!\d)(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?")
+# "27년 10월 1일" — 두 자리 연도. `(?<!\d)` 가 "2027년" 의 뒤 두 자리에 걸리는 것을 막는다.
+_YMD_SHORT = re.compile(r"(?<!\d)(\d{2})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?")
 _MD = re.compile(r"(?<!\d)(\d{1,2})\s*월\s*(\d{1,2})\s*일")
 _MD_SLASH = re.compile(r"(?<!\d)(\d{1,2})\s*/\s*(\d{1,2})(?!\s*/|\d)")
+
+# 상대 연도 낱말 → 올해 기준 몇 년 뒤. **긴 낱말부터** 본다 — "재작년" 안에 "작년" 이 있다.
+_RELATIVE_YEARS: tuple[tuple[str, int], ...] = (
+    ("내후년", 2),
+    ("재작년", -2),
+    ("내년", 1),
+    ("명년", 1),
+    ("작년", -1),
+    ("올해", 0),
+    ("금년", 0),
+)
+
+# 연도 없는 날짜가 **이만큼 안쪽으로 지났으면** 내년으로 넘기지 않고 지난 날짜 그대로 둔다.
+#
+# 9/18 에 "9월 15일까지" 는 사람에게 사흘 전의 마감이지 1년 뒤가 아니다. 내년으로 밀면
+# 계획이 1년짜리로 늘어나고, 지난 마감을 되묻는 경로(#231)도 조용히 비켜 간다. 지난 날짜로
+# 두면 그 경로가 "이미 지났는데 실제로는 언제까지인지" 를 사용자에게 묻는다 — 추측하지
+# 않고 묻는 쪽이다. 12월의 "3월 2일" 처럼 한참 지난 날은 여전히 내년이다.
+_RECENT_PAST_DAYS = 30
 
 
 def parse_date(text: str, *, today: date) -> str | None:
@@ -41,8 +64,13 @@ def parse_date(text: str, *, today: date) -> str | None:
     당연히 내년으로 읽는데, LLM 은 그때그때 다르다. 규칙을 하나로 고정한다:
 
         연도가 없으면 **오늘 이후로 가장 가까운 해**를 고른다.
+        단, 최근 `_RECENT_PAST_DAYS` 일 안에 지난 날이면 그 지난 날짜다.
 
     같은 달·같은 날이면 오늘로 본다(마감이 오늘인 경우가 실제로 있다).
+
+    ⚠️ **연도를 말했으면 그 연도를 따른다.** "내년 10월 1일"·"27년 10월 1일" 의 연도 표시를
+    버리고 월·일만 읽으면 1년 뒤 마감이 2주 뒤가 된다 — 그리고 룰이 LLM 값을 덮으므로
+    (#432) LLM 이 맞게 읽어도 소용이 없었다.
     """
     s = text.strip()
     if not s:
@@ -53,15 +81,28 @@ def parse_date(text: str, *, today: date) -> str | None:
         y, mo, d = (int(g) for g in m.groups())
         return _iso_or_none(y, mo, d)
 
+    m = _YMD_SHORT.search(s)
+    if m:
+        yy, mo, d = (int(g) for g in m.groups())
+        return _iso_or_none(2000 + yy, mo, d)
+
     m = _MD.search(s) or _MD_SLASH.search(s)
     if m:
         mo, d = (int(g) for g in m.groups())
-        # 연도 없음 — 오늘 이후로 가장 가까운 해.
+        offset = next((n for word, n in _RELATIVE_YEARS if word in s), None)
+        if offset is not None:
+            return _iso_or_none(today.year + offset, mo, d)
+        # 연도 없음 — 최근에 지난 날이면 그 날, 아니면 오늘 이후로 가장 가까운 해.
+        this_year = _iso_or_none(today.year, mo, d)
+        if this_year is not None:
+            passed_days = (today - date.fromisoformat(this_year)).days
+            if 0 < passed_days <= _RECENT_PAST_DAYS:
+                return this_year
         for year in (today.year, today.year + 1):
             iso = _iso_or_none(year, mo, d)
             if iso is not None and date.fromisoformat(iso) >= today:
                 return iso
-        return _iso_or_none(today.year, mo, d)
+        return this_year
     return None
 
 
@@ -86,7 +127,10 @@ _MERIDIEM = {
     "밤": 12,
 }
 _MIDNIGHT_WORDS = ("자정", "밤 12시", "밤12시", "0시")
-_HOUR = r"(?:(새벽|아침|오전|낮|점심|오후|저녁|밤)\s*)?(\d{1,2})\s*(?:시|:)\s*(\d{1,2})?\s*분?"
+# "밤 12시" 는 자정이다(낮 12시가 아니다). "저녁 12시" 도 같은 뜻으로 쓰인다.
+_MIDNIGHT_MERIDIEM = ("밤", "저녁")
+# 시와 분 사이 구분자(`시` | `:`)를 **잡아 둔다** — `:` 로 쓴 시각은 이미 24시간제다.
+_HOUR = r"(?:(새벽|아침|오전|낮|점심|오후|저녁|밤)\s*)?(\d{1,2})\s*(시|:)\s*(\d{1,2})?\s*분?"
 _RANGE = re.compile(
     _HOUR + r"\s*(?:부터|에서|~|-|–|—|to)\s*" + _HOUR,
     re.IGNORECASE,
@@ -106,20 +150,22 @@ def parse_time_range(text: str, *, end_is_window: bool = True) -> dict[str, str]
 
     m = _RANGE.search(s)
     if m:
-        mer1, h1, min1, mer2, h2, min2 = m.groups()
+        mer1, h1, _sep1, min1, mer2, h2, sep2, min2 = m.groups()
         start = _to_hhmm(mer1, h1, min1)
-        end = _to_hhmm(mer2, h2, min2, prev_hour=start)
+        end = _to_hhmm(mer2, h2, min2, prev_hour=start, clock=sep2 == ":")
         if start is None or end is None:
             return None
         if end_is_window and end == "00:00":
             end = "24:00"
+        # 끝이 시작보다 앞이면 **자정을 넘는 구간**이다("22:00-02:00"). 그대로 둔다 —
+        # `first_plan_adapter._activity_awake_min` 이 이미 넘김을 두 구간으로 읽는다.
         return {"start": start, "end": end}
 
     # "밤 8시부터 자정까지" — 끝이 숫자가 아니라 낱말이다.
     if any(w in s for w in _MIDNIGHT_WORDS):
         head = re.search(_HOUR + r"\s*(?:부터|에서|~|-)", s)
         if head:
-            mer, hh, mm = head.groups()
+            mer, hh, _sep, mm = head.groups()
             start = _to_hhmm(mer, hh, mm)
             if start is not None:
                 return {"start": start, "end": "24:00" if end_is_window else "00:00"}
@@ -127,23 +173,39 @@ def parse_time_range(text: str, *, end_is_window: bool = True) -> dict[str, str]
 
 
 def _to_hhmm(
-    meridiem: str | None, hour: str, minute: str | None, *, prev_hour: str | None = None
+    meridiem: str | None,
+    hour: str,
+    minute: str | None,
+    *,
+    prev_hour: str | None = None,
+    clock: bool = False,
 ) -> str | None:
+    """시각 토큰 하나 → "HH:MM". `clock=True` 는 "02:00" 처럼 `:` 로 쓴 24시간제 표기다."""
     h = int(hour)
     mi = int(minute) if minute else 0
     if not (0 <= h <= 24 and 0 <= mi < 60):
         return None
     if meridiem:
         base = _MERIDIEM[meridiem]
-        # "오후 12시" 는 12시, "오전 12시" 는 0시 — 12 를 더하면 24시가 된다.
-        h = h % 12 + base if h != 12 else (12 if base == 12 else 0)
-    elif prev_hour is not None and 0 < h <= 12:
-        # 오전/오후가 없는 뒤쪽 시각("9시~6시")은 **앞 시각보다 뒤**로 읽는다.
+        if h == 12:
+            # "오후 12시" 는 12시, "오전 12시" 는 0시 — 12 를 더하면 24시가 된다.
+            # "밤 12시" 는 자정(0시)이다 — 구간 끝이면 호출부가 24:00 으로 바꾼다.
+            h = 12 if base == 12 and meridiem not in _MIDNIGHT_MERIDIEM else 0
+        else:
+            h = h % 12 + base
+    elif prev_hour is not None and not clock and 0 < h <= 12:
+        # 오전/오후가 없는 뒤쪽 시각("9시~6시")은 **앞 시각보다 뒤**로 읽는다 — 단, 12 를
+        # 더해야 실제로 앞 시각 뒤가 될 때만. "22시-2시" 의 2시에 12 를 더하면 14시가 되어
+        # 밤 10시~낮 2시라는 엉뚱한 구간이 나온다. 그건 자정을 넘는 구간이다(02:00).
         #
         # ⚠️ **0시는 제외한다.** 자정은 모호하지 않은데(12시로 읽을 이유가 없다) 이 규칙에
         # 걸리면 "저녁 8시 ~ 0시" 가 20:00~12:00 이 된다 — 끝이 시작보다 앞선다.
+        #
+        # ⚠️ **`:` 로 쓴 시각("02:00")도 제외한다.** 이미 24시간제다 — FE 시간 다이얼이
+        # "09:00-23:00" 형식을 쓰고, 자정을 넘는 구간은 '직접 입력' 으로 같은 형식을 적으라고
+        # 안내한다. 여기에 12 를 더하면 "22:00-02:00" 이 22:00~14:00 이 됐다(실측).
         prev = int(prev_hour.split(":")[0])
-        if h < prev and h + 12 <= 24:
+        if h < prev < h + 12:
             h += 12
     if h > 24 or (h == 24 and mi):
         return None
