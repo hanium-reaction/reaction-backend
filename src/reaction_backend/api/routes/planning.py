@@ -2005,6 +2005,7 @@ async def _fill_continuation_cards(
     horizon: str | None,
     action_repo: ActionItemRepo,
     goal_repo: GoalRepo,
+    tone_mode: str | None = None,
 ) -> list[continuation_fill.FilledCard]:
     """재계획 후보 중 자리표시자를 찾아 내용을 채운다 (#454). 실패하면 빈 목록.
 
@@ -2067,6 +2068,8 @@ async def _fill_continuation_cards(
                     and a.id not in placeholder_ids
                     and a.goal_node_id not in rule_nodes
                 ],
+                # 사용자가 고른 말투 — 계획의 다른 LLM 호출과 같게 (planA-19).
+                tone_mode=tone_mode,
             )
         )
         budget -= len(placeholders)
@@ -2224,6 +2227,7 @@ async def generate_replan(
             horizon=None,
             action_repo=action_repo,
             goal_repo=goal_repo,
+            tone_mode=user.tone_mode,
         )
         if filled:
             # 채운 제목이 **드래프트 미리보기에 보여야** 한다 — 사용자가 승인하는 건

@@ -158,3 +158,34 @@ def test_replan_says_so_when_a_goal_cannot_fit_before_its_deadline(
     assert len(notes) == 1, resp.json()["warnings"]
     # 세션마다 한 줄씩 늘어놓지 않는다 — 목표 단위 한 줄.
     assert not any("배치할 가용 시간을 찾지 못했어요" in w for w in resp.json()["warnings"])
+
+
+def test_replan_fills_placeholders_in_the_users_tone(
+    monkeypatch: Any,
+    client: TestClient,
+    demo_user_orm: Any,
+    fake_goal_repo: FakeGoalRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """planA-19 — 자리표시자 채우기(LLM)도 사용자가 고른 말투를 받는다."""
+    from reaction_backend.orchestrator import continuation_fill
+    from tests.test_replan_route import _seed_rule_node
+
+    _freeze_now(monkeypatch)
+    demo_user_orm.tone_mode = "strict"
+    goal = _seed_goal(fake_goal_repo, title="정보처리기사", deadline=date(2026, 11, 30))
+    node = _seed_rule_node(fake_goal_repo, goal_id=goal.id, title="목표 21회차")
+    card = _card(fake_action_item_repo, goal, title="목표 21회차")
+    card.goal_node_id = node.id
+    seen: dict[str, Any] = {}
+
+    async def capture(session: Any, **kwargs: Any) -> list[Any]:
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(continuation_fill, "fill_cards", capture)
+
+    resp = client.post("/plans/replan")
+
+    assert resp.status_code == 201, resp.text
+    assert seen.get("tone_mode") == "strict"
