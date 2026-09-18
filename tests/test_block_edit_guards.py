@@ -1,6 +1,7 @@
 """주간 캘린더 블록 편집(PATCH /plans/{planId}/blocks/{blockId})의 가드.
 
 - planA-9: 이미 시작했거나 끝낸 블록은 시간을 옮길 수 없다(제목·목표만 바꾸는 건 허용).
+- planA-4: 300자를 넘는 제목은 한국어 422 로 거절한다(예전엔 UPDATE 에서 터져 일반 500).
 """
 
 from __future__ import annotations
@@ -64,3 +65,28 @@ def test_a_finished_block_can_still_be_renamed(
     assert body["blockStatus"] == "finished"
     assert body["source"] == "ai_plan"
     assert body["startAt"].startswith(f"{_dt(1, 9, 0).date().isoformat()}T09:00")
+
+
+def test_a_title_longer_than_the_card_column_is_rejected_in_korean(
+    client: TestClient,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    action = _action()
+    fake_action_item_repo.seed(action)
+    block = _block(_dt(1, 9, 0), _dt(1, 10, 0), action_id=action.id)
+    fake_scheduled_block_repo.seed(block, title=action.title, category=action.category)
+
+    too_long: Any = _patch(
+        client, f"block_{block.id}", {"startAt": _dt(1, 9, 0).isoformat(), "title": "가" * 301}
+    )
+    assert too_long.status_code == 422
+    assert too_long.json()["code"] == "COMMON_VALIDATION_ERROR"
+    assert too_long.json()["message"] == "제목은 300자까지 쓸 수 있어요. 조금 줄여 주세요."
+    assert action.title == "GROUP BY 실습"
+
+    exact: Any = _patch(
+        client, f"block_{block.id}", {"startAt": _dt(1, 9, 0).isoformat(), "title": "가" * 300}
+    )
+    assert exact.status_code == 200, exact.text
+    assert action.title == "가" * 300

@@ -33,6 +33,14 @@ _MILESTONE_TITLE_MAX = 200
 _MILESTONE_SUMMARY_MAX = 500
 _MILESTONES_MAX = 10
 
+
+def _block_title_fits(v: object) -> object:
+    """블록(카드) 제목 길이 검사 — `mode="before"` 검증기 공용. 넘치면 한국어 422."""
+    if isinstance(v, str) and len(v) > _BLOCK_TITLE_MAX:
+        raise PydanticCustomError("string_too_long", _BLOCK_TITLE_TOO_LONG)
+    return v
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM Structured Output (LLM ②③) — goal_decompose.v1.md 출력 형식과 1:1 대응.
 # node_id 는 LLM 이 만드는 temp_uuid (DB UUID 아님). SAVING 단계에서 실제 UUID 로 치환.
@@ -234,6 +242,34 @@ class FirstPlanGenerateRequest(CamelModel):
     # 전달돼 생성되는 action_item 수의 하한 가이드가 된다. light≈3 / standard≈5 / intense≈8 세션/주.
     density: Literal["light", "standard", "intense"] = "standard"
 
+    @field_validator("milestones")
+    @classmethod
+    def _milestones_fit(cls, v: list[MilestoneDraft] | None) -> list[MilestoneDraft] | None:
+        """사용자가 확인·편집한 중간 목표를 **요청 단계에서** 잰다 (planA-4).
+
+        `MilestoneDraft` 자체에 길이 제한을 두지 않는 건 그게 LLM 출력 스키마(`MilestonePlan`)
+        이기도 해서다 — 거기 걸면 긴 제목 하나로 LLM 결과 전체가 폴백으로 떨어진다. 검사가
+        없으면 200자 넘는 이름이 생성은 통과하고 승인(goal_nodes.title String(200))에서만
+        터져, 그 초안은 몇 번을 눌러도 '잠시 후 다시' 로 끝났다.
+        """
+        if v is None:
+            return v
+        if len(v) > _MILESTONES_MAX:
+            raise PydanticCustomError(
+                "too_long",
+                "중간 목표는 10개까지 정할 수 있어요. 비슷한 것끼리 합치거나 몇 개를 지워 주세요.",
+            )
+        for m in v:
+            if len(m.title) > _MILESTONE_TITLE_MAX:
+                raise PydanticCustomError(
+                    "string_too_long", "중간 목표 이름은 200자까지 쓸 수 있어요. 조금 줄여 주세요."
+                )
+            if len(m.summary) > _MILESTONE_SUMMARY_MAX:
+                raise PydanticCustomError(
+                    "string_too_long", "중간 목표 설명은 500자까지 쓸 수 있어요. 조금 줄여 주세요."
+                )
+        return v
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 응답 — Draft Layer 미리보기 (DraftMixin: is_draft / ai_source 강제).
@@ -267,9 +303,7 @@ class FirstPlanApproveBlock(CamelModel):
     @field_validator("title", mode="before")
     @classmethod
     def _title_fits(cls, v: object) -> object:
-        if isinstance(v, str) and len(v) > _BLOCK_TITLE_MAX:
-            raise PydanticCustomError("string_too_long", _BLOCK_TITLE_TOO_LONG)
-        return v
+        return _block_title_fits(v)
 
 
 class FirstPlanApproveRequest(CamelModel):
@@ -442,7 +476,13 @@ class BlockEditRequest(CamelModel):
     start_at: str  # ISO 8601 (KST)
     end_at: str | None = None
     category: str | None = None  # 목표 카테고리 변경 (블록 색/분류) — 없으면 유지
-    title: str | None = None  # 카드 제목 변경 — 없으면 유지
+    title: str | None = None  # 카드 제목 변경 — 없으면 유지. 300자까지(action_items.title)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title_fits(cls, v: object) -> object:
+        # 넘친 제목은 UPDATE 에서 터져 일반 500 이 됐다 (planA-4).
+        return _block_title_fits(v)
 
 
 class BlockEditResponse(_BlockFields):

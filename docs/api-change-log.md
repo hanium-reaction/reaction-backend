@@ -102,6 +102,16 @@ AI 원안이 그대로 저장됐다 — 사용자는 캘린더에서야 알게 �
 않아도 반영돼요" 문구를 실제로 반영되는 항목(활동 시간대·집중 길이·집중 시간대)으로 좁힌다. 회복 대화
 톤 반영은 회복 쪽 수정 범위다.
 
+### 제목 길이 검증 — 블록 제목 300자·중간 목표 이름 200자 (검증 추가, 새 에러 코드 없음)
+
+- `PATCH /plans/{planId}/blocks/{blockId}` 의 `title` 이 300자를 넘으면 UPDATE 에서 터져 일반
+  500 이었다. 이제 422 `COMMON_VALIDATION_ERROR` "제목은 300자까지 쓸 수 있어요. 조금 줄여 주세요."
+- `POST /plans/generate` 의 `milestones` 는 최대 10개, 이름 200자, 설명 500자. 예전엔 생성은
+  통과하고 승인에서만 터져(goal_nodes.title 200자) 그 초안은 몇 번을 눌러도 승인되지 않았다.
+  이제 LLM 호출 전에 422(field `milestones`, 한국어 안내).
+- **FE(reaction-frontend 이슈)**: `BlockEditSheet` 제목 입력 `maxLength={300}`, `MilestoneConfirmScreen`
+  이름 `maxLength={200}`·설명 `maxLength={500}`, 10개가 되면 '중간 목표 추가' 를 숨긴다.
+
 ---
 
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)
