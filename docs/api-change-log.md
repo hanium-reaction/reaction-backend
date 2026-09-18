@@ -85,6 +85,8 @@
 - 칩 질문의 "탭해서 담기 · 여러 개 골라도 돼요" 안내는 `currentQuestion.multiple=true` 일 때만
   띄우고, false 면 단일 선택으로 토글하면 된다 — 지금은 두 번째로 고른 목표·빈도가 말없이
   버려진다.
+- `outcome.coreGoals` 의 자리표시자 `(미입력 목표)`(`confidence=0`)는 목표가 아니다 — 목표 분류
+  화면에서 걸러 주면 된다(api-contract §4 에 문서화, 응답 형태는 무변경).
 
 ---
 
