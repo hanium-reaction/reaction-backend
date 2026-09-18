@@ -191,3 +191,24 @@ async def test_lookup_failure_log_does_not_leak_the_api_key(
     assert result.reason == client.REASON_UNAVAILABLE
     assert "aladin lookup failed" in caplog.text
     assert _SECRET not in caplog.text
+
+
+_API_ERROR_BODY = '{ "errorCode":4, "errorMessage":"API출력이 금지된 회원입니다." }'
+
+
+async def test_api_error_in_a_200_body_is_unavailable_not_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """알라딘은 키 차단·한도 초과도 HTTP 200 + `errorCode` 로 준다(라이브 실측) — 이걸
+    '결과 없음' 으로 읽으면 사용자에게 멀쩡한 검색어를 바꾸라고 안내하게 된다(inbox-6)."""
+    monkeypatch.setattr(client.requests, "get", lambda *a, **k: _FakeResponse(body=_API_ERROR_BODY))
+    result = await client.search_books("토익", key="ttbblocked", limit=3)
+    assert result.reason == client.REASON_UNAVAILABLE
+
+
+async def test_lookup_api_error_in_a_200_body_is_unavailable_not_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client.requests, "get", lambda *a, **k: _FakeResponse(body=_API_ERROR_BODY))
+    result = await client.lookup_book("9788965422389", key="ttbblocked")
+    assert result.reason == client.REASON_UNAVAILABLE
