@@ -326,6 +326,18 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 응답 ID 형식: `goal_<uuid>` (§1.8). category enum 9종 (`study`/`project`/`health`/`routine`/`schedule`/`career`/`relationship`/`self_dev`/`other`).
 
+**입력 상한**(v2.30-goals) — 넘으면 500 대신 422 `COMMON_VALIDATION_ERROR`(envelope·코드 그대로, 문구만 한국어):
+- 목표 `title`(`POST /goals`, `PATCH /goals/{id}`): 앞뒤 공백을 떼고 **1~200자**. 공백뿐이거나 비면
+  "목표 이름을 적어 주세요.", 길면 "목표 이름은 200자까지 적을 수 있어요."(`field="title"`).
+  `PATCH` 에서 `title` 을 빼면 그대로다. `estimatedMinutes` 는 0~1,000,000.
+- 궁극목표(`POST /goals/ultimate`) 제목은 인터뷰 문장을 **앞 200자로 줄여**(넘으면 끝에 `…`) 저장한다 —
+  긴 문장이 500 을 내고 재시도도 영영 실패하던 경로. 원문은 인터뷰 기록에 그대로 남는다.
+- 만다라 축·칸 제목(`subgoals[].title` 1~10자, `cells[].title` 1~16자 — `/plans/mandala/*` 요청 포함)은
+  **허용 범위 그대로**, 문구만 한국어: "축 이름은 1~10자로 적어 주세요." / "칸 내용은 1~16자로 적어 주세요."
+  `field` 에 `subgoals.3.title` 처럼 위치가 실린다. 칸 편집(`PATCH /goals/mandala/nodes/{id}`)의 빈 제목은
+  "칸 내용을 적어 주세요."
+- 반복형 전환(`POST /goals/mandala/nodes/{id}/habit`)의 `title`·`minutesPerSession` 은 §7 과 같은 상한.
+
 `status` enum 4종 — `proposed` / `active` / `completed` / `archived`.
 **`proposed`(잠정)** 는 딥 인터뷰가 추출했지만 **계획이 아직 승인되지 않은** 목표다. 인터뷰 완료 시
 `proposed` 로 저장되고, `POST /plans/{planId}/approve` 가 그 목표를 `active` 로 승격한다.
@@ -467,8 +479,8 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 | Method | Path | 설명 |
 | --- | --- | --- |
 | GET | `/habits` | 내 습관 전체 |
-| POST | `/habits` | 신규 — `{ title, category, frequencyPerWeek }` |
-| PATCH | `/habits/{id}` | 빈도/제목 |
+| POST | `/habits` | 신규 — `{ title, category, frequencyPerWeek }`. `title` 은 앞뒤 공백을 떼고 1~200자(비면 "습관 이름을 적어 주세요.", 길면 "습관 이름은 200자까지 적을 수 있어요." — 422 `COMMON_VALIDATION_ERROR`, v2.30-goals), `minutesPerSession` 1~1440 |
+| PATCH | `/habits/{id}` | 빈도/제목 — `title` 상한은 `POST` 와 같다(생략하면 그대로) |
 | DELETE | `/habits/{id}` | soft delete |
 | GET | `/habit-instances?weekStart=YYYY-MM-DD` | 이번 주 인스턴스 (`doneCount` vs `targetCount`) |
 | POST | `/habit-instances/{id}/check` | 1회 달성 |

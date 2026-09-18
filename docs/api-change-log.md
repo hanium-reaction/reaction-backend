@@ -41,6 +41,17 @@
   `status="archived"` 는 `archive` 와 같은 보관(`archivedAt` 까지).
 - `GET /inbox?status=<없는 값>` 은 500 대신 422 `COMMON_VALIDATION_ERROR`.
 
+### 제목·숫자 입력 상한 — 500 대신 한국어 422
+
+- 목표·습관 `title`(`POST`/`PATCH /goals`, `POST`/`PATCH /habits`, 반복형 전환 `title`)은 앞뒤 공백을 떼고
+  1~200자. 예전엔 200자를 넘으면 DB 가 500 을 냈고("잠시 후 다시 시도" — 다시 해도 영영 안 됐다),
+  공백뿐인 제목이 그대로 저장됐다. 이제 422 `COMMON_VALIDATION_ERROR` + 한국어 문구(`field="title"`).
+- `estimatedMinutes` 0~1,000,000, `minutesPerSession` 1~1440 — 32bit 를 넘는 값이 500 이던 경로.
+- `POST /goals/ultimate` — 인터뷰 문장이 200자를 넘으면 제목만 앞 200자(`…`)로 저장. 예전엔 인터뷰를
+  다 마치고도 저장이 계속 실패했다.
+- 만다라 축(1~10자)·칸(1~16자) 제목 — 허용 범위는 그대로, 영어 pydantic 문구 대신
+  "축 이름은 1~10자로 적어 주세요." 처럼 한국어로. `field` 는 예전처럼 `subgoals.3.title`.
+
 ---
 
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)

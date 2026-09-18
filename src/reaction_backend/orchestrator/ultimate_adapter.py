@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.orchestrator import interview_adapter
+from reaction_backend.orchestrator.goal_policy import clip_goal_title
 from reaction_backend.orchestrator.interview_catalog import ULTIMATE_REQUIRED_SLOT_KEYS
 from reaction_backend.repositories.interview_repo import InterviewRepo
 from reaction_backend.schemas.common import now_kst
@@ -233,8 +234,12 @@ async def materialize_ultimate_goal(
         Goal.user_id == user_id, Goal.is_ultimate.is_(True), Goal.archived_at.is_(None)
     )
     existing = (await session.execute(stmt)).scalar_one_or_none()
+    # 인터뷰 문장은 길이 제한이 없는데 `goals.title` 은 200자다 — 그대로 넣으면 긴 문장이
+    # 500 을 내고, 서버 fallback 도 같은 문장을 다시 투영해 재시도가 영영 실패했다. 제목만
+    # 줄이고 원문은 인터뷰 기록(slot_answers)에 그대로 남는다.
+    title = clip_goal_title(outcome.statement)
     if existing is not None:
-        existing.title = outcome.statement
+        existing.title = title
         existing.why_now = outcome.success_image
         existing.deadline = _deadline_from_horizon(outcome.horizon_years)
         await session.flush()
@@ -242,7 +247,7 @@ async def materialize_ultimate_goal(
 
     goal = Goal()
     goal.user_id = user_id
-    goal.title = outcome.statement
+    goal.title = title
     goal.category = "other"
     goal.goal_tier = "parked"
     goal.status = "active"
