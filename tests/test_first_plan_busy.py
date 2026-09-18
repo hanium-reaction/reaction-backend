@@ -12,6 +12,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
+import pytest
+
 from reaction_backend.db.models.fixed_schedule import FixedSchedule
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.time_policy import TimePolicy
@@ -401,8 +403,8 @@ async def test_calendar_week_never_exceeds_the_stated_cadence() -> None:
     """'주 5회' 는 어느 달력 주(월~일)에도 5개를 넘지 않는다 (planB-6).
 
     회귀(미러 실측): '주 5회' 20세션이 분 기준 26일 창에 흩어져 9/21 주에 6세션이 들어갔다.
-    stride 는 평균 간격만 맞추므로 창을 개수 기준(28일)으로 넓히고, 스케줄러가 주 단위
-    개수를 직접 센다.
+    창을 개수 기준(28일)으로 넓히면 stride 만으로 주 5회가 지켜진다 — 스케줄러에 주 단위
+    개수 상한을 따로 걸지 않는다(아래 주 중간 시작 마감 테스트 참고).
     """
     session = _RoutingSession(blocks=[], fixed=[], policies=[])
     config: Any = {"configurable": {"session": session, "tone_mode": None}}
@@ -412,6 +414,81 @@ async def test_calendar_week_never_exceeds_the_stated_cadence() -> None:
     assert len(blocks) == 20, "세션을 떨어뜨리지 않고 전부 놓는다"
     per_week = _sessions_per_calendar_week(blocks)
     assert max(per_week.values()) <= 5, f"달력 주별 세션 수가 주 5회를 넘었다: {per_week}"
+    assert not [w for w in new_state["schedule_warnings"] if "가용 시간을 찾지 못했" in w]
+
+
+def _deadline_cadence_state(*, freq: int, minutes: int, start: date, deadline: date) -> Any:
+    """주 중간에 시작하는 **마감 있는** 빈도 목표 — 분해 뒤 자르기·보충까지 거친 상태.
+
+    `decompose_goal` 이 LLM 결과에 하는 결정적 후처리(`shape_action_plan` →
+    `extend_action_plan_to_horizon`)를 그대로 태워, 세션 수가 실제 경로처럼
+    '주 N회 × 올림(일수/7)' 이 되게 한다 — 창이 온전한 주가 아니면 개수가 일수보다 많아진다.
+    """
+    base = _freq_state(deadline=deadline.isoformat(), sessions=60)
+    heaviest = (
+        base["outcome"]
+        .core_goals[0]
+        .model_copy(update={"frequency_per_week": freq, "session_length_min": minutes})
+    )
+    outcome = base["outcome"].model_copy(update={"core_goals": [heaviest]})
+    state = {**base, "outcome": outcome, "target_date": start.isoformat()}
+    gp = base["goal_plan"]
+    gp = gp.model_copy(
+        update={
+            "action_items": [
+                a.model_copy(update={"estimated_minutes": minutes}) for a in gp.action_items
+            ]
+        }
+    )
+    for step in (
+        first_plan_adapter.shape_action_plan,
+        first_plan_adapter.extend_action_plan_to_horizon,
+    ):
+        gp = step(
+            outcome, state["density"], gp, target_date=start, max_weeks=state["max_plan_weeks"]
+        )
+    return {**state, "goal_plan": gp}
+
+
+@pytest.mark.parametrize(
+    ("freq", "minutes", "start", "deadline", "max_per_day"),
+    [
+        # 토요일 시작 · 16일 창 · 매일 → 21세션. 주 상한을 걸었을 땐 일요일 하루에 5~6개.
+        (7, 30, date(2026, 9, 19), date(2026, 10, 4), 2),
+        # 금요일 시작 · 10일 창 · 주 5회 → 10세션. 주 상한일 땐 하루 3개.
+        (5, 30, date(2026, 9, 18), date(2026, 9, 27), 1),
+        # 토요일 시작 · 9일 창 · 주 3회 40분 → 6세션. 주 상한일 땐 하루 2개.
+        (3, 40, date(2026, 9, 19), date(2026, 9, 27), 1),
+        # 목요일 시작 · 11일 창 · 매일 → 14세션. 주 상한일 땐 하루 3개.
+        (7, 30, date(2026, 9, 17), date(2026, 9, 27), 2),
+    ],
+)
+async def test_midweek_deadline_window_does_not_stack_sessions_on_one_day(
+    monkeypatch: Any, freq: int, minutes: int, start: date, deadline: date, max_per_day: int
+) -> None:
+    """주 중간에 시작하는 마감 계획은 짧은 첫·끝 주의 하루에 세션을 쌓지 않는다 (planB-6 리뷰).
+
+    회귀: 달력 주마다 '주 N회' 상한을 걸자, 온전한 주가 상한에 막혀 넘친 몫이 짧은 첫 주
+    (토·일)나 끝 주에 하루 여러 개로 몰렸다 — '매일' 을 고쳤는데 도리어 하루 5개가 됐다.
+    기대치는 상한을 걸기 전(origin/main)과 같거나 낫다: 매일은 하루 2개 이하, 주 N회(<7)는
+    하루 1개. 세션을 떨어뜨리지도, 빈 시간이 있는데 '못 찾았다' 고 하지도 않는다.
+    """
+    monkeypatch.setattr(first_plan, "now_kst", lambda: _at(start, 7, 0))
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+    state = _deadline_cadence_state(freq=freq, minutes=minutes, start=start, deadline=deadline)
+    planned = len(state["goal_plan"].action_items)
+
+    new_state = await first_plan.schedule_blocks(state, config)
+
+    blocks = new_state["scheduled_blocks"]
+    assert len(blocks) == planned, "세션을 떨어뜨리지 않고 전부 놓는다"
+    per_day: dict[date, int] = {}
+    for b in blocks:
+        day = b.start.astimezone(KST).date()
+        assert start <= day <= deadline
+        per_day[day] = per_day.get(day, 0) + 1
+    assert max(per_day.values()) <= max_per_day, f"하루에 세션이 몰렸다: {per_day}"
     assert not [w for w in new_state["schedule_warnings"] if "가용 시간을 찾지 못했" in w]
 
 

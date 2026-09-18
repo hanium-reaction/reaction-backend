@@ -911,9 +911,10 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         daily_focus_cap_min=daily_cap,
         committed_min_by_day=first_plan_adapter.committed_minutes_by_day(existing_busy),
         roomy_busy_for_day=roomy_busy_for_day,
-        # 창을 개수로 넓혀도 stride 는 평균 간격만 맞춘다 — 막힌 날을 뒤로 밀면 한 달력 주에
-        # N+1 개가 들어갈 수 있어, 사용자가 말한 '주 N회' 를 스케줄러가 직접 지킨다.
-        max_sessions_per_week=per_week,
+        # ⚠️ 달력 주(월~일) 단위 개수 상한은 **걸지 않는다** (planB-6 리뷰). 마감 계획의 세션
+        # 수는 '주 N회 × 올림(일수/7)' 이라 창이 주 중간에 시작·끝나면 온전한 주가 상한에
+        # 막히고, 넘친 몫이 짧은 첫·끝 주의 며칠에 하루 여러 개로 쌓였다(실측: '매일' 토요일
+        # 시작·16일 창 → 일요일 하루 5~6개). 케이던스는 위의 개수 기준 창 넓히기가 지킨다.
     )
 
     # 세션 하나가 활동창의 연속 가용 길이보다 길어 어디에도 안 들어간 경우(#252):

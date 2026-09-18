@@ -199,7 +199,6 @@ def schedule_actions_multiday(
     daily_focus_cap_min: int,
     committed_min_by_day: Mapping[date, int] | None = None,
     roomy_busy_for_day: Callable[[date], Sequence[BusyBlock]] | None = None,
-    max_sessions_per_week: int | None = None,
 ) -> tuple[list[DraftScheduledBlock], list[str]]:
     """action_item 들을 start_day~horizon_day 에 걸쳐 배치한다.
 
@@ -225,11 +224,6 @@ def schedule_actions_multiday(
     roomy_busy_for_day:
         1차 배치에만 쓰는 '여유 있는' busy — 기존 블록 앞뒤로 휴식 여백을 덧댄 버전(#191).
         2차(가용 시간 채우기)는 항상 `busy_for_day` 를 쓴다. 없으면 두 패스 모두 동일.
-    max_sessions_per_week:
-        한 **달력 주(월~일, KST)** 에 놓을 수 있는 세션 수 상한 — 사용자가 직접 말한
-        케이던스('주 5회')다. 하루 상한과 달리 2차 패스에서도 넘기지 않는다: 하루 상한은
-        '편한 정도' 라 급하면 넘겨도 되지만, 주 N회는 사용자의 답 그 자체다. 없으면 제한 없음
-        (종전 동작 — 재계획 등 다른 호출자).
 
     Returns
     -------
@@ -253,16 +247,6 @@ def schedule_actions_multiday(
     # 하루 상한은 **이미 확정된 집중 시간에서 이어서** 센다(#190). 예전엔 항상 0에서 시작해,
     # 목표가 늘면 각 계획이 저마다 상한을 지켜도 합계는 아무도 지키지 않았다(실측 240분/180분).
     used_by_day: dict[date, int] = {d: max(0, (committed_min_by_day or {}).get(d, 0)) for d in days}
-    # 달력 주(그 주 월요일) → 이미 놓은 세션 수. stride 는 '평균' 간격만 맞출 뿐이라, 창이
-    # 조금만 좁거나(분 기준 창) 막힌 날을 뒤로 밀어도 한 주에 N+1 개가 들어간다(실측: '주 5회'
-    # 인데 9/21 주에 6세션). 그래서 주 단위 개수를 직접 센다.
-    week_cap = (
-        max_sessions_per_week if max_sessions_per_week and max_sessions_per_week > 0 else None
-    )
-    sessions_by_week: dict[date, int] = {}
-
-    def _week_of(day: date) -> date:
-        return day - timedelta(days=day.weekday())
 
     def free_of(day: date) -> list[TimeInterval]:
         cached = free_by_day.get(day)
@@ -371,8 +355,6 @@ def schedule_actions_multiday(
             day = days[di]
             if respect_cap and used_by_day[day] > 0 and used_by_day[day] + minutes > cap:
                 continue
-            if week_cap is not None and sessions_by_week.get(_week_of(day), 0) >= week_cap:
-                continue
             source = _join_midnight(day, roomy_free_of if respect_cap else free_of)
             start = _earliest_fit(source, need, _peak_intervals(day, peak_windows))
             if start is None:
@@ -384,7 +366,6 @@ def schedule_actions_multiday(
             # 은 '그날 밤' 한 덩어리지 이틀이 아니다 — 다음 날 앞에 나눠 달면 그 날 몫이 미리
             # 깎여, 정작 다음 날 밤에 배치할 자리가 이유 없이 줄어든다.
             used_by_day[day] += minutes
-            sessions_by_week[_week_of(day)] = sessions_by_week.get(_week_of(day), 0) + 1
             return True
         return False
 
