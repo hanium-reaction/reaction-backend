@@ -198,6 +198,29 @@ async def _get_execution_or_404(
     return execution
 
 
+def _in_selection_order(
+    pending: list[RecoveryAttempt],
+    failure_tags: list[str],
+    strategies: list[RecoveryStrategyCatalog],
+    escalation_level: EscalationLevel | None,
+) -> list[RecoveryAttempt]:
+    """다시 열었을 때도 **처음 만들 때와 같은 순서**로 — FE 는 첫 카드에 '추천'을 붙인다.
+
+    처음 generate 는 `select_strategies` 순서(매칭 점수 내림차순 → display_priority)로 카드를
+    돌려준다. 그런데 다시 열면 `list_attempts` 의 DB 정렬(`trigger_tag` 유무 → display_priority)
+    이라 점수를 모른다 — 태그 2개가 맞은 개인화 카드(ACTIVE_RECOVERY)가 1개 맞은 템플릿
+    카드(DOWNSCOPE_DEFAULT)에 밀려, 새 정보 없이 다시 열기만 해도 추천이 옮겨 갔다.
+
+    같은 입력(실패 태그·활성 카탈로그·에스컬레이션 레벨 — 레벨은 위에서 이미 다시 계산했다)
+    으로 `select_strategies` 를 다시 돌려 그 순서를 쓴다. 룰은 결정적이라 L2 선두 강제·L3 고정
+    순서까지 그대로 재현된다. 그 사이 카탈로그가 바뀌어 순위에 없는 카드는 기존 순서대로
+    뒤에 둔다(`sorted` 는 안정 정렬). 마이그레이션 없이 고치려고 순위를 저장하지 않는다.
+    """
+    selected = select_strategies(failure_tags, strategies, escalation_level=escalation_level)
+    rank = {s.strategy_type: i for i, s in enumerate(selected)}
+    return sorted(pending, key=lambda a: rank.get(a.recovery_strategy_type, len(rank)))
+
+
 def _recovery_mode(level: EscalationLevel | None) -> RecoveryMode:
     return "goal_renegotiation" if level == "L3" else "standard"
 
@@ -336,6 +359,7 @@ async def generate_recovery_proposals(
     recovery_mode = _recovery_mode(escalation_level)
 
     if pending:
+        pending = _in_selection_order(pending, failure_tags, strategies, escalation_level)
         await repo.stamp_first_viewed(pending, now_kst())
         await session.commit()
         return RecoveryProposalsResponse(

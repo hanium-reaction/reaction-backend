@@ -727,6 +727,41 @@ def test_generate_is_idempotent_while_pending(
     assert [c["attemptId"] for c in first["cards"]] == [c["attemptId"] for c in second["cards"]]
 
 
+def test_reopening_keeps_the_recommended_card_first(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """다시 열어도 '추천'(첫 카드)이 옮겨 가지 않는다 (recovery-7).
+
+    FATIGUE+LOW_ENERGY — ACTIVE_RECOVERY 는 태그 2개가 맞아(점수 2) 선두, DOWNSCOPE_DEFAULT 는
+    1개(점수 1). 실 DB 의 `list_attempts` 는 점수를 모르고 `trigger_tag` 유무 → display_priority
+    (20 < 60)로 정렬해 DOWNSCOPE_DEFAULT 를 먼저 돌려준다 — 그 정렬을 fake 에 재현한다
+    (파이썬 리스트는 삽입 순서를 지켜 결함이 안 보인다).
+    """
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["FATIGUE", "LOW_ENERGY"]
+    )
+    first = _generate(client, exec_id).json()["cards"]
+    assert [c["strategyType"] for c in first] == ["ACTIVE_RECOVERY", "DOWNSCOPE_DEFAULT"]
+
+    priority = {s.strategy_type: s.display_priority for s in default_recovery_strategies()}
+    insertion_order_list = fake_recovery_repo.list_attempts
+
+    async def db_ordered_list_attempts(user_id: UUID, execution_id: UUID) -> list[Any]:
+        attempts = await insertion_order_list(user_id, execution_id)
+        return sorted(
+            attempts,
+            key=lambda a: (a.trigger_tag is None, priority[a.recovery_strategy_type]),
+        )
+
+    monkeypatch.setattr(fake_recovery_repo, "list_attempts", db_ordered_list_attempts)
+
+    reopened = _generate(client, exec_id).json()["cards"]
+    assert [c["attemptId"] for c in reopened] == [c["attemptId"] for c in first]
+
+
 def test_generate_409_after_decision_is_final(
     client: TestClient,
     fake_recovery_repo: FakeRecoveryRepo,
