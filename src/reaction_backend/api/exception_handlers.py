@@ -3,6 +3,7 @@
 - `ApiError`              → `code`/`message`/`field` 그대로, `http_status` 적용
 - `RequestValidationError`→ 422 `COMMON_VALIDATION_ERROR`, 첫 위반 필드 표기 + **한국어 문구**
 - `HTTPException`         → status code 보존하며 `ErrorResponse` 로 정규화 (영어 detail 은 한국어로)
+- DB 문자열 길이 초과(SQLSTATE 22001) → 422 `COMMON_VALIDATION_ERROR` "너무 길어요" (나머지 DB 오류는 500)
 - 그 외 `Exception`       → 500 `COMMON_INTERNAL_ERROR` (스택 트레이스 비노출).
   실제로는 `middleware/unhandled_error.py` 가 CORS 안쪽에서 먼저 받는다 — 여기 핸들러는
   Starlette 가 CORS **바깥**에서 실행해 500 에 CORS·`x-request-id` 가 빠지기 때문이다.
@@ -10,16 +11,20 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, cast
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from reaction_backend.schemas.common import ErrorResponse
 from reaction_backend.schemas.errors import ApiError, ErrorCode
+
+_log = logging.getLogger(__name__)
 
 # HTTPException status code → 공통 에러 코드 매핑
 _STATUS_TO_CODE: dict[int, ErrorCode] = {
@@ -159,6 +164,31 @@ def internal_error_response() -> JSONResponse:
     )
 
 
+# PostgreSQL `string_data_right_truncation` — 값이 VARCHAR(n) 보다 길다.
+_SQLSTATE_STRING_TOO_LONG = "22001"
+
+
+async def _handle_db_error(request: Request, exc: Exception) -> Response:
+    """DB 오류 — 문자열 길이 초과만 입력 문제(422)로, 나머지는 500.
+
+    스키마에 길이 상한이 빠진 입력(제목 등)이 컬럼 `String(n)` 을 넘으면 asyncpg 가
+    StringDataRightTruncation 을 던져 500 이 됐다(auth-5). 상한은 스키마가 1차로 막고, 이건
+    빠진 곳이 남아도 사용자가 "줄이면 된다"는 걸 알 수 있게 하는 안전망이다.
+    """
+    err = cast(DBAPIError, exc)
+    if getattr(err.orig, "sqlstate", None) == _SQLSTATE_STRING_TOO_LONG:
+        _log.warning("db string too long on %s %s", request.method, request.url.path)
+        return _error_json(
+            422,
+            ErrorResponse(
+                code=ErrorCode.COMMON_VALIDATION_ERROR.value,
+                message="입력한 내용이 너무 길어요. 조금 줄여 주세요.",
+            ),
+        )
+    _log.error("unhandled db error on %s %s", request.method, request.url.path, exc_info=exc)
+    return internal_error_response()
+
+
 async def _handle_unhandled_error(request: Request, exc: Exception) -> Response:
     # 최후 안전망 — 평소엔 `UnhandledErrorMiddleware` 가 먼저 받아 CORS 헤더가 붙은 500 을
     # 보낸다. 여기까지 오는 건 응답이 이미 시작된 뒤의 예외 등 그 미들웨어 밖의 경우뿐이다.
@@ -170,4 +200,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(ApiError, _handle_api_error)
     app.add_exception_handler(RequestValidationError, _handle_validation_error)
     app.add_exception_handler(StarletteHTTPException, _handle_http_exception)
+    app.add_exception_handler(DBAPIError, _handle_db_error)
     app.add_exception_handler(Exception, _handle_unhandled_error)

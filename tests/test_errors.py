@@ -6,6 +6,7 @@ import pytest
 from fastapi import FastAPI, HTTPException, status
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.exc import DBAPIError
 
 from reaction_backend.main import create_app
 from reaction_backend.schemas.errors import ApiError, ErrorCode
@@ -74,6 +75,16 @@ def _app_with_test_routes() -> FastAPI:
     @app.get("/__test__/boom")
     async def _boom() -> None:
         raise RuntimeError("unexpected failure")
+
+    class _PgError(Exception):
+        def __init__(self, sqlstate: str) -> None:
+            super().__init__(f"pg error {sqlstate}")
+            self.sqlstate = sqlstate
+
+    @app.get("/__test__/db/{sqlstate}")
+    async def _db(sqlstate: str) -> None:
+        # asyncpg 가 VARCHAR(n) 초과에서 던지는 것과 같은 모양(orig.sqlstate)
+        raise DBAPIError("INSERT ...", None, _PgError(sqlstate))
 
     @app.get("/__test__/not-implemented")
     async def _not_implemented() -> None:
@@ -208,3 +219,23 @@ def test_starlette_404_and_405_messages_are_korean(client: TestClient) -> None:
     assert wrong_method.status_code == 405
     assert wrong_method.json()["code"] == "COMMON_METHOD_NOT_ALLOWED"
     assert "Method Not Allowed" not in wrong_method.json()["message"]
+
+
+def test_db_string_too_long_is_422_not_500() -> None:
+    """스키마에 길이 상한이 빠진 입력이 VARCHAR(n) 을 넘어도 500 대신 '줄여 주세요' (auth-5)."""
+    client = TestClient(_app_with_test_routes(), raise_server_exceptions=False)
+    resp = client.get("/__test__/db/22001")
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"
+    assert "줄여 주세요" in resp.json()["message"]
+
+
+def test_other_db_errors_stay_500_with_cors() -> None:
+    client = TestClient(_app_with_test_routes(), raise_server_exceptions=False)
+    resp = client.get("/__test__/db/40001", headers={"Origin": "http://localhost:5173"})
+
+    assert resp.status_code == 500
+    assert resp.json()["code"] == "COMMON_INTERNAL_ERROR"
+    assert "pg error" not in resp.text
+    assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"

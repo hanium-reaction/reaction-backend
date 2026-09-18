@@ -43,6 +43,8 @@
   (`COMMON_VALIDATION_ERROR`)도 pydantic 영어 원문 대신 종류별 한국어("꼭 필요한 항목이
   빠졌어요.", "200자까지 입력할 수 있어요. 조금 줄여 주세요." 등)이고, 어느 입력인지는 `field`
   로 알린다. 없는 경로·메서드(404/405)도 한국어. 분기는 `message` 가 아니라 `code` 로 할 것.
+  DB 컬럼 길이를 넘는 문자열은 스키마에서 못 막았더라도 500 이 아니라 422
+  `COMMON_VALIDATION_ERROR`("입력한 내용이 너무 길어요. 조금 줄여 주세요.")다.
 - 500 `COMMON_INTERNAL_ERROR` 에도 CORS 헤더와 `x-request-id` 가 붙는다(v2.30-auth) —
   크로스오리진 네이티브 앱도 네트워크 오류가 아니라 이 envelope 을 받는다.
 
