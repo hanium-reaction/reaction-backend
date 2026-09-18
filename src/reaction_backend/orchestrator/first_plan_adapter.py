@@ -370,31 +370,55 @@ def volume_shortfall_warning(
 
     부족분을 조용히 삼키지 않고 conflict_report 로 올리는 이유는 그대로다 — 두 답이 서로 맞지
     않는다는 사실 자체가 사용자가 판단할 정보다(AGENTS §1).
+
+    ⚠️ **사용자가 말하지 않은 숫자를 사용자 말처럼 인용하지 않는다** (planB-7). 새 인터뷰는
+    길이·빈도를 답하면 주당 시간을 묻지 않고 `max(1, round(길이×빈도))` 로 **반올림해** 채운다
+    (`interview_adapter.derived_weekly_hours`). 그 값을 그대로 쓰면 '30분씩 주 3회'(1.5시간)가
+    "주 2시간 쓸 수 있다고 하셨는데" 가 되고, 올림분 30분이 허용 오차를 먹어 LLM 이 세션을
+    조금만 줄여도 경고가 떴다. 주당 시간이 길이×빈도의 반올림과 같으면 **길이×빈도 그대로**를
+    기준으로 삼고 그 두 답을 인용한다. 직접 답한 다른 값(주 5시간 · 주 3회 · 1시간)이면 종전대로
+    그 값을 인용한다 — 그때의 어긋남은 사용자가 판단할 진짜 정보다.
+
+    집중 가능한 시간도 같다 — 목표별 길이도 전역 집중 시간도 답하지 않아 기본값(50분)이면
+    "~라고 하셨거든요" 대신 기본값으로 잡았다고 말한다.
     """
     heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
     hours = heaviest.weekly_hours
     if not hours or hours <= 0 or planned_minutes <= 0 or span_days <= 0:
         return None
-    stated_min = hours * 60
+    freq, length = heaviest.frequency_per_week, heaviest.session_length_min
+    derived = bool(
+        freq and freq > 0 and length and length > 0 and hours == max(1, round(freq * length / 60))
+    )
+    stated_min = freq * length if derived and freq and length else hours * 60
     actual_weekly_min = planned_minutes * 7 / span_days
     if actual_weekly_min >= stated_min - _SHORTFALL_TOLERANCE_MIN:
         return None
 
     # 원인이 '한 번에 집중 가능한 시간' 이면 그걸 짚어준다 — 사용자가 바꿀 수 있는 레버라서.
-    freq, capacity = heaviest.frequency_per_week, session_min_for(outcome)
+    capacity = session_min_for(outcome)
+    capacity_answered = bool(length or outcome.preferences.focus_duration_min)
     reason = ""
     if freq and freq > 0 and round(stated_min / freq) > capacity:
+        told = (
+            f"한 번에 집중 가능한 시간을 {capacity}분이라고 하셨거든요"
+            if capacity_answered
+            else f"한 번에 얼마나 집중할 수 있는지는 아직 몰라서 기본값 {capacity}분으로 잡았거든요"
+        )
         reason = (
-            f" 주 {freq}회로 나누면 한 번에 {round(stated_min / freq)}분씩 해야 하는데 "
-            f"한 번에 집중 가능한 시간을 {capacity}분이라고 하셨거든요 — "
+            f" 주 {freq}회로 나누면 한 번에 {round(stated_min / freq)}분씩 해야 하는데 {told} — "
             "횟수를 늘리거나 한 번에 하는 시간을 늘리면 더 담을 수 있어요."
         )
     else:
         reason = " 목표를 더 잘게 나누면 남은 시간도 채울 수 있어요."
-    return (
-        f"주 {hours}시간 쓸 수 있다고 하셨는데 이번 계획은 "
-        f"주 {actual_weekly_min / 60:.1f}시간이에요.{reason}"
+    # 사용자가 고른 칩 그대로 되읽는다 — '매일' 을 고른 사람에게 '주 7회' 라고 하지 않는다.
+    cadence = "매일" if freq == 7 else f"주 {freq}회"
+    said = (
+        f"{cadence} {length}분씩(주 {stated_min / 60:g}시간) 하고 싶다고 하셨는데"
+        if derived
+        else f"주 {hours}시간 쓸 수 있다고 하셨는데"
     )
+    return f"{said} 이번 계획은 주 {actual_weekly_min / 60:.1f}시간이에요.{reason}"
 
 
 # 세션 하한(분). 이보다 짧으면 체크인 단위로서 의미가 없어 하한으로 올린다(9분 garbage 방지).
