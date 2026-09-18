@@ -152,7 +152,10 @@ def parse_time_range(text: str, *, end_is_window: bool = True) -> dict[str, str]
     if m:
         mer1, h1, _sep1, min1, mer2, h2, sep2, min2 = m.groups()
         start = _to_hhmm(mer1, h1, min1)
-        end = _to_hhmm(mer2, h2, min2, prev_hour=start, clock=sep2 == ":")
+        # 24시간제로 보는 건 **두 자리 시**를 `:` 로 쓴 경우만이다("02:00"·"13:00"). "9:00-6:00"
+        # 처럼 한 자리로 쓴 시각은 사람들이 '9시~6시' 를 적는 흔한 모양이라 기존 오후 보정을
+        # 그대로 탄다(18:00) — 전부 24시간제로 읽으면 21시간짜리 밤샘 구간이 된다.
+        end = _to_hhmm(mer2, h2, min2, prev_hour=start, clock=sep2 == ":" and len(h2) == 2)
         if start is None or end is None:
             return None
         if end_is_window and end == "00:00":

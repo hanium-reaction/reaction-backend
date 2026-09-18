@@ -167,6 +167,16 @@ def test_overnight_windows_are_kept_overnight(text: str, want: dict[str, str]) -
     assert parse_time_range(text) == want
 
 
+def test_single_digit_clock_end_still_reads_as_afternoon() -> None:
+    """ "9:00-6:00" 은 9시~6시(18:00)다 — 두 자리로 쓴 "06:00" 만 24시간제로 본다.
+
+    `:` 표기를 전부 24시간제로 읽으면 흔한 '9시~6시' 적기가 21시간짜리 밤샘 구간이 된다.
+    """
+    assert parse_time_range("9:00-6:00") == {"start": "09:00", "end": "18:00"}
+    assert parse_time_range("9:00-06:00") == {"start": "09:00", "end": "06:00"}
+    assert parse_time_range("22:00-2:00") == {"start": "22:00", "end": "02:00"}
+
+
 def test_night_twelve_oclock_is_midnight_not_noon() -> None:
     """ "밤 12시" 는 자정이다 — 낮 12시로 읽으면 "아침 9시부터 밤 12시까지" 가 3시간이 된다."""
     assert parse_time_range("아침 9시부터 밤 12시까지") == {"start": "09:00", "end": "24:00"}
