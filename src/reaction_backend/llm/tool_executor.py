@@ -74,6 +74,7 @@ from reaction_backend.safety.llm_budget import (
     LlmRunRecord,
     estimate_cost_cents,
     estimate_cost_micro_usd,
+    estimate_prompt_tokens,
 )
 from reaction_backend.safety.llm_budget import (
     check as budget_check,
@@ -242,26 +243,36 @@ class LLMToolExecutor:
         prompt_text = compose_system_prompt(prompt_text, tone_mode)
 
         # ── 2) 예산 가드 ────────────────────────────────────────────
-        if session is not None:
+        # 이번 호출의 입력 토큰을 **미리 더해서** 본다(llm-5). 예전엔 0 으로 잡아 "지금까지
+        # 쓴 양" 만 봤고, 사용 0 인 사용자가 수십만 자를 보내면 그 한 번이 통과해 한도를 통째로
+        # 넘겼다. 너무 큰 프롬프트는 잔량과 상관없이 부르지 않는다(`llm_max_prompt_chars`).
+        budget_error = _oversized_prompt_error(prompt_text, settings.llm_max_prompt_chars)
+        if budget_error is None and session is not None:
             try:
-                await budget_check(session, user_id=user_id)
-            except BudgetExceeded as exc:
-                return await self._fallback(
-                    fallback,
-                    module=module,
-                    schema=schema,
-                    protected=user_texts,
-                    prompt_id=resolved_prompt_id,
-                    prompt_version=prompt_version,
-                    reason="budget",
-                    error=str(exc),
+                await budget_check(
+                    session,
                     user_id=user_id,
-                    session=session,
-                    trace_id=trace_id,
-                    latency_ms=int((time.monotonic() - started) * 1000),
-                    log_payloads=log_payloads,
-                    input_summary=prompt_text if log_payloads else None,
+                    projected_tokens=estimate_prompt_tokens(prompt_text),
                 )
+            except BudgetExceeded as exc:
+                budget_error = str(exc)
+        if budget_error is not None:
+            return await self._fallback(
+                fallback,
+                module=module,
+                schema=schema,
+                protected=user_texts,
+                prompt_id=resolved_prompt_id,
+                prompt_version=prompt_version,
+                reason="budget",
+                error=budget_error,
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                log_payloads=log_payloads,
+                input_summary=prompt_text if log_payloads else None,
+            )
 
         # ── 3) provider 호출 + retry/backoff ────────────────────────
         last_error: BaseException | None = None
@@ -520,9 +531,27 @@ class LLMToolExecutor:
         # ── 2) 예산 가드 — 토큰과 그라운딩 **둘 다** ────────────────
         # 둘은 서로를 대신하지 못한다: 그라운딩 호출은 토큰을 거의 안 써서(실측 in 17)
         # 토큰 가드를 언제나 통과한다. 토큰 가드만 걸면 이 경로엔 상한이 없는 것과 같다.
+        oversized = _oversized_prompt_error(prompt_text, settings.llm_max_prompt_chars)
+        if oversized is not None:
+            return await self._grounding_discard(
+                module=module,
+                prompt_id=resolved_prompt_id,
+                prompt_version=prompt_version,
+                reason="budget",
+                error=oversized,
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                latency_ms=_elapsed(),
+                model=resolved_model,
+            )
         if session is not None:
             try:
-                await budget_check(session, user_id=user_id)
+                await budget_check(
+                    session,
+                    user_id=user_id,
+                    projected_tokens=estimate_prompt_tokens(prompt_text),
+                )
             except BudgetExceeded as exc:
                 return await self._grounding_discard(
                     module=module,
@@ -877,6 +906,16 @@ class LLMToolExecutor:
             latency_ms=latency_ms,
             banned_hits=banned_hits,
         )
+
+
+def _oversized_prompt_error(prompt_text: str, max_chars: int) -> str | None:
+    """프롬프트가 호출 1회 상한(`llm_max_prompt_chars`)을 넘으면 기록용 사유, 아니면 None.
+
+    내용은 싣지 않는다 — 길이만(`llm_runs.error` 는 평문 컬럼이다).
+    """
+    if max_chars > 0 and len(prompt_text) > max_chars:
+        return f"prompt_too_large: {len(prompt_text)} chars > {max_chars}"
+    return None
 
 
 def _validate_within_limits[T: BaseModel](schema: type[T], payload: Any) -> T:
