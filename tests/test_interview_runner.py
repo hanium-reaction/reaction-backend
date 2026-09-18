@@ -453,3 +453,97 @@ def test_required_sequence_covers_three_pillars() -> None:
     assert any(k.startswith("goals.") for k in seq)
     assert any(k.startswith("time.") for k in seq)
     assert any(k.startswith("recovery.") for k in seq)
+
+
+def _fallback_stub() -> Any:
+    """aiClient 가 **실제로 폴백했을 때**와 같은 값 — 각 노드의 `fallback()` 을 그대로 부른다.
+
+    타임아웃·레이트리밋·전역 토큰 예산 소진·금지어 차단 어느 쪽이든 aiClient 는 이 경로다.
+    """
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        return RunResult(
+            value=kwargs["fallback"](),
+            fell_back=True,
+            reason="timeout",
+            prompt_id=kwargs["prompt_id"],
+            prompt_version="v1",
+        )
+
+    return stub_run
+
+
+@pytest.mark.parametrize(
+    ("slot_key", "text", "want"),
+    [
+        ("identity.role", "3학년", ["3학년"]),
+        ("time.peak_window", "저녁, 심야", ["저녁", "심야"]),
+        ("recovery.tone", "따뜻", ["따뜻"]),
+        ("goals.session_length", "1시간 30분", ["1시간 30분"]),
+    ],
+)
+async def test_chip_text_answer_survives_llm_fallback(
+    monkeypatch: pytest.MonkeyPatch, slot_key: str, text: str, want: list[str]
+) -> None:
+    """⚠️ LLM 이 폴백해도 **보기 그대로 온 칩 답은 저장된다** (interview-3).
+
+    FE 는 칩을 탭해도 문자열("3학년")로 보낸다. 폴백 채점은 정규화 값이 없어, 고치기 전엔
+    제약 슬롯이라는 이유로 곧장 스킵 마커(`{"type":"text","raw":""}`)가 저장됐다 — 사용자는
+    답했는데 '없음' 이 됐고, 이월 슬롯이라 다음 인터뷰도 그 칸을 다시 묻지 않았다.
+    """
+    monkeypatch.setattr(aiClient, "run", _fallback_stub())
+    start = await interview_runner.start_interview(session_id=uuid4(), user_id=uuid4())
+    slot = interview_catalog.PLAN_CATALOG.by_key[slot_key]
+
+    result = await interview_runner.submit_and_advance(
+        state=start.state,
+        slot_key=slot_key,
+        answer_value=text,
+        answer_type=slot.answer_type,
+        options=list(slot.options),
+    )
+
+    assert result.state["slot_answers"][slot_key] == {"type": "chip", "values": want}
+
+
+async def test_heaviest_text_answer_survives_llm_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """런타임 보기(`goals.heaviest`)는 라우터가 넘긴 보기와 정확히 같을 때만 받는다.
+
+    고치기 전엔 pending 으로 남아 같은 룰 질문을 세 번 되풀이했다.
+    """
+    monkeypatch.setattr(aiClient, "run", _fallback_stub())
+    start = await interview_runner.start_interview(session_id=uuid4(), user_id=uuid4())
+    state = {
+        **start.state,
+        "slot_answers": {
+            "goals.list": {"type": "text", "raw": "토익, 운동", "normalized": ["토익", "운동"]}
+        },
+    }
+
+    result = await interview_runner.submit_and_advance(
+        state=state,  # type: ignore[arg-type]
+        slot_key="goals.heaviest",
+        answer_value="토익",
+        answer_type="select",
+        options=["토익", "운동"],
+    )
+
+    assert result.state["slot_answers"]["goals.heaviest"] == {"type": "chip", "values": ["토익"]}
+    assert result.state["next_slot_key"] != "goals.heaviest"
+
+
+async def test_off_menu_text_is_not_forced_into_a_chip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """보기에 없는 말은 룰이 억지로 맞히지 않는다 — 지어낸 값으로 슬롯을 닫지 않는다."""
+    monkeypatch.setattr(aiClient, "run", _fallback_stub())
+    start = await interview_runner.start_interview(session_id=uuid4(), user_id=uuid4())
+    slot = interview_catalog.PLAN_CATALOG.by_key["identity.role"]
+
+    result = await interview_runner.submit_and_advance(
+        state=start.state,
+        slot_key="identity.role",
+        answer_value="휴학하고 알바 중이에요",
+        answer_type=slot.answer_type,
+        options=list(slot.options),
+    )
+
+    assert result.state["slot_answers"]["identity.role"].get("type") != "chip"

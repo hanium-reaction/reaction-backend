@@ -562,6 +562,17 @@ async def validate_answer(state: InterviewState, config: RunnableConfig) -> Inte
     # 어느 슬롯인지 골라야 하는데, 그건 파서가 할 수 없는 판단이다.
     ruled = _rule_first_value(answer_type, answer_text, today=now_kst().date())
     normalized = ruled if ruled is not None else update.normalized_value
+    if normalized is None:
+        # 칩 답을 LLM 이 정규화하지 못했을 때(타임아웃·예산 소진·금지어 차단으로 룰 폴백)
+        # 보기 글자 그대로 온 답은 룰로 맞춘다. FE 는 칩을 탭해도 **문자열**("3학년")로
+        # 보내므로, 이 길이 없으면 폴백 한 번에 칩 답이 전부 '없음'(스킵)으로 저장되고 —
+        # 이월 슬롯이라 — 다음 인터뷰에서도 다시 묻지 않았다.
+        normalized = _rule_chip_values(
+            answer_type,
+            answer_text,
+            slot=catalog.by_key.get(slot_key),
+            options=_answer_options(config),
+        )
 
     slot_answers = dict(state["slot_answers"])
     attempts = _pending_attempts(slot_answers.get(slot_key)) + 1  # 이번 시도 포함
@@ -874,6 +885,38 @@ def _rule_first_value(answer_type: str | None, text: str, *, today: date) -> Any
     if answer_type == "time_range":
         return datetime_parse.parse_time_range(text)
     return None
+
+
+def _rule_chip_values(
+    answer_type: str | None,
+    text: str,
+    *,
+    slot: InterviewSlot | None,
+    options: Sequence[str],
+) -> list[str] | None:
+    """칩/선택 슬롯의 답이 **보기 글자 그대로**면 그 보기들. 아니면 `None`(= 판단하지 않음).
+
+    쉼표로 여러 개를 고른 답("저녁, 심야")도 나눠서 맞춘다. 단 답 전체가 보기 하나와
+    같으면 나누지 않는다 — `goals.heaviest` 의 보기는 사용자가 적은 목표 제목이라 쉼표가
+    들어 있을 수 있다("토익, 오픽 준비").
+
+    카탈로그 보기가 있으면 `canonical_chip_values`(공백·시간 표기 정규화)로, 없으면
+    (`goals.heaviest` 처럼 런타임에 만든 보기) 라우터가 넘긴 보기와 **정확히 같을 때만**
+    받는다. 보기에 없는 말은 버린다 — 지어낸 값으로 슬롯을 닫느니 다시 묻는다.
+    """
+    if answer_type not in {"chip", "select"}:
+        return None
+    whole = text.strip()
+    if not whole:
+        return None
+    parts = [whole] if whole in options else [p.strip() for p in _TEXT_SPLIT_RE.split(whole)]
+    parts = [p for p in parts if p]
+    if slot is not None and slot.options:
+        picked = canonical_chip_values(slot, parts, drop_unknown=True)
+    else:
+        allowed = set(options)
+        picked = list(dict.fromkeys(p for p in parts if p in allowed))
+    return picked or None
 
 
 def _coerce_normalized(
