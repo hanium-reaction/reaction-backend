@@ -2265,15 +2265,24 @@ class FakeUserRepo:
             and getattr(u, "anonymized_at", None) is None
         ]
 
+    async def touch_login(self, user: User, profile: GoogleProfile) -> User:
+        """실 repo 와 같은 규칙 — 이름·활동 시각 갱신 + 익명화 플래그 해제 (auth-1)."""
+        user.name = profile.name
+        user.last_active_at = datetime.now(UTC)
+        if getattr(user, "is_anonymized", False) or getattr(user, "anonymized_at", None):
+            user.is_anonymized = False
+            user.anonymized_at = None
+        return user
+
     async def upsert_from_google(self, profile: GoogleProfile) -> User:
         existing = self._by_email.get(profile.email)
         if existing is not None:
-            existing.name = profile.name
-            return existing
+            return await self.touch_login(existing, profile)
         u = User()
         u.id = uuid4()
         u.email = profile.email
         u.name = profile.name
+        u.last_active_at = datetime.now(UTC)
         u.timezone = "Asia/Seoul"
         u.onboarding_state = "WELCOME"
         u.tone_mode = None

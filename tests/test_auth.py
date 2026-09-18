@@ -13,6 +13,7 @@ fixture 로 켜고 돈다. 기존 사용자 로그인(같은 email 두 번째 �
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -632,3 +633,39 @@ def test_invalid_refresh_cookie_paths_stop_the_app(
     monkeypatch.setenv("REFRESH_COOKIE_PATHS", raw)
     with pytest.raises(ValueError, match="REFRESH_COOKIE_PATHS"):
         Settings()
+
+
+# ───────────────────── 익명화 뒤 돌아온 사용자 (auth-1 / sched-3) ─────────────────────
+
+
+def test_relogin_after_anonymization_clears_flags(
+    auth_client: TestClient,
+    fake_invite_code_repo: FakeInviteCodeRepo,
+    fake_user_repo: FakeUserRepo,
+) -> None:
+    """90일 cron 으로 익명화된 사용자가 다시 로그인하면 새 활동 기간이 시작된다.
+
+    플래그가 남으면 cron sweep(습관·브리프·알림)에서 영영 빠지고, 수동 익명화는 409 로
+    막혔다. 이미 가린 과거 텍스트는 그대로 둔다(되살리지 않는다).
+    """
+    login = _login(auth_client, fake_invite_code_repo)
+    user_id = UUID(login["user"]["userId"].removeprefix("user_"))
+    stored = fake_user_repo._by_id[user_id]
+    stored.is_anonymized = True
+    stored.anonymized_at = datetime.now(UTC)
+    stored.name = "[anonymized]"
+
+    again = auth_client.post("/auth/google", json={"idToken": "stub"})
+    assert again.status_code == 200
+    assert stored.is_anonymized is False
+    assert stored.anonymized_at is None
+    assert again.json()["user"]["name"] == "김민수"
+
+    # 수동 익명화도 다시 가능하다 — 409 PRIVACY_ALREADY_ANONYMIZED 가 아니라 1단계 확인.
+    step1 = auth_client.post(
+        "/settings/anonymize",
+        json={},
+        headers={"Authorization": f"Bearer {again.json()['accessToken']}"},
+    )
+    assert step1.status_code == 200
+    assert step1.json()["status"] == "confirmation_required"

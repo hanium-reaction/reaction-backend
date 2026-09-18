@@ -1148,6 +1148,10 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
   익명화이되 트리거만 다르다(사람 vs 시간). email 은 양쪽 다 안 건드린다 — 로그인 1차
   키라 마스킹하면 익명화가 아니라 사실상 계정 삭제가 되기 때문(그건 `/settings/delete-account`
   소관, #321). API 계약 변경 없음 — endpoint·스키마·에러코드 그대로.
+- 익명화는 **그때까지의** 텍스트를 가리는 일이다. 익명화된 사용자가 Google 로 다시 로그인하면
+  `is_anonymized`/`anonymized_at` 이 내려가 새 활동 기간이 시작된다(v2.30-auth) — 알림·습관
+  sweep 에 다시 포함되고, 또 90일 비활성이면 새로 쓴 텍스트도 다시 익명화된다. 이미 가린
+  과거 텍스트는 되살리지 않는다.
 
 #23-B 구현 메모:
 - `GET /privacy/consent` — consent_type(`required`/`marketing`/`research`) 별 **최신 1행**(`{ consentType, isGranted, updatedAt }`). 미기록 시 `[]`.

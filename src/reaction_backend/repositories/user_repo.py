@@ -3,6 +3,8 @@
 규칙:
 - `email` 이 1차 식별 키 (Google OAuth). 신규는 `onboarding_state=WELCOME` (DB server_default).
 - 기존 user 는 `name` · `last_active_at` 만 갱신, `onboarding_state` · `tone_mode` 는 보존.
+  단 익명화된 채 돌아온 사용자는 익명화 플래그를 내린다(`touch_login` — 과거 텍스트는
+  마스킹된 그대로, 되살리지 않는다).
 - hard delete 금지 (AGENTS.md §2). 본 repo 는 delete 미제공.
 - commit 은 호출자 책임 — 라우터에서 `await session.commit()`.
 """
@@ -87,19 +89,42 @@ class UserRepo:
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
 
+    async def touch_login(self, user: User, profile: GoogleProfile) -> User:
+        """기존 사용자의 Google 재로그인 — 이름·활동 시각 갱신 + 익명화 플래그 해제.
+
+        익명화(90일 cron·수동)는 **그때까지의** 자유서술 텍스트를 가리는 일이지 계정을 닫는
+        일이 아니다(email 을 남겨 로그인이 되게 둔 이유). 그런데 플래그를 안 내리면 돌아온
+        사용자가 영영 "떠난 사람"으로 남았다:
+
+        - `list_active()`·pre_card 조회가 `is_anonymized` 로 거른다 → 습관 인스턴스가 다음
+          주부터 안 생기고, 아침 브리프·저녁 회고·시작 알림이 영영 안 온다.
+        - 90일 cron 은 `anonymized_at IS NULL` 만 본다 → 다시 떠나도 새로 쓴 텍스트는 절대
+          익명화되지 않는다(잠금 규칙 §1.4 위반).
+        - 수동 익명화는 409 '이미 익명화된 계정이에요' 로 막힌다.
+
+        그래서 다시 로그인하면 새 활동 기간이 시작된다고 보고 두 플래그를 내린다. 이미 가린
+        텍스트는 그대로다(되살릴 원문이 없다). 삭제된 계정(`archived_at`)은 `get_by_email` 이
+        걸러 여기까지 오지 않는다. commit 은 호출자 책임.
+        """
+        user.name = profile.name
+        user.last_active_at = datetime.now(UTC)
+        if user.is_anonymized or user.anonymized_at is not None:
+            user.is_anonymized = False
+            user.anonymized_at = None
+        await self._session.flush()
+        return user
+
     async def upsert_from_google(self, profile: GoogleProfile) -> User:
         """email 기준 upsert.
 
         - 신규: WELCOME 상태로 생성 (`onboarding_state` 는 DB server_default).
-        - 기존: `name` · `last_active_at` 만 갱신, `onboarding_state` 등 보존.
+        - 기존: `touch_login` — 이름·`last_active_at` 갱신 + 익명화 플래그 해제,
+          `onboarding_state` 등 보존.
         """
         existing = await self.get_by_email(profile.email)
-        now = datetime.now(UTC)
         if existing is not None:
-            existing.name = profile.name
-            existing.last_active_at = now
-            await self._session.flush()
-            return existing
+            return await self.touch_login(existing, profile)
+        now = datetime.now(UTC)
         user = User(
             email=profile.email,
             name=profile.name,
