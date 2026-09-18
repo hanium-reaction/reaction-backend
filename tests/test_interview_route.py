@@ -970,3 +970,46 @@ def test_start_is_refused_once_the_daily_interview_limit_is_reached(
     assert res.json()["code"] == "RATE_LIMIT_DAILY_CALLS_EXCEEDED"
     assert res.headers["Retry-After"].isdigit()
     assert fake_interview_repo._sessions == {}
+
+
+def test_only_slots_that_keep_every_pick_are_marked_multiple(client: TestClient) -> None:
+    """`multiple` 은 어댑터가 목록 전체를 쓰는 슬롯에만 true 다 (interview-17).
+
+    FE 는 모든 칩 질문에 "여러 개 골라도 돼요" 를 띄웠는데, 역할·가장 무거운 목표·빈도 등은
+    첫 값만 쓰여 두 번째 선택이 말없이 버려졌다. 이 플래그로 단일/복수 선택을 가른다.
+    """
+    plan = client.get("/interview/slot-catalog").json()
+    assert {e["slotKey"] for e in plan if e["multiple"]} == {"time.peak_window"}
+    ultimate = client.get("/interview/slot-catalog", params={"kind": "ultimate"}).json()
+    assert {e["slotKey"] for e in ultimate if e["multiple"]} == {"ultimate.values"}
+
+
+def test_multi_select_slots_are_read_as_lists_by_the_adapters() -> None:
+    """복수 선택으로 내보낸 슬롯은 어댑터가 실제로 **모든 값**을 쓴다 — 첫 값만 쓰는 슬롯을
+    복수로 표시하면 같은 사고가 반대로 난다."""
+    from reaction_backend.orchestrator import interview_adapter, ultimate_adapter
+
+    outcome = interview_adapter.build_outcome(
+        session_id="s1",
+        slot_answers={"time.peak_window": {"type": "chip", "values": ["저녁", "심야"]}},
+        ambiguity_final=0.5,
+        end_reason="early_user",
+        analysis_source="rule",
+    )
+    assert outcome.availability.peak_window == ["저녁", "심야"]
+    ultimate = ultimate_adapter.build_ultimate_outcome(
+        session_id="s1",
+        slot_answers={"ultimate.values": {"type": "chip", "values": ["성장", "자유"]}},
+        ambiguity_final=0.5,
+        end_reason="early_user",
+        analysis_source="rule",
+    )
+    assert ultimate.values == ["성장", "자유"]
+
+
+def test_single_choice_question_is_not_multiple(client: TestClient, monkeypatch: Any) -> None:
+    """첫 질문(역할)은 단일 선택이다 — `currentQuestion.multiple=false`."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    question = client.post("/interview/sessions").json()["currentQuestion"]
+    assert question["slotKey"] == "identity.role"
+    assert question["multiple"] is False

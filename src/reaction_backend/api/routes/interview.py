@@ -57,6 +57,7 @@ from reaction_backend.orchestrator._common import user_agent_lock
 from reaction_backend.orchestrator.interview import InterviewState
 from reaction_backend.orchestrator.interview_catalog import (
     CATALOGS,
+    MULTI_SELECT_SLOTS,
 )
 from reaction_backend.repositories.goal_repo import GoalRepo, get_goal_repo
 from reaction_backend.repositories.interview_repo import InterviewRepo, get_interview_repo
@@ -304,6 +305,7 @@ def _to_question(
         answer_type=slot.answer_type if slot else "text",
         options=options,
         suggested_answers=[] if options else interview.drop_placeholder_cards(nq.suggested_answers),
+        multiple=slot_key in MULTI_SELECT_SLOTS,
     )
 
 
@@ -653,6 +655,7 @@ async def get_slot_catalog(
             is_required=s.is_required,
             category=s.category,
             options=list(s.options),
+            multiple=s.slot_key in MULTI_SELECT_SLOTS,
         )
         for s in CATALOGS[kind].slots
     ]

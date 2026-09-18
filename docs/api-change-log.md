@@ -64,6 +64,12 @@
   429 `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(+ `Retry-After`)를 준다. 예전엔 시작만 열려 있어 첫
   질문을 받은 뒤 모든 답이 실패했다. 에러 코드·envelope 는 기존 그대로.
 
+### 질문·카탈로그에 `multiple` (additive)
+
+- `Question.multiple`·`SlotCatalogEntry.multiple`(bool, 기본 false) 추가. 보기를 여러 개 골라도
+  전부 쓰이는 슬롯만 true — 계획 `time.peak_window`, 궁극목표 `ultimate.values`. 나머지는 서버가
+  첫 값만 쓴다. 기존 필드는 무변경.
+
 ### FE 에 미치는 것
 
 - `next-question` 응답에 `endReason` 이 올 수 있다 — `answers` 의 종료 응답과 같은 분기로
@@ -76,6 +82,9 @@
 - `RATE_LIMIT_DAILY_CALLS_EXCEEDED` 는 아직 FE 문구 표에 없어 "요청 처리 중 오류" 로 보인다 —
   "오늘 이용 가능한 횟수를 다 썼어요. 자정 이후에 이어서 할 수 있어요." 처럼 매핑하고
   `Retry-After` 를 쓰면 된다. 인터뷰 시작에서도 이 코드가 올 수 있다.
+- 칩 질문의 "탭해서 담기 · 여러 개 골라도 돼요" 안내는 `currentQuestion.multiple=true` 일 때만
+  띄우고, false 면 단일 선택으로 토글하면 된다 — 지금은 두 번째로 고른 목표·빈도가 말없이
+  버려진다.
 
 ---
 
