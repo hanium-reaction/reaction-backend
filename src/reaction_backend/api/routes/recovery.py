@@ -29,7 +29,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from http import HTTPStatus
 from typing import Annotated, Literal
 from uuid import UUID
@@ -71,7 +71,7 @@ from reaction_backend.repositories.scheduled_block_repo import (
     get_scheduled_block_repo,
 )
 from reaction_backend.safety import endpoint_rate_limit
-from reaction_backend.schemas.common import now_kst
+from reaction_backend.schemas.common import KST, now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.recovery import (
     RecoveryCard,
@@ -811,6 +811,11 @@ def _after_block_time(
     )
 
 
+def _kst_day(at: datetime) -> date:
+    """블록이 실제로 놓이는 KST 달력일 — 오늘 화면(`target_date` 로 고른다)과 같은 기준."""
+    return at.astimezone(KST).date()
+
+
 async def _existing_replan_block(
     user_id: UUID, recovery_action_id: UUID, block_repo: ScheduledBlockRepo
 ) -> ScheduledBlock | None:
@@ -893,7 +898,9 @@ async def get_replan_diff(
         after=ReplanBlock(
             action_item_id=f"{_ACTION_PREFIX}{recovery_action.id}",
             title=recovery_action.title,
-            target_date=recovery_action.target_date,
+            # 블록이 놓이는 날 — 밤늦은 승인이면 카드 날짜 다음날이고, 승인 시 카드 날짜도
+            # 이 값으로 맞춰진다(approve_replan). 프리뷰가 승인 결과와 같은 날을 말해야 한다.
+            target_date=_kst_day(start_at),
             start_at=start_at,
             end_at=end_at,
             estimated_minutes=recovery_action.estimated_minutes,
@@ -932,6 +939,11 @@ async def approve_replan(
             end_at=end_at,
             source=_REPLAN_BLOCK_SOURCE,
         )
+        # 밤늦은 승인은 블록을 다음날 아침으로 넘긴다(`shift_to_recovery_day` 3번 경로). 오늘
+        # 화면은 카드를 `target_date` 로만 고르므로, 카드 날짜를 블록 날짜에 맞추지 않으면
+        # 블록이 잡힌 그날 오늘 화면에 회복 카드가 안 뜬다. 바뀌는 건 **새 회복 카드**뿐 —
+        # 원본 카드(status 포함)는 읽기만 한다(AGENTS.md §2).
+        recovery_action.target_date = _kst_day(start_at)
         await session.commit()
 
     return ReplanApproveResponse(

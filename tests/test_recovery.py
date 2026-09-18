@@ -2247,3 +2247,118 @@ def test_recovery_action_title_fits_the_column_and_survives_missing_original() -
     assert titled.endswith(" · 이어서")
     # 원본을 못 읽으면(보관 등) 질문형 템플릿 대신 짧고 정직한 이름.
     assert recovery_action_title(None, "DOWNSCOPE") == "다시 해보기"
+
+
+# ───────────────────────── 밤늦은 승인 — 카드 날짜 = 블록 날짜 (recovery-2) ─────────────────────────
+
+
+def _accept_downscope_at(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+    *,
+    now: datetime,
+    original_minutes: int = 120,
+) -> tuple[str, Any]:
+    """`now` 에 DOWNSCOPE 를 수락한 실행 ID 와 그 회복 카드를 돌려준다(19시 계획, 2시간 원본)."""
+    from reaction_backend.api.routes import recovery as recovery_routes
+
+    monkeypatch.setattr(recovery_routes, "now_kst", lambda: now)
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo,
+        fake_action_item_repo,
+        target_date=now.date(),
+        plan_start_at=now.replace(hour=19, minute=0),
+    )
+    original = next(a for a in fake_action_item_repo._items.values() if a.source == "manual")
+    original.estimated_minutes = original_minutes
+    decision = _accept_group(client, exec_id, "DOWNSCOPE")
+    recovery_id = UUID(decision["resultingActionItemId"].removeprefix("action_"))
+    return exec_id, fake_action_item_repo._items[recovery_id]
+
+
+def test_late_night_approval_moves_the_recovery_card_to_the_block_day(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """22:10 에 고른 50분 회복은 23시 전에 못 끝나 다음날 07:00 블록이 된다 — 카드도 그날로.
+
+    회귀: 블록만 다음날로 가고 카드 `target_date` 는 결정한 날에 남아, 블록이 잡힌 그날
+    오늘 화면(`target_date` 로 고른다)에 회복 카드가 안 떴다.
+    """
+    now = datetime(2026, 9, 18, 22, 10, tzinfo=KST)
+    exec_id, recovery_action = _accept_downscope_at(
+        client, fake_recovery_repo, fake_action_item_repo, monkeypatch, now=now
+    )
+    assert recovery_action.estimated_minutes == 50
+    assert recovery_action.target_date == date(2026, 9, 18)  # 수락 직후엔 결정한 날
+
+    preview = client.get(f"/replan/{exec_id}").json()
+    assert preview["after"]["startAt"] == "2026-09-19T07:00:00+09:00"
+    assert preview["after"]["targetDate"] == "2026-09-19", "프리뷰가 블록 날짜를 말해야 한다"
+
+    body = _approve_replan(client, exec_id).json()
+    assert body["startAt"] == "2026-09-19T07:00:00+09:00"
+    assert recovery_action.target_date == date(2026, 9, 19)
+
+    # 원본 카드는 그대로 (AGENTS.md §2)
+    original = next(a for a in fake_action_item_repo._items.values() if a.source == "manual")
+    assert original.status == "failed"
+    assert original.target_date == date(2026, 9, 18)
+
+    after = client.get(f"/replan/{exec_id}").json()
+    assert after["alreadyApproved"] is True
+    assert after["after"]["targetDate"] == "2026-09-19"
+
+
+def test_evening_approval_that_fits_today_keeps_the_card_date(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """대조군 — 21:00 결정은 23시 전에 끝나 같은 날 블록이고 카드 날짜도 그대로다."""
+    now = datetime(2026, 9, 18, 21, 0, tzinfo=KST)
+    exec_id, recovery_action = _accept_downscope_at(
+        client, fake_recovery_repo, fake_action_item_repo, monkeypatch, now=now
+    )
+
+    body = _approve_replan(client, exec_id).json()
+    assert body["startAt"] == "2026-09-18T21:15:00+09:00"
+    assert recovery_action.target_date == date(2026, 9, 18)
+
+
+# ───────────────────────── 회복 블록 15분 격자 (recovery-19) ─────────────────────────
+
+
+def test_shift_to_recovery_day_snaps_adhoc_start_to_the_quarter_grid() -> None:
+    """계획 없이 바로 시작한 카드는 `plan_start_at` 이 클릭 시각이다 — 초·마이크로초까지.
+
+    회귀: 과거 보정이 없는 경로(CARRY_OVER 내일)는 그 시각을 그대로 옮겨 11:35:22.808 같은
+    블록이 주간 그리드·15분 편집기와 어긋나게 박혔다.
+    """
+    plan_start = datetime(2026, 9, 18, 11, 35, 22, 808336, tzinfo=KST)
+    start_at, end_at = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 9, 18),
+        recovery_target_date=date(2026, 9, 19),
+        estimated_minutes=30,
+        now=datetime(2026, 9, 18, 21, 0, tzinfo=KST),
+    )
+    assert start_at == datetime(2026, 9, 19, 11, 45, tzinfo=KST)
+    assert end_at == datetime(2026, 9, 19, 12, 15, tzinfo=KST)
+
+
+def test_shift_to_recovery_day_keeps_a_quarter_aligned_start() -> None:
+    plan_start = datetime(2026, 9, 18, 11, 30, tzinfo=KST)
+    start_at, _ = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 9, 18),
+        recovery_target_date=date(2026, 9, 19),
+        estimated_minutes=30,
+        now=datetime(2026, 9, 18, 21, 0, tzinfo=KST),
+    )
+    assert start_at == datetime(2026, 9, 19, 11, 30, tzinfo=KST)
