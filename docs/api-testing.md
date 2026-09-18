@@ -14,7 +14,7 @@ uv run uvicorn reaction_backend.main:app --reload
 | --- | --- |
 | local | `http://localhost:8000` |
 | compose | `http://reaction-backend:8000` |
-| staging / production | TBD (Issue #24 호스팅 결정 후) |
+| staging (EC2) | `https://54-184-8-149.sslip.io` — 웹은 Vercel `/api` rewrite 경유 |
 
 ## 2. Swagger UI (권장)
 
@@ -62,8 +62,10 @@ curl.exe -X POST http://localhost:8000/reflection/batch -H "Idempotency-Key: dem
 
 같은 키 재요청은 캐시된 응답을 반환(`idempotent-replay: true` 헤더), 같은 키 + 다른 body 는 409.
 
-## 4. 현재 상태 (Issue #3 진행 중)
+## 4. 현재 상태
 
-- `/health` 만 실제 동작. 16개 도메인 라우터는 placeholder 501.
-- 도메인 mock/stub 응답은 #3-B ~ #3-H 에서 도메인별로 채워진다.
-- 데모 사용자: `demo@reaction.local` (`api/mock/demo.py`).
+- 모든 도메인 라우터가 실 DB·실 LLM 경로로 동작한다(Issue #3 의 mock/stub 단계는 끝났고,
+  그때의 `api/mock/` 패키지는 삭제됐다).
+- 데모 사용자: `AUTH_STUB_MODE=true`(local/dev 전용)일 때 `POST /auth/google` 의 `idToken`
+  이 아무 문자열이면 `demo@reaction.local`, `"demo:<임의 id>"` 면 그 id 전용 격리 계정
+  (`integrations/google_oauth/verifier.py`). 시드 시나리오는 `scripts/db_seed_demo.py`.

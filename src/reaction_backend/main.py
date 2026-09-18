@@ -1,13 +1,11 @@
 """FastAPI 앱 진입점.
 
-re:action backend는 18개 도메인 라우터로 구성된다 (docs/api-contract.md):
+re:action backend는 19개 도메인 라우터로 구성된다 (docs/api-contract.md):
   health · auth · onboarding · interview · time_policies · fixed_schedules
-  · calendar · notifications · goals · habits · inbox · planning · today
-  · reflection · recovery · review · policy · settings
+  · calendar · notifications · goals · habits · inbox · planning · materials
+  · today · reflection · recovery · review · policy · settings
 
-도메인 라우터는 Issue #3 에서 도메인별 mock/stub 으로 채워지는 중이다.
-auth·onboarding·interview(#3-B), time_policies·calendar·fixed_schedules·notifications(#3-C),
-goals·habits·inbox(#3-D) 구현 완료. 나머지는 placeholder 501.
+모든 라우터가 실 DB·LLM 경로로 동작한다 (Issue #3 의 mock/stub 단계는 끝났다).
 """
 
 import logging
