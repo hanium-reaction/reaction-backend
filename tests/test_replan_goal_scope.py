@@ -2,7 +2,8 @@
 
 - planA-8: 지운(보관)·완료한 목표의 카드는 '남은 일' 로 다시 배치하지 않는다.
 - planA-6: 목표마다 자기 마감 안에 배치한다 — 지평 하나로 균등 분산하면 금요일 시험 목표의
-  남은 세션이 한 달짜리 목표의 지평에 섞여 시험 뒤로 밀렸다.
+  남은 세션이 한 달짜리 목표의 지평에 섞여 시험 뒤로 밀렸다. 마감이 이미 지난 목표는 배치하되
+  그 사실을 알린다.
 """
 
 from __future__ import annotations
@@ -158,6 +159,26 @@ def test_replan_says_so_when_a_goal_cannot_fit_before_its_deadline(
     assert len(notes) == 1, resp.json()["warnings"]
     # 세션마다 한 줄씩 늘어놓지 않는다 — 목표 단위 한 줄.
     assert not any("배치할 가용 시간을 찾지 못했어요" in w for w in resp.json()["warnings"])
+
+
+def test_replan_says_so_when_a_goals_deadline_has_already_passed(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_goal_repo: FakeGoalRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """리뷰 반영: 마감(7/10)이 재배치 시작(7/13) 전에 이미 지난 목표의 카드는 버리지 않고
+    배치하되, 마감 뒤에 잡았다는 걸 목표 단위 한 줄로 알린다(예전엔 아무 말이 없었다)."""
+    _freeze_now(monkeypatch)
+    exam = _seed_goal(fake_goal_repo, title="중간고사", deadline=date(2026, 7, 10))
+    ids = {f"action_{_card(fake_action_item_repo, exam, title=f'범위 {i}').id}" for i in range(2)}
+
+    resp = client.post("/plans/replan")
+
+    assert resp.status_code == 201, resp.text
+    assert len(_blocks_of(resp, ids)) == 2
+    notes = [w for w in resp.json()["warnings"] if "'중간고사' 마감(7월 10일)이 이미 지나서" in w]
+    assert len(notes) == 1, resp.json()["warnings"]
 
 
 def test_replan_fills_placeholders_in_the_users_tone(

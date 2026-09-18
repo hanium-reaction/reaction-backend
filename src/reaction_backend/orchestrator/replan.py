@@ -222,16 +222,23 @@ def build_forward_replan_by_deadline(
 
     마감 전에 다 못 넣은 세션은 **마감 뒤로 밀지 않는다** — 시험 뒤의 공부는 쓸모가 없다.
     대신 목표 이름과 마감을 짚은 경고 한 줄로 알린다(초안이라 사용자가 보고 고른다).
+
+    마감이 **이미 지난**(재배치 시작일 전) 목표의 카드는 넣을 자리가 마감 안에 없다. 버리면
+    사용자가 계속하려던 일이 말없이 사라지므로 전체 지평에 배치하되, 마감 뒤에 잡았다는 걸
+    목표 단위 한 줄로 알린다(리뷰 반영) — 예전엔 아무 말 없이 마감 뒤로 흩어졌다.
     """
     # (마감일, 목표 제목) → 후보. 마감 없는 묶음은 (지평, "") — 마감 묶음은 지평보다 **엄격히**
     # 이르므로 정렬하면 항상 맨 뒤에 온다.
     groups: dict[tuple[date, str], list[ReplanCandidate]] = {}
+    overdue: dict[uuid.UUID, GoalDeadline] = {}
     for c in candidates:
         d = deadlines.get(c.action_id)
         if d is not None and window_start <= d.day < horizon_day:
             key = (d.day, d.goal_title)
         else:
             key = (horizon_day, "")
+            if d is not None and d.day < window_start:
+                overdue[c.action_id] = d
         groups.setdefault(key, []).append(c)
 
     busy = list(committed_busy)
@@ -255,6 +262,13 @@ def build_forward_replan_by_deadline(
             )
         else:
             warnings.extend(group_warnings)
+    # 마감이 지난 목표 — 실제로 마감 뒤에 놓인 카드가 있는 목표만, 목표마다 한 줄.
+    late_goals = {overdue[b.action_id] for b in blocks if b.action_id in overdue}
+    for d in sorted(late_goals, key=lambda g: (g.day, g.goal_title)):
+        warnings.append(
+            f"'{d.goal_title}' 마감({d.day.month}월 {d.day.day}일)이 이미 지나서, 남은 일정은 "
+            "그 뒤로 잡아 뒀어요. 계속할 목표라면 마감을 새로 정해 주세요."
+        )
     blocks.sort(key=lambda b: b.start)
     return blocks, warnings
 
