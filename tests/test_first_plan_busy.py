@@ -353,6 +353,68 @@ async def test_daily_frequency_stays_daily_when_sessions_are_not_a_week_multiple
     )
 
 
+def _cadence_state(*, freq: int, sessions: int, minutes: tuple[int, ...]) -> Any:
+    """빈도를 말한 마감 없는 목표 + 길이가 **제각각인** 세션 — ADR-0009 D2 가 허용하는 모양.
+
+    세션 길이 50분(집중 용량·평균)인데 LLM 이 50/30/20 을 섞어 내면 합계 분이 평균보다
+    작아져, 분 기준 창(`placement_days_needed`)이 개수보다 좁아진다 (planB-6).
+    """
+    base = _freq_state(deadline=None, sessions=sessions)
+    heaviest = base["outcome"].core_goals[0].model_copy(update={"frequency_per_week": freq})
+    outcome = base["outcome"].model_copy(update={"core_goals": [heaviest]})
+    gp = base["goal_plan"]
+    items = [
+        a.model_copy(update={"estimated_minutes": minutes[i % len(minutes)]})
+        for i, a in enumerate(gp.action_items)
+    ]
+    return {**base, "outcome": outcome, "goal_plan": gp.model_copy(update={"action_items": items})}
+
+
+def _sessions_per_calendar_week(blocks: list[Any]) -> dict[date, int]:
+    counts: dict[date, int] = {}
+    for b in blocks:
+        day = b.start.astimezone(KST).date()
+        week = day - timedelta(days=day.weekday())  # 월요일 기준 달력 주
+        counts[week] = counts.get(week, 0) + 1
+    return counts
+
+
+async def test_daily_goal_with_short_sessions_still_gets_one_session_per_day() -> None:
+    """'매일' 28세션인데 LLM 이 세션을 짧게 섞어도 28일에 하루 하나씩 놓인다 (planB-6).
+
+    회귀(미러 실측): '매일 30분 달리기' 28세션 합계 740분 → 분 기준 창 25일 → 9/22·9/30·
+    10/8 에 18:00·18:30 두 번씩 연달아 잡히고 계획이 사흘 일찍 끝났다. 개수 기준 창(28일)이
+    분 기준보다 넓으면 그쪽을 쓴다.
+    """
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+    state = _cadence_state(freq=7, sessions=28, minutes=(50, 30, 20))
+    new_state = await first_plan.schedule_blocks(state, config)
+    blocks = new_state["scheduled_blocks"]
+    assert len(blocks) == 28
+    days = {b.start.astimezone(KST).date() for b in blocks}
+    assert len(days) == 28, f"하루 하나씩이어야 하는데 {len(days)}일에 몰렸다"
+    assert max(days) <= TUE + timedelta(days=27)
+
+
+async def test_calendar_week_never_exceeds_the_stated_cadence() -> None:
+    """'주 5회' 는 어느 달력 주(월~일)에도 5개를 넘지 않는다 (planB-6).
+
+    회귀(미러 실측): '주 5회' 20세션이 분 기준 26일 창에 흩어져 9/21 주에 6세션이 들어갔다.
+    stride 는 평균 간격만 맞추므로 창을 개수 기준(28일)으로 넓히고, 스케줄러가 주 단위
+    개수를 직접 센다.
+    """
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+    state = _cadence_state(freq=5, sessions=20, minutes=(50, 30, 20))
+    new_state = await first_plan.schedule_blocks(state, config)
+    blocks = new_state["scheduled_blocks"]
+    assert len(blocks) == 20, "세션을 떨어뜨리지 않고 전부 놓는다"
+    per_week = _sessions_per_calendar_week(blocks)
+    assert max(per_week.values()) <= 5, f"달력 주별 세션 수가 주 5회를 넘었다: {per_week}"
+    assert not [w for w in new_state["schedule_warnings"] if "가용 시간을 찾지 못했" in w]
+
+
 # ── #231 이미 지난 마감 ───────────────────────────────────────────────────
 
 

@@ -96,6 +96,7 @@ SCHEDULER_ARGS_SUPPLIED: Final = (
     "focus_chunk_min",
     "break_min",
     "daily_focus_cap_min",
+    "max_sessions_per_week",
 )
 SCHEDULER_ARGS_STRESS_ONLY: Final = (
     # 둘 다 DB 유래(승인된 다른 계획). **기본은 비운다** — "달력이 빈 사용자" 조건이다.
@@ -300,6 +301,7 @@ def place(
             density,
             longest_action_min=max((a["estimated_minutes"] or 0 for a in items), default=0),
         ),
+        max_sessions_per_week=first_plan_adapter.requested_sessions_per_week(outcome),
         **extra,
     )
     return placed, warnings, len(actions), end

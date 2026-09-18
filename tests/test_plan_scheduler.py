@@ -717,3 +717,50 @@ def test_window_ending_exactly_at_midnight_does_not_join_into_next_day_sleep() -
         f"수면 시간대로 넘어간 배치가 생겼다 — {[(b.interval.start, b.interval.end) for b in blocks]}"
     )
     assert warnings
+
+
+def test_weekly_cap_holds_even_in_the_second_pass() -> None:
+    """`max_sessions_per_week` 는 하루 상한과 달리 2차 패스에서도 넘기지 않는다 (planB-6).
+
+    창이 2주(월~일 두 번)인데 5세션·주 2회 — 하루 상한이 넉넉해도 한 주에 3개째는 안 들어가고,
+    못 넣은 1개는 조용히 몰아넣지 않고 경고로 남는다.
+    """
+    monday = date(2026, 7, 13)
+    actions = [_action(f"운동{i}", 30) for i in range(5)]
+    blocks, warnings = schedule_actions_multiday(
+        start_day=monday,
+        horizon_day=monday + timedelta(days=13),
+        actions=actions,
+        busy_for_day=_busy_09_2330,
+        peak_windows=[],
+        focus_chunk_min=60,
+        break_min=10,
+        daily_focus_cap_min=600,
+        max_sessions_per_week=2,
+    )
+    per_week: dict[date, int] = {}
+    for b in blocks:
+        day = b.interval.start.date()
+        week = day - timedelta(days=day.weekday())
+        per_week[week] = per_week.get(week, 0) + 1
+    assert len(blocks) == 4
+    assert max(per_week.values()) == 2
+    assert len(warnings) == 1
+
+
+def test_no_weekly_cap_keeps_the_old_behavior() -> None:
+    """상한을 안 주면(재계획 등 다른 호출자) 종전대로 한 주에 몇 개든 놓는다."""
+    monday = date(2026, 7, 13)
+    actions = [_action(f"운동{i}", 30) for i in range(5)]
+    blocks, warnings = schedule_actions_multiday(
+        start_day=monday,
+        horizon_day=monday + timedelta(days=6),
+        actions=actions,
+        busy_for_day=_busy_09_2330,
+        peak_windows=[],
+        focus_chunk_min=60,
+        break_min=10,
+        daily_focus_cap_min=600,
+    )
+    assert len(blocks) == 5
+    assert not warnings

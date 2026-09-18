@@ -739,12 +739,24 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
     # 기본값에서 ~1주치 세션이 먼 마감(예: 이번 학기) 전체에 균등 분산돼 이번 주가 텅 빈다.
     # 마감이 그보다 가까우면 _schedule_end 캡이 그대로 이겨(마감까지 몰기) 유지된다. 이후 주는
     # 주간 재계획이 채운다(비지속 초안이라 안전).
+    per_week = first_plan_adapter.requested_sessions_per_week(outcome)
     if action_items:
         # 배치 창 너비 — 근거와 산식은 `placement_days_needed` 참고 (ADR-0009 D1).
         days_needed = first_plan_adapter.placement_days_needed(
             sum(a.estimated_minutes for a in action_items),
             first_plan_adapter.weekly_minutes(outcome, state["density"]),
         )
+        if per_week is not None:
+            # 빈도를 말한 목표는 **개수**로도 창을 잰다 — 분 기준만 쓰면 짧은 세션이 섞일 때
+            # 창이 줄어 같은 개수가 더 적은 날에 몰린다(`cadence_days_needed`). 둘 중 넓은
+            # 쪽을 쓰고, 계획 지평(주)을 넘지는 않는다 — 마감 없는 경로도 바운드가 남는다.
+            days_needed = max(
+                days_needed,
+                min(
+                    first_plan_adapter.cadence_days_needed(len(action_items), per_week),
+                    state["max_plan_weeks"] * 7,
+                ),
+            )
         density_end = start_day + timedelta(days=days_needed - 1)
         if state["scope"] == "horizon" and (not outcome.horizon or overdue_deadline):
             # 마감 없는 습관형 목표(예: '매일 운동')는 _schedule_end 가 배치 창을 **하루로
@@ -852,6 +864,9 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         ),
         committed_min_by_day=first_plan_adapter.committed_minutes_by_day(existing_busy),
         roomy_busy_for_day=roomy_busy_for_day,
+        # 창을 개수로 넓혀도 stride 는 평균 간격만 맞춘다 — 막힌 날을 뒤로 밀면 한 달력 주에
+        # N+1 개가 들어갈 수 있어, 사용자가 말한 '주 N회' 를 스케줄러가 직접 지킨다.
+        max_sessions_per_week=per_week,
     )
 
     # 세션 하나가 활동창의 연속 가용 길이보다 길어 어디에도 안 들어간 경우(#252):

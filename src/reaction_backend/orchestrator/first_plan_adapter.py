@@ -534,6 +534,31 @@ def placement_days_needed(planned_min: int, weekly_min: int) -> int:
     return max(1, -(-max(planned_min, 0) * 7 // max(weekly_min, 1)))
 
 
+def requested_sessions_per_week(outcome: InterviewOutcome) -> int | None:
+    """사용자가 **직접 말한** 주당 횟수('매일'=7, '주 3회'=3). 말하지 않았으면 None.
+
+    `target_sessions_per_week` 와 같은 클램프(상한 14)를 쓰되, 주당 시간·density 에서
+    **파생한** 개수는 돌려주지 않는다 — 그건 시간을 길이로 나눈 값이지 약속한 횟수가 아니라
+    (`cadence_session_cap` 과 같은 구분), 주 단위 개수를 묶을 근거가 못 된다.
+    """
+    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    freq = heaviest.frequency_per_week
+    if not freq or freq <= 0:
+        return None
+    return max(1, min(freq, _MAX_SESSIONS_PER_WEEK))
+
+
+def cadence_days_needed(session_count: int, per_week: int) -> int:
+    """세션 `session_count` 개를 주 `per_week` 회로 놓는 데 필요한 **일 수** (최소 1).
+
+    `placement_days_needed` 의 개수판이다. 빈도를 말한 목표는 횟수가 곧 사용자의 답이라,
+    분으로만 창을 재면 LLM 이 세션을 짧게 잡는 순간(ADR-0009 D2 가 허용한다) 창이 줄어
+    같은 개수가 더 적은 날에 몰린다 — 실측: '매일 30분' 28세션이 740분이라 25일 창을 받아
+    하루에 두 번씩 잡힌 날이 생겼고, '주 5회' 20세션은 26일 창에서 한 주에 6개가 들어갔다.
+    """
+    return max(1, -(-max(session_count, 0) * 7 // max(per_week, 1)))
+
+
 def horizon_minute_budget(
     outcome: InterviewOutcome,
     density: str,
