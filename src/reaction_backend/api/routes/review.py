@@ -466,12 +466,18 @@ def _already_decided(habit: Habit, reference_week: date) -> bool:
     return decided_at is not None and to_kst(decided_at).date() >= reference_week
 
 
-def _candidate_message(target: int, avg_done: float, suggested: int) -> str:
-    """비난 없는 재설계 톤 (베이스라인 §1.4)."""
-    return (
-        f"지난 3주 동안 주 {target}회 목표 중 평균 {avg_done:g}회를 했어요. "
-        f"무리하지 않게 주 {suggested}회로 맞춰볼까요?"
+def _candidate_message(target: int, total_done: int, suggested: int) -> str:
+    """비난 없는 재설계 톤 (베이스라인 §1.4).
+
+    3주 **합계**를 쓴다 — 평균은 "평균 0.67회" 같은 소수가 떴다. 한 번도 못 한 경우는 숫자
+    0 을 들이밀지 않는다.
+    """
+    did = (
+        f"주 {target}회 목표로 {total_done}회를 해냈어요."
+        if total_done > 0
+        else f"주 {target}회는 조금 버거웠던 것 같아요."
     )
+    return f"지난 3주 동안 {did} 무리하지 않게 주 {suggested}회로 맞춰볼까요?"
 
 
 def _to_candidate(habit: Habit, ev: PenaltyEval) -> HabitPenaltyCandidate:
@@ -482,7 +488,7 @@ def _to_candidate(habit: Habit, ev: PenaltyEval) -> HabitPenaltyCandidate:
         current_frequency=habit.frequency_per_week,
         suggested_frequency=ev.suggested_frequency,
         recent_weeks=[HabitWeekStat(done_count=d, target_count=t) for d, t in ev.recent],
-        message=_candidate_message(target, ev.avg_done, ev.suggested_frequency),
+        message=_candidate_message(target, ev.total_done, ev.suggested_frequency),
     )
 
 
@@ -531,6 +537,10 @@ async def accept_habit_penalty(
     previous = habit.frequency_per_week
     await habit_repo.apply_penalty(
         habit, new_frequency=ev.suggested_frequency, decided_at=now_kst()
+    )
+    # 이번 주 카드도 새 목표로 — 예전엔 옛 목표(0/5)로 남았다(v2.30-goals).
+    await habit_inst_repo.sync_week_target(
+        habit.id, current_week_start_kst(), ev.suggested_frequency
     )
     await session.commit()
 

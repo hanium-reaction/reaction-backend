@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
@@ -25,6 +26,11 @@ from reaction_backend.db.session import get_db
 from reaction_backend.schemas.common import KST
 
 
+def today_kst() -> date:
+    """오늘 날짜(KST). 주 경계·첫 주 목표치 계산이 모두 이 값 하나를 본다(테스트가 여기를 고정)."""
+    return datetime.now(KST).date()
+
+
 def current_week_start_kst() -> date:
     """이번 주 월요일 (KST 기준). habit_instances.week_start 와 매칭.
 
@@ -32,8 +38,33 @@ def current_week_start_kst() -> date:
     `GET /habit-instances`)가 **전부 이 함수 하나**를 쓴다. 주 경계를 각자 재면 어긋난 주에
     행이 생겨 습관이 안 보인다 — 새 호출자도 여기로 올 것.
     """
-    today = datetime.now(KST).date()
+    today = today_kst()
     return today - timedelta(days=today.weekday())  # Monday=0
+
+
+def week_target(frequency_per_week: int, *, created_on: date | None, week_start: date) -> int:
+    """이 주(`week_start`)의 목표 횟수 — **등록한 그 주만** 남은 날 비율로 줄인다.
+
+    토요일에 '매일' 습관을 만들면 이번 주는 이틀뿐인데 목표가 7이라, 이틀 다 해도 2/7(절반
+    미만)이었다. 그 주가 '3주 연속 미달' 의 첫 주로 세어져 실제로는 2주 만에 빈도 줄이기 카드가
+    떴고, 오늘 화면엔 시작부터 닿을 수 없는 0/7 이 떴다. 그래서 등록한 주는
+    `ceil(빈도 × 남은 날 / 7)`(최소 1) — 월요일에 만들면 그대로다. 그다음 주부터는 cron 이
+    `habit.target_count`(= 빈도) 그대로 만든다.
+
+    `created_on` 이 없거나(아직 저장 전 등) 이 주보다 앞이면 등록 주가 아니므로 빈도 그대로.
+    """
+    if created_on is None or created_on < week_start:
+        return frequency_per_week
+    remaining_days = 7 - created_on.weekday()
+    return max(1, math.ceil(frequency_per_week * remaining_days / 7))
+
+
+def first_week_target(frequency_per_week: int) -> int:
+    """**오늘** 등록하는 습관의 이번 주 목표 — `week_target` 의 등록 시점 버전."""
+    today = today_kst()
+    return week_target(
+        frequency_per_week, created_on=today, week_start=today - timedelta(days=today.weekday())
+    )
 
 
 class HabitRepo:

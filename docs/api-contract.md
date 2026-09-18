@@ -479,11 +479,12 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 | Method | Path | 설명 |
 | --- | --- | --- |
 | GET | `/habits` | 내 습관 전체 |
-| POST | `/habits` | 신규 — `{ title, category, frequencyPerWeek }`. `title` 은 앞뒤 공백을 떼고 1~200자(비면 "습관 이름을 적어 주세요.", 길면 "습관 이름은 200자까지 적을 수 있어요." — 422 `COMMON_VALIDATION_ERROR`, v2.30-goals), `minutesPerSession` 1~1440 |
-| PATCH | `/habits/{id}` | 빈도/제목 — `title` 상한은 `POST` 와 같다(생략하면 그대로) |
+| POST | `/habits` | 신규 — `{ title, category, frequencyPerWeek }`. 응답 `Habit` 에 **`currentInstanceId`**(이번 주 인스턴스 id, v2.30-goals — 방금 만든 습관을 곧바로 `check` 할 수 있게; 생성 응답에만 싣고 그 외 응답은 `null`). **등록한 주의 `targetCount` 는 남은 날만큼**: `ceil(빈도 × (7 − 요일) / 7)`, 최소 1(월=0 … 일=6 — 토요일에 만든 '매일'은 2). 다음 주부터는 빈도 그대로. `category` 가 목표 전용 값(`project`/`schedule`/`career`)이면 `other` 로 받는다(v2.30-goals — 오늘 화면 폼이 목표 분류를 띄워 422 로 사라지던 경로), 그 밖의 모르는 값은 422. `title` 은 앞뒤 공백을 떼고 1~200자(비면 "습관 이름을 적어 주세요.", 길면 "습관 이름은 200자까지 적을 수 있어요." — 422 `COMMON_VALIDATION_ERROR`, v2.30-goals), `minutesPerSession` 1~1440 |
+| PATCH | `/habits/{id}` | 빈도/제목 — `title` 상한은 `POST` 와 같다(생략하면 그대로). `frequencyPerWeek` 를 바꾸면 **이번 주 인스턴스의 `targetCount` 도** 새 값으로(등록한 주면 남은 날 비율), 이미 한 횟수는 새 목표에서 멈춘다(`doneCount = min(doneCount, target)`). 지난 주 기록은 그대로(v2.30-goals) |
 | DELETE | `/habits/{id}` | soft delete |
-| GET | `/habit-instances?weekStart=YYYY-MM-DD` | 이번 주 인스턴스 (`doneCount` vs `targetCount`) |
-| POST | `/habit-instances/{id}/check` | 1회 달성 |
+| GET | `/habit-instances?weekStart=YYYY-MM-DD` | 이번 주 인스턴스 (`doneCount` vs `targetCount`). **이번 주를 읽을 때는 없는 인스턴스를 먼저 채운다**(v2.30-goals, 멱등 — 새 주 인스턴스를 만드는 월요일 00:05 cron 전에 열어도 체크 대상이 있다). 다른 주는 읽기만 |
+| POST | `/habit-instances/{id}/check` | 1회 달성(`targetCount` 에서 멈춤, 동시에 두 번 와도 둘 다 센다). **지난 주 인스턴스로 오면 이번 주 인스턴스를 올리고 그것을 돌려준다**(v2.30-goals — 일요일 밤에 열어 둔 화면에서 월요일에 누른 체크가 지난 주로 가던 경로; 지난 주 기록은 그대로). 응답의 `instanceId`·`weekStart` 로 새 주를 알 수 있다 |
+| POST | `/habit-instances/{id}/uncheck` | **1회 되돌리기**(v2.30-goals, additive) — 잘못 누른 체크용. `doneCount` 를 1 줄이고 0 아래로는 안 내려간다(다시 불러도 안전). 응답은 `check` 와 같은 `HabitInstance`. 없는/다른 사용자의 인스턴스는 404 `HABIT_NOT_FOUND` |
 
 ---
 
@@ -936,11 +937,14 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 #21-C Habit Penalty 메모 (S22 — 비난 아닌 빈도 재설계):
 - 감지: 직전 완료 주 기준 **최근 3주 연속** `done_count < target_count*0.5`. 순수 함수
   `orchestrator/habit_penalty.py`. `suggestedFrequency` = 3주 평균 달성(round, 최소 1, 현재보다 작게).
+  **더 줄일 수 없는 주 1회 습관은 후보가 아니다**(v2.30-goals — 예전엔 "주 1회 → 1회" 카드가 떴다).
 - `GET /reviews/habit-penalty` — 후보(habitId/title/current·suggestedFrequency/recentWeeks/message).
-  이미 이번 사이클 결정한 habit(`last_penalty_evaluated_at` ≥ 직전 완료 주)은 제외.
+  이미 이번 사이클 결정한 habit(`last_penalty_evaluated_at` ≥ 직전 완료 주)은 제외. `message` 는
+  3주 **합계**로 말한다("주 5회 목표로 2회를 해냈어요." — 예전 "평균 0.67회" 같은 소수 없음).
 - `POST /reviews/habit-penalty/{habitId}/accept` — **Idempotency-Key 필수**(§1.7 미들웨어). 조건
   미충족/중복 시 422 `HABIT_PENALTY_NOT_ELIGIBLE`, 습관 없음 404 `HABIT_NOT_FOUND`. 수락 시
-  `frequency_per_week`=`target_count`=suggested, `last_penalty_decision='accepted'`. DB 마이그레이션 없음.
+  `frequency_per_week`=`target_count`=suggested, `last_penalty_decision='accepted'`. **이번 주
+  인스턴스의 `targetCount` 도 새 빈도로**(이미 한 횟수는 새 목표에서 멈춤, v2.30-goals). DB 마이그레이션 없음.
 - reject(+4주 cooldown) 경로는 후속(현재 accept 만).
 
 #21-A 구현 메모 (룰 기반, LLM 한 줄 평은 P2):

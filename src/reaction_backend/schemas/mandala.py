@@ -24,6 +24,7 @@ from reaction_backend.schemas.habits import (
     HABIT_TITLE_MAX_LENGTH,
     HabitCategory,
     TimePreference,
+    habit_category_from_goal_category,
 )
 from reaction_backend.schemas.planning import FirstPlanResponse
 
@@ -412,6 +413,11 @@ class MandalaHabitLinkRequest(CamelModel):
     @classmethod
     def _title(cls, v: object) -> object:
         return clean_title(v, noun="습관 이름", max_length=HABIT_TITLE_MAX_LENGTH)
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _category(cls, v: object) -> object:
+        return habit_category_from_goal_category(v)
 
 
 __all__ = [

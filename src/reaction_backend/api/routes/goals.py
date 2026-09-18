@@ -20,10 +20,10 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
+from reaction_backend.api.routes.habits import HABIT_ID_PREFIX, to_habit_schema
 from reaction_backend.db.models.goal import GOAL_CATEGORY_VALUES
 from reaction_backend.db.models.goal import Goal as GoalModel
 from reaction_backend.db.models.goal_node import GoalNode as GoalNodeModel
-from reaction_backend.db.models.habit import Habit as HabitModel
 from reaction_backend.db.session import get_db
 from reaction_backend.orchestrator import (
     first_plan_adapter,
@@ -41,6 +41,7 @@ from reaction_backend.repositories.habit_instance_repo import (
 from reaction_backend.repositories.habit_repo import (
     HabitRepo,
     current_week_start_kst,
+    first_week_target,
     get_habit_repo,
 )
 from reaction_backend.repositories.inbox_repo import InboxRepo, get_inbox_repo
@@ -320,7 +321,7 @@ async def list_goal_nodes(goal_id: str, user: CurrentUser, repo: RepoDep) -> Goa
 # ─────────────────────────────────────────────────────────────────────────────
 
 _NODE_PREFIX = "node_"
-_HABIT_PREFIX = "habit_"  # api/routes/habits.py 의 _HABIT_PREFIX 와 반드시 같은 값
+_HABIT_PREFIX = HABIT_ID_PREFIX  # api/routes/habits.py 가 원본 — 두 곳에서 따로 정의하지 않는다
 
 
 def _milestone_not_found() -> ApiError:
@@ -392,19 +393,6 @@ def _to_mandala_node(
         habit_id=f"{_HABIT_PREFIX}{habit_id}" if habit_id is not None else None,
         progress=progress,
         coverage=coverage,
-    )
-
-
-def _to_habit_schema(h: HabitModel) -> HabitSchema:
-    return HabitSchema(
-        habit_id=f"{_HABIT_PREFIX}{h.id}",
-        title=h.title,
-        category=h.category,
-        frequency_per_week=h.frequency_per_week,
-        minutes_per_session=h.minutes_per_session,
-        time_preference=h.time_preference,
-        priority_level=h.priority_level,
-        goal_node_id=f"{_NODE_PREFIX}{h.goal_node_id}" if h.goal_node_id is not None else None,
     )
 
 
@@ -702,7 +690,10 @@ async def link_mandala_habit(
         )
     existing = await habit_repo.get_active_by_goal_node(user.id, node.id)
     if existing is not None:
-        return _to_habit_schema(existing)
+        current = await instance_repo.get_for_week(existing.id, current_week_start_kst())
+        return to_habit_schema(
+            existing, current_instance_id=current.id if current is not None else None
+        )
 
     habit = await habit_repo.create(
         user_id=user.id,
@@ -715,15 +706,15 @@ async def link_mandala_habit(
         goal_node_id=node.id,
     )
     # 등록 시점에 이번 주 instance 도 함께 — POST /habits 와 같은 이유(주 중간 등록이 다음
-    # 월요일까지 오늘 화면에 안 보이면 안 된다).
-    await instance_repo.create_or_get_for_week(
+    # 월요일까지 오늘 화면에 안 보이면 안 된다). 목표는 남은 날만큼(`first_week_target`).
+    instance = await instance_repo.create_or_get_for_week(
         habit_id=habit.id,
         week_start=current_week_start_kst(),
-        target_count=body.frequency_per_week,
+        target_count=first_week_target(body.frequency_per_week),
     )
     await session.commit()
     await session.refresh(habit)
-    return _to_habit_schema(habit)
+    return to_habit_schema(habit, current_instance_id=instance.id)
 
 
 @router.delete("/mandala/nodes/{node_id}/habit", status_code=status.HTTP_204_NO_CONTENT)

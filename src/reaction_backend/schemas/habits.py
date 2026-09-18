@@ -19,6 +19,19 @@ HABIT_TITLE_MAX_LENGTH = 200
 # 한 번 하는 데 드는 시간 상한 — 하루(1440분). 컬럼이 32bit 정수라 큰 값은 500 이 났다.
 HABIT_MINUTES_PER_SESSION_MAX = 1440
 
+# 목표 분류(9종, db.models.goal.GOAL_CATEGORY_VALUES)에는 있지만 습관 분류(6종)에는 없는 값.
+# 오늘 화면의 습관 추가 폼이 목표 분류 목록을 그대로 띄워서 이 셋을 고르면 422 가 났고, FE 는
+# 그 실패를 삼켜 화면에만 있는 유령 습관이 남았다. 거절하지 않고 '기타' 로 받는다 — 두 목록이
+# 어긋나도 사용자가 적은 습관이 사라지지 않게. 아예 모르는 값은 여전히 422 다.
+_GOAL_ONLY_CATEGORIES = frozenset({"project", "schedule", "career"})
+
+
+def habit_category_from_goal_category(value: object) -> object:
+    """`category` 검사 전(`mode="before"`) — 목표 전용 분류를 `other` 로 바꾼다."""
+    if isinstance(value, str) and value in _GOAL_ONLY_CATEGORIES:
+        return "other"
+    return value
+
 
 class Habit(CamelModel):
     """습관 — GET/POST/PATCH 응답 항목."""
@@ -32,6 +45,11 @@ class Habit(CamelModel):
     priority_level: int
     # 만다라 반복형 칸에서 만들어졌으면 그 노드 id, 아니면 null(ADR-0008 §1).
     goal_node_id: str | None = None
+    # 이번 주 체크 대상(`POST /habit-instances/{id}/check`) — 새로 만든 습관을 곧바로 체크할 수
+    # 있게 생성 응답(`POST /habits`, 반복형 전환)에만 싣는다. 그 외 응답은 null(
+    # `GET /habit-instances` 가 원본). 예전엔 방금 만든 습관의 인스턴스 id 를 알 길이 없어
+    # 화면만 +1 되고 서버엔 안 올라갔다.
+    current_instance_id: str | None = None
 
 
 class HabitCreateRequest(CamelModel):
@@ -48,6 +66,11 @@ class HabitCreateRequest(CamelModel):
     @classmethod
     def _title(cls, v: object) -> object:
         return clean_title(v, noun="습관 이름", max_length=HABIT_TITLE_MAX_LENGTH)
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _category(cls, v: object) -> object:
+        return habit_category_from_goal_category(v)
 
 
 class HabitUpdateRequest(CamelModel):

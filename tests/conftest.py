@@ -762,7 +762,29 @@ class FakeHabitInstanceRepo:
         return items
 
     async def get_for_user(self, user_id: UUID, instance_id: UUID) -> HabitInstance | None:
-        return self._items.get(instance_id)
+        instance = self._items.get(instance_id)
+        if instance is not None and self._habits is not None:
+            # 실 repo 는 habits 조인으로 소유자·보관을 본다 — 습관을 아는 경우에만 흉내 낸다.
+            habit = self._habits._items.get(instance.habit_id)
+            if habit is not None and (habit.user_id != user_id or habit.archived_at is not None):
+                return None
+        return instance
+
+    async def ensure_for_week(self, user_id: UUID, week_start: date) -> None:
+        if self._habits is None:
+            return
+        for habit in await self._habits.list_active(user_id):
+            await self.create_or_get_for_week(habit.id, week_start, habit.target_count)
+
+    async def decrement_done(self, instance: HabitInstance) -> HabitInstance:
+        instance.done_count = max(instance.done_count - 1, 0)
+        return instance
+
+    async def sync_week_target(self, habit_id: UUID, week_start: date, target_count: int) -> None:
+        instance = await self.get_for_week(habit_id, week_start)
+        if instance is not None:
+            instance.target_count = target_count
+            instance.done_count = min(instance.done_count, target_count)
 
     async def list_recent_for_habit(
         self, habit_id: UUID, before_week: date, limit: int = 3
