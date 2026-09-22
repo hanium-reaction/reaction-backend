@@ -778,6 +778,13 @@ FE 가 할 일(고정 일정): `SetupScreen.addSchedule` 은 422 를 `friendlyEr
   `unsubscribePush()` + `DELETE /notifications/subscribe` 를 먼저 부르기.
 - **알림 설정 첫 조회가 동시에 와도 500 이 나지 않는다** — `GET/PATCH /notifications/settings`·
   `POST /notifications/subscribe` 의 행 생성이 `ON CONFLICT DO NOTHING` 으로 바뀌었다.
+- **`toneMode` 가 두 경로에서 같은 값**(v2.30-auth2) — `GET /auth/me`(와 `POST /auth/google`
+  응답의 `user`)가 톤을 아직 안 고른 사용자에게 `""` 대신 **`null`** 을 내린다. `GET /settings`
+  는 예전부터 `null` 이라, 같은 사람의 같은 값을 두 화면이 다르게 말하고 있었다. 필드는
+  그대로 있고(사라지지 않는다) 값이 있는 사용자는 종전과 같다. ⚠️ 타입이 `string` →
+  `"gentle"|"strict"|"encouraging"|null` 로 넓어진다. FE 할 일 없음 — 두 곳 다 값을 비교
+  (`toneMode === mode`)하거나 그대로 넘기기만 하고, `/settings` 의 `null` 을 이미 그렇게 읽고
+  있다. 생성 타입(`openapi.d.ts`)만 다시 뽑으면 된다.
 - **401 `AUTH_INVALID_TOKEN` 문구가 다른 화면과 같은 말투로**(v2.30-auth2). 여기만 합쇼체였다
   ("인증 헤더가 없습니다.", "인증 토큰이 유효하지 않습니다.", "사용자를 찾을 수 없습니다.") —
   로그인이 풀린, 가장 당황스러운 순간에 말투가 갑자기 딱딱해지고 뭘 하면 되는지도 말해 주지

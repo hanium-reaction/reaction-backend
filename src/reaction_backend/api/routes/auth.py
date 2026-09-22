@@ -100,7 +100,9 @@ async def _signup_lock(session: AsyncSession) -> AsyncIterator[None]:
 def _to_profile(user: User) -> UserProfile:
     """User ORM → API UserProfile (ADR-0001 §3.1: API 식별자에 `user_` prefix).
 
-    tone_mode 는 신규 user 에서 None 가능 — 빈 문자열로 fallback (FE 는 기본 톤).
+    tone_mode 는 신규 user(인터뷰 전)에서 None — **그대로 null 로 내린다**. 예전엔 여기서만
+    빈 문자열로 덮어 `GET /settings` 의 같은 값(null)과 갈렸다(재검증 P4). FE 는 두 경로
+    모두 "고른 톤이 있으면 그 칸을 켠다"로만 읽어 동작은 같고, 값의 뜻이 정직해진다.
     """
     return UserProfile(
         user_id=f"user_{user.id}",
@@ -108,7 +110,7 @@ def _to_profile(user: User) -> UserProfile:
         name=user.name,
         timezone=user.timezone,
         onboarding_state=user.onboarding_state,
-        tone_mode=user.tone_mode or "",
+        tone_mode=user.tone_mode,  # type: ignore[arg-type]
     )
 
 

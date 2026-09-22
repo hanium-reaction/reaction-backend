@@ -178,7 +178,7 @@ root·branch 제목, 룰 폴백의 `"{목표 제목} N회차"`, 만다라 축 �
 | POST | `/auth/google` | Google id_token → 자체 JWT (access+refresh) 발급. **신규 가입만** 가입 게이트(#324) 대상 |
 | POST | `/auth/refresh` | refresh → 새 access |
 | POST | `/auth/logout` | refresh 무효화 |
-| GET | `/auth/me` | 현재 사용자 (`onboarding_state` 포함) |
+| GET | `/auth/me` | 현재 사용자 (`onboarding_state` 포함). `toneMode` 는 `gentle｜strict｜encouraging｜null` — **아직 톤을 고르지 않았으면 null**(v2.30-auth2, `GET /settings` 와 같은 값). 그전에는 이 경로만 빈 문자열이었다. 필드는 그대로 있다 |
 
 **가입 게이트(#324, FE #237 §8)** — `POST /auth/google` 요청에 선택 필드 `inviteCode` 가
 추가된다. **기존 사용자 로그인(요청의 email 이 이미 `users` 에 있음)은 이 게이트를 전혀

@@ -306,6 +306,25 @@ def test_me_with_expired_token_returns_401_expired(auth_client: TestClient) -> N
     assert resp.json()["code"] == "AUTH_TOKEN_EXPIRED"
 
 
+def test_me_and_settings_agree_on_an_unset_tone_mode(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    """톤을 아직 고르지 않은 사용자 — `/auth/me` 도 `/settings` 와 같이 null (재검증 P4).
+
+    예전엔 `/auth/me` 만 빈 문자열이라, 같은 사람의 같은 값을 두 화면이 다르게 말했다.
+    빈 문자열은 "고르지 않음"이 아니라 "고른 값이 비어 있음"처럼 읽히는 거짓말이다.
+    필드 자체는 그대로 있다(사라지지 않는다).
+    """
+    login = _login(auth_client, fake_invite_code_repo)
+    token = login["accessToken"]
+
+    assert "toneMode" in login["user"]
+    assert login["user"]["toneMode"] is None, login["user"]
+
+    me = auth_client.get("/auth/me", headers={"Authorization": f"Bearer {token}"}).json()
+    assert me["toneMode"] is None, me
+
+
 def test_invalid_token_messages_speak_the_same_korean_as_the_rest(
     auth_client: TestClient,
 ) -> None:
