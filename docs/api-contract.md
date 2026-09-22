@@ -820,6 +820,10 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   가 있을 때만 personalize 가 v3 프롬프트로 라우팅되고, 그 배치의 **선두 카드에만** 값이
   실린다. 그 외 카드(형제·비-AVOIDANCE 배치·룰 폴백)는 셋 다 null. `acknowledgment` 는
   v3 안에서도 조건부라 obstacle/copingClause 만 있고 이건 null 인 경우가 있다.
+  **선두 카드여도 문장이 깨졌으면 그 필드만 null**(v2.30-recovery) — 비었거나, 길이 초과
+  (acknowledgment 60자, obstacle/copingClause 120자), 한글·영문·숫자·흔한 문장부호 밖의 글자,
+  날짜/시각 흔적, 카드 제목에 없는 3글자 이상 영단어. `suggestedActionText` 는 그대로다.
+  FE 는 값이 있을 때만 그리면 된다(없는 게 정상인 경우가 많다).
 - **`recoveryMode: "standard" | "goal_renegotiation"`(#328, 근거 대장 §5.2 L3)** — 동일
   목표 4회 연속 실패 또는 회복 2회 연속 rejected(skipped 포함)면 `goal_renegotiation` 이고,
   이때 `cards` 는 태그 매칭과 무관하게 **DOWNSCOPE/RESCHEDULE/PARK 각 1장, 정확히 3장**
@@ -834,12 +838,27 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   무력화돼 같은 실패에 회복 ActionItem 이 여러 개 생기고, replan 은 `created_at` 오름차순의
   **첫** 채택 카드에 고정돼 사용자가 다시 고른 최신 회복이 영영 배치되지 않는다.
   → FE 는 회복 화면 재진입 시 409 를 "이미 결정함"으로 처리한다(에러 토스트 X).
+- **`personalizationSkipped: boolean`(v2.30-recovery, 추가 필드 — 기본 `false`)** — L2(단서
+  전환)·L3(`goal_renegotiation`)처럼 **제품 규칙으로 LLM 개인화를 일부러 건너뛴** 세트면 `true`.
+  이때도 `aiSource` 는 계약대로 `"rule"` 이다. 타임아웃·키 없음 같은 **룰 폴백**이면 `false`.
+  → FE 는 "오프라인 모드(룰 기반)로 제안했어요" 안내를 `aiSource === "rule" &&
+  !personalizationSkipped` 일 때만 띄운다(예전엔 L2/L3 마다 AI 가 안 되는 것처럼 보였다).
+  pending 재반환 경로도 같은 판정(다시 계산한 에스컬레이션 레벨)을 쓴다.
 - 룰 선택: `recovery_strategy_catalog.primary_trigger_tags` ↔ 실패 태그 매칭,
   그룹별 최고 1장, 최소 2장 패딩 (orchestrator/recovery.py).
 - `POST /recovery/decisions` 요청 `{ executionId, decision: accepted|edited|skipped,
   acceptedAttemptId?, editedActionText?, decisionReason?, reEngagementAnchorAt? }` — accepted 시
   나머지 pending 은 rejected. DOWNSCOPE/CARRY_OVER 수락 → 새 ActionItem(source=`recovery_downscope`/
   `recovery_carryover`, `parent_action_item_id` 혈통) 생성. RESCHEDULE/PARK 는 생성 없음.
+- **새 회복 카드의 `title` = 원본 카드 제목 + 그룹 꼬리표**(v2.30-recovery) — DOWNSCOPE
+  `"<원본> · 가볍게 다시"`, CARRY_OVER `"<원본> · 이어서"`(최대 300자, 회복을 또 회복해도
+  꼬리표는 한 번만, 원본을 못 읽으면 `"다시 해보기"`). ⚠️ 그전에는 `suggestedActionText` 를
+  그대로 제목으로 썼다 — 선두 카드만 LLM 이 다듬고 나머지는 카탈로그 템플릿이라, 형제 카드를
+  고르면 "내일 같은 슬롯으로 그대로 옮겨드릴까요?" 같은 질문이 오늘 화면·주간 그리드·아침 알림의 카드 이름이 됐다. 제안 문구는
+  DOWNSCOPE 카드의 `firstStep`(오늘 화면 '첫 걸음')으로 옮기고(L1/L2 컴백 프리픽스는 뗀다),
+  CARRY_OVER 는 원본의 `firstStep` 을 물려받는다. `decision="edited"` 면 종전대로 사용자
+  문구가 제목이다(이때 DOWNSCOPE `firstStep` 은 비운다 — 사용자가 AI 문구 대신 자기 말을
+  골랐다). `recovery_attempts.suggested_action_text`(AI 원문)는 그대로 보존.
 - **회복 카드의 `estimatedMinutes` 는 원본 카드에서 파생한다** (2026-08-28, ADR-0009 D6):
   **CARRY_OVER = 원본 그대로**('내일로 그대로 옮기기'라 길이를 줄이지 않는다),
   **DOWNSCOPE = 원본의 40%** 를 5분 눈금으로 반올림하고 `[min(minRecoveryUnitMinutes, 원본),
@@ -858,6 +877,11 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   만들지 않는다. 응답 `reEngagementAnchorAt` 는 확정된(명시값 또는 계산된 기본값) 시점을 항상
   KST 로 반환하며, PARK/CARRY_OVER 가 아니면 `null`. 저장 위치는
   `recovery_attempts.re_engagement_anchor_at`.
+  **CARRY_OVER 에 명시값을 보내면 새 회복 카드의 `targetDate` 도 그 KST 날짜가 된다**
+  (v2.30-recovery) — 단 내일보다 이르면 내일('이어가기'는 오늘 안으로 당기지 않는다). 생략하면
+  종전대로 내일. ⚠️ 그전에는 앵커만 저장되고 카드는 무조건 내일에 놓여, "금요일에 다시
+  확인할게요"라고 고른 사용자의 할 일이 내일 오늘 화면에 떴다. 앵커의 **시각**은 여전히 쓰지
+  않는다 — 재관여 알림은 그날 아침 알림 시각에 한 번 간다(§15 morning_brief).
 - **`decision="edited"`(잠금 결정 [수락/수정/거절] 의 '수정')** — `acceptedAttemptId` +
   `editedActionText`(trim 후 1~300자) 필수. 부수효과는 accepted 와 **동일**(형제 rejected,
   새 ActionItem 생성, replan 대상)이고 **새 카드 title 만 사용자 문구**가 된다.
@@ -886,11 +910,15 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   시각이면 `조회/승인 시각 + 10분`을 15분 격자로 올린 시각(`earliest`)까지 앞당긴다.
   (a) `earliest` 가 그 날 **07:00**(quiet hours 끝) 이전이면 같은 날 07:00, (b) 그 밖에
   `earliest + estimatedMinutes` 가 그 날 **23:00**(quiet hours 시작) 전에 끝나면 `earliest`,
-  (c) 아니면 **다음날 07:00**. 회복 `targetDate` 는 이 보정으로 바뀌지 않으므로 (c) 경로에서는
-  카드 날짜와 블록 날짜가 하루 어긋난다 — 의도적으로 받아들인 트레이드오프다(#258): 하루
-  어긋난 `targetDate` 는 주간 그리드 표기가 어색할 뿐이지만, 과거에 박힌 블록은 **원리적으로
-  완주가 불가능**하다. ⚠️ 회복 길이가 원본에서 파생되면서(ADR-0009 D6) 긴 원본의 DOWNSCOPE 는
-  (b) 를 통과하지 못해 (c) 로 가는 빈도가 늘어난다.
+  (c) 아니면 **다음날 07:00**. 과거에 박힌 블록은 **원리적으로 완주가 불가능**해서(#258)
+  하루 늦게라도 미래에 놓는다. ⚠️ 회복 길이가 원본에서 파생되면서(ADR-0009 D6) 긴 원본의
+  DOWNSCOPE 는 (b) 를 통과하지 못해 (c) 로 가는 빈도가 늘어난다.
+  **(c) 경로의 카드 날짜(v2.30-recovery)**: approve 가 블록을 만들 때 회복 카드의 `targetDate`
+  를 **블록의 KST 날짜로 맞춘다**(새 회복 카드만, 원본 카드는 불변). GET 프리뷰의
+  `after.targetDate` 도 같은 값(블록이 놓이는 날)이다. ⚠️ 그전에는 카드 날짜가 결정한 날에
+  남아, 오늘 화면(`targetDate` 로 카드를 고른다)이 블록이 잡힌 다음날 그 카드를 보여주지 않았다.
+  시프트 결과는 항상 **15분 격자로 올림**한다(v2.30-recovery) — 계획 블록 없이 바로 시작한
+  카드는 `planStartAt` 이 클릭 시각(초·마이크로초 포함)이라 그대로 옮기면 격자에서 어긋났다.
   왜: 회복 결정은 21시 일괄 회고(잠금 결정)에서만 일어나고 DOWNSCOPE 는 day_delta 가 0 이라,
   보정이 없으면 결과가 항상 **이미 지나간 원본 슬롯**이 된다. 과거 블록은 `pre_card` 알림
   창(`[now+2m, now+7m)`, 5분 폴)을 영영 만나지 못한다. 왜 밤엔 안 미는가: 블록 생성 경로는
@@ -1198,7 +1226,11 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 - morning_brief 는 **재관여 대상이 있을 때만** — 오늘이 채택된 PARK/CARRY_OVER 회복의
   재관여 앵커 날짜인 사용자에게, `morning_brief` 클래스를 재사용해 발송한다(새 클래스
   아님, 근거 대장 §6.2 T2). 대상 없으면 그날은 발송 없음. `morningTime` 이 06:00~06:59
-  면 07:00 으로 클램프해 발송(quiet hours 끝나는 시각 — evening 의 22:55 클램프와 대칭)
+  면 07:00 으로 클램프해 발송(quiet hours 끝나는 시각 — evening 의 22:55 클램프와 대칭).
+  **더는 권할 게 없는 회복은 대상이 아니다**(v2.30-recovery) — 이미 완주한 회복
+  (`recovery_result='completed'`), 이어가기 카드를 끝냈거나(done/over_done) 목표 완료·계획
+  교체로 치워진 경우, 원본 카드의 목표가 완료·보관된 경우. 만료(`reflection_skipped`)로 보관된
+  카드와 해 보다 못 끝낸 회복은 그대로 대상이다. 앵커의 **시각**은 쓰지 않는다(날짜만)
 
 `POST /notifications/{notificationId}/opened` — **⚠️ 아직 이 endpoint 를 부르는 FE 콜백이
 없다.** push `notificationclick` 이벤트 핸들러가 준비되면 그 알림의 push payload 에 실린

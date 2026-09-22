@@ -15,9 +15,12 @@ from fastapi.testclient import TestClient
 
 from reaction_backend.orchestrator.escalation import L3_REJECTED_STREAK_THRESHOLD
 from reaction_backend.orchestrator.recovery import (
+    ACKNOWLEDGMENT_MAX_LENGTH,
     COMEBACK_ACK_PREFIX,
+    COPING_TEXT_MAX_LENGTH,
     DOWNSCOPE_RETAIN_RATIO,
     RECOVERY_NIGHT_CUTOFF_HOUR,
+    clean_coping_text,
     re_engagement_anchor_at,
     recovery_action_minutes,
     recovery_target_date,
@@ -125,6 +128,8 @@ def test_generate_returns_2_to_4_cards(
     assert body["isDraft"] is True
     # LLM 키 없음 → 룰 fallback
     assert body["aiSource"] == "rule"
+    # 폴백은 '일부러 건너뜀'이 아니다 — 오프라인 안내 대상(recovery-5)
+    assert body["personalizationSkipped"] is False
     # 에스컬레이션 없는 평범한 실패 — 재협상 모드가 아니다(#328).
     assert body["recoveryMode"] == "standard"
 
@@ -269,6 +274,97 @@ def test_generate_avoidance_tag_routes_to_v3_and_fills_coping_plan_on_leading_ca
         assert sibling["acknowledgment"] is None
 
 
+def test_generate_blanks_only_the_broken_coping_fields(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """깨진 코핑 문장은 그 필드만 비우고 if/then 개인화는 살린다 (recovery-12).
+
+    미러 실측 문자열 그대로 — acknowledgment 에 다른 문자권 글자 + 타임스탬프가 붙었다.
+    """
+    from reaction_backend.llm import RunResult, aiClient
+    from reaction_backend.schemas.recovery import RecoveryProposalLLMv3
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        return RunResult(
+            value=RecoveryProposalLLMv3(
+                strategy_code="downscope",
+                if_clause="책상 앞에 앉으면",
+                then_clause="GROUP BY 실습에서 예제 1절만 봐요",
+                rationale="",
+                obstacle="막상 앉아도 뭐부터 볼지 헷갈릴 수 있어요",
+                coping_clause="wait, let me rethink the coping step",
+                acknowledgment="처음 시작할 때는 누구나 조금 망설여져요ო2025-02-23T00:00:00Z",
+            ),
+            fell_back=False,
+            reason=None,
+            prompt_id="recovery/if_then_proposal",
+            prompt_version="v3",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["AVOIDANCE", "HARD_TO_START"]
+    )
+    body = _generate(client, exec_id).json()
+
+    top = body["cards"][0]
+    assert top["suggestedActionText"] == "책상 앞에 앉으면 GROUP BY 실습에서 예제 1절만 봐요"
+    assert top["obstacle"] == "막상 앉아도 뭐부터 볼지 헷갈릴 수 있어요"
+    assert top["copingClause"] is None
+    assert top["acknowledgment"] is None
+    assert body["aiSource"] == "llm"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "처음 시작할 때는 누구나 조금 망설여져요ო2025-02-23T00:00:00Z",  # 미러 실측
+        "누구나 시작이 막막할 때가 있어요 2025-02-23",
+        "지금은 21:00:00 이라 조금 늦었어요",
+        "wait, let me think about the obstacle",  # 추론 문장 유출
+        "자연스러운 일이에요그나저나 시작이 막막할 때가 있어요 마음을 다독여봐요 "
+        "누구나 시작이 막막할 때가 있어요. 슬라이드 만들기가 부담스러울 수 있죠.",  # 메타 문단(60자 초과)
+        "힘내요 😊",
+        "",
+        "   ",
+        None,
+    ],
+)
+def test_clean_coping_text_rejects_broken_output(text: str | None) -> None:
+    assert (
+        clean_coping_text(
+            text, max_length=ACKNOWLEDGMENT_MAX_LENGTH, context_title="발표 슬라이드 만들기"
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "title"),
+    [
+        ("처음 시작할 때는 누구나 막막한 법이에요.", "영어 스피킹 연습"),
+        ("누구나 시작이 막막할 때가 있어요", "영어 스피킹 연습"),
+        # 카드 제목에 있는 영어는 그대로 둔다(대소문자 무관)
+        ("SQL 문법이 헷갈리면 예제 1절만 다시 봐요", "sql GROUP BY 실습"),
+        ("그마저 어려우면 5분만, 목차만 훑어봐요!", "알고리즘 2문제"),
+    ],
+)
+def test_clean_coping_text_keeps_normal_sentences(text: str, title: str) -> None:
+    assert clean_coping_text(text, max_length=COPING_TEXT_MAX_LENGTH, context_title=title) == text
+
+
+def test_clean_coping_text_normalizes_whitespace_and_enforces_length() -> None:
+    assert (
+        clean_coping_text("  누구나   그럴 때가 있어요 ", max_length=60, context_title="")
+        == "누구나 그럴 때가 있어요"
+    )
+    assert clean_coping_text("가" * 61, max_length=60, context_title="") is None
+    assert clean_coping_text("가" * 60, max_length=60, context_title="") == "가" * 60
+
+
 def test_generate_non_avoidance_tag_stays_on_v2_without_coping_plan(
     client: TestClient,
     fake_recovery_repo: FakeRecoveryRepo,
@@ -364,6 +460,8 @@ def test_generate_forces_environment_shift_lead_and_skips_llm_at_l2(
     assert top["strategyType"] == "ENVIRONMENT_SHIFT"
     assert "NANO_STEP" not in {c["strategyType"] for c in body["cards"]}
     assert body["aiSource"] == "rule"
+    # 일부러 건너뛴 것 — FE 가 '오프라인 모드' 안내를 띄우지 않게 구분해 준다(recovery-5).
+    assert body["personalizationSkipped"] is True
 
 
 def test_generate_does_not_escalate_one_below_l2_threshold(
@@ -478,9 +576,13 @@ def test_generate_l3_escalates_on_two_consecutive_skipped_recoveries(
     assert body["recoveryMode"] == "goal_renegotiation"
     assert {c["optionGroup"] for c in body["cards"]} == {"DOWNSCOPE", "RESCHEDULE", "PARK"}
 
+    assert body["aiSource"] == "rule"
+    assert body["personalizationSkipped"] is True  # recovery-5 — 오프라인 아님
+
     # 멱등 재조회(같은 pending 카드) — recoveryMode 가 그대로 유지된다.
     refetched = _generate(client, f"exec_{current.id}").json()
     assert refetched["recoveryMode"] == "goal_renegotiation"
+    assert refetched["personalizationSkipped"] is True
     assert refetched["cards"] == body["cards"]
 
 
@@ -725,6 +827,41 @@ def test_generate_is_idempotent_while_pending(
     first = _generate(client, exec_id).json()
     second = _generate(client, exec_id).json()
     assert [c["attemptId"] for c in first["cards"]] == [c["attemptId"] for c in second["cards"]]
+
+
+def test_reopening_keeps_the_recommended_card_first(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """다시 열어도 '추천'(첫 카드)이 옮겨 가지 않는다 (recovery-7).
+
+    FATIGUE+LOW_ENERGY — ACTIVE_RECOVERY 는 태그 2개가 맞아(점수 2) 선두, DOWNSCOPE_DEFAULT 는
+    1개(점수 1). 실 DB 의 `list_attempts` 는 점수를 모르고 `trigger_tag` 유무 → display_priority
+    (20 < 60)로 정렬해 DOWNSCOPE_DEFAULT 를 먼저 돌려준다 — 그 정렬을 fake 에 재현한다
+    (파이썬 리스트는 삽입 순서를 지켜 결함이 안 보인다).
+    """
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["FATIGUE", "LOW_ENERGY"]
+    )
+    first = _generate(client, exec_id).json()["cards"]
+    assert [c["strategyType"] for c in first] == ["ACTIVE_RECOVERY", "DOWNSCOPE_DEFAULT"]
+
+    priority = {s.strategy_type: s.display_priority for s in default_recovery_strategies()}
+    insertion_order_list = fake_recovery_repo.list_attempts
+
+    async def db_ordered_list_attempts(user_id: UUID, execution_id: UUID) -> list[Any]:
+        attempts = await insertion_order_list(user_id, execution_id)
+        return sorted(
+            attempts,
+            key=lambda a: (a.trigger_tag is None, priority[a.recovery_strategy_type]),
+        )
+
+    monkeypatch.setattr(fake_recovery_repo, "list_attempts", db_ordered_list_attempts)
+
+    reopened = _generate(client, exec_id).json()["cards"]
+    assert [c["attemptId"] for c in reopened] == [c["attemptId"] for c in first]
 
 
 def test_generate_409_after_decision_is_final(
@@ -2113,3 +2250,361 @@ def test_edited_text_with_non_edited_decision_is_rejected(
 
     assert resp.status_code == 422
     assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"
+
+
+# ───────────────────────── 회복 카드 제목·첫 걸음 (recovery-1) ─────────────────────────
+
+
+def _stub_personalize_top(monkeypatch: Any, *, if_clause: str, then_clause: str) -> None:
+    """선두 카드만 LLM 이 다듬는 실제 흐름을 재현 — 형제 카드는 카탈로그 템플릿 그대로."""
+    from reaction_backend.llm import RunResult, aiClient
+    from reaction_backend.schemas.recovery import RecoveryProposalLLM
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        return RunResult(
+            value=RecoveryProposalLLM(
+                strategy_code="downscope",
+                if_clause=if_clause,
+                then_clause=then_clause,
+                rationale="",
+            ),
+            fell_back=False,
+            reason=None,
+            prompt_id="recovery/if_then_proposal",
+            prompt_version="v2",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+
+def test_accepted_sibling_card_is_titled_after_the_original_not_the_template(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """형제 카드(템플릿 문구)를 골라도 새 카드 이름은 원본 제목이다.
+
+    회귀: 제안 문구를 그대로 제목으로 써서, '내일 같은 시간' 을 고르면 다음 날 오늘 화면·
+    주간 그리드·아침 알림에 "내일 같은 슬롯으로 그대로 옮겨드릴까요?" 가 카드 이름으로 떴다.
+    """
+    _stub_personalize_top(
+        monkeypatch, if_clause="책상에 앉으면", then_clause="예제 한 문제만 먼저 풀어봐요"
+    )
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo, fake_action_item_repo, failure_tags=["PRIORITY_SHIFT", "AMBIGUITY"]
+    )
+    original = next(a for a in fake_action_item_repo._items.values() if a.source == "manual")
+    original.first_step = "교재 3장 펴기"
+
+    cards = _generate(client, exec_id).json()["cards"]
+    assert cards[0]["optionGroup"] != "CARRY_OVER", "형제 카드를 고르는 시나리오여야 한다"
+    carry = next(c for c in cards if c["optionGroup"] == "CARRY_OVER")
+    assert "옮겨드릴까요" in carry["suggestedActionText"]  # 템플릿 문구 그대로인 형제
+
+    resp = _decide(
+        client,
+        {"executionId": exec_id, "decision": "accepted", "acceptedAttemptId": carry["attemptId"]},
+    )
+    assert resp.status_code == 200, resp.json()
+
+    new_action = next(
+        a for a in fake_action_item_repo._items.values() if a.source == "recovery_carryover"
+    )
+    assert new_action.title == "GROUP BY 실습 · 이어서"
+    assert "옮겨드릴까요" not in new_action.title
+    # 같은 일을 이어가는 것이라 원본의 첫 걸음을 물려받는다 — 템플릿은 할 일이 아니다.
+    assert new_action.first_step == "교재 3장 펴기"
+    # AI 원문은 보존 (Draft Layer 지표)
+    attempt = fake_recovery_repo._attempts[UUID(carry["attemptId"].removeprefix("rec_"))]
+    assert attempt.suggested_action_text == carry["suggestedActionText"]
+
+    diff = client.get(f"/replan/{exec_id}").json()
+    assert diff["after"]["title"] == "GROUP BY 실습 · 이어서"
+
+
+def test_comeback_prefix_never_reaches_the_new_card(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """L1 컴백 프리픽스는 제안하는 순간의 말 — 수락한 카드 제목·첫 걸음에 남지 않는다."""
+    _stub_personalize_top(
+        monkeypatch, if_clause="책상에 앉으면", then_clause="보고서 첫 문단만 써봐요"
+    )
+    action = _seed_action(fake_action_item_repo, title="보고서 작성")
+    for day in (1, 2):
+        current = fake_recovery_repo.register_execution(
+            user_id=DEMO_USER_UUID,
+            action_item_id=action.id,
+            completion_status="failed",
+            failure_tags=["AMBIGUITY"],
+            plan_start_at=datetime(2026, 6, day, tzinfo=KST),
+        )
+    exec_id = f"exec_{current.id}"
+
+    top = _generate(client, exec_id).json()["cards"][0]
+    assert top["optionGroup"] == "DOWNSCOPE"
+    assert top["suggestedActionText"].startswith(COMEBACK_ACK_PREFIX)
+
+    resp = _decide(
+        client,
+        {"executionId": exec_id, "decision": "accepted", "acceptedAttemptId": top["attemptId"]},
+    )
+    assert resp.status_code == 200, resp.json()
+
+    new_action = next(
+        a for a in fake_action_item_repo._items.values() if a.source == "recovery_downscope"
+    )
+    assert new_action.title == "보고서 작성 · 가볍게 다시"
+    # 제안 문구는 '첫 걸음' 으로 옮기되 프리픽스는 뗀다.
+    assert new_action.first_step == "책상에 앉으면 보고서 첫 문단만 써봐요"
+
+
+def test_recovery_action_title_does_not_stack_suffixes_on_repeated_recovery() -> None:
+    from reaction_backend.orchestrator.recovery import recovery_action_title
+
+    once = recovery_action_title("자료구조 과제 2번", "DOWNSCOPE")
+    assert once == "자료구조 과제 2번 · 가볍게 다시"
+    # 회복 카드가 또 실패해 다시 회복해도 꼬리표가 쌓이지 않는다.
+    assert recovery_action_title(once, "DOWNSCOPE") == once
+    assert recovery_action_title(once, "CARRY_OVER") == "자료구조 과제 2번 · 이어서"
+
+
+def test_recovery_action_title_fits_the_column_and_survives_missing_original() -> None:
+    from reaction_backend.orchestrator.recovery import (
+        RECOVERY_TITLE_MAX_LENGTH,
+        recovery_action_title,
+    )
+
+    long_title = "가" * RECOVERY_TITLE_MAX_LENGTH
+    titled = recovery_action_title(long_title, "CARRY_OVER")
+    assert len(titled) == RECOVERY_TITLE_MAX_LENGTH
+    assert titled.endswith(" · 이어서")
+    # 원본을 못 읽으면(보관 등) 질문형 템플릿 대신 짧고 정직한 이름.
+    assert recovery_action_title(None, "DOWNSCOPE") == "다시 해보기"
+
+
+# ───────────────────────── 밤늦은 승인 — 카드 날짜 = 블록 날짜 (recovery-2) ─────────────────────────
+
+
+def _accept_downscope_at(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+    *,
+    now: datetime,
+    original_minutes: int = 120,
+) -> tuple[str, Any]:
+    """`now` 에 DOWNSCOPE 를 수락한 실행 ID 와 그 회복 카드를 돌려준다(19시 계획, 2시간 원본)."""
+    from reaction_backend.api.routes import recovery as recovery_routes
+
+    monkeypatch.setattr(recovery_routes, "now_kst", lambda: now)
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo,
+        fake_action_item_repo,
+        target_date=now.date(),
+        plan_start_at=now.replace(hour=19, minute=0),
+    )
+    original = next(a for a in fake_action_item_repo._items.values() if a.source == "manual")
+    original.estimated_minutes = original_minutes
+    decision = _accept_group(client, exec_id, "DOWNSCOPE")
+    recovery_id = UUID(decision["resultingActionItemId"].removeprefix("action_"))
+    return exec_id, fake_action_item_repo._items[recovery_id]
+
+
+def test_late_night_approval_moves_the_recovery_card_to_the_block_day(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """22:10 에 고른 50분 회복은 23시 전에 못 끝나 다음날 07:00 블록이 된다 — 카드도 그날로.
+
+    회귀: 블록만 다음날로 가고 카드 `target_date` 는 결정한 날에 남아, 블록이 잡힌 그날
+    오늘 화면(`target_date` 로 고른다)에 회복 카드가 안 떴다.
+    """
+    now = datetime(2026, 9, 18, 22, 10, tzinfo=KST)
+    exec_id, recovery_action = _accept_downscope_at(
+        client, fake_recovery_repo, fake_action_item_repo, monkeypatch, now=now
+    )
+    assert recovery_action.estimated_minutes == 50
+    assert recovery_action.target_date == date(2026, 9, 18)  # 수락 직후엔 결정한 날
+
+    preview = client.get(f"/replan/{exec_id}").json()
+    assert preview["after"]["startAt"] == "2026-09-19T07:00:00+09:00"
+    assert preview["after"]["targetDate"] == "2026-09-19", "프리뷰가 블록 날짜를 말해야 한다"
+
+    body = _approve_replan(client, exec_id).json()
+    assert body["startAt"] == "2026-09-19T07:00:00+09:00"
+    assert recovery_action.target_date == date(2026, 9, 19)
+
+    # 원본 카드는 그대로 (AGENTS.md §2)
+    original = next(a for a in fake_action_item_repo._items.values() if a.source == "manual")
+    assert original.status == "failed"
+    assert original.target_date == date(2026, 9, 18)
+
+    after = client.get(f"/replan/{exec_id}").json()
+    assert after["alreadyApproved"] is True
+    assert after["after"]["targetDate"] == "2026-09-19"
+
+
+def test_evening_approval_that_fits_today_keeps_the_card_date(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """대조군 — 21:00 결정은 23시 전에 끝나 같은 날 블록이고 카드 날짜도 그대로다."""
+    now = datetime(2026, 9, 18, 21, 0, tzinfo=KST)
+    exec_id, recovery_action = _accept_downscope_at(
+        client, fake_recovery_repo, fake_action_item_repo, monkeypatch, now=now
+    )
+
+    body = _approve_replan(client, exec_id).json()
+    assert body["startAt"] == "2026-09-18T21:15:00+09:00"
+    assert recovery_action.target_date == date(2026, 9, 18)
+
+
+# ───────────────────────── 회복 블록 15분 격자 (recovery-19) ─────────────────────────
+
+
+def test_shift_to_recovery_day_snaps_adhoc_start_to_the_quarter_grid() -> None:
+    """계획 없이 바로 시작한 카드는 `plan_start_at` 이 클릭 시각이다 — 초·마이크로초까지.
+
+    회귀: 과거 보정이 없는 경로(CARRY_OVER 내일)는 그 시각을 그대로 옮겨 11:35:22.808 같은
+    블록이 주간 그리드·15분 편집기와 어긋나게 박혔다.
+    """
+    plan_start = datetime(2026, 9, 18, 11, 35, 22, 808336, tzinfo=KST)
+    start_at, end_at = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 9, 18),
+        recovery_target_date=date(2026, 9, 19),
+        estimated_minutes=30,
+        now=datetime(2026, 9, 18, 21, 0, tzinfo=KST),
+    )
+    assert start_at == datetime(2026, 9, 19, 11, 45, tzinfo=KST)
+    assert end_at == datetime(2026, 9, 19, 12, 15, tzinfo=KST)
+
+
+def test_shift_to_recovery_day_keeps_a_quarter_aligned_start() -> None:
+    plan_start = datetime(2026, 9, 18, 11, 30, tzinfo=KST)
+    start_at, _ = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 9, 18),
+        recovery_target_date=date(2026, 9, 19),
+        estimated_minutes=30,
+        now=datetime(2026, 9, 18, 21, 0, tzinfo=KST),
+    )
+    assert start_at == datetime(2026, 9, 19, 11, 30, tzinfo=KST)
+
+
+# ───────────────────────── 직접 고른 이어가기 날짜 (recovery-14) ─────────────────────────
+
+
+def _accept_carry_over_with_anchor(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+    *,
+    now: datetime,
+    anchor: str | None,
+) -> Any:
+    """`now` 에 CARRY_OVER 를 (선택적으로 앵커와 함께) 수락하고 새 회복 카드를 돌려준다."""
+    from reaction_backend.api.routes import recovery as recovery_routes
+
+    monkeypatch.setattr(recovery_routes, "now_kst", lambda: now)
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo,
+        fake_action_item_repo,
+        failure_tags=["AMBIGUITY", "PRIORITY_SHIFT"],
+        target_date=now.date(),
+        plan_start_at=now.replace(hour=14, minute=0),
+    )
+    cards = _generate(client, exec_id).json()["cards"]
+    carry_over = next(c for c in cards if c["optionGroup"] == "CARRY_OVER")
+    body: dict[str, Any] = {
+        "executionId": exec_id,
+        "decision": "accepted",
+        "acceptedAttemptId": carry_over["attemptId"],
+    }
+    if anchor is not None:
+        body["reEngagementAnchorAt"] = anchor
+    decision = _decide(client, body)
+    assert decision.status_code == 200, decision.json()
+    recovery_id = UUID(decision.json()["resultingActionItemId"].removeprefix("action_"))
+    return fake_action_item_repo._items[recovery_id]
+
+
+def test_carry_over_card_lands_on_the_day_the_user_picked(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """'금요일에 다시 확인할게요'로 골랐으면 이어가는 카드도 금요일에 놓인다.
+
+    회귀: 앵커는 금요일로 저장되는데 카드는 무조건 내일로 만들어져, 화면이 약속한 날과
+    할 일이 놓인 날이 달랐다(설정이 반영되지 않은 것처럼 보였다).
+    """
+    now = datetime(2026, 9, 16, 21, 5, tzinfo=KST)  # 수요일
+    recovery_action = _accept_carry_over_with_anchor(
+        client,
+        fake_recovery_repo,
+        fake_action_item_repo,
+        monkeypatch,
+        now=now,
+        anchor="2026-09-25T20:00:00+09:00",  # 다음 주 금요일 20:00
+    )
+    assert recovery_action.target_date == date(2026, 9, 25)
+    # 원본 카드는 그대로 (AGENTS.md §2)
+    original = next(a for a in fake_action_item_repo._items.values() if a.source == "manual")
+    assert original.status == "failed"
+    assert original.target_date == date(2026, 9, 16)
+
+
+def test_carry_over_anchor_before_tomorrow_keeps_the_card_on_tomorrow(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    """오늘(또는 과거) 앵커 — '이어가기'가 오늘 안으로 당겨지진 않는다(내일 그대로)."""
+    now = datetime(2026, 9, 16, 21, 5, tzinfo=KST)
+    recovery_action = _accept_carry_over_with_anchor(
+        client,
+        fake_recovery_repo,
+        fake_action_item_repo,
+        monkeypatch,
+        now=now,
+        anchor="2026-09-16T22:00:00+09:00",
+    )
+    assert recovery_action.target_date == date(2026, 9, 17)
+
+
+def test_carry_over_without_anchor_still_goes_to_tomorrow(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    monkeypatch: Any,
+) -> None:
+    now = datetime(2026, 9, 16, 21, 5, tzinfo=KST)
+    recovery_action = _accept_carry_over_with_anchor(
+        client, fake_recovery_repo, fake_action_item_repo, monkeypatch, now=now, anchor=None
+    )
+    assert recovery_action.target_date == date(2026, 9, 17)
+
+
+def test_recovery_target_date_follows_an_explicit_carry_over_day_only() -> None:
+    decided_on = date(2026, 9, 16)
+    friday = date(2026, 9, 25)
+    assert recovery_target_date(decided_on, "CARRY_OVER", re_engagement_on=friday) == friday
+    # 내일보다 이르면 내일
+    assert recovery_target_date(decided_on, "CARRY_OVER", re_engagement_on=decided_on) == date(
+        2026, 9, 17
+    )
+    # 다른 그룹은 앵커와 무관하게 결정한 날
+    assert recovery_target_date(decided_on, "DOWNSCOPE", re_engagement_on=friday) == decided_on

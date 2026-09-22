@@ -6,7 +6,8 @@
 핵심 결정 (AGENTS.md §1):
 - UX 4 그룹 (DOWNSCOPE / RESCHEDULE / CARRY_OVER / PARK) — 같은 그룹 동시 노출 1카드.
 - 내부 13 전략(원본 9 + 2026-08-17 gap-fill 4)은 `recovery_strategy_catalog` 기준, 통계/감사용 보존.
-- 8초 안에 LLM 응답 못 받으면 heuristic fallback (PRD §9) — 룰 선택 + 카탈로그 템플릿.
+- LLM 응답을 12초 1회 안에 못 받으면 heuristic fallback (PRD §9, ADR-0003 addendum #128·
+  recovery-13) — 룰 선택 + 카탈로그 템플릿. 재시도는 하지 않는다(최악 대기 12초).
 - 원본 `action_item.status` (FAILED 등)는 절대 변경 X — Resilience 지표 전제.
 - AI 출력 = Draft Layer (`is_draft=True`) → `/recovery/decisions` 에서만 확정.
 
@@ -29,7 +30,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from http import HTTPStatus
 from typing import Annotated, Literal
 from uuid import UUID
@@ -50,14 +51,19 @@ from reaction_backend.db.session import get_db
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator.escalation import EscalationLevel, compute_escalation_state
 from reaction_backend.orchestrator.recovery import (
+    ACKNOWLEDGMENT_MAX_LENGTH,
+    COPING_TEXT_MAX_LENGTH,
+    clean_coping_text,
     first_matching_tag,
     re_engagement_anchor_at,
     recovery_action_minutes,
+    recovery_action_title,
     recovery_target_date,
     render_template,
     select_strategies,
     shift_to_recovery_day,
     with_comeback_ack,
+    without_comeback_ack,
 )
 from reaction_backend.repositories.action_item_repo import (
     ActionItemRepo,
@@ -69,7 +75,7 @@ from reaction_backend.repositories.scheduled_block_repo import (
     get_scheduled_block_repo,
 )
 from reaction_backend.safety import endpoint_rate_limit
-from reaction_backend.schemas.common import now_kst
+from reaction_backend.schemas.common import KST, now_kst
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.recovery import (
     RecoveryCard,
@@ -195,8 +201,40 @@ async def _get_execution_or_404(
     return execution
 
 
+def _in_selection_order(
+    pending: list[RecoveryAttempt],
+    failure_tags: list[str],
+    strategies: list[RecoveryStrategyCatalog],
+    escalation_level: EscalationLevel | None,
+) -> list[RecoveryAttempt]:
+    """다시 열었을 때도 **처음 만들 때와 같은 순서**로 — FE 는 첫 카드에 '추천'을 붙인다.
+
+    처음 generate 는 `select_strategies` 순서(매칭 점수 내림차순 → display_priority)로 카드를
+    돌려준다. 그런데 다시 열면 `list_attempts` 의 DB 정렬(`trigger_tag` 유무 → display_priority)
+    이라 점수를 모른다 — 태그 2개가 맞은 개인화 카드(ACTIVE_RECOVERY)가 1개 맞은 템플릿
+    카드(DOWNSCOPE_DEFAULT)에 밀려, 새 정보 없이 다시 열기만 해도 추천이 옮겨 갔다.
+
+    같은 입력(실패 태그·활성 카탈로그·에스컬레이션 레벨 — 레벨은 위에서 이미 다시 계산했다)
+    으로 `select_strategies` 를 다시 돌려 그 순서를 쓴다. 룰은 결정적이라 L2 선두 강제·L3 고정
+    순서까지 그대로 재현된다. 그 사이 카탈로그가 바뀌어 순위에 없는 카드는 기존 순서대로
+    뒤에 둔다(`sorted` 는 안정 정렬). 마이그레이션 없이 고치려고 순위를 저장하지 않는다.
+    """
+    selected = select_strategies(failure_tags, strategies, escalation_level=escalation_level)
+    rank = {s.strategy_type: i for i, s in enumerate(selected)}
+    return sorted(pending, key=lambda a: rank.get(a.recovery_strategy_type, len(rank)))
+
+
 def _recovery_mode(level: EscalationLevel | None) -> RecoveryMode:
     return "goal_renegotiation" if level == "L3" else "standard"
+
+
+def _personalization_skipped(level: EscalationLevel | None) -> bool:
+    """L2/L3 는 LLM 개인화를 **일부러** 건너뛴다(근거 대장 §5.2, #328) — 실패가 아니다.
+
+    generate 의 LLM 분기와 응답 `personalizationSkipped` 가 같은 판정을 써야 한다. 이 경우도
+    `aiSource` 는 'rule' 이지만(계약 동결), FE 는 이 값으로 "AI 를 못 불렀다" 안내를 거른다.
+    """
+    return level in ("L2", "L3")
 
 
 async def _determine_escalation_level(
@@ -273,7 +311,7 @@ async def generate_recovery_proposals(
     action_repo: ActionRepoDep,
     session: SessionDep,
 ) -> RecoveryProposalsResponse:
-    """실패 컨텍스트 기반 회복 옵션 2~4개 생성 (LLM thinking 0 + ≤ 12s, 룰 fallback — ADR-0003 addendum).
+    """실패 컨텍스트 기반 회복 옵션 2~4개 생성 (LLM thinking 0 + 12s × 1회, 룰 fallback — ADR-0003 addendum).
 
     이미 pending 카드가 있으면 재생성하지 않고 그대로 반환한다 (중복 INSERT 방지).
     """
@@ -333,6 +371,7 @@ async def generate_recovery_proposals(
     recovery_mode = _recovery_mode(escalation_level)
 
     if pending:
+        pending = _in_selection_order(pending, failure_tags, strategies, escalation_level)
         await repo.stamp_first_viewed(pending, now_kst())
         await session.commit()
         return RecoveryProposalsResponse(
@@ -340,6 +379,7 @@ async def generate_recovery_proposals(
             cards=[_to_card(a, catalog.get(a.recovery_strategy_type)) for a in pending],
             ai_source=_ai_source(all(a.llm_fallback_used for a in pending)),
             recovery_mode=recovery_mode,
+            personalization_skipped=_personalization_skipped(escalation_level),
         )
 
     # 진짜 새로 생성하는 경로에서만 카운트한다(#325) — 위 멱등 분기(pending 재반환)는 LLM 도,
@@ -377,7 +417,7 @@ async def generate_recovery_proposals(
     top_obstacle: str | None = None
     top_coping_clause: str | None = None
     top_acknowledgment: str | None = None
-    if escalation_level in ("L2", "L3"):
+    if _personalization_skipped(escalation_level):
         llm_fell_back = True
         llm_prompt_version: str | None = None
     else:
@@ -405,6 +445,9 @@ async def generate_recovery_proposals(
             # timeout 여유.
             thinking_budget=0,
             timeout=12.0,
+            # 재시도하지 않는다 — 기본(llm_max_retries=3)이면 12s×3+backoff ≈ 37초 동안 사용자가
+            # 로딩만 본다(미러 실측 26.6초). 룰 카드가 이미 준비돼 있으니 한 번 실패하면 바로 낸다.
+            max_attempts=1,
             variables={
                 "failure_type": ", ".join(failure_tags) if failure_tags else "UNKNOWN",
                 "confidence": "n/a",
@@ -432,10 +475,24 @@ async def generate_recovery_proposals(
             if personalized:
                 texts[top.strategy_type] = personalized
             # 코핑 플랜은 v3 스키마일 때만 존재 — RecoveryProposalLLMv3 로 좁힌 뒤에만 읽는다.
+            # 필드마다 검사해 깨진 문장(타임스탬프·다른 문자권·메타 문단)은 그 필드만 비운다
+            # — if/then 개인화는 그대로 살린다(`clean_coping_text`, recovery-12).
             if isinstance(result.value, RecoveryProposalLLMv3):
-                top_obstacle = result.value.obstacle or None
-                top_coping_clause = result.value.coping_clause or None
-                top_acknowledgment = result.value.acknowledgment or None
+                top_obstacle = clean_coping_text(
+                    result.value.obstacle,
+                    max_length=COPING_TEXT_MAX_LENGTH,
+                    context_title=action_title,
+                )
+                top_coping_clause = clean_coping_text(
+                    result.value.coping_clause,
+                    max_length=COPING_TEXT_MAX_LENGTH,
+                    context_title=action_title,
+                )
+                top_acknowledgment = clean_coping_text(
+                    result.value.acknowledgment,
+                    max_length=ACKNOWLEDGMENT_MAX_LENGTH,
+                    context_title=action_title,
+                )
 
     # COMEBACK 프리픽스(근거 대장 §4.1, D6) — 연속실패≥2(에스컬레이션 발생)일 때만 선두
     # 카드 문구 맨 앞에 얹는다. personalize 성패와 무관하게 적용(고정 문구, LLM 출력 아님).
@@ -469,6 +526,7 @@ async def generate_recovery_proposals(
         cards=[_to_card(a, catalog.get(a.recovery_strategy_type)) for a in attempts],
         ai_source=_ai_source(llm_fell_back),
         recovery_mode=recovery_mode,
+        personalization_skipped=_personalization_skipped(escalation_level),
     )
 
 
@@ -616,6 +674,7 @@ async def _create_recovery_action(
     decided_at: datetime,
     repo: RecoveryRepo,
     action_repo: ActionItemRepo,
+    re_engagement_anchor_override: datetime | None = None,
 ) -> UUID:
     """DOWNSCOPE/CARRY_OVER 수락 → 회복 ActionItem 생성. 반환: 새 카드 ID.
 
@@ -624,6 +683,13 @@ async def _create_recovery_action(
 
     소요 시간은 `recovery_action_minutes` 가 원본에서 파생한다 — CARRY_OVER 는 그대로,
     DOWNSCOPE 는 비례 축소. 예전엔 그룹과 무관하게 전략 카탈로그 상수를 썼다.
+
+    제목은 **원본 제목 + 그룹 꼬리표**(`recovery_action_title`)다 — 제안 문구는 질문형
+    템플릿일 수 있어 카드 이름이 될 수 없다. 제안 문구는 DOWNSCOPE 에서만 '첫 걸음'으로
+    옮긴다(`_recovery_first_step`).
+
+    날짜는 `recovery_target_date` 가 정한다 — CARRY_OVER 를 고르며 사용자가 재관여 날짜를
+    **직접** 골랐으면(`re_engagement_anchor_override`, #327) 카드도 그날로 간다.
     """
     original = await action_repo.get_by_id(user_id, execution.action_item_id)
     strategy = await repo.get_strategy(target.recovery_strategy_type)
@@ -632,10 +698,23 @@ async def _create_recovery_action(
         parent_action_item_id=execution.action_item_id,
         # 편집 수락이면 사용자 문구가 카드 제목이 된다. `target.suggested_action_text`
         # (AI 원문)는 그대로 둔다 — 덮어쓰면 "얼마나 고쳐 썼나"를 영영 못 잰다.
-        title=edited_text or (target.suggested_action_text or "회복 액션")[:300],
+        title=edited_text
+        or recovery_action_title(
+            original.title if original is not None else None, target.recovery_option_group
+        ),
         category=original.category if original is not None else "other",
         source=source,
-        target_date=recovery_target_date(decided_at.date(), target.recovery_option_group),
+        target_date=recovery_target_date(
+            decided_at.date(),
+            target.recovery_option_group,
+            # 사용자가 직접 고른 재관여 날짜만 반영한다(#327 명시값) — 서버 기본값은 이미
+            # '내일 09시'라 결과가 같다.
+            re_engagement_on=(
+                _kst_day(re_engagement_anchor_override)
+                if re_engagement_anchor_override is not None
+                else None
+            ),
+        ),
         estimated_minutes=recovery_action_minutes(
             option_group=target.recovery_option_group,
             original_minutes=original.estimated_minutes if original is not None else None,
@@ -644,7 +723,27 @@ async def _create_recovery_action(
             ),
         ),
     )
+    # 리포지토리 시그니처를 늘리지 않고 반환된 행에 싣는다 — commit 은 이 요청의 끝에서 한 번.
+    new_action.first_step = _recovery_first_step(target, original, edited=bool(edited_text))
     return new_action.id
+
+
+def _recovery_first_step(
+    target: RecoveryAttempt, original: ActionItem | None, *, edited: bool
+) -> str | None:
+    """회복 카드의 '첫 걸음'(오늘 화면 상세에 그대로 보인다).
+
+    - DOWNSCOPE 수락: 제안 문구가 곧 "무엇을 얼마나 작게" 할지다 — 컴백 프리픽스만 떼고
+      옮긴다. 편집 수락이면 사용자가 AI 문구 대신 자기 말을 제목으로 골랐으니 AI 문구를
+      다른 자리에 되살리지 않는다(None).
+    - CARRY_OVER: 같은 일을 그대로 이어가는 것이라 원본의 첫 걸음을 물려받는다. 템플릿
+      ("같은 슬롯으로 그대로 옮겨드릴까요?")은 옮기자는 제안일 뿐 할 일이 아니다.
+    """
+    if target.recovery_option_group == "CARRY_OVER":
+        return original.first_step if original is not None else None
+    if edited:
+        return None
+    return without_comeback_ack(target.suggested_action_text or "") or None
 
 
 @router.post("/recovery/decisions")
@@ -721,6 +820,7 @@ async def decide_recovery(
                 decided_at=decided_at,
                 repo=repo,
                 action_repo=action_repo,
+                re_engagement_anchor_override=anchor_override,
             )
             target.resulting_action_item_id = new_action_id
             resulting_action_id = f"{_ACTION_PREFIX}{new_action_id}"
@@ -780,6 +880,11 @@ def _after_block_time(
         estimated_minutes=recovery_action.estimated_minutes,
         now=now,
     )
+
+
+def _kst_day(at: datetime) -> date:
+    """블록이 실제로 놓이는 KST 달력일 — 오늘 화면(`target_date` 로 고른다)과 같은 기준."""
+    return at.astimezone(KST).date()
 
 
 async def _existing_replan_block(
@@ -864,7 +969,9 @@ async def get_replan_diff(
         after=ReplanBlock(
             action_item_id=f"{_ACTION_PREFIX}{recovery_action.id}",
             title=recovery_action.title,
-            target_date=recovery_action.target_date,
+            # 블록이 놓이는 날 — 밤늦은 승인이면 카드 날짜 다음날이고, 승인 시 카드 날짜도
+            # 이 값으로 맞춰진다(approve_replan). 프리뷰가 승인 결과와 같은 날을 말해야 한다.
+            target_date=_kst_day(start_at),
             start_at=start_at,
             end_at=end_at,
             estimated_minutes=recovery_action.estimated_minutes,
@@ -903,6 +1010,11 @@ async def approve_replan(
             end_at=end_at,
             source=_REPLAN_BLOCK_SOURCE,
         )
+        # 밤늦은 승인은 블록을 다음날 아침으로 넘긴다(`shift_to_recovery_day` 3번 경로). 오늘
+        # 화면은 카드를 `target_date` 로만 고르므로, 카드 날짜를 블록 날짜에 맞추지 않으면
+        # 블록이 잡힌 그날 오늘 화면에 회복 카드가 안 뜬다. 바뀌는 건 **새 회복 카드**뿐 —
+        # 원본 카드(status 포함)는 읽기만 한다(AGENTS.md §2).
+        recovery_action.target_date = _kst_day(start_at)
         await session.commit()
 
     return ReplanApproveResponse(

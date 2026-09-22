@@ -15,6 +15,7 @@ LLM(Recovery Coach)은 선두 카드의 if-then 문구 personalize 에만 쓰이
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -114,6 +115,52 @@ def with_comeback_ack(text: str, *, escalation_level: EscalationLevel | None) ->
     if escalation_level is None:
         return text
     return f"{COMEBACK_ACK_PREFIX}{text}"
+
+
+def without_comeback_ack(text: str) -> str:
+    """`with_comeback_ack` 의 역 — 제안 문구를 카드 본문(첫 걸음)으로 옮길 때 프리픽스를 뗀다.
+
+    프리픽스는 **제안을 보여주는 그 순간**의 말이다("다시 돌아온 지금이 중요해요"). 수락해서
+    만들어진 카드에 남으면 다음 날 오늘 화면·알림에서도 계속 같은 말을 하게 된다.
+    """
+    return text.removeprefix(COMEBACK_ACK_PREFIX).strip()
+
+
+# 회복 카드 제목 꼬리표 — 원본 제목 뒤에 붙여 "무슨 일의 어떤 회복인지"를 한눈에 보이게 한다.
+# 분 단위나 날짜 말("5분", "내일")은 일부러 안 넣는다: 카드 길이는 원본에서 파생되고
+# (`recovery_action_minutes`), 블록 날짜는 승인 시각에 따라 달라져 제목과 어긋날 수 있다.
+RECOVERY_TITLE_SUFFIX: dict[str, str] = {
+    "DOWNSCOPE": "가볍게 다시",
+    _CARRY_OVER_GROUP: "이어서",
+}
+_RECOVERY_TITLE_SEPARATOR = " · "
+# `action_items.title` 컬럼 길이(String(300)).
+RECOVERY_TITLE_MAX_LENGTH = 300
+
+
+def recovery_action_title(original_title: str | None, option_group: str) -> str:
+    """수락한 회복으로 만드는 새 카드의 제목 — **원본 제목 + 그룹 꼬리표**.
+
+    예전엔 제안 문구(`suggested_action_text`)를 그대로 제목으로 썼다. 선두 카드만 LLM 이
+    다듬고 나머지는 카탈로그 템플릿이라, 형제 카드를 고르면 다음 날 오늘 화면·주간 그리드·
+    아침 알림에 "내일 같은 슬롯으로 그대로 옮겨드릴까요?" 같은 **질문 문장**이 카드 이름으로
+    떴다 — 무슨 일인지도 안 보이고, 당일인데 "내일"이라고 적혀 있었다.
+
+    이미 회복 카드였던 것을 또 회복하면 꼬리표가 쌓이지 않게 기존 꼬리표를 먼저 뗀다
+    ("과제 · 가볍게 다시 · 가볍게 다시" 방지). 원본을 못 읽으면(보관 등) 꼬리표 없이
+    "다시 해보기" 로 둔다 — 지어낸 제목보다 짧고 정직한 편이 낫다.
+    """
+    suffix = RECOVERY_TITLE_SUFFIX.get(option_group)
+    base = " ".join((original_title or "").split())
+    known_tails = tuple(f"{_RECOVERY_TITLE_SEPARATOR}{s}" for s in RECOVERY_TITLE_SUFFIX.values())
+    while base.endswith(known_tails):
+        base = next(base.removesuffix(t) for t in known_tails if base.endswith(t))
+    if not base:
+        return "다시 해보기"
+    if suffix is None:
+        return base[:RECOVERY_TITLE_MAX_LENGTH]
+    tail = f"{_RECOVERY_TITLE_SEPARATOR}{suffix}"
+    return f"{base[: RECOVERY_TITLE_MAX_LENGTH - len(tail)]}{tail}"
 
 
 def select_strategies(
@@ -258,13 +305,25 @@ def first_matching_tag(failure_tags: list[str], strategy: RecoveryStrategyCatalo
     return None
 
 
-def recovery_target_date(decided_on: date, option_group: str) -> date:
+def recovery_target_date(
+    decided_on: date, option_group: str, *, re_engagement_on: date | None = None
+) -> date:
     """회복 카드를 언제 할 것인가 — 기본은 결정한 날, CARRY_OVER 만 '내일로 이어가기'.
 
     제품 규칙(UX 4 그룹)이라 HTTP 핸들러가 아니라 여기 산다. DOWNSCOPE 는 "지금 작게라도
     해보기"라 같은 날, CARRY_OVER 는 그룹 이름 그대로 하루 뒤다.
+
+    `re_engagement_on` — 사용자가 CARRY_OVER 를 고르며 **직접 고른** 재관여 날짜(#327 앵커,
+    KST 달력일). 있으면 카드도 그날로 간다: 화면은 "금요일에 다시 확인할게요"라고 약속했는데
+    카드는 내일에 놓이고 알림은 금요일에 와서, 설정이 반영되지 않은 것처럼 보였다. 내일보다
+    이르면(오늘 등) 내일로 둔다 — '이어가기'가 오늘 안으로 당겨지면 그룹의 뜻이 사라진다.
     """
-    return decided_on + timedelta(days=1) if option_group == _CARRY_OVER_GROUP else decided_on
+    if option_group != _CARRY_OVER_GROUP:
+        return decided_on
+    tomorrow = decided_on + timedelta(days=1)
+    if re_engagement_on is None:
+        return tomorrow
+    return max(re_engagement_on, tomorrow)
 
 
 def re_engagement_anchor_at(option_group: str, decided_at: datetime) -> datetime | None:
@@ -378,7 +437,7 @@ def shift_to_recovery_day(
 
     일 단위 시프트라 시간대(KST/UTC offset)는 그대로 보존된다 — KST 는 DST 가 없어 UTC
     인스턴트에 정수 일을 더하면 벽시계 시각이 유지된다. 룰 기반이라 freebusy·time_policies
-    와는 무관하다 (api-contract §12, 명시적 비목표).
+    와는 무관하다 (api-contract §12, 명시적 비목표). 시프트 결과는 항상 15분 격자로 올림한다.
 
     **과거 배치 보정 (#174, 야간·익일 보정은 #258 도그푸딩 결함 수정)**: 시프트 결과가 이미
     지난 시각이면 `now + RECOVERY_MIN_LEAD_MINUTES` 를 15분 격자로 올린 시각(`earliest`)까지
@@ -388,14 +447,16 @@ def shift_to_recovery_day(
       2. 그 외 `earliest` 가 그 날 `RECOVERY_NIGHT_CUTOFF_HOUR` 전에 끝나면 그대로 쓴다.
       3. 아니면(오늘은 이미 자리가 없다) **다음날 `RECOVERY_MORNING_START_HOUR` 로 넘긴다** —
          "과거에 멈춰 있는 것"보다 "하루 늦게라도 미래에 놓이는 것"이 낫다는 판단.
-    회복 카드의 `target_date` 는 이 함수가 건드리지 않는다(호출부 책임) — 그래서 3번 경로는
-    카드 `target_date` 와 실제 블록 날짜가 하루 어긋날 수 있다. **의도적으로 받아들인
-    트레이드오프**다: 예전엔 이 어긋남을 피하려고 아예 보정을 포기했는데(같은 날 아니면
-    원본 시프트 결과를 그대로 씀), 그 결과가 도그푸딩 실측(#258 — `recovery_attempts`
-    2건 중 완주 0건)에서 실제로 나타났다 — 21시 이후 결정이나 다음날 뒤늦은 승인이 전부
-    "영원히 과거인 블록"이 되어 `pre_card` 스윕도, 사용자 눈에 띌 기회도 영영 없었다. 하루
-    어긋난 `target_date` 는 주간 그리드 표기가 다소 어색해질 뿐 완주 자체는 여전히 셀 수
-    있지만, 과거에 박힌 블록은 **원리적으로 완주가 불가능**하다 — 후자가 훨씬 나쁘다.
+    회복 카드의 `target_date` 는 이 함수가 건드리지 않는다(순수 함수) — 3번 경로는 블록이
+    카드 날짜 다음날에 놓이므로, **승인 경로(`approve_replan`)가 카드 `target_date` 를 블록의
+    KST 날짜로 맞춘다.** 예전엔 이 어긋남을 "주간 그리드 표기가 조금 어색할 뿐"이라며 그대로
+    뒀는데, 오늘 화면은 `target_date` 로만 카드를 고른다 — 밤 10시에 고른 회복이 다음날 07시
+    블록으로 잡히고도 다음날 오늘 화면에는 안 떠서, 회복을 골랐는데 사라진 것처럼 보였다.
+    보정 자체를 포기하지 않는 이유는 그대로다: 예전엔 어긋남을 피하려고 보정을 포기했는데
+    (같은 날 아니면 원본 시프트 결과를 그대로 씀), 도그푸딩 실측(#258 — `recovery_attempts`
+    2건 중 완주 0건)에서 21시 이후 결정이나 다음날 뒤늦은 승인이 전부 "영원히 과거인 블록"이
+    되어 `pre_card` 스윕도, 사용자 눈에 띌 기회도 영영 없었다 — 과거에 박힌 블록은
+    **원리적으로 완주가 불가능**하다.
 
     왜 보정하는가: 회복 결정은 21시 일괄 회고에서만 일어나고(AGENTS.md §1) DOWNSCOPE 는
     day_delta 가 0 이라, 보정이 없으면 결과가 항상 **이미 지나간 원본 슬롯**이 된다. 과거
@@ -411,7 +472,10 @@ def shift_to_recovery_day(
     모듈이 KST/schemas 를 import 하지 않는다 — 순수 함수 계약 유지.
     """
     day_delta = (recovery_target_date - original_target_date).days
-    start_at = plan_start_at + timedelta(days=day_delta)
+    # 시프트 결과도 15분 격자에 맞춘다 — 계획 블록 없이 바로 시작한 카드는 `plan_start_at` 이
+    # 클릭 시각(예: 11:35:22.808)이라, 그대로 옮기면 회복 블록이 주간 그리드·15분 편집기와
+    # 어긋난 시각에 박혔다. 올림이라 결과가 입력보다 앞서지 않아 아래 과거 판정은 그대로다.
+    start_at = _ceil_to_quarter(plan_start_at + timedelta(days=day_delta))
 
     earliest = _ceil_to_quarter(now + timedelta(minutes=RECOVERY_MIN_LEAD_MINUTES))
     if earliest > start_at:
@@ -430,3 +494,45 @@ def shift_to_recovery_day(
             start_at = morning + timedelta(days=1)
 
     return start_at, start_at + timedelta(minutes=estimated_minutes)
+
+
+# ── v3 코핑 플랜 보조 문장 검사 (recovery-12) ──────────────────────────────────
+#
+# obstacle/coping_clause/acknowledgment 는 선두 카드 아래 덧붙는 **짧은 한 문장**이다.
+# 실측(미러, AVOIDANCE)에서 LLM 이 여기에 타임스탬프·다른 문자권 글자·내부 메타 문장을
+# 흘렸다 — "…망설여져요ო2025-02-23T00:00:00Z", 같은 말을 되풀이한 200자 넘는 문단 등.
+# Pydantic LLM 스키마에 max_length 를 걸면 위반 하나로 개인화 **전체**(if/then 포함)가
+# 룰 폴백으로 버려지므로, 필드 단위로 검사해 그 필드만 비운다.
+ACKNOWLEDGMENT_MAX_LENGTH = 60  # 프롬프트 요구 "25자 안팎"의 두 배 남짓
+COPING_TEXT_MAX_LENGTH = 120  # obstacle/coping_clause — 프롬프트 예시는 20~40자
+
+# 허용 문자: 한글(음절·자모), 영문·숫자, 공백, 문장에 흔한 문장부호. 그 밖(다른 문자권·이모지·
+# 제어문자)이 하나라도 섞이면 생성이 깨진 것으로 본다.
+_COPING_TEXT_ALLOWED = re.compile(
+    r"[\uAC00-\uD7A3\u3131-\u318E0-9A-Za-z\s.,!?~'\"()\[\]·…\-:;%/+&‘’“”]*"
+)
+# 날짜·시각 흔적(2025-02-23, 00:00:00) — 사용자 문장에 올 이유가 없다.
+_TIMESTAMP_LIKE = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}:\d{2}")
+# 세 글자 이상 영단어 — 카드 제목에 없는 영어는 추론 문장이 새어 나온 흔적이다
+# ("wait", "let me" 등). 제목에 있는 영어("SQL", "GROUP BY")는 허용한다.
+_ASCII_WORD = re.compile(r"[A-Za-z]{3,}")
+
+
+def clean_coping_text(text: str | None, *, max_length: int, context_title: str) -> str | None:
+    """LLM 이 만든 코핑 플랜 보조 문장 하나를 검사해, 쓸 수 없으면 `None`.
+
+    `None` 이 되는 경우: 비었음 · `max_length` 초과 · 허용 밖 문자 · 날짜/시각 흔적 ·
+    `context_title`(원본 카드 제목)에 없는 3글자 이상 영단어. if/then 문구는 건드리지 않는다
+    — 이 필드들이 비어도 카드는 그대로 쓸 수 있다(FE 는 값이 있을 때만 그린다).
+    """
+    cleaned = " ".join((text or "").split())
+    if not cleaned or len(cleaned) > max_length:
+        return None
+    if _COPING_TEXT_ALLOWED.fullmatch(cleaned) is None:
+        return None
+    if _TIMESTAMP_LIKE.search(cleaned):
+        return None
+    title_words = {w.lower() for w in _ASCII_WORD.findall(context_title)}
+    if any(w.lower() not in title_words for w in _ASCII_WORD.findall(cleaned)):
+        return None
+    return cleaned

@@ -218,6 +218,64 @@ FE 가 할 일(고정 일정): `SetupScreen.addSchedule` 은 422 를 `friendlyEr
   **`peakWindow`/`drainWindow`** 에 시간대 `night`(00~04시, 전날 요일 — 화 01:00 → `monday_night`)
   가 생겼다. FE `windowLabel` 은 이미 `night`→'밤' 을 안다. 한 줄 평도 "월요일 밤에…" 로 나간다.
 
+## v2.30-recovery — 2026-09-18 (회복 카드 이름·날짜·재관여 알림 바로잡기)
+
+마이그레이션 없음. 기존 필드·에러 코드 무변경.
+
+### 새 회복 카드의 제목 — `POST /recovery/decisions` (동작 변경, 스키마 무변경)
+
+- 수락(accepted)으로 만들어지는 회복 카드의 `title` 이 **원본 제목 + 그룹 꼬리표**가 된다 —
+  DOWNSCOPE `"<원본> · 가볍게 다시"`, CARRY_OVER `"<원본> · 이어서"`.
+- 예전엔 제안 문구를 그대로 제목으로 써서, 템플릿 카드를 고르면 "내일 같은 슬롯으로 그대로
+  옮겨드릴까요?" 같은 질문이 다음 날 오늘 화면·주간 그리드·아침 알림에 카드 이름으로 떴다.
+- 제안 문구는 DOWNSCOPE 카드의 `firstStep`('첫 걸음')으로 간다(컴백 프리픽스 제거).
+  CARRY_OVER 는 원본의 `firstStep` 을 물려받는다. `decision="edited"` 는 종전대로 사용자
+  문구가 제목.
+- FE 할 일 없음 — 이미 `title`/`firstStep` 을 그대로 그린다.
+
+### 밤늦은 승인 — `POST /replan/{executionId}/approve` · `GET /replan/{executionId}` (동작 변경)
+
+- 23시 전에 못 끝나 블록이 **다음날 07:00** 으로 넘어가면, approve 가 회복 카드의
+  `targetDate` 도 그날로 맞춘다. GET 프리뷰 `after.targetDate` 도 블록이 놓이는 날을 말한다.
+  예전엔 카드가 결정한 날에 남아, 다음날 오늘 화면에 회복 카드가 안 떴다.
+- 회복 블록 시작 시각은 항상 15분 격자로 올림(예: `11:35:22.808` → `11:45`).
+- FE 할 일 없음.
+
+### 직접 고른 이어가기 날짜 — `POST /recovery/decisions` (동작 변경, 스키마 무변경)
+
+- CARRY_OVER 수락에 `reEngagementAnchorAt` 를 보내면 새 회복 카드의 `targetDate` 가 그 KST
+  날짜가 된다(내일보다 이르면 내일). 생략하면 종전대로 내일.
+- 예전엔 앵커만 저장되고 카드는 무조건 내일이라, 화면이 약속한 날과 할 일이 놓인 날이 달랐다.
+- FE 할 일(이슈): 앵커 **시각**은 쓰이지 않는다 — 재관여 알림은 그날 아침 알림 시각에 간다.
+  시간 다이얼을 빼거나 문구를 "그날 아침에 알려드릴게요"로 바꾸고, 날짜 최소값을 내일로.
+
+### 재관여 아침 알림(morning_brief T2) 대상 좁힘 — 동작 변경, API 무변경
+
+- 이미 완주한 회복, 끝냈거나(done/over_done) 목표 완료·계획 교체로 치워진 이어가기 카드,
+  원본 카드의 목표가 완료·보관된 회복은 "'<제목>', 다시 보러 갈까요?" 알림 대상에서 뺀다.
+  예전엔 앵커 날짜만 봐서, 아침에 끝낸 일이나 닫은 목표에 주 3건뿐인 알림 한 칸을 썼다.
+- 만료(`reflection_skipped`)로 보관된 카드·해 보다 못 끝낸 회복·목표 없는 카드의 PARK 는
+  종전대로 대상.
+- FE 할 일 없음(위 앵커 시각 안내 이슈와 같은 맥락).
+
+### 코핑 플랜 보조 문장 검사 — `POST /recovery/proposals/generate` (동작 변경, 스키마 무변경)
+
+- 선두 카드의 `obstacle`/`copingClause`/`acknowledgment` 가 깨졌으면 **그 필드만 null** —
+  비었거나 길이 초과(60/120/120자), 다른 문자권 글자·이모지, 날짜/시각 흔적, 카드 제목에 없는
+  영단어(추론 문장 유출). 예전엔 "…망설여져요ო2025-02-23T00:00:00Z" 같은 값이 그대로 저장됐다.
+  `suggestedActionText`(if-then)는 그대로 살린다.
+- FE 할 일(이슈): 세 필드는 지금 화면에 안 쓰인다. 값이 있을 때만 선두 카드 아래
+  "혹시 {obstacle} → {copingClause}" 로 보여 주면 잠금 결정의 'if-then 코핑 플랜'이 완성된다.
+
+### `personalizationSkipped` 추가 — `POST /recovery/proposals/generate` 응답 (추가 필드)
+
+- `personalizationSkipped: boolean`(기본 `false`) — L2/L3 에서 LLM 개인화를 **일부러** 건너뛴
+  세트면 `true`. `aiSource` 는 종전대로 `"rule"`(계약 동결).
+- 예전엔 L2/L3 마다 FE 가 `aiSource === "rule"` 만 보고 "오프라인 모드(룰 기반)로 제안했어요.
+  AI 호출이 가능해지면…" 안내를 띄웠다 — AI 가 고장 난 게 아닌데 그렇게 보였다.
+- FE 할 일(이슈): 오프라인 안내를 `aiSource === "rule" && !personalizationSkipped` 일 때만.
+  필드를 모르는 클라이언트는 종전과 같다.
+
 ---
 
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)
