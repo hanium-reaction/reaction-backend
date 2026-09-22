@@ -181,7 +181,7 @@ root·branch 제목, 룰 폴백의 `"{목표 제목} N회차"`, 만다라 축 �
 | POST | `/auth/google` | Google id_token → 자체 JWT (access+refresh) 발급. **신규 가입만** 가입 게이트(#324) 대상 |
 | POST | `/auth/refresh` | refresh → 새 access |
 | POST | `/auth/logout` | refresh 무효화 |
-| GET | `/auth/me` | 현재 사용자 (`onboarding_state` 포함) |
+| GET | `/auth/me` | 현재 사용자 (`onboarding_state` 포함). `toneMode` 는 `gentle｜strict｜encouraging｜null` — **아직 톤을 고르지 않았으면 null**(v2.30-auth2, `GET /settings` 와 같은 값). 그전에는 이 경로만 빈 문자열이었다. 필드는 그대로 있다 |
 
 **가입 게이트(#324, FE #237 §8)** — `POST /auth/google` 요청에 선택 필드 `inviteCode` 가
 추가된다. **기존 사용자 로그인(요청의 email 이 이미 `users` 에 있음)은 이 게이트를 전혀
@@ -896,7 +896,9 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   v3 안에서도 조건부라 obstacle/copingClause 만 있고 이건 null 인 경우가 있다.
   **선두 카드여도 문장이 깨졌으면 그 필드만 null**(v2.30-recovery) — 비었거나, 길이 초과
   (acknowledgment 60자, obstacle/copingClause 120자), 한글·영문·숫자·흔한 문장부호 밖의 글자,
-  날짜/시각 흔적, 카드 제목에 없는 3글자 이상 영단어. `suggestedActionText` 는 그대로다.
+  날짜/시각 흔적, **문장이 끝났는데 다음 문장이 공백·문장부호 없이 바로 붙음**
+  ("…있어요네", "…했어요그리고", v2.30-recovery2), 카드 제목에 없는 3글자 이상 영단어.
+  `suggestedActionText` 는 그대로다.
   FE 는 값이 있을 때만 그리면 된다(없는 게 정상인 경우가 많다).
 - **`recoveryMode: "standard" | "goal_renegotiation"`(#328, 근거 대장 §5.2 L3)** — 동일
   목표 4회 연속 실패 또는 회복 2회 연속 rejected(skipped 포함)면 `goal_renegotiation` 이고,
@@ -981,13 +983,20 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   + `alreadyApproved`. `before`=원본 실패 카드 계획 시각, `after`=회복 카드 제안 시각
   (원본 시간대를 회복 `targetDate` 로 일(day) 단위 시프트 — 룰 기반, freebusy 무관).
   **날짜는 시프트가 정하고, 시각은 과거 배치 보정이 정한다** — 시프트 결과가 이미 지난
-  시각이면 `조회/승인 시각 + 10분`을 15분 격자로 올린 시각(`earliest`)까지 앞당긴다.
-  (a) `earliest` 가 그 날 **07:00**(quiet hours 끝) 이전이면 같은 날 07:00, (b) 그 밖에
-  `earliest + estimatedMinutes` 가 그 날 **23:00**(quiet hours 시작) 전에 끝나면 `earliest`,
-  (c) 아니면 **다음날 07:00**. 과거에 박힌 블록은 **원리적으로 완주가 불가능**해서(#258)
-  하루 늦게라도 미래에 놓는다. ⚠️ 회복 길이가 원본에서 파생되면서(ADR-0009 D6) 긴 원본의
-  DOWNSCOPE 는 (b) 를 통과하지 못해 (c) 로 가는 빈도가 늘어난다.
-  **(c) 경로의 카드 날짜(v2.30-recovery)**: approve 가 블록을 만들 때 회복 카드의 `targetDate`
+  시각이면 `조회/승인 시각 + 10분`을 15분 격자로 올린 시각(`earliest`)까지 앞당긴 뒤,
+  **사용자의 활동 시간대 안**에 놓는다(v2.30-recovery2). 창 = 설정의 활동 시간대
+  (`focus_mode_preferences.activity_start/end`) > 온보딩 인터뷰가 저장한
+  `behavioral_profiles.preferred_start_time/end_time` > **모르면 07:00~23:00**(quiet hours
+  경계 — 종전 동작). 한쪽만 아는 창은 모르는 것으로 본다.
+  (a) `earliest` 가 창 안이고 `earliest + estimatedMinutes` 가 창 안에서 끝나면 `earliest`,
+  (b) 아니면 **다음에 그 창이 열리는 시각**(15분 격자 올림). 창은 자정을 넘길 수 있다
+  (`end <= start`, 예: 22:00~02:00) — 그 사용자의 00:30 은 '어제 저녁에 열린 창' 안이지
+  다음날 아침이 아니다. `start == end` 는 "하루 종일"로 읽어 미루지 않는다.
+  과거에 박힌 블록은 **원리적으로 완주가 불가능**해서(#258) 하루 늦게라도 미래에 놓는다.
+  ⚠️ 회복 길이가 원본에서 파생되면서(ADR-0009 D6) 긴 원본의 DOWNSCOPE 는 (a) 를 통과하지
+  못해 (b) 로 가는 빈도가 늘어난다.
+  ⚠️ **활동 시간대를 모르는 사용자의 동작은 종전과 완전히 같다**(07/23 기본창).
+  **(b) 경로의 카드 날짜(v2.30-recovery)**: approve 가 블록을 만들 때 회복 카드의 `targetDate`
   를 **블록의 KST 날짜로 맞춘다**(새 회복 카드만, 원본 카드는 불변). GET 프리뷰의
   `after.targetDate` 도 같은 값(블록이 놓이는 날)이다. ⚠️ 그전에는 카드 날짜가 결정한 날에
   남아, 오늘 화면(`targetDate` 로 카드를 고른다)이 블록이 잡힌 다음날 그 카드를 보여주지 않았다.
@@ -995,9 +1004,10 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   카드는 `planStartAt` 이 클릭 시각(초·마이크로초 포함)이라 그대로 옮기면 격자에서 어긋났다.
   왜: 회복 결정은 21시 일괄 회고(잠금 결정)에서만 일어나고 DOWNSCOPE 는 day_delta 가 0 이라,
   보정이 없으면 결과가 항상 **이미 지나간 원본 슬롯**이 된다. 과거 블록은 `pre_card` 알림
-  창(`[now+2m, now+7m)`, 5분 폴)을 영영 만나지 못한다. 왜 밤엔 안 미는가: 블록 생성 경로는
-  시간 정책 검사를 하지 않는데 S15 주간 편집기는 같은 시각을 `POLICY_VIOLATION`(422)으로
-  거부한다 — 서버가 사용자보다 느슨한 블록을 만들지 않기 위한 하한선.
+  창(`[now+2m, now+7m)`, 5분 폴)을 영영 만나지 못한다. 왜 창 밖으로는 안 미는가: 블록 생성
+  경로는 시간 정책 검사를 하지 않는데 S15 주간 편집기는 활동 시간대 밖을
+  `POLICY_VIOLATION`(422)으로 거부한다(그 정책은 활동 시간대의 여집합 = 수면이다) —
+  서버가 사용자보다 느슨한 블록을 만들지 않기 위한 하한선.
   `freebusy`·`time_policies` 는 **여전히 보지 않는다**(명시적 비목표) — 방금 승인된 5~30분
   행동이라 슬롯 탐색을 하지 않는다. 정책 인지 배치는 후속.
   `alreadyApproved=true` 면 `after.startAt`/`endAt` 는 **실제 배치된 블록** 시각이다.

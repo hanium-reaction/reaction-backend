@@ -16,7 +16,7 @@ LLM(Recovery Coach)은 선두 카드의 if-then 문구 personalize 에만 쓰이
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import time, timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -65,6 +65,11 @@ RECOVERY_NIGHT_CUTOFF_HOUR = 23
 # 끝(07시)과 같은 경계, 같은 이유로 import 대신 테스트로 고정한다(#258 도그푸딩 — 완주 0건의
 # 원인 중 하나로 발견된 과거 배치 결함의 수정).
 RECOVERY_MORNING_START_HOUR = 7
+
+# 활동 시간대를 **모를 때만** 쓰는 기본 창 (07:00~23:00). 위 두 상수의 다른 이름이 아니라
+# "사용자가 말해 준 게 없을 때의 추정치"라는 뜻이다 — 아는 사용자에게는 본인이 말한 창을 쓴다.
+RECOVERY_DEFAULT_WINDOW_START = time(RECOVERY_MORNING_START_HOUR, 0)
+RECOVERY_DEFAULT_WINDOW_END = time(RECOVERY_NIGHT_CUTOFF_HOUR, 0)
 
 # PARK_DEFAULT 의 동적 트리거 임계값 — `recovery_strategy_catalog.py` 설계 주석
 # "PARK_DEFAULT ← overwhelm_level >= 4" 를 그대로 상수화.
@@ -425,6 +430,56 @@ def _ceil_to_quarter(dt: datetime) -> datetime:
     return floored if floored == dt else floored + timedelta(minutes=15)
 
 
+def _at_wall_time(anchor: datetime, wall: time) -> datetime:
+    """`anchor` 와 같은 날짜·시간대의 `wall` 시각 — 벽시계로만 옮긴다(일 단위 시프트와 같은 이유)."""
+    return anchor.replace(hour=wall.hour, minute=wall.minute, second=0, microsecond=0)
+
+
+def place_in_activity_window(
+    earliest: datetime,
+    *,
+    estimated_minutes: int,
+    window_start: time,
+    window_end: time,
+) -> datetime:
+    """`earliest` 이후로 **사용자의 활동 시간대 안**에 들어가는 가장 이른 시각.
+
+    지금 창 안이고 끝까지 들어가면 `earliest` 그대로, 아니면 **다음에 창이 열리는 시각**이다.
+    창이 자정을 넘길 수 있다(`window_end <= window_start`, 예: 22:00~02:00) — 밤 사람의 하루는
+    날짜로 끊기지 않으므로 새벽 00:30 은 '어제 저녁에 열린 창' 안이지 다음날 아침이 아니다.
+    `window_start == window_end` 는 "하루 종일"로 읽는다(설정이 허용하는 값) — 미룰 이유가 없다.
+
+    창이 열리는 시각은 15분 격자로 올린다 — 사용자가 08:07 같은 시각을 넣어도 회복 블록은
+    주간 그리드·15분 편집기와 같은 눈금에 놓인다.
+    """
+    if window_start == window_end:
+        return earliest
+
+    opens_today = _at_wall_time(earliest, window_start)
+    closes_today = _at_wall_time(earliest, window_end)
+    ends_at = earliest + timedelta(minutes=estimated_minutes)
+
+    if window_start < window_end:
+        # 같은 날 안에서 열고 닫는 창 (예: 08:00~16:00).
+        if earliest < opens_today:
+            return _ceil_to_quarter(opens_today)
+        if ends_at <= closes_today:
+            return earliest
+        return _ceil_to_quarter(opens_today + timedelta(days=1))
+
+    # 자정을 넘기는 창 (예: 22:00~02:00).
+    if earliest >= opens_today:  # 오늘 저녁에 열린 창 안 — 창은 내일 새벽에 닫힌다.
+        if ends_at <= closes_today + timedelta(days=1):
+            return earliest
+        return _ceil_to_quarter(opens_today + timedelta(days=1))
+    if earliest < closes_today:  # 어제 저녁에 열린 창의 새벽 꼬리.
+        if ends_at <= closes_today:
+            return earliest
+        return _ceil_to_quarter(opens_today)  # 오늘 밤 다시 열릴 때
+    # 창이 닫혀 있는 낮 — 오늘 저녁에 열릴 때.
+    return _ceil_to_quarter(opens_today)
+
+
 def shift_to_recovery_day(
     plan_start_at: datetime,
     *,
@@ -432,6 +487,8 @@ def shift_to_recovery_day(
     recovery_target_date: date,
     estimated_minutes: int,
     now: datetime,
+    activity_start: time | None = None,
+    activity_end: time | None = None,
 ) -> tuple[datetime, datetime]:
     """회복 카드 제안 시각 — **날짜는 일(day) 단위 시프트가, 시각은 과거 배치 보정으로** 정한다.
 
@@ -441,13 +498,25 @@ def shift_to_recovery_day(
 
     **과거 배치 보정 (#174, 야간·익일 보정은 #258 도그푸딩 결함 수정)**: 시프트 결과가 이미
     지난 시각이면 `now + RECOVERY_MIN_LEAD_MINUTES` 를 15분 격자로 올린 시각(`earliest`)까지
-    앞당긴다.
-      1. `earliest` 자체가 quiet hours 꼬리(00~07시)에 떨어지면 — `RECOVERY_MIN_LEAD_MINUTES`
-         가 자정을 넘겨 밀린 경우다 — **같은 날** `RECOVERY_MORNING_START_HOUR` 로 당긴다.
-      2. 그 외 `earliest` 가 그 날 `RECOVERY_NIGHT_CUTOFF_HOUR` 전에 끝나면 그대로 쓴다.
-      3. 아니면(오늘은 이미 자리가 없다) **다음날 `RECOVERY_MORNING_START_HOUR` 로 넘긴다** —
-         "과거에 멈춰 있는 것"보다 "하루 늦게라도 미래에 놓이는 것"이 낫다는 판단.
-    회복 카드의 `target_date` 는 이 함수가 건드리지 않는다(순수 함수) — 3번 경로는 블록이
+    앞당긴 뒤, **사용자가 '이 시간대에 움직여요' 라고 답한 활동 시간대 안**에 놓는다
+    (`place_in_activity_window`). `earliest` 가 그 창 안이고 블록이 창 안에서 끝나면 그대로,
+    아니면 **다음에 그 창이 열리는 시각**이다 — "과거에 멈춰 있는 것"보다 "하루 늦게라도
+    미래에 놓이는 것"이 낫다는 판단은 그대로 두되, 기준을 07시가 아니라 **그 사람의 창**으로
+    옮겼다.
+
+    `activity_start`/`activity_end` 를 모르면(둘 중 하나라도 없으면) 종전 07:00~23:00
+    (`RECOVERY_DEFAULT_WINDOW_*`)을 쓴다 — 동작이 달라지지 않는다. 왜 창을 받는가: 예전엔
+    07/23 을 박아 둬서, 08~16시에만 시간이 난다고 답한 사용자가 16:50 에 회복을 고르면
+    블록이 **17:15**(이미 일과가 끝난 시각)에 잡혔고, 22~02시에 공부하는 사람의 00:30 회복은
+    자는 시간인 **07:00** 으로 밀렸다. 둘 다 "사용자가 없다고 말한 시간"에 회복을 놓은 것이다.
+
+    왜 창 밖으로는 안 미는가: 블록 생성 경로(`ScheduledBlockRepo.create_block`)는 시간 정책
+    검사를 하지 않는데, 사용자가 직접 옮기는 S15 주간 편집기는 활동 시간대 밖을
+    `POLICY_VIOLATION`(422)으로 거부한다(그 정책은 활동 시간대의 여집합 = 수면이다).
+    서버가 사용자보다 느슨한 블록을 만들지 않기 위한 하한선 — 그래서 창 밖에서는 안 밀고,
+    **다음 창**으로 넘긴다(포기하지 않는다).
+
+    회복 카드의 `target_date` 는 이 함수가 건드리지 않는다(순수 함수) — 다음 창 경로는 블록이
     카드 날짜 다음날에 놓이므로, **승인 경로(`approve_replan`)가 카드 `target_date` 를 블록의
     KST 날짜로 맞춘다.** 예전엔 이 어긋남을 "주간 그리드 표기가 조금 어색할 뿐"이라며 그대로
     뒀는데, 오늘 화면은 `target_date` 로만 카드를 고른다 — 밤 10시에 고른 회복이 다음날 07시
@@ -463,11 +532,6 @@ def shift_to_recovery_day(
     블록은 pre_card 스윕 창(`[now+2m, now+7m)`)을 영영 만나지 못해 알림이 안 가고, 주간
     그리드에서는 실패한 원본 블록과 같은 좌표에 겹쳐 그려진다.
 
-    왜 밤에는 그 날 안 미는가: 블록 생성 경로(`ScheduledBlockRepo.create_block`)는 시간
-    정책 검사를 하지 않는데, 사용자가 직접 옮기는 S15 주간 편집기는 같은 시각을
-    `POLICY_VIOLATION`(422)으로 거부한다. 서버가 사용자보다 느슨한 블록을 만들지 않기
-    위한 하한선 — 그래서 그 날 안에서는 안 밀고, **다음날**로 넘긴다(포기하지 않는다).
-
     `now` 는 **aware** 여야 한다(호출자는 `now_kst()`). `now.tzinfo` 를 그대로 쓰고 이
     모듈이 KST/schemas 를 import 하지 않는다 — 순수 함수 계약 유지.
     """
@@ -479,19 +543,18 @@ def shift_to_recovery_day(
 
     earliest = _ceil_to_quarter(now + timedelta(minutes=RECOVERY_MIN_LEAD_MINUTES))
     if earliest > start_at:
-        morning = earliest.replace(
-            hour=RECOVERY_MORNING_START_HOUR, minute=0, second=0, microsecond=0
-        )
-        night = earliest.replace(hour=RECOVERY_NIGHT_CUTOFF_HOUR, minute=0, second=0, microsecond=0)
-        if earliest < morning:
-            # `+RECOVERY_MIN_LEAD_MINUTES` 가 자정을 넘겨 quiet hours 꼬리(00~07시)에 떨어진
-            # 경우 — 같은 날 07시로 당긴다(하루를 더 넘길 필요 없다).
-            start_at = morning
-        elif earliest + timedelta(minutes=estimated_minutes) <= night:
-            start_at = earliest
+        # 창을 반쪽만 아는 건 모르는 것으로 본다 — 사용자가 말한 시작에 기본 끝(23시)을
+        # 섞으면 본인이 말한 적 없는 시간대가 만들어진다.
+        if activity_start is None or activity_end is None:
+            window_start, window_end = RECOVERY_DEFAULT_WINDOW_START, RECOVERY_DEFAULT_WINDOW_END
         else:
-            # 오늘은 이미 자리가 없다(23시 이후) — 다음날 07시로 넘긴다.
-            start_at = morning + timedelta(days=1)
+            window_start, window_end = activity_start, activity_end
+        start_at = place_in_activity_window(
+            earliest,
+            estimated_minutes=estimated_minutes,
+            window_start=window_start,
+            window_end=window_end,
+        )
 
     return start_at, start_at + timedelta(minutes=estimated_minutes)
 
@@ -517,13 +580,30 @@ _TIMESTAMP_LIKE = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}:\d{2}")
 # ("wait", "let me" 등). 제목에 있는 영어("SQL", "GROUP BY")는 허용한다.
 _ASCII_WORD = re.compile(r"[A-Za-z]{3,}")
 
+# 문장이 끝났는데 공백·문장부호 없이 다음 문장이 바로 붙은 흔적 (재검증 P2 실측 —
+# AVOIDANCE 의 acknowledgment "…무거워질 수 있어요네, 천천히 해봐요"). 사람이 쓴 문장에는
+# 안 나오고, 읽는 사람에게는 오타이거나 말이 끊긴 것처럼 보인다.
+#
+# '요' 앞 음절을 **고정 목록**으로 둔 이유: "받침 없는 음절 + 요" 같은 모음 규칙으로
+# 일반화하면 '화요일'·'재요청'·'마요네즈' 처럼 어미가 아닌 낱말까지 걸려, 멀쩡한 문장이
+# 통째로 버려진다. 아래 목록은 해요체 종결어미(-아/어/여요, -해요, -세요, -네요, -게요,
+# -래요, -봐요, -돼요 …)가 실제로 쓰는 음절만이다.
+# '니다'(합쇼체)는 그 자체로 종결이라 별도 조건이 필요 없다.
+_POLITE_SENTENCE_END = r"(?:[어아에예해세네게래대봐돼와줘여려겨저져쳐펴]요|니다)"
+# 접속부사는 어떤 어미 뒤에 붙든 새 문장의 시작이다 — "…봤다그리고" 처럼 '다'로 끝나는
+# 경우를 인용형('간다고'·'있다는')과 혼동하지 않고 잡는다. '하지만'은 뺐다 —
+# '노력하지만' 처럼 어미(-지만) 안에 그대로 들어 있어 멀쩡한 문장을 버리게 된다.
+_GLUED_CONNECTIVE = r"(?:그리고|그런데|그래서|그러나|그래도|그러니까|그렇지만)"
+_FUSED_SENTENCES = re.compile(rf"{_POLITE_SENTENCE_END}(?=[가-힣])|[가-힣](?={_GLUED_CONNECTIVE})")
+
 
 def clean_coping_text(text: str | None, *, max_length: int, context_title: str) -> str | None:
     """LLM 이 만든 코핑 플랜 보조 문장 하나를 검사해, 쓸 수 없으면 `None`.
 
     `None` 이 되는 경우: 비었음 · `max_length` 초과 · 허용 밖 문자 · 날짜/시각 흔적 ·
-    `context_title`(원본 카드 제목)에 없는 3글자 이상 영단어. if/then 문구는 건드리지 않는다
-    — 이 필드들이 비어도 카드는 그대로 쓸 수 있다(FE 는 값이 있을 때만 그린다).
+    **문장이 끝났는데 다음 문장이 공백 없이 붙었음** · `context_title`(원본 카드 제목)에 없는
+    3글자 이상 영단어. if/then 문구는 건드리지 않는다 — 이 필드들이 비어도 카드는 그대로
+    쓸 수 있다(FE 는 값이 있을 때만 그린다).
     """
     cleaned = " ".join((text or "").split())
     if not cleaned or len(cleaned) > max_length:
@@ -531,6 +611,9 @@ def clean_coping_text(text: str | None, *, max_length: int, context_title: str) 
     if _COPING_TEXT_ALLOWED.fullmatch(cleaned) is None:
         return None
     if _TIMESTAMP_LIKE.search(cleaned):
+        return None
+    if _FUSED_SENTENCES.search(cleaned):
+        # "…있어요네, 천천히 해봐요" — 길이·문자권 검사는 다 통과하지만 읽으면 말이 끊긴다.
         return None
     title_words = {w.lower() for w in _ASCII_WORD.findall(context_title)}
     if any(w.lower() not in title_words for w in _ASCII_WORD.findall(cleaned)):

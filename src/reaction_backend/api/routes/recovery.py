@@ -30,7 +30,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, time
 from http import HTTPStatus
 from typing import Annotated, Literal
 from uuid import UUID
@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
 from reaction_backend.db.models.action_item import ActionItem
+from reaction_backend.db.models.behavioral_profile import BehavioralProfile
 from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.recovery_attempt import (
     ADOPTED_DECISION_VALUES,
@@ -47,6 +48,7 @@ from reaction_backend.db.models.recovery_attempt import (
 )
 from reaction_backend.db.models.recovery_strategy_catalog import RecoveryStrategyCatalog
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
+from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator.escalation import EscalationLevel, compute_escalation_state
@@ -69,6 +71,7 @@ from reaction_backend.repositories.action_item_repo import (
     ActionItemRepo,
     get_action_item_repo,
 )
+from reaction_backend.repositories.profile_repo import ProfileRepo, get_profile_repo
 from reaction_backend.repositories.recovery_repo import RecoveryRepo, get_recovery_repo
 from reaction_backend.repositories.scheduled_block_repo import (
     ScheduledBlockRepo,
@@ -133,6 +136,7 @@ _GROUP_TO_SOURCE = {
 RecoveryRepoDep = Annotated[RecoveryRepo, Depends(get_recovery_repo)]
 ActionRepoDep = Annotated[ActionItemRepo, Depends(get_action_item_repo)]
 BlockRepoDep = Annotated[ScheduledBlockRepo, Depends(get_scheduled_block_repo)]
+ProfileRepoDep = Annotated[ProfileRepo, Depends(get_profile_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 
 # replan 으로 만드는 블록의 출처 (DB 설계서 §5.10 block_source)
@@ -861,24 +865,72 @@ def _accepted_replan_attempt(attempts: list[RecoveryAttempt]) -> RecoveryAttempt
     raise _no_replan()
 
 
+def _hhmm_time(value: object) -> time | None:
+    """설정이 저장한 "HH:MM" → `time`. 형식이 깨졌으면 `None`(모르는 것으로 본다).
+
+    "24:00" 은 자정으로 읽는다 — 설정 검증(`routes/settings.py`)이 허용하는 표기다.
+    """
+    if not isinstance(value, str):
+        return None
+    if value == "24:00":
+        return time(0, 0)
+    try:
+        hh, mm = value.split(":")
+        return time(int(hh), int(mm))
+    except ValueError:
+        return None
+
+
+async def _activity_window(
+    user: User, profile_repo: ProfileRepo
+) -> tuple[time | None, time | None]:
+    """사용자가 "이 시간대에 움직여요" 라고 말한 창 — 설정 편집값 > 인터뷰 답 > 모름.
+
+    `GET /settings/profile` 이 같은 순서로 읽는다(설정에서 고친 값이 인터뷰 답을 덮는다).
+    한쪽만 알면 **둘 다 모르는 것으로** 돌려준다 — 반쪽에 기본값(07/23)을 섞으면 사용자가
+    말한 적 없는 시간대가 만들어진다.
+    """
+    fmp = user.focus_mode_preferences or {}
+    start = _hhmm_time(fmp.get("activity_start"))
+    end = _hhmm_time(fmp.get("activity_end"))
+    if start is None or end is None:
+        behavioral: BehavioralProfile | None = await profile_repo.get_behavioral(user.id)
+        if behavioral is not None:
+            if start is None:
+                start = behavioral.preferred_start_time
+            if end is None:
+                end = behavioral.preferred_end_time
+    if start is None or end is None:
+        return None, None
+    return start, end
+
+
 def _after_block_time(
     execution: ExecutionEvent,
     original: ActionItem,
     recovery_action: ActionItem,
     *,
     now: datetime,
+    activity_window: tuple[time | None, time | None] = (None, None),
 ) -> tuple[datetime, datetime]:
     """회복 카드 제안 시각 — ORM 객체에서 원시값을 꺼내 orchestrator 규칙에 넘긴다.
 
     계산(일 단위 시프트 + 과거 배치 보정)은 `orchestrator.recovery.shift_to_recovery_day` 에
     있다 — DB/요청 객체가 필요 없는 순수 규칙이라 그쪽에서 단위 테스트로 고정된다.
+
+    활동 시간대를 같이 넘기는 이유: 보정은 "지금 이후 가장 이른 자리"를 찾는데, 그 자리가
+    사용자가 시간이 안 난다고 말한 시각이면 회복 블록은 잡히자마자 못 지킬 약속이 된다
+    (08~16 사용자의 17:15 블록, 22~02 사용자의 07:00 블록).
     """
+    activity_start, activity_end = activity_window
     return shift_to_recovery_day(
         execution.plan_start_at,
         original_target_date=original.target_date,
         recovery_target_date=recovery_action.target_date,
         estimated_minutes=recovery_action.estimated_minutes,
         now=now,
+        activity_start=activity_start,
+        activity_end=activity_end,
     )
 
 
@@ -935,6 +987,7 @@ async def get_replan_diff(
     repo: RecoveryRepoDep,
     action_repo: ActionRepoDep,
     block_repo: BlockRepoDep,
+    profile_repo: ProfileRepoDep,
 ) -> ReplanDiffResponse:
     """S20 before/after diff (Draft Layer) — 수락한 회복의 일정 변화 프리뷰 (#20-B).
 
@@ -953,7 +1006,13 @@ async def get_replan_diff(
     if block is not None:
         start_at, end_at = block.start_at, block.end_at
     else:
-        start_at, end_at = _after_block_time(execution, original, recovery_action, now=now_kst())
+        start_at, end_at = _after_block_time(
+            execution,
+            original,
+            recovery_action,
+            now=now_kst(),
+            activity_window=await _activity_window(user, profile_repo),
+        )
 
     return ReplanDiffResponse(
         execution_id=execution_id,
@@ -988,6 +1047,7 @@ async def approve_replan(
     repo: RecoveryRepoDep,
     action_repo: ActionRepoDep,
     block_repo: BlockRepoDep,
+    profile_repo: ProfileRepoDep,
     session: SessionDep,
 ) -> ReplanApproveResponse:
     """S20 최종 적용 (Idempotency-Key 필수 — §1.7 미들웨어 enforce).
@@ -1002,7 +1062,13 @@ async def approve_replan(
 
     block = await _existing_replan_block(user.id, recovery_action.id, block_repo)
     if block is None:
-        start_at, end_at = _after_block_time(execution, original, recovery_action, now=now_kst())
+        start_at, end_at = _after_block_time(
+            execution,
+            original,
+            recovery_action,
+            now=now_kst(),
+            activity_window=await _activity_window(user, profile_repo),
+        )
         block = await block_repo.create_block(
             user_id=user.id,
             action_item_id=recovery_action.id,

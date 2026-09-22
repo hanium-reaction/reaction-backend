@@ -660,11 +660,25 @@ done 인데 남은 회차 블록은 `scheduled` 로 남아 주간표에 할 일�
 ### 코핑 플랜 보조 문장 검사 — `POST /recovery/proposals/generate` (동작 변경, 스키마 무변경)
 
 - 선두 카드의 `obstacle`/`copingClause`/`acknowledgment` 가 깨졌으면 **그 필드만 null** —
-  비었거나 길이 초과(60/120/120자), 다른 문자권 글자·이모지, 날짜/시각 흔적, 카드 제목에 없는
-  영단어(추론 문장 유출). 예전엔 "…망설여져요ო2025-02-23T00:00:00Z" 같은 값이 그대로 저장됐다.
+  비었거나 길이 초과(60/120/120자), 다른 문자권 글자·이모지, 날짜/시각 흔적, **문장이 끝났는데
+  다음 문장이 공백 없이 바로 붙음**, 카드 제목에 없는 영단어(추론 문장 유출). 예전엔
+  "…망설여져요ო2025-02-23T00:00:00Z" 나 "…무거워질 수 있어요네, 천천히 해봐요"(두 문장이
+  붙어 오타처럼 보인다) 같은 값이 그대로 저장됐다.
   `suggestedActionText`(if-then)는 그대로 살린다.
 - FE 할 일(이슈): 세 필드는 지금 화면에 안 쓰인다. 값이 있을 때만 선두 카드 아래
   "혹시 {obstacle} → {copingClause}" 로 보여 주면 잠금 결정의 'if-then 코핑 플랜'이 완성된다.
+
+### 회복 블록은 **내가 시간이 난다고 말한 시간대**에 잡힌다 — `GET /replan/{executionId}` · `POST /replan/{executionId}/approve` (동작 변경, 스키마 무변경)
+
+- 과거 배치 보정이 07:00~23:00 이라는 박힌 값 대신 **사용자의 활동 시간대**를 쓴다. 창은
+  설정의 활동 시간대 > 온보딩 인터뷰가 저장한 값 > 모르면 종전 07:00~23:00.
+- 예전엔 08~16시에만 시간이 난다고 답한 사용자가 16:50 에 회복을 수락하면 블록이 그날
+  **17:15**(일과가 끝난 시각)에 잡혔고, 22~02시에 공부하는 사람의 00:30 회복은 자는 시간인
+  **07:00** 으로 밀렸다. 이제 앞은 **다음날 08:00**, 뒤는 **그 밤 00:45** 다. 자정을 넘기는
+  창은 날짜로 끊지 않는다.
+- 15분 격자·HITL(수락한 초안만 배치)·원본 `action_item.status` 불변은 그대로다.
+- **활동 시간대를 모르는 사용자의 동작은 종전과 완전히 같다.**
+- FE 할 일 없음.
 
 ### `personalizationSkipped` 추가 — `POST /recovery/proposals/generate` 응답 (추가 필드)
 
@@ -833,6 +847,20 @@ FE 가 할 일(고정 일정): `SetupScreen.addSchedule` 은 422 를 `friendlyEr
   `unsubscribePush()` + `DELETE /notifications/subscribe` 를 먼저 부르기.
 - **알림 설정 첫 조회가 동시에 와도 500 이 나지 않는다** — `GET/PATCH /notifications/settings`·
   `POST /notifications/subscribe` 의 행 생성이 `ON CONFLICT DO NOTHING` 으로 바뀌었다.
+- **`toneMode` 가 두 경로에서 같은 값**(v2.30-auth2) — `GET /auth/me`(와 `POST /auth/google`
+  응답의 `user`)가 톤을 아직 안 고른 사용자에게 `""` 대신 **`null`** 을 내린다. `GET /settings`
+  는 예전부터 `null` 이라, 같은 사람의 같은 값을 두 화면이 다르게 말하고 있었다. 필드는
+  그대로 있고(사라지지 않는다) 값이 있는 사용자는 종전과 같다. ⚠️ 타입이 `string` →
+  `"gentle"|"strict"|"encouraging"|null` 로 넓어진다. FE 할 일 없음 — 두 곳 다 값을 비교
+  (`toneMode === mode`)하거나 그대로 넘기기만 하고, `/settings` 의 `null` 을 이미 그렇게 읽고
+  있다. 생성 타입(`openapi.d.ts`)만 다시 뽑으면 된다.
+- **401 `AUTH_INVALID_TOKEN` 문구가 다른 화면과 같은 말투로**(v2.30-auth2). 여기만 합쇼체였다
+  ("인증 헤더가 없습니다.", "인증 토큰이 유효하지 않습니다.", "사용자를 찾을 수 없습니다.") —
+  로그인이 풀린, 가장 당황스러운 순간에 말투가 갑자기 딱딱해지고 뭘 하면 되는지도 말해 주지
+  않았다. 네 갈래(헤더 없음/형식 오류/검증 실패/계정 없음) 모두 "… 다시 로그인해 주세요." 로
+  끝난다. 'Bearer'·'토큰'·'헤더' 같은 내부 표기도 뺐다(사용자가 고칠 수 있는 말이 아니다).
+  **코드·envelope·HTTP 상태 무변경** — 분기는 종전대로 `code` 로. FE 할 일 없음(메시지를
+  그대로 띄우면 된다).
 - **에러 `message` 가 한국어로** — 요청 검증 422(`COMMON_VALIDATION_ERROR`)가 pydantic 영어 원문
   ('String should have at least 1 character', 'Field required' …)을 그대로 내보내던 것을 종류별
   한국어로 바꿨다(`field` 는 그대로, 스키마가 직접 쓴 한국어 문구는 그대로). Starlette 기본

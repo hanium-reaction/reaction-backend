@@ -306,6 +306,56 @@ def test_me_with_expired_token_returns_401_expired(auth_client: TestClient) -> N
     assert resp.json()["code"] == "AUTH_TOKEN_EXPIRED"
 
 
+def test_me_and_settings_agree_on_an_unset_tone_mode(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    """톤을 아직 고르지 않은 사용자 — `/auth/me` 도 `/settings` 와 같이 null (재검증 P4).
+
+    예전엔 `/auth/me` 만 빈 문자열이라, 같은 사람의 같은 값을 두 화면이 다르게 말했다.
+    빈 문자열은 "고르지 않음"이 아니라 "고른 값이 비어 있음"처럼 읽히는 거짓말이다.
+    필드 자체는 그대로 있다(사라지지 않는다).
+    """
+    login = _login(auth_client, fake_invite_code_repo)
+    token = login["accessToken"]
+
+    assert "toneMode" in login["user"]
+    assert login["user"]["toneMode"] is None, login["user"]
+
+    me = auth_client.get("/auth/me", headers={"Authorization": f"Bearer {token}"}).json()
+    assert me["toneMode"] is None, me
+
+
+def test_invalid_token_messages_speak_the_same_korean_as_the_rest(
+    auth_client: TestClient,
+) -> None:
+    """401 `AUTH_INVALID_TOKEN` 문구도 다른 화면과 같은 해요체 + 다음 걸음 (재검증 P3).
+
+    `message` 는 화면에 그대로 띄우는 문구인데(api-contract §1) 여기만 합쇼체였다
+    ("인증 헤더가 없습니다.") — 로그인이 풀린, 가장 당황스러운 순간에 갑자기 딱딱한
+    말투가 튀어나오고 뭘 해야 하는지도 말해 주지 않았다. 'Bearer'·'토큰'·'헤더' 같은
+    내부 표기도 사용자가 고칠 수 있는 말이 아니라 뺐다. 코드·envelope 는 그대로다.
+    """
+    from uuid import uuid4
+
+    unknown_user = issue_helper_token(user_id=uuid4(), token_type="access")
+    cases = {
+        "헤더 없음": {},
+        "형식 오류": {"Authorization": "Token abc"},
+        "검증 실패": {"Authorization": "Bearer not.a.jwt"},
+        "계정 없음": {"Authorization": f"Bearer {unknown_user}"},
+    }
+    for label, headers in cases.items():
+        resp = auth_client.get("/auth/me", headers=headers)
+        assert resp.status_code == 401, (label, resp.text)
+        body = resp.json()
+        assert body["code"] == "AUTH_INVALID_TOKEN", (label, body)
+        message = body["message"]
+        assert message.endswith("다시 로그인해 주세요."), (label, message)
+        assert "니다" not in message, (label, message)  # 합쇼체
+        for jargon in ("Bearer", "토큰", "헤더", "인증"):
+            assert jargon not in message, (label, message)
+
+
 def test_me_with_refresh_token_rejected(
     auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
 ) -> None:
