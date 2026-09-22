@@ -2422,7 +2422,12 @@ async def generate_replan(
             ]
 
         def _replaced_times(action_id: UUID) -> dict[str, str | None]:
-            """대표 옛 블록의 원래 시각(KST) — 미리보기의 '기존 → 새' 비교용 (planA-15)."""
+            """대표 옛 블록의 원래 시각(KST) — 미리보기의 '기존 → 새' 비교용 (planA-15).
+
+            회차별 1:1 매핑이 **아니다** — 한 카드가 여러 회차로 나뉘면 새 회차 전부가 이
+            같은 값(첫 옛 블록, 밀린 카드면 그 과거 블록)을 싣는다. '이 카드가 원래 있던
+            자리' 라는 뜻이고, 계약 문서에도 그렇게 적었다.
+            """
             bids = old_blocks_by_action.get(action_id)
             if not bids:
                 return {"replacesStart": None, "replacesEnd": None}
