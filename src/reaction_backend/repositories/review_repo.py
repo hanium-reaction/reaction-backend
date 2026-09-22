@@ -15,7 +15,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import ActionItem
@@ -25,6 +25,7 @@ from reaction_backend.db.models.recovery_attempt import (
     ADOPTED_DECISION_VALUES,
     RecoveryAttempt,
 )
+from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.session import get_db
 from reaction_backend.orchestrator.weekly_review import (
     ExecutionStat,
@@ -208,6 +209,39 @@ class ReviewRepo:
             )
             for ev, category in rows
         ]
+
+    async def count_unstarted_blocks(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime, *, now: datetime
+    ) -> int:
+        """[start_dt, end_dt) 에 시작했어야 하는데 **한 번도 [▶ 시작] 하지 않고 지나간** 블록 수.
+
+        주간 KPI 는 실행(`execution_events`)만 센다 — 시작조차 안 한 카드는 실행 행이 없어
+        준수율의 분자에도 분모에도 없다. 그래서 10장 중 1장만 하고 9장을 그냥 넘긴 주가
+        "준수율 100%" 로 보였다. 준수율 정의는 바꾸지 않고(api-contract: 과거 주와 비교가
+        깨진다) 이 수를 옆에 따로 싣는다.
+
+        - `block_status='scheduled'` — 시작하면 started/finished, 옮기거나 지우면 cancelled.
+        - `end_at <= now` — 블록이 **끝난 것만**. 아직 진행 중이거나 남은 블록은 놓친 게 아니다.
+        - 카드가 살아 있고(`archived_at IS NULL`) 아직 한 번도 결론이 안 난(`planned`/
+          `in_progress`) 것만 — 다른 세션에서 이미 완료·실패로 체크인한 카드의 남은 블록을
+          여기서 또 세면 같은 카드를 두 번 벌점 준다.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(ScheduledBlock)
+            .join(ActionItem, ScheduledBlock.action_item_id == ActionItem.id)
+            .where(
+                ScheduledBlock.user_id == user_id,
+                ScheduledBlock.block_status == "scheduled",
+                ScheduledBlock.start_at >= start_dt,
+                ScheduledBlock.start_at < end_dt,
+                ScheduledBlock.end_at <= now,
+                ActionItem.archived_at.is_(None),
+                ActionItem.status.in_(("planned", "in_progress")),
+            )
+        )
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one())
 
     async def _recovered_execution_ids(self, user_id: UUID, execution_ids: list[UUID]) -> set[UUID]:
         """수락된 회복 카드가 있는 실행 id 집합 (resilience 분자)."""

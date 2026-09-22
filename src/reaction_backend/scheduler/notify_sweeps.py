@@ -11,6 +11,10 @@
   풀어준다.
 - **except 에서 rollback** — DB 예외로 세션이 aborted 로 남으면 이후 사용자 전원이
   PendingRollbackError 로 죽어 실패 격리가 허상이 된다.
+- **순회는 미리 떠 둔 원시값으로** — rollback 은 세션이 들고 있던 ORM 객체를 전부
+  만료(expire)시킨다. 그 뒤 루프가 `user.id`·`block.action_item.title` 을 읽으면 비동기
+  세션은 lazy refresh 를 못 해 `MissingGreenlet` 로 죽고, except 의 로그가 같은 속성을 다시
+  읽다가 루프 밖으로 튄다 — rollback 을 넣어도 격리가 여전히 허상이었다(실 DB 테스트로 고정).
 
 저녁 회고 알림 (19~23시 5분 폴):
 - 사용자별 `evening_reflection_time` 이후 첫 폴에서 발송 — "`now >= 유효시각` 이고 오늘
@@ -162,10 +166,11 @@ async def run_evening_reflection_notify_sweep(
     """19~23시 5분 폴 — 유효시각(≤22:55) 지난 사용자에게 회고 알림 (있을 때만, 하루 1건)."""
     read_clock = clock or now_kst
     users = await user_repo.list_active()
+    user_ids = [u.id for u in users]  # rollback 뒤에도 읽을 수 있게 원시값으로 (모듈 docstring)
     sent = skipped = failed = 0
-    for user in users:
+    for user_id in user_ids:
         try:
-            setting = await notif_repo.get_by_user(user.id)
+            setting = await notif_repo.get_by_user(user_id)
             # 행이 없으면 구독한 적도 없는 사용자 (구독이 행에 담긴다) — 만들지 않는다.
             if setting is None or setting.push_subscription is None:
                 skipped += 1
@@ -175,7 +180,7 @@ async def run_evening_reflection_notify_sweep(
                 skipped += 1
                 continue
             pending = await execution_repo.list_pending_reflection(
-                user.id, since=pending_reflection_since(now_kst_dt.date())
+                user_id, since=pending_reflection_since(now_kst_dt.date())
             )
             if not pending:
                 skipped += 1
@@ -200,17 +205,17 @@ async def run_evening_reflection_notify_sweep(
             await session.commit()
         except Exception:  # noqa: BLE001 — 한 사용자 실패가 배치를 멈추지 않게
             failed += 1
-            _log.exception("evening_reflection notify failed for user %s", user.id)
+            _log.exception("evening_reflection notify failed for user %s", user_id)
             await session.rollback()  # aborted 세션이 다음 사용자를 전멸시키지 않게
     if sent or failed:
         _log.info(
             "evening_reflection notify: total=%d sent=%d skipped=%d failed=%d",
-            len(users),
+            len(user_ids),
             sent,
             skipped,
             failed,
         )
-    return NotifySweepResult(total=len(users), sent=sent, skipped=skipped, failed=failed)
+    return NotifySweepResult(total=len(user_ids), sent=sent, skipped=skipped, failed=failed)
 
 
 async def run_pre_card_notify_sweep(
@@ -229,15 +234,16 @@ async def run_pre_card_notify_sweep(
     blocks = await execution_repo.list_blocks_starting_between(
         start=window_start, end=window_start + NOTIFY_POLL_INTERVAL
     )
+    # rollback 뒤에도 읽을 수 있게 원시값으로 (모듈 docstring) — 제목은 joinedload 로 이미 와 있다.
+    targets = [(b.id, b.user_id, b.action_item_id, b.start_at, b.action_item.title) for b in blocks]
     sent = skipped = failed = 0
-    for block in blocks:
+    for block_id, block_user_id, action_item_id, start_at, title in targets:
         try:
-            setting = await notif_repo.get_by_user(block.user_id)
+            setting = await notif_repo.get_by_user(block_user_id)
             if setting is None or not setting.pre_card_enabled:
                 skipped += 1  # opt-in 기본 false (api-contract §15)
                 continue
-            title = block.action_item.title
-            start_hhmm = block.start_at.astimezone(now_kst_dt.tzinfo).strftime("%H:%M")
+            start_hhmm = start_at.astimezone(now_kst_dt.tzinfo).strftime("%H:%M")
             notification_id = uuid4()
             result = await push_gate.send_push(
                 setting=setting,
@@ -247,24 +253,24 @@ async def run_pre_card_notify_sweep(
                 now=read_clock(),
                 send_repo=send_repo,
                 sender=sender,
-                target_action_item_id=block.action_item_id,
+                target_action_item_id=action_item_id,
             )
             sent += 1 if result.sent else 0
             skipped += 0 if result.sent else 1
             await session.commit()  # 블록 단위 commit — 모듈 docstring
         except Exception:  # noqa: BLE001
             failed += 1
-            _log.exception("pre_card notify failed for block %s", block.id)
+            _log.exception("pre_card notify failed for block %s", block_id)
             await session.rollback()
     if sent or failed:
         _log.info(
             "pre_card notify: total=%d sent=%d skipped=%d failed=%d",
-            len(blocks),
+            len(targets),
             sent,
             skipped,
             failed,
         )
-    return NotifySweepResult(total=len(blocks), sent=sent, skipped=skipped, failed=failed)
+    return NotifySweepResult(total=len(targets), sent=sent, skipped=skipped, failed=failed)
 
 
 def _morning_brief_payload(
@@ -325,10 +331,11 @@ async def run_morning_brief_notify_sweep(
     """06~10시 5분 폴 — 오늘이 anchor 인 PARK/CARRY_OVER 재관여 대상에게 발송(T2, 모듈 docstring)."""
     read_clock = clock or now_kst
     users = await user_repo.list_active()
+    user_ids = [u.id for u in users]  # rollback 뒤에도 읽을 수 있게 원시값으로 (모듈 docstring)
     sent = skipped = failed = 0
-    for user in users:
+    for user_id in user_ids:
         try:
-            setting = await notif_repo.get_by_user(user.id)
+            setting = await notif_repo.get_by_user(user_id)
             if setting is None or setting.push_subscription is None:
                 skipped += 1
                 continue
@@ -336,12 +343,12 @@ async def run_morning_brief_notify_sweep(
             if now_kst_dt.time() < effective:
                 skipped += 1
                 continue
-            due = await recovery_repo.list_due_re_engagement(user.id, now_kst_dt.date())
+            due = await recovery_repo.list_due_re_engagement(user_id, now_kst_dt.date())
             if not due:
                 skipped += 1
                 continue
             title, target_action_item_id = await _due_re_engagement_title(
-                due, user_id=user.id, recovery_repo=recovery_repo, action_repo=action_repo
+                due, user_id=user_id, recovery_repo=recovery_repo, action_repo=action_repo
             )
             notification_id = uuid4()
             result = await push_gate.send_push(
@@ -359,14 +366,14 @@ async def run_morning_brief_notify_sweep(
             await session.commit()  # 사용자 단위 commit — 모듈 docstring
         except Exception:  # noqa: BLE001
             failed += 1
-            _log.exception("morning_brief notify failed for user %s", user.id)
+            _log.exception("morning_brief notify failed for user %s", user_id)
             await session.rollback()
     if sent or failed:
         _log.info(
             "morning_brief notify: total=%d sent=%d skipped=%d failed=%d",
-            len(users),
+            len(user_ids),
             sent,
             skipped,
             failed,
         )
-    return NotifySweepResult(total=len(users), sent=sent, skipped=skipped, failed=failed)
+    return NotifySweepResult(total=len(user_ids), sent=sent, skipped=skipped, failed=failed)

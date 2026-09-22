@@ -188,6 +188,36 @@ FE 가 할 일(고정 일정): `SetupScreen.addSchedule` 은 422 를 `friendlyEr
 없어 **언제나 기본 후보 세 개**(수면 23:00–07:00 · 휴식 15분 · 심야 22:00~)였다. 죽은 조회를 걷어내고
 계약 문구를 사실대로 고쳤다. FE 에서 부르는 화면은 없다.
 
+## v2.30-sched — 2026-09-18 (주간 리뷰·cron 신뢰성)
+
+- **동작 변경 — `GET /reviews/weekly`.** 저장된 `period_summaries` 행은 그 주의 **확정본**(회고
+  창이 닫힌 뒤 = 다음 주 목요일 00:00 KST 이후 집계)일 때만 쓰고, 그 전에는 즉석 계산한다.
+  응답 스키마 무변경. 일요일 18:00 스냅샷이 그 주 내내 잠겨 저녁 회고 결과가 점수·카테고리
+  성공률·한 줄 평에 안 들어가던 문제를 고친다(같은 응답의 `effort` 와 준수율이 어긋나던 것도).
+- cron: 일요일 저녁 폴이 매번 다시 집계하고(`force=True`), 새 job `weekly_review_finalize`(매일
+  04:30 KST)가 회고 창까지 닫힌 주를 확정 집계한다. 모닝 브리프 생성은 06:00 1회 → 06~10시
+  15분 폴(이미 있는 날은 skip). 사용자 순회 cron 전부 사용자 단위 commit·rollback.
+- **필드 추가 — `GET /reviews/weekly` · `POST /reviews/weekly/generate` 응답 `unstartedBlocks`
+  (int, 기본 0).** 그 주에 잡혀 있었지만 한 번도 시작하지 않고 지나간 블록 수. 준수율
+  (`adherenceRate`·`effort`)은 시작한 카드만 세므로 1장 하고 9장을 넘긴 주가 100% 로 보였다 —
+  준수율 정의는 그대로 두고 옆에 싣는다. 조회 시점 파생, 마이그레이션 없음.
+- FE 할 일: `unstartedBlocks` 가 종결 실행 수 이상이면 "이번 주, 잘 했어요" 대신 중립 헤드라인,
+  "시작 못 한 카드 N장" 표시, `adherenceRate` 가 null 이어도 `unstartedBlocks > 0` 이면
+  "집계할 활동이 없어요" 대신 시작하지 못한 카드가 있었다고 안내.
+- **엔드포인트 추가 — `POST /reviews/habit-penalty/{habitId}/reject`.** '지금대로 유지' 를 서버에
+  기록해 4주 동안 같은 제안을 다시 띄우지 않는다(GET 후보 제외, accept 422). 응답
+  `{ habitId, frequency, message }`. 도메인 멱등이라 Idempotency-Key 불필요. 마이그레이션 없음.
+- FE 할 일: '지금대로 유지' 에서 reject 를 호출(성공 전엔 카드를 되돌릴 수 있게). '조정' 은 응답을
+  기다려 서버 `message` 를 토스트로 보여주고, 실패하면 카드를 되돌리고 친절한 오류 문구를
+  보여준다(지금은 실패를 삼켜 조정된 줄 안다). accept 의 Idempotency-Key 는 시도마다 새로.
+- **필드 추가 — 주간 리뷰 응답 `habits: [{ habitId, title, doneCount, targetCount }]`(기본 `[]`).**
+  만다라 밖 활성 습관의 그 주 체크인. 습관만 쓰는 사용자가 체크인을 해도 "집계할 활동이
+  없어요" 를 보던 문제. 만다라 칸 습관은 `mandala.habits` 에 있으니 중복하지 않는다. 조회 시점 파생.
+- FE 할 일: `habits` 행을 렌더하고, 빈 상태 문구는 실행도 습관 체크인도 없을 때만.
+- **값 정의 정정 — `avgDelayMinutes`.** 일찍 시작한 실행은 지연 0분으로 센다(음수 없음).
+  **`peakWindow`/`drainWindow`** 에 시간대 `night`(00~04시, 전날 요일 — 화 01:00 → `monday_night`)
+  가 생겼다. FE `windowLabel` 은 이미 `night`→'밤' 을 안다. 한 줄 평도 "월요일 밤에…" 로 나간다.
+
 ---
 
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)

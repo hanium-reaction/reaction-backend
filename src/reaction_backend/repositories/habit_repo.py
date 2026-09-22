@@ -126,6 +126,13 @@ class HabitRepo:
         await self._session.flush()
         return habit
 
+    async def reject_penalty(self, habit: Habit, *, decided_at: datetime) -> Habit:
+        """S22 거절('지금대로 유지') — 빈도는 그대로 두고 4주 cooldown 의 기준 시각만 기록."""
+        habit.last_penalty_decision = "rejected"
+        habit.last_penalty_evaluated_at = decided_at
+        await self._session.flush()
+        return habit
+
     async def soft_delete(self, habit: Habit) -> None:
         habit.archived_at = datetime.now(UTC)
         await self._session.flush()

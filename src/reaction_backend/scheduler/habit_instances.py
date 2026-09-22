@@ -31,7 +31,8 @@ S22 수락이 재설계 결과를 쓰는 자리다(`habit_repo.apply_penalty`). 
 트랜잭션 규약은 `notify_sweeps.py` 와 같다 — **사용자 단위 commit + except 에서 rollback**.
 배치 말미 일괄 commit 은 한 사용자 실패로 그 주 전원의 인스턴스를 잃고, rollback 이 없으면
 DB 예외로 aborted 된 세션이 뒤따르는 사용자를 전부 `PendingRollbackError` 로 죽여 실패
-격리가 허상이 된다.
+격리가 허상이 된다. 순회도 같은 이유로 **미리 떠 둔 사용자 id** 로 한다 — rollback 이 만료시킨
+ORM 객체의 `user.id` 를 다시 읽으면 비동기 세션이 `MissingGreenlet` 로 죽는다.
 
 `week_start` 는 호출자가 주입한다 — 런타임 job 이 `GET /today/agenda` 와 **같은 함수**
 (`habit_repo.current_week_start_kst`)를 쓰게 해서 생성과 조회가 어긋날 수 없게 한다.
@@ -85,10 +86,12 @@ async def run_habit_instances_sweep(
     `created` 를 셀 수 있고 이미 있는 주에는 INSERT 를 시도조차 안 한다).
     """
     users = await user_repo.list_active()
+    user_ids = [u.id for u in users]  # rollback 뒤에도 읽을 수 있게 원시값으로 (모듈 docstring)
     ok = failed = created = 0
-    for user in users:
+    for user_id in user_ids:
         try:
-            for habit in await habit_repo.list_active(user.id):
+            made = 0
+            for habit in await habit_repo.list_active(user_id):
                 if await instance_repo.get_for_week(habit.id, week_start) is not None:
                     continue
                 await instance_repo.create_or_get_for_week(
@@ -96,21 +99,24 @@ async def run_habit_instances_sweep(
                     week_start=week_start,
                     target_count=habit.target_count,
                 )
-                created += 1
-            ok += 1
+                made += 1
             # 사용자 단위 commit — 뒤 사용자의 실패가 앞 사용자의 인스턴스를 되돌리지 않게.
             await session.commit()
+            # commit 이 끝난 뒤에 센다 — 도중에 실패해 rollback 된 행을 `created` 에 넣으면
+            # "만들었다"는 로그가 거짓이 된다.
+            created += made
+            ok += 1
         except Exception:  # noqa: BLE001 — 한 사용자 실패가 배치를 멈추지 않게
             failed += 1
-            _log.exception("habit_instances sweep failed for user %s", user.id)
+            _log.exception("habit_instances sweep failed for user %s", user_id)
             await session.rollback()  # aborted 세션이 다음 사용자를 전멸시키지 않게
     if created or failed:
         _log.info(
             "habit_instances sweep: week_start=%s total=%d ok=%d failed=%d created=%d",
             week_start,
-            len(users),
+            len(user_ids),
             ok,
             failed,
             created,
         )
-    return HabitSweepResult(total=len(users), ok=ok, failed=failed, created=created)
+    return HabitSweepResult(total=len(user_ids), ok=ok, failed=failed, created=created)

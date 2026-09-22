@@ -10,9 +10,9 @@
 권장**(PM #24 배포 설정)은 유지.
 
 시각 기준 = KST. cron 시간표는 `scheduler/README.md`. 등록 대상은 **job 함수가 존재하는 것만**:
-morning_brief / weekly_review / interruption_resolver / expire_drafts / expire_reflections
-/ expire_proposed_goals / anonymize_inactive / evening_reflection_notify / pre_card_notify
-/ morning_brief_notify / habit_instances.
+morning_brief / weekly_review / weekly_review_finalize / interruption_resolver / expire_drafts
+/ expire_reflections / expire_proposed_goals / anonymize_inactive / evening_reflection_notify
+/ pre_card_notify / morning_brief_notify / habit_instances.
 (notification_dispatcher 는 별도 job 이 아니라 발송 게이트로 대체 — ADR-0006 §1.)
 """
 
@@ -86,6 +86,16 @@ async def _morning_brief_job() -> None:
 async def _weekly_review_job() -> None:
     async for session in _session_scope():
         await sweeps.run_weekly_review_sweep(
+            now_kst(),
+            user_repo=UserRepo(session),
+            review_repo=ReviewRepo(session),
+            session=session,
+        )
+
+
+async def _weekly_review_finalize_job() -> None:
+    async for session in _session_scope():
+        await sweeps.run_weekly_review_finalize_sweep(
             now_kst(),
             user_repo=UserRepo(session),
             review_repo=ReviewRepo(session),
@@ -198,11 +208,18 @@ async def _pre_card_notify_job() -> None:
 def build_scheduler() -> AsyncIOScheduler:
     """cron job 을 등록한 (미기동) 스케줄러. 호출자가 `.start()`."""
     scheduler = AsyncIOScheduler(timezone=KST)
+    # 06~10시 15분 폴 — 예전엔 06:00 고정 1회(misfire_grace_time 기본 1초)였다. 브리프는 이
+    # job 말고는 만드는 곳이 없는데(`GET /today/agenda` 는 읽기만 한다), 배포 재기동·스케줄러
+    # 토글·루프 지연이 06:00 에 걸리면 그날은 **전원이 브리프 없이** 지나갔다. 이미 오늘
+    # 브리프가 있는 사용자는 job 이 즉시 건너뛰므로(`get_by_date`, idempotent) 폴의 추가 비용은
+    # 사용자당 조회 1번이고, 앞선 폴에서 실패하거나 놓친 사용자만 다음 폴이 채운다.
+    # misfire_grace_time 은 폴 간격(15분)보다 짧게 — weekly_review 폴과 같은 이유.
     scheduler.add_job(
         _morning_brief_job,
-        CronTrigger(hour=6, minute=0, timezone=KST),
+        CronTrigger(hour="6-10", minute="*/15", timezone=KST),
         id="morning_brief",
         replace_existing=True,
+        misfire_grace_time=600,
     )
     # 일요일 18~23시 30분 폴 — 예전엔 일요일 03:00 고정 1회였는데, `week_window()` 가 재는
     # 주 경계는 [월 00:00, 다음 월 00:00) 라 03:00 실행 시점엔 그 주 일요일 활동의 대부분이
@@ -220,6 +237,17 @@ def build_scheduler() -> AsyncIOScheduler:
         id="weekly_review",
         replace_existing=True,
         misfire_grace_time=600,
+    )
+    # 매일 04:30 — 회고 창까지 닫힌 주(다음 주 목요일 00:00 이후)의 확정 집계. 일요일 저녁
+    # 폴 뒤 월·화에 늦게 회고한 카드가 `period_summaries` 에 들어가는 유일한 경로다
+    # (`sweeps.run_weekly_review_finalize_sweep`). 04:00 만료 배치 뒤에 둔다. 매일인 이유는
+    # habit_instances 와 같다 — 이미 확정본이 있는 날은 사용자당 조회 1번으로 끝난다.
+    scheduler.add_job(
+        _weekly_review_finalize_job,
+        CronTrigger(hour=4, minute=30, timezone=KST),
+        id="weekly_review_finalize",
+        replace_existing=True,
+        misfire_grace_time=3600,
     )
     scheduler.add_job(
         _interruption_job,

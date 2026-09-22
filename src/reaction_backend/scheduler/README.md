@@ -6,11 +6,12 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 
 | 시각 | 작업 | 출력 |
 | --- | --- | --- |
-| 매일 06:00 | `daily_brief_precompute` — 헤드라인 + Big Rock 생성 (LLM 1회) + **오늘 블록 × Google 캘린더 겹침 힌트**(연결한 사용자만, freebusy 1회) | `daily_briefs` row |
+| 06~10시 15분 폴 | `daily_brief_precompute` — 헤드라인 + Big Rock 생성 (LLM 1회) + **오늘 블록 × Google 캘린더 겹침 힌트**(연결한 사용자만, freebusy 1회). 오늘 브리프가 이미 있으면 skip — 06:00 을 놓치거나 실패한 사용자만 다음 폴이 채운다 | `daily_briefs` row |
 | 19~23시 5분 폴 | `evening_reflection_notify` — 사용자별 설정 시각 이후 회고 알림 (pending 있을 때만, 게이트 enforce) | (외부) Web Push + `notification_sends` row |
 | 종일 5분 폴 | `pre_card_notify` — 2~7분 뒤 시작 블록 사전 알림 (opt-in, 게이트 enforce) | (외부) Web Push + `notification_sends` row |
 | 06~10시 5분 폴 | `morning_brief_notify` — 오늘이 anchor 인 PARK/CARRY_OVER 재관여 대상에게만(T2, 근거 대장 §6.2), `morning_brief` 클래스 재사용 | (외부) Web Push + `notification_sends` row |
-| 매주 일요일 03:00 | `weekly_review_precompute` — KPI + insight 생성 (LLM 1회) | `period_summaries` row |
+| 일요일 18~23시 30분 폴 | `weekly_review_precompute` — 이번 주 KPI 룰 집계(LLM 없음), **매 폴 다시 집계**(`force=True`, 결정적 upsert). 아직 확정본이 아니다 | `period_summaries` row |
+| 매일 04:30 KST | `weekly_review_finalize` — 회고 창까지 닫힌 가장 최근 주(다음 주 목요일 00:00 이후)를 확정 집계로 덮는다. 이미 확정본이면 skip. `GET /reviews/weekly` 는 확정본만 저장값으로 쓰고 그 전엔 즉석 계산 | `period_summaries` UPDATE |
 | 매일 00:05 | `habit_instances` — 이번 주 habit_instances 행 생성 (월요일에만 실제 생성, 그 외 no-op) | `habit_instances` rows |
 | 6시간마다 | `interruption_resolver` — `resumed_after_interrupt IS NULL AND created_at < now()-6h` → `false` | `interruption_events` UPDATE |
 | 6시간마다 | `expire_stale_drafts` — `plan_drafts.status='draft' AND expires_at < now()` → `expired` (72h, §7.8) | `plan_drafts` UPDATE |
@@ -30,7 +31,7 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 | `run_morning_brief_for_user(user_id, now_kst_dt, *, action_repo, brief_repo, session)` | `morning_brief.py` | #19-C | ✅ job 로직 (룰+`aiClient.run("brief/morning_brief")` fallback, 같은 날 skip) |
 | `run_interruption_resolver(now_kst_dt, *, repo)` | `interruption_resolver.py` | #19-C | ✅ job 로직 (6h 미재개 NULL→false) |
 | `run_expire_stale_drafts(session, *, now, repo)` | `expire_drafts.py` | #62 | ✅ job 로직 (72h 미응답 Draft expired, idempotent) |
-| `run_weekly_review_for_user(user_id, week_start, now_kst_dt, *, repo, force=False)` | `weekly_review_precompute.py` | #21-A | ✅ job 로직 (룰 KPI 집계 → `period_summaries` upsert, 같은 주 skip) |
+| `run_weekly_review_for_user(user_id, week_start, now_kst_dt, *, repo, force=False)` | `weekly_review_precompute.py` | #21-A | ✅ job 로직 (룰 KPI 집계 → `period_summaries` upsert. `force=False` 는 같은 주 skip, cron 두 곳은 `force=True`). 확정 경계 `week_final_at(week_start)`(다음 주 목 00:00 KST) 는 라우터(`is_final_summary`)와 확정 sweep 이 공유하는 단일 소스 |
 | `run_expire_unreflected_cards(session, *, now, repo)` | `expire_reflections.py` | #20 | ✅ job 로직 (회고 창 밖 미체크 카드 만료, idempotent). 창 경계 `pending_reflection_since(today)` 는 **라우터도 재사용하는 단일 소스** — `GET /reflection/pending` 이 `>=`, cron 이 `<` (정확한 여집합) |
 | `run_abandon_stale_recoveries(session, *, now, repo)` | `expire_reflections.py` | #20 | ✅ job 로직 (회고 창 밖 미완주 회복 포기, idempotent). 만료 cron 과 **경계값도 기준식도 같은 소스** — `pending_reflection_since(today)` + `execution_repo.reflectable_from()`. 두 쪽이 다른 컬럼을 재면 아직 회고 가능한 회복이 포기로 확정돼 `average_recovery_minutes` 가 사라진다 |
 | `run_evening_reflection_notify_sweep(now, *, user_repo, notif_repo, execution_repo, send_repo, sender, session)` | `notify_sweeps.py` | #20 | ✅ 사용자별 `evening_reflection_time` 이후 첫 폴에서 발송 (pending 있을 때만 — 창 경계는 위와 동일 소스). 발송 판단은 전부 `safety/push_gate.py` (주 ≤3건·23~07 금지·클래스 하루 1건) |
@@ -44,11 +45,12 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 
 | 모듈 | 역할 |
 | --- | --- |
-| `sweeps.py` | **전체 활성 사용자 순회 wrapper** — `run_morning_brief_sweep` / `run_weekly_review_sweep`. per-user job 을 `user_repo.list_active()` 전체에 실행(개별 try/except 격리, 사용자 톤 반영). |
+| `sweeps.py` | **전체 활성 사용자 순회 wrapper** — `run_morning_brief_sweep` / `run_weekly_review_sweep` / `run_weekly_review_finalize_sweep`. per-user job 을 `user_repo.list_active()` 전체에 실행(사용자 톤 반영). `notify_sweeps` 와 같은 트랜잭션 규약(사용자 단위 commit + except rollback). |
 | `habit_instances.py` | **전체 활성 사용자 × 활성 습관 순회** — `run_habit_instances_sweep`. `notify_sweeps` 와 같은 트랜잭션 규약(사용자 단위 commit + except rollback). |
-| `runtime.py` | **APScheduler(AsyncIOScheduler) 등록** — `build_scheduler()` 가 11 job 을 KST cron 으로 add_job. job wrapper 가 1회용 세션·repo 를 만들어 sweep/전역 job 호출. |
+| `runtime.py` | **APScheduler(AsyncIOScheduler) 등록** — `build_scheduler()` 가 12 job 을 KST cron 으로 add_job. job wrapper 가 1회용 세션·repo 를 만들어 sweep/전역 job 호출. |
 
-등록 시각: morning_brief=매일 06:00 · weekly_review=일요일 03:00 · interruption_resolver=6h ·
+등록 시각: morning_brief=06~10시 */15분 · weekly_review=일요일 18~23시 */30분 ·
+weekly_review_finalize=매일 04:30 · interruption_resolver=6h ·
 expire_drafts=6h · expire_reflections=매일 04:00 · expire_proposed_goals=매일 04:00 ·
 evening_reflection_notify=19~23시 */5분 · pre_card_notify=종일 */5분 ·
 morning_brief_notify=06~10시 */5분 · habit_instances=매일 00:05.
@@ -59,6 +61,12 @@ morning_brief_notify=06~10시 */5분 · habit_instances=매일 00:05.
 > 회수되지 않고 **그 주 전체가 인스턴스 없이 지나간다** — 이 job 이 고치려는 버그가 그대로
 > 재현된다. 월요일이 아닌 날은 get-or-create 가 no-op 이라 비용이 없고, 재기동 구멍을 하루
 > 안에 자가치유한다.
+
+> **사용자 순회 sweep 의 공통 규약** (`sweeps` · `notify_sweeps` · `habit_instances`): 사용자(블록)
+> 단위 commit, except 에서 rollback, 그리고 **순회는 미리 떠 둔 원시값(id 등)으로**. rollback 은
+> 세션이 들고 있던 ORM 객체를 전부 만료시키므로, 그 뒤 `user.id` 를 읽으면 비동기 세션이
+> `MissingGreenlet` 로 죽어 격리가 무너진다. fake 세션으로는 안 보이는 성질이라
+> `tests/test_scheduler_sweeps_real_db.py` 가 실 Postgres 로 고정한다.
 
 기동: `main.py` lifespan 이 **`SCHEDULER_ENABLED=true`** 일 때만 `build_scheduler().start()`.
 기본 OFF — 테스트/로컬은 안 돈다(데모는 시드로 커버).
