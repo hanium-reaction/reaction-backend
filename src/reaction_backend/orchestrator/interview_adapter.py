@@ -322,16 +322,7 @@ def _build_goals(slot_answers: Mapping[str, Mapping[str, Any] | None]) -> list[G
     deadline = _text_raw(slot_answers.get("goals.deadlines"))  # date_picker → raw "YYYY-MM-DD"
     success_image = _text_raw(slot_answers.get("goals.success_image"))
     current_level = _text_raw(slot_answers.get("goals.current_level"))
-    # **직접 답한 값이 이긴다.** 새 인터뷰는 길이·빈도를 답하면 주당 시간을 아예 묻지 않으므로
-    # (`is_slot_needed`) 자연히 유도값을 쓰고, 이미 저장된 세션은 종전 해석을 그대로 유지한다.
-    #
-    # 유도값을 우선하면 과거 데이터의 계획 분량이 말없이 바뀐다 — 실측에 '주 8시간 · 한 번
-    # 2시간 · 매일' 세션이 있는데, 유도하면 14시간이 되어 **부하가 두 배**가 된다. 사용자가
-    # 이미 승인한 계획의 전제를 뒤에서 바꾸는 셈이라 하위호환을 택한다.
-    weekly_hours = _chip_hours(slot_answers.get("goals.weekly_time"))
-    if weekly_hours is None:
-        _derived = derived_weekly_hours(slot_answers)
-        weekly_hours = max(1, round(_derived)) if _derived else None
+    weekly_hours = weekly_hours_for_plan(slot_answers)
     session_length = chip_duration_min(slot_answers.get("goals.session_length"))
     preferred_time = _first(_chip_values(slot_answers.get("goals.preferred_time")))
     frequency = _chip_frequency(slot_answers.get("goals.frequency"))
@@ -420,6 +411,32 @@ def derived_weekly_hours(slot_answers: Mapping[str, Any]) -> float | None:
     if not minutes or not freq:
         return None
     return round(minutes * freq / 60, 1)
+
+
+def weekly_hours_for_plan(slot_answers: Mapping[str, Any]) -> int | None:
+    """계획이 실제로 쓰는 주당 시간(정수). 없으면 None.
+
+    **확인 카드와 목표 기록이 반드시 같은 값을 봐야 한다** — 이 함수가 그 단일 진실이다.
+    예전엔 목표 기록(`_build_goals`)은 직접 답한 `goals.weekly_time` 을, 확인 카드
+    (`interview._summary_variables`)와 분량 경고는 유도값(길이×빈도)을 각자 읽었다. 그래서
+    한 사용자의 같은 인터뷰가 "주 3.5시간 쓰게 돼요" 라고 확인받고 계획은 주 2시간으로
+    만들어졌다(실측). 사용자가 [이대로 진행]을 누른 숫자와 계획이 쓰는 숫자가 다르면,
+    그 확인 카드는 확인이 아니다.
+
+    **직접 답한 값이 이긴다.** 새 인터뷰는 길이·빈도를 답하면 주당 시간을 아예 묻지 않고
+    (`is_slot_needed`) 수확도 하지 않으므로(`_PLAN_HARVEST_EXCLUDE`) 자연히 유도값을 쓴다 —
+    즉 이 분기는 **사용자가 정말로 그 질문에 답했을 때만** 탄다. 그때는 답한 값을 그대로
+    쓴다: 유도값을 우선하면 이미 저장된 세션의 계획 분량이 말없이 바뀐다(실측에 '주 8시간 ·
+    한 번 2시간 · 매일' 세션이 있는데 유도하면 14시간, **부하가 두 배**다).
+
+    한 시간 미만(예: 15분씩 주 1회)은 1시간으로 올린다 — `weekly_hours` 가 정수 계약이라
+    0.5 를 담을 수 없고, 0 이면 '미입력' 과 구분되지 않는다.
+    """
+    answered = _chip_hours(slot_answers.get("goals.weekly_time"))
+    if answered is not None:
+        return answered
+    derived = derived_weekly_hours(slot_answers)
+    return max(1, round(derived)) if derived else None
 
 
 def is_slot_needed(slot_key: str, slot_answers: Mapping[str, Any]) -> bool:

@@ -1253,13 +1253,21 @@ def _summary_variables(state: InterviewState) -> dict[str, str]:
     # 계산된 주당 총량 — 사용자에게 **곱셈 결과를 되돌려준다**. '한 번에 2시간 · 매일' 이
     # 주 14시간이라는 걸 확인 카드에서 보고 조정할 수 있게(그동안은 셋을 따로 묻고, 어긋나면
     # 계획 단계에서 경고만 냈다). 빈도가 '상관없음' 이면 계산이 안 되므로 답한 값을 그대로.
+    #
+    # ⚠️ **계획이 쓰는 값과 순서가 같아야 한다**(`interview_adapter.weekly_hours_for_plan`).
+    # 예전엔 여기만 유도값을 먼저 읽어서, 주당 시간을 직접 답한 사용자에게 카드가 "약 주
+    # 3.5시간" 을 보여 주고 계획은 답한 주 2시간으로 만들어졌다(실측). 확인 카드는 사용자가
+    # [이대로 진행] 을 누르는 화면이라, 거기 적힌 숫자가 곧 계획의 숫자여야 한다.
+    answered_weekly = _slot_first_chip(answers.get("goals.weekly_time"))
     derived = interview_adapter.derived_weekly_hours(answers)
-    if derived:
+    if answered_weekly:
+        weekly_load = answered_weekly
+    elif derived:
         length = _slot_first_chip(answers.get("goals.session_length")) or "?"
         freq = _slot_first_chip(answers.get("goals.frequency")) or "?"
         weekly_load = f"약 주 {derived:g}시간 (한 번 {length} × {freq})"
     else:
-        weekly_load = _slot_first_chip(answers.get("goals.weekly_time")) or _NOT_SET
+        weekly_load = _NOT_SET
     return {
         "identity": identity,
         "weekly_load": weekly_load,

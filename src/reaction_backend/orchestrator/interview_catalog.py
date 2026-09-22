@@ -313,6 +313,37 @@ _PLAN_DEFAULT_QUESTIONS: dict[str, str] = {
     "recovery.downscope_unit": "밀렸을 때 할 일을 몇 분짜리까지 줄이면 해볼 만해요?",
 }
 
+# 하베스팅(다른 답에 섞여 나온 값으로 미리 채우기)을 **하지 않는** 슬롯.
+#
+# 기준은 하나다 — **그 슬롯의 질문이 묻는 것과 사용자가 흘린 말이 같은 것이어야** 한다.
+# 하베스팅된 값은 '미충족' 이 아니어서, 안 물어본 답이 프로필로 새는 걸 막는 가드
+# (v2.30-interview, `profile_memory.persist_profile_from_outcome` 의 unresolved 검사)가
+# 아예 적용되지 않는다. 그래서 여기서 막지 못하면 되돌릴 자리가 없다.
+#
+# - goals.heaviest — goals.list 응답에서 파생(동적 보기)이라 별도 경로.
+# - time.activity_window — 질문이 "이 시간 밖엔 일정을 안 잡아요" 라고 **약속**하는 하루
+#   전체의 경계다. 실측: "새벽에만 집중이 돼서 밤에 작업해요" 한 마디에서 00:00~06:00 이
+#   수확돼, 한 번도 묻지 않은 활동창이 그 사용자의 **유일한 배치 가능 시간**이 됐다.
+#   프로필(내 정보)에도 그대로 저장되고, 계획은 22:00 에 일정을 잡아 놓고 "활동 가능
+#   시간(00:00~06:00)과 겹치지 않아서" 라고 스스로를 반박했다. 집중이 잘 되는 때(peak)를
+#   말한 것을 **일정을 잡아도 되는 경계**로 옮겨 적은 셈 — 두 질문은 다른 질문이다.
+# - goals.weekly_time — 길이×빈도로 **유도되면 아예 묻지 않는** 슬롯이다(`is_slot_needed`).
+#   그런데 수확은 그 유도 규칙을 보지 않아, 묻지 않기로 한 슬롯이 말없이 채워졌다. 그 값은
+#   `weekly_hours_for_plan` 에서 유도값을 이기므로, 확인 카드는 "약 주 3.5시간(한 번 30분 ×
+#   매일)" 이라 보여 주고 계획은 주 2시간으로 만들어졌다(실측). 묻지 않을 슬롯이면 채우지도
+#   않는다 — 빈도를 '몰아서' 로 답해 유도가 안 될 때는 정식으로 묻는다.
+#
+# 여기 **넣지 않은** 슬롯들(검토 결과): time.peak_window·recovery.* 는 프로필에 저장되지만
+# "오전에 집중이 잘돼"·"담백하게 해주세요" 처럼 사용자가 **그 질문의 답 그대로** 흘린 말을
+# 받는다 — 질문이 묻는 것과 같은 것이라 위 기준에 걸리지 않고, 계획 전체를 가두는 경계도
+# 아니다. identity.*·goals.*(목표 내용)는 애초에 하베스팅이 겨냥한 대상이다.
+#
+# ⚠️ 앞으로 슬롯을 더할 때: 그 값이 **계획 전체를 가두는 경계**(수면·취침 등 시간 창)이거나
+# 프로필로 영속되는데 사용자가 그 질문에 직접 답해야만 알 수 있는 것이라면 여기 넣어라.
+_PLAN_HARVEST_EXCLUDE: frozenset[str] = frozenset(
+    {"goals.heaviest", "time.activity_window", "goals.weekly_time"}
+)
+
 PLAN_CATALOG = InterviewCatalog(
     kind="plan",
     slots=PLAN_SLOTS,
@@ -320,7 +351,7 @@ PLAN_CATALOG = InterviewCatalog(
     critical_slots=frozenset({"goals.list", "goals.heaviest"}),
     harvest_enabled=True,
     # 하베스팅 대상에서 제외 — goals.heaviest 는 goals.list 응답에서 파생(동적 보기)이라 별도.
-    harvest_exclude=frozenset({"goals.heaviest"}),
+    harvest_exclude=_PLAN_HARVEST_EXCLUDE,
     # heaviest 목표의 속성을 묻는 슬롯들 — 귀속이 확정되기 전에는 하베스팅하지 않는다
     # (`_per_goal_harvest_allowed`).
     per_goal_slots=frozenset(
