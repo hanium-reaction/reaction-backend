@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from typing import Any, cast
 
 from fastapi import FastAPI, Request, Response
@@ -122,6 +123,22 @@ def _validation_message(error: dict[str, Any]) -> str:
     return _GENERIC_VALIDATION_MESSAGE
 
 
+def _field_from_loc(loc: Sequence[Any]) -> str | None:
+    """pydantic `loc` → 사용자 요청의 필드 경로. 진짜 필드가 아니면 None.
+
+    본문이 JSON 으로 **읽히지도 않으면**(`{not json`) pydantic 은 loc 에 필드 이름 대신
+    깨진 **문자 위치**를 넣는다(`("body", 1)`). 그대로 이어 붙이면 `field: "1"` 이 나가,
+    FE 는 있지도 않은 '1' 필드에 빨간 줄을 그리려다 아무 칸도 못 찾는다. 이름이 하나도 없는
+    loc 은 가리킬 필드가 없다는 뜻이므로 비운다(문구는 종전대로 "요청을 읽지 못했어요…").
+    배열 원소 오류(`("body", "daysOfWeek", 0)` → `daysOfWeek.0`)처럼 이름이 하나라도 있으면
+    종전 그대로 경로를 싣는다.
+    """
+    parts = [p for p in loc if p not in _LOC_PREFIXES]
+    if not any(isinstance(p, str) for p in parts):
+        return None
+    return ".".join(str(p) for p in parts)
+
+
 async def _handle_validation_error(request: Request, exc: Exception) -> Response:
     err = cast(RequestValidationError, exc)
     details = err.errors()
@@ -129,8 +146,7 @@ async def _handle_validation_error(request: Request, exc: Exception) -> Response
     field: str | None = None
     message = _GENERIC_VALIDATION_MESSAGE
     if first is not None:
-        loc = [str(p) for p in first.get("loc", ()) if p not in _LOC_PREFIXES]
-        field = ".".join(loc) or None
+        field = _field_from_loc(first.get("loc", ()))
         message = _validation_message(first)
     return _error_json(
         422,

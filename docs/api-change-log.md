@@ -296,6 +296,11 @@ AI 원안이 그대로 저장됐다 — 사용자는 캘린더에서야 알게 �
   "weekStart 는 YYYY-MM-DD 형식이어야 해요." → **"날짜 형식이 올바르지 않아요 (YYYY-MM-DD)."**
   (`/calendar` 의 같은 문구와 맞췄다). 422 `PLAN_INVALID_TIME` · `field="weekStart"` 는 그대로다 —
   어느 값이 문제인지는 `field` 가 들고 있고, 화면에 그대로 뜨는 문장에는 'weekStart' 가 필요 없다.
+- (전역 envelope, 모든 엔드포인트) 본문이 JSON 으로 **읽히지도 않을 때**(`{not json`) `field` 가
+  `null` 이다 — 예전엔 pydantic 이 loc 에 넣는 **깨진 문자 위치**가 그대로 나가 `field: "1"` 이었고,
+  FE 는 있지도 않은 '1' 칸에 오류 표시를 하려다 아무 데도 못 찾았다. 코드·문구는 그대로
+  (422 `COMMON_VALIDATION_ERROR`, "요청을 읽지 못했어요. 잠시 후 다시 시도해 주세요."). 배열 원소
+  오류는 종전대로 `daysOfWeek.0` 처럼 경로를 싣는다.
 
 ---
 
