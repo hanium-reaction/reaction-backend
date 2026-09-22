@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -38,6 +38,20 @@ from tests.conftest import (
     FakeRecoveryRepo,
     default_recovery_strategies,
 )
+
+
+def _behavioral_window(*, start: time | None, end: time | None) -> Any:
+    """온보딩·설정에 저장된 활동 시간대 1행 — "이 시간대에 움직여요" 의 지속 저장소."""
+    from reaction_backend.db.models.behavioral_profile import BehavioralProfile
+
+    b = BehavioralProfile()
+    b.user_id = DEMO_USER_UUID
+    b.energy_cycle = "varies"
+    b.attention_span = 30
+    b.time_chunk_preference = "30"
+    b.preferred_start_time = start
+    b.preferred_end_time = end
+    return b
 
 
 def _seed_failed_execution(
@@ -2039,6 +2053,129 @@ def test_shift_to_recovery_day_lead_always_covers_pre_card_window() -> None:
         )
         assert start_at - now >= timedelta(minutes=10), f"{now:%H:%M} 리드 부족: {start_at:%H:%M}"
         assert start_at.minute % 15 == 0, f"{now:%H:%M} 격자 이탈: {start_at:%H:%M}"
+
+
+def test_shift_to_recovery_day_keeps_block_inside_a_daytime_window() -> None:
+    """08~16시에만 시간이 난다고 답한 사용자 — 16:50 수락이 **다음날 창 안**으로 간다.
+
+    미러 실측(재검증 P1): 이 사용자가 16:50 에 DOWNSCOPE 를 수락하자 블록이 그날 17:15 에
+    잡혔다. 일과가 끝난 시각이라 회복은 생기자마자 못 지킬 약속이 됐다. 07/23 이라는 박힌
+    값이 아니라 **본인이 말한 창**이 기준이어야 한다.
+    """
+    plan_start = datetime(2026, 9, 22, 9, 0, tzinfo=KST)
+    start_at, end_at = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 9, 22),
+        recovery_target_date=date(2026, 9, 22),
+        estimated_minutes=15,
+        now=datetime(2026, 9, 22, 16, 50, tzinfo=KST),
+        activity_start=time(8, 0),
+        activity_end=time(16, 0),
+    )
+    assert start_at == datetime(2026, 9, 23, 8, 0, tzinfo=KST)
+    assert end_at == datetime(2026, 9, 23, 8, 15, tzinfo=KST)
+
+
+def test_shift_to_recovery_day_keeps_night_owl_in_the_same_night() -> None:
+    """22~02시에 공부한다고 답한 사용자 — 00:30 수락은 **그 밤 안**에 남는다(07시 아님).
+
+    예전엔 00:30 이 'quiet hours 꼬리'로 읽혀 07:00 으로 밀렸다. 그 사람이 자는 시간이다.
+    자정을 넘기는 창은 날짜로 끊기지 않는다 — 00:30 은 어제 저녁에 열린 창 안이다.
+    """
+    plan_start = datetime(2026, 9, 22, 23, 0, tzinfo=KST)
+    start_at, end_at = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 9, 22),
+        recovery_target_date=date(2026, 9, 22),
+        estimated_minutes=15,
+        now=datetime(2026, 9, 23, 0, 30, tzinfo=KST),
+        activity_start=time(22, 0),
+        activity_end=time(2, 0),
+    )
+    assert start_at == datetime(2026, 9, 23, 0, 45, tzinfo=KST)
+    assert end_at == datetime(2026, 9, 23, 1, 0, tzinfo=KST)
+    assert start_at.minute % 15 == 0
+
+
+def test_shift_to_recovery_day_night_owl_past_window_waits_for_tonight() -> None:
+    """같은 밤 사람이라도 창이 닫힌 뒤(02시 이후)면 **오늘 밤 창이 열릴 때**로 간다.
+
+    '자정 넘는 창이면 뭐든 지금'으로 뭉개는 뮤턴트를 잡는다.
+    """
+    plan_start = datetime(2026, 9, 22, 23, 0, tzinfo=KST)
+    start_at, _ = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 9, 22),
+        recovery_target_date=date(2026, 9, 22),
+        estimated_minutes=15,
+        now=datetime(2026, 9, 23, 13, 0, tzinfo=KST),
+        activity_start=time(22, 0),
+        activity_end=time(2, 0),
+    )
+    assert start_at == datetime(2026, 9, 23, 22, 0, tzinfo=KST)
+
+
+def test_shift_to_recovery_day_unknown_window_keeps_todays_behavior() -> None:
+    """활동 시간대를 모르면 종전 07:00~23:00 그대로 — 아는 게 없는데 새 규칙을 밀지 않는다."""
+    plan_start = datetime(2026, 9, 22, 9, 0, tzinfo=KST)
+    same_day, _ = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 9, 22),
+        recovery_target_date=date(2026, 9, 22),
+        estimated_minutes=15,
+        now=datetime(2026, 9, 22, 16, 50, tzinfo=KST),
+    )
+    assert same_day == datetime(2026, 9, 22, 17, 0, tzinfo=KST)
+
+    # 한쪽만 아는 창도 '모름' — 사용자가 말한 적 없는 08:00~23:00 을 지어내지 않는다.
+    half_known, _ = shift_to_recovery_day(
+        plan_start,
+        original_target_date=date(2026, 9, 22),
+        recovery_target_date=date(2026, 9, 22),
+        estimated_minutes=15,
+        now=datetime(2026, 9, 22, 16, 50, tzinfo=KST),
+        activity_start=time(8, 0),
+    )
+    assert half_known == datetime(2026, 9, 22, 17, 0, tzinfo=KST)
+
+
+def test_replan_approve_places_block_inside_the_users_activity_window(
+    client: TestClient,
+    fake_recovery_repo: FakeRecoveryRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_profile_repo: Any,
+    fake_scheduled_block_repo: Any,
+    monkeypatch: Any,
+) -> None:
+    """라우트 배선 회귀 — 프로필의 활동 시간대가 실제 블록 시각까지 간다 (재검증 P1).
+
+    순수 함수만 고치고 라우트가 창을 안 넘기면 사용자 화면은 그대로다. GET 프리뷰도 같은
+    시각을 말해야 한다(승인 결과와 다른 날을 예고하면 또 다른 사고다).
+    """
+    from reaction_backend.api.routes import recovery as recovery_routes
+
+    monkeypatch.setattr(
+        recovery_routes, "now_kst", lambda: datetime(2026, 9, 22, 16, 50, tzinfo=KST)
+    )
+    fake_profile_repo._behavioral[DEMO_USER_UUID] = _behavioral_window(
+        start=time(8, 0), end=time(16, 0)
+    )
+
+    exec_id = _seed_failed_execution(
+        fake_recovery_repo,
+        fake_action_item_repo,
+        target_date=date(2026, 9, 22),
+        plan_start_at=datetime(2026, 9, 22, 9, 0, tzinfo=KST),
+    )
+    _accept_group(client, exec_id, "DOWNSCOPE")
+
+    preview = client.get(f"/replan/{exec_id}").json()
+    assert preview["after"]["startAt"].startswith("2026-09-23T08:00"), preview
+
+    body = _approve_replan(client, exec_id).json()
+    assert body["startAt"].startswith("2026-09-23T08:00"), body
+    block = next(b for b in fake_scheduled_block_repo._blocks.values() if b.source == "recovery")
+    assert block.start_at.hour == 8
 
 
 def test_night_cutoff_matches_push_gate_quiet_hours() -> None:
