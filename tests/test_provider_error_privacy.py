@@ -75,3 +75,44 @@ async def test_non_json_message_does_not_echo_the_response(
     message = str(exc.value)
     assert _SENTINEL not in message
     assert message.startswith("non-JSON response (len=")
+
+
+# ── dict 로 선언된 필드는 키를 LLM 이 고른다 ──────────────────────────────────
+
+
+def test_model_chosen_dict_keys_do_not_reach_the_plaintext_error() -> None:
+    """`loc` 에 실린 LLM 선택 키는 `<key>` 로 가린다 — 지금 스키마엔 없지만 생기면 샌다."""
+    from pydantic import BaseModel, ValidationError
+
+    class WithDict(BaseModel):
+        notes: dict[str, int]
+
+    try:
+        WithDict(notes={_SENTINEL: "not-an-int"})  # type: ignore[dict-item]
+    except ValidationError as exc:
+        summary = provider.validation_error_summary(exc)
+    else:  # pragma: no cover - 검증이 반드시 실패한다
+        pytest.fail("ValidationError 가 나지 않았다")
+
+    assert _SENTINEL not in summary
+    assert "notes.<key>:int_parsing" in summary
+
+
+def test_declared_field_names_and_indices_are_kept() -> None:
+    """가리는 건 값뿐 — 필드 이름과 리스트 인덱스는 그대로 남아야 추적이 된다."""
+    from pydantic import BaseModel, ValidationError
+
+    class Item(BaseModel):
+        count: int
+
+    class Holder(BaseModel):
+        items: list[Item]
+
+    try:
+        Holder(items=[{"count": "x"}])  # type: ignore[list-item]
+    except ValidationError as exc:
+        summary = provider.validation_error_summary(exc)
+    else:  # pragma: no cover
+        pytest.fail("ValidationError 가 나지 않았다")
+
+    assert "items.0.count:int_parsing" in summary

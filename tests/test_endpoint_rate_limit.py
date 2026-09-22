@@ -376,3 +376,44 @@ async def test_other_modules_keep_counting_every_prompt(real_db_session: AsyncSe
 
     with pytest.raises(EndpointCallLimitExceeded):
         await check(real_db_session, user_id=user_id, module="recovery")
+
+
+# ── `_UNGATED_PROMPTS` 는 손으로 적는 목록이다 — 낡으면 조용히 틀린다 ──────────
+#
+# 완전한 불변식("이 prompt 는 enforce 를 부르지 않는 라우트에서만 쓰인다")은 정적으로 못
+# 잡는다. 계획 생성·다음 사이클은 LangGraph 노드로 동적 디스패치라 호출 그래프가 끊긴다
+# (실측: `generate_plan` 에서 정적으로 도달 가능한 prompt 가 0개). 그래서 자동으로 확실히
+# 잡을 수 있는 것만 고정한다 — 이름이 실재하고, 만드는 곳이 하나뿐인지.
+
+
+def test_ungated_prompt_ids_are_real_registered_prompts() -> None:
+    """오타·이름 변경으로 목록이 낡으면 제외가 조용히 안 먹는다(상한이 일찍 걸린다)."""
+    from reaction_backend.prompts import registry
+    from reaction_backend.safety.endpoint_rate_limit import _UNGATED_PROMPTS
+
+    known = {t.prompt_id for t in registry.list_all()}
+    for module, prompt_ids in _UNGATED_PROMPTS.items():
+        for prompt_id in prompt_ids:
+            assert prompt_id in known, f"{module}: 등록되지 않은 prompt id {prompt_id!r}"
+
+
+def test_each_ungated_prompt_has_exactly_one_producer() -> None:
+    """제외한 prompt 를 **다른 곳에서 또** 쓰기 시작하면 여기서 걸린다.
+
+    그 순간 '상한을 거는 라우트가 이 prompt 를 쓰게 됐는지' 를 사람이 봐야 한다 — 쓰게
+    됐다면 그 라우트는 세어지는 행이 하나도 안 남아 상한이 통째로 꺼진다.
+    """
+    import pathlib
+    import re
+
+    from reaction_backend.safety.endpoint_rate_limit import _UNGATED_PROMPTS
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "reaction_backend"
+    files = [p for p in src.rglob("*.py") if p.name != "endpoint_rate_limit.py"]
+
+    for prompt_ids in _UNGATED_PROMPTS.values():
+        for prompt_id in prompt_ids:
+            # `prompt_id="planning/study_method@v2"` 처럼 버전이 붙은 모양도 같이 잡는다.
+            pattern = re.compile(rf'prompt_id=["\']{re.escape(prompt_id)}(@v\d+)?["\']')
+            producers = [f"{p.relative_to(src)}" for p in files if pattern.search(p.read_text())]
+            assert len(producers) == 1, f"{prompt_id}: 만드는 곳 {producers}"

@@ -43,6 +43,20 @@ class ProviderValidationError(ProviderError):
     """Structured Output 이 schema 검증을 통과하지 못함."""
 
 
+def _loc_part(part: object) -> str:
+    """`loc` 한 조각 — 스키마가 선언한 이름·인덱스만 그대로 남긴다.
+
+    보통 `loc` 는 필드 이름과 리스트 인덱스뿐이라 값이 새지 않는다. 다만 `dict` 로 선언된
+    필드는 **키를 LLM 이 고른다** — 그 키에 사용자의 자유서술이 실리면 그대로
+    `llm_runs.error`(평문)로 나간다. 우리 스키마의 필드 이름은 전부 ASCII 식별자라,
+    그 모양이 아닌 조각은 값으로 보고 가린다.
+    """
+    if isinstance(part, int):
+        return str(part)
+    text = str(part)
+    return text if text.isascii() and text.isidentifier() else "<key>"
+
+
 def validation_error_summary(exc: ValidationError) -> str:
     """검증 실패를 **내용 없이** 요약한다 — `필드경로:오류종류` 목록.
 
@@ -51,7 +65,7 @@ def validation_error_summary(exc: ValidationError) -> str:
     `llm_runs.error`(평문 컬럼)·로그로 가므로 값은 빼고 어디가 왜 틀렸는지만 남긴다.
     """
     parts = [
-        f"{'.'.join(str(p) for p in err['loc']) or '<root>'}:{err['type']}"
+        f"{'.'.join(_loc_part(p) for p in err['loc']) or '<root>'}:{err['type']}"
         for err in exc.errors(include_input=False, include_url=False, include_context=False)
     ]
     return f"{exc.title}: " + "; ".join(parts)
