@@ -251,6 +251,20 @@ def test_overnight_window_explains_how_to_enter_it(client: TestClient) -> None:
     assert "자정" in body["message"] and "나눠" in body["message"]
 
 
+def test_a_reversed_same_day_range_is_told_what_is_wrong(client: TestClient) -> None:
+    """11:00–10:00 은 거의 언제나 오타다 — '둘로 나눠 넣으라'는 자정 넘김 안내가 나가면
+    사용자는 무엇이 틀렸는지 모른 채 같은 실수를 반복한다."""
+    resp = _post(client, title="알바", daysOfWeek=["mon"], startTime="11:00", endTime="10:00")
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["field"] == "startTime"
+    assert body["message"] == (
+        "종료 시각이 시작 시각보다 늦어야 해요. 시작과 종료가 바뀌지 않았는지 확인해 주세요."
+    )
+    assert "자정" not in body["message"] and "나눠" not in body["message"]
+
+
 def test_equal_start_and_end_keeps_the_plain_message(client: TestClient) -> None:
     resp = _post(client, startTime="09:00", endTime="09:00")
     assert resp.status_code == 422
