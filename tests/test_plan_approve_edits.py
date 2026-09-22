@@ -24,6 +24,8 @@ from reaction_backend.db.models.fixed_schedule import FixedSchedule
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.user import User
+from reaction_backend.integrations.google_calendar import freebusy
+from reaction_backend.orchestrator.goal_structuring import BusyBlock, TimeInterval
 from reaction_backend.orchestrator.plan_edit import (
     DraftBlockEdit,
     DraftEditError,
@@ -502,6 +504,56 @@ def test_approve_rejects_a_block_moved_onto_a_fixed_schedule(
     assert res.status_code == 422, res.text
     assert res.json()["code"] == "PLAN_BLOCK_CONFLICT"
     assert "자료구조 수업" in res.json()["message"]
+
+
+def _stub_calendar(
+    monkeypatch: Any, status: str, by_day: dict[date, list[BusyBlock]] | None = None
+) -> None:
+    """`freebusy.fetch_busy_by_day` 를 대신한다 — 실제 구글 왕복 없이 busy 만 준다."""
+
+    async def _fetch(session: Any, *, user_id: Any, start_day: date, end_day: date) -> Any:
+        return (by_day or {}), status
+
+    monkeypatch.setattr(freebusy, "fetch_busy_by_day", _fetch)
+
+
+def test_approve_rejects_a_block_moved_onto_a_calendar_event(
+    monkeypatch: Any, client: TestClient, fake_plan_draft_repo: FakePlanDraftRepo
+) -> None:
+    """월 18~20 구글 약속 위로 옮김 → 422. 생성이 피하는 약속은 승인도 피한다(리뷰 반영)."""
+    _use_session(client, _CapturingSession())
+    _stub_calendar(
+        monkeypatch,
+        "ok",
+        {_DAY: [BusyBlock(TimeInterval(_at(18), _at(20)), "calendar", "캘린더 일정")]},
+    )
+    plan_id = _seed_two_card_draft(fake_plan_draft_repo)
+
+    res = client.post(
+        f"/plans/{plan_id}/approve",
+        json={"blocks": [_edit("n1", _at(18, 30)), _edit("n2", _at(16))]},
+    )
+
+    assert res.status_code == 422, res.text
+    assert res.json()["code"] == "PLAN_BLOCK_CONFLICT"
+    assert "캘린더" in res.json()["message"]
+    assert "캘린더 일정" not in res.json()["message"]  # busy 조회라 약속 제목은 모른다
+
+
+def test_approve_does_not_fail_when_the_calendar_lookup_fails(
+    monkeypatch: Any, client: TestClient, fake_plan_draft_repo: FakePlanDraftRepo
+) -> None:
+    """캘린더 조회가 실패해도 승인은 진행된다 — 생성과 같은 규칙(장애가 승인을 막지 않는다)."""
+    _use_session(client, _CapturingSession())
+    _stub_calendar(monkeypatch, "failed")
+    plan_id = _seed_two_card_draft(fake_plan_draft_repo)
+
+    res = client.post(
+        f"/plans/{plan_id}/approve",
+        json={"blocks": [_edit("n1", _at(18, 30)), _edit("n2", _at(16))]},
+    )
+
+    assert res.status_code == 200, res.text
 
 
 def test_approve_rejects_two_edited_blocks_moved_onto_each_other(

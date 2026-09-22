@@ -1077,7 +1077,7 @@ async def _ensure_moved_blocks_fit(
     fixed_repo: FixedScheduleRepo,
     policy_repo: TimePolicyRepo,
 ) -> None:
-    """사용자가 **옮긴** 블록만 기존 일정·고정 일정·시간 정책과 대조한다 (planA-2).
+    """사용자가 **옮긴** 블록만 기존 일정·고정 일정·시간 정책·캘린더와 대조한다 (planA-2).
 
     초안 그대로인 블록은 생성 단계에서 이미 같은 busy 를 피해 놓였다. 옮긴 블록은 그 검사를
     안 거쳤으므로 생성과 같은 소스로 다시 본다 — 활동 시간대(outcome 정책)는 영속화의
@@ -1103,6 +1103,14 @@ async def _ensure_moved_blocks_fit(
     # generate_replan 과 같은 이유로 Any 로 넘긴다.
     fixed: list[Any] = list(await fixed_repo.list_active(user_id))
     db_policies: list[Any] = list(await policy_repo.list_active(user_id))
+    # 구글 캘린더 약속 — 생성 단계도 이걸 피해 놓는다(`first_plan._calendar_busy_by_day`).
+    # 안 보면 사용자가 끌어 옮긴 블록만 약속 위에 얹혀 저장된다. 조회 실패·미연결이면
+    # 그냥 넘어간다(생성과 같은 규칙) — 캘린더 장애가 승인을 막으면 안 된다.
+    # freebusy 는 commit 하지 않는다 — 이 lock 은 트랜잭션 단위라 중간 commit 이 풀어 버린다.
+    cal_by_day, cal_status = await freebusy.fetch_busy_by_day(
+        session, user_id=user_id, start_day=lo.date(), end_day=hi.date()
+    )
+    calendar_busy = cal_by_day if cal_status == "ok" else {}
 
     def _conflict(message: str, code: ErrorCode = ErrorCode.PLAN_BLOCK_CONFLICT) -> ApiError:
         return ApiError(code, message, http_status=HTTPStatus.UNPROCESSABLE_ENTITY, field="blocks")
@@ -1125,12 +1133,21 @@ async def _ensure_moved_blocks_fit(
             hit = first_busy_overlap(
                 start,
                 end,
-                [*fixed_schedules_to_busy(day, fixed), *time_policies_to_busy(day, db_policies)],
+                [
+                    *fixed_schedules_to_busy(day, fixed),
+                    *time_policies_to_busy(day, db_policies),
+                    *calendar_busy.get(day, []),
+                ],
             )
             if hit is None:
                 continue
             if hit.source == "fixed_schedule":
                 raise _conflict(f"'{label}' 블록을 옮긴 시간이 '{hit.label}' 고정 일정과 겹쳐요.")
+            if hit.source == "calendar":
+                # 일정 제목은 싣지 않는다 — busy 조회라 서버도 모른다(label 은 '캘린더 일정').
+                raise _conflict(
+                    f"'{label}' 블록을 옮긴 시간에 캘린더 약속이 있어요. 다른 시간으로 옮겨 주세요."
+                )
             raise _conflict(
                 f"'{label}' 블록을 옮긴 시간이 {hit.label} 시간과 겹쳐요. 다른 시간으로 옮겨 주세요.",
                 ErrorCode.PLAN_POLICY_VIOLATION,
@@ -1184,7 +1201,7 @@ async def approve_plan(
     블록 목록이다 — 옮긴 시각·지운 카드·바꾼 제목을 반영해 영속화한다(`apply_draft_edits`).
     예전엔 본문을 아예 안 받아, 초안 화면에서 끌어 옮기고 지운 것이 승인 때 전부 버려지고
     AI 원안이 그대로 저장됐다 — '수정' 버튼이 있는데 수정이 안 되는 HITL 이었다. 옮긴 블록은
-    생성과 같은 소스(기존 일정·고정 일정·시간 정책)로 다시 대조하고(`_ensure_moved_blocks_fit`),
+    생성과 같은 소스(기존 일정·고정 일정·시간 정책·캘린더)로 다시 대조하고(`_ensure_moved_blocks_fit`),
     활동 시간대는 영속화 가드가 그대로 막는다. 본문이 없으면 종전과 같다.
     """
     # ⚠️ 원시 값으로 먼저 잡아 둔다 (planA-3). 시도가 실패하면 가드 트랜잭션이 rollback 하는데,
