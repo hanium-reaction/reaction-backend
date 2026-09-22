@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from reaction_backend.schemas.common import CamelModel
+from reaction_backend.schemas.goals import strip_invisible
 
 # Inbox 항목 라이프사이클 + category enum (DB 모델과 일치)
 InboxStatus = Literal["captured", "classified", "archived", "promoted"]
@@ -66,6 +67,15 @@ class InboxCreateRequest(CamelModel):
     """POST /inbox — 1줄 캡처."""
 
     raw_text: str = Field(min_length=1)
+
+    @field_validator("raw_text", mode="before")
+    @classmethod
+    def _strip_invisible(cls, v: object) -> object:
+        """제어문자·폭 없는 공백 제거 — 메모는 암호화 컬럼이라 NUL 이 그대로 저장됐고,
+        그 메모를 목표·할 일로 옮길 때마다 Postgres 가 거절해 **영구히 500** 이었다."""
+        if not isinstance(v, str):
+            return v
+        return strip_invisible(v)
 
 
 class InboxUpdateRequest(CamelModel):

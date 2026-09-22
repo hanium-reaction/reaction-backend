@@ -195,3 +195,43 @@ def test_mandala_habit_link_long_title_is_korean_422(client: TestClient) -> None
         json={"title": "가" * 201, "frequencyPerWeek": 3, "minutesPerSession": 20},
     )
     _assert_korean_422(resp, "title")
+
+
+# ── 보이지 않는 문자 (감사 재검증에서 발견) ─────────────────────────────────────
+#
+# NUL(`\x00`)은 Postgres text 컬럼에 저장되지 않아 그대로 500 이었다. 인박스는 암호화
+# 컬럼이라 **저장은 201 로 성공**하고, 그 메모를 목표·할 일로 옮길 때마다 영영 500 이 났다.
+
+
+def test_nul_byte_in_title_is_stripped_not_500(client: TestClient) -> None:
+    res = client.post("/goals", json=_goal_body(title="자료\x00구조 과제"))
+    assert res.status_code == 201, res.text
+    assert res.json()["title"] == "자료구조 과제"
+
+
+def test_zero_width_only_title_is_blank(client: TestClient) -> None:
+    """폭 없는 공백만 적은 제목은 '보이지 않는 제목'으로 저장되지 않는다."""
+    res = client.post("/goals", json=_goal_body(title="​‌"))
+    assert res.status_code == 422
+    assert res.json()["message"] == "목표 이름을 적어 주세요."
+
+
+def test_habit_title_strips_control_characters(client: TestClient) -> None:
+    res = client.post("/habits", json=_habit_body(title="스트\x07레칭"))
+    assert res.status_code == 201, res.text
+    assert res.json()["title"] == "스트레칭"
+
+
+def test_inbox_memo_with_nul_can_still_become_a_goal(client: TestClient) -> None:
+    """인박스 메모에 섞인 NUL 이 저장돼 변환이 영구히 막히지 않는다."""
+    created = client.post("/inbox", json={"rawText": "널바이트\x00 정리하기"})
+    assert created.status_code == 201, created.text
+    assert created.json()["rawText"] == "널바이트 정리하기"
+
+    inbox_id = created.json()["inboxId"]
+    converted = client.post(
+        f"/inbox/{inbox_id}/convert-to-goal",
+        json={},
+        headers={"Idempotency-Key": f"nul-{uuid4()}"},
+    )
+    assert converted.status_code in (200, 201), converted.text

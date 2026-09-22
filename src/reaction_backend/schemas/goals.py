@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import Field, field_validator
@@ -19,6 +20,24 @@ GOAL_TITLE_MAX_LENGTH = 200
 GOAL_ESTIMATED_MINUTES_MAX = 1_000_000
 
 
+# 화면에 남지 않으면서 저장은 되는 문자 — 제어문자(C0/C1)와 폭 없는 공백.
+#
+# NUL(`\x00`)은 Postgres 가 text 컬럼에 저장하지 못해 그대로 500 이 된다. 더 나쁜 건
+# 인박스처럼 **암호화 컬럼**에 먼저 들어가는 경로다 — 저장은 201 로 성공하고, 나중에
+# 목표·할 일로 옮길 때마다 영영 500 이 난다(감사 실측: 그 메모는 변환이 영구 불가).
+# 폭 없는 공백만으로 된 제목은 `.strip()` 을 통과해 '보이지 않는 제목' 으로 저장됐다.
+#
+# 사용자가 일부러 넣는 문자가 아니라 붙여넣기에 섞여 오는 것이므로, 422 로 돌려보내
+# "뭘 고치라는 거지?" 하게 만들지 않고 **조용히 떼고 나머지를 그대로 쓴다**. 떼고 나서
+# 비면 그때는 기존과 같은 "…을 적어 주세요." 422 다.
+_INVISIBLE_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200d\ufeff]")
+
+
+def strip_invisible(text: str) -> str:
+    """제어문자·폭 없는 공백 제거 + 앞뒤 공백 정리. 줄바꿈/탭은 살린다(메모용)."""
+    return _INVISIBLE_CHARS.sub("", text).strip()
+
+
 def clean_title(value: object, *, noun: str, max_length: int) -> object:
     """사용자가 적는 제목 검사(`mode="before"`) — 앞뒤 공백을 떼고, 비었거나 길면 한국어 422.
 
@@ -32,7 +51,7 @@ def clean_title(value: object, *, noun: str, max_length: int) -> object:
     """
     if not isinstance(value, str):
         return value
-    text = value.strip()
+    text = strip_invisible(value)
     if not text:
         raise PydanticCustomError("title_blank", f"{noun}을 적어 주세요.")
     if len(text) > max_length:

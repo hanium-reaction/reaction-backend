@@ -38,6 +38,7 @@ from reaction_backend.schemas.fixed_schedules import (
     FixedScheduleCreateRequest,
     FixedScheduleUpdateRequest,
 )
+from reaction_backend.schemas.goals import strip_invisible
 
 router = APIRouter(prefix="/fixed-schedules", tags=["fixed-schedules"])
 
@@ -104,7 +105,7 @@ def _validate_time_window(start: time, end: time, *, start_field: str = "startTi
 def _normalize_title(raw: str) -> str:
     """앞뒤 공백을 걷어낸 제목. 비었거나 200자를 넘으면 422 — 예전엔 공백뿐인 제목이 저장되고
     201자는 DB 가 거절해 500 이었다."""
-    title = raw.strip()
+    title = strip_invisible(raw)
     if not title:
         raise ApiError(
             ErrorCode.COMMON_VALIDATION_ERROR,
