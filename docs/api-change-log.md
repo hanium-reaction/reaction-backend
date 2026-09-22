@@ -778,6 +778,13 @@ FE 가 할 일(고정 일정): `SetupScreen.addSchedule` 은 422 를 `friendlyEr
   `unsubscribePush()` + `DELETE /notifications/subscribe` 를 먼저 부르기.
 - **알림 설정 첫 조회가 동시에 와도 500 이 나지 않는다** — `GET/PATCH /notifications/settings`·
   `POST /notifications/subscribe` 의 행 생성이 `ON CONFLICT DO NOTHING` 으로 바뀌었다.
+- **401 `AUTH_INVALID_TOKEN` 문구가 다른 화면과 같은 말투로**(v2.30-auth2). 여기만 합쇼체였다
+  ("인증 헤더가 없습니다.", "인증 토큰이 유효하지 않습니다.", "사용자를 찾을 수 없습니다.") —
+  로그인이 풀린, 가장 당황스러운 순간에 말투가 갑자기 딱딱해지고 뭘 하면 되는지도 말해 주지
+  않았다. 네 갈래(헤더 없음/형식 오류/검증 실패/계정 없음) 모두 "… 다시 로그인해 주세요." 로
+  끝난다. 'Bearer'·'토큰'·'헤더' 같은 내부 표기도 뺐다(사용자가 고칠 수 있는 말이 아니다).
+  **코드·envelope·HTTP 상태 무변경** — 분기는 종전대로 `code` 로. FE 할 일 없음(메시지를
+  그대로 띄우면 된다).
 - **에러 `message` 가 한국어로** — 요청 검증 422(`COMMON_VALIDATION_ERROR`)가 pydantic 영어 원문
   ('String should have at least 1 character', 'Field required' …)을 그대로 내보내던 것을 종류별
   한국어로 바꿨다(`field` 는 그대로, 스키마가 직접 쓴 한국어 문구는 그대로). Starlette 기본
