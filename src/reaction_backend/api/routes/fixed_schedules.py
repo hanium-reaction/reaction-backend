@@ -50,6 +50,10 @@ _TITLE_MAX = 200
 _FIELD_LABELS = {"startTime": "시작 시각", "endTime": "종료 시각"}
 #: 사용자별 advisory lock 이름 — 겹침 검사와 저장 사이에 다른 요청이 끼지 못하게.
 _LOCK_NAME = "fixed_schedules"
+_MINUTES_PER_DAY = 24 * 60
+#: 자정을 넘는 일정으로 읽어 줄 최대 길이(분). 이보다 길면 시작·종료를 거꾸로 적은 것이다
+#: (11:00–10:00 → 23시간). `_validate_time_window` 참고.
+_OVERNIGHT_MAX_MIN = 12 * 60
 
 
 def _to_schema(schedule: FixedScheduleModel) -> FixedSchedule:
@@ -84,12 +88,32 @@ def _parse_hhmm(value: str, *, field: str) -> time:
         ) from e
 
 
+def _minutes(value: time) -> int:
+    """자정 기준 분. `"24:00"`(= `time.max`)은 하루 끝(1440)."""
+    return _MINUTES_PER_DAY if value == time.max else value.hour * 60 + value.minute
+
+
 def _validate_time_window(start: time, end: time, *, start_field: str = "startTime") -> None:
+    """[start, end) 검증 — 끝이 시작보다 앞서면 **자정 넘김인지 오타인지 갈라서** 안내한다.
+
+    예전엔 둘 다 "자정을 넘기는 일정은 둘로 나눠…" 였다. 11:00–10:00 처럼 시작·종료를 거꾸로
+    적은 사용자(훨씬 흔하다)는 나눠 넣으라는 엉뚱한 안내를 읽고, 무엇이 틀렸는지 모른 채 같은
+    실수를 반복했다. 거꾸로 적은 값을 자정 넘김으로 읽으면 23시간짜리 일정이 된다 — 수업·알바에
+    그런 건 없다. 그래서 자정을 넘겨 읽었을 때의 길이가 12시간 이내일 때만 진짜 밤 일정
+    (22:00–02:00 같은)으로 보고 종전 안내를 준다.
+    """
     if start > end:
-        # 자정을 넘는 일정 — 모듈 독스트링. 왜 안 되는지와 어떻게 넣으면 되는지를 같이 말한다.
+        if _MINUTES_PER_DAY - _minutes(start) + _minutes(end) <= _OVERNIGHT_MAX_MIN:
+            # 자정을 넘는 일정 — 모듈 독스트링. 왜 안 되는지와 어떻게 넣으면 되는지를 같이 말한다.
+            raise ApiError(
+                ErrorCode.COMMON_VALIDATION_ERROR,
+                "자정을 넘기는 일정은 둘로 나눠 넣어 주세요. 예: 금 22:00–24:00, 토 00:00–02:00",
+                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                field=start_field,
+            )
         raise ApiError(
             ErrorCode.COMMON_VALIDATION_ERROR,
-            "자정을 넘기는 일정은 둘로 나눠 넣어 주세요. 예: 금 22:00–24:00, 토 00:00–02:00",
+            "종료 시각이 시작 시각보다 늦어야 해요. 시작과 종료가 바뀌지 않았는지 확인해 주세요.",
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field=start_field,
         )
@@ -135,9 +159,12 @@ def _validate_days(days: list[str]) -> list[str]:
         )
     invalid = [d for d in days if d not in _VALID_DAYS]
     if invalid:
+        # 파이썬 목록 표기(`['monday', 'wednesday']`)가 그대로 화면에 떴다 — 대괄호·따옴표는
+        # 사용자에게 아무 뜻도 아니다. 쉼표로 이어 쓰고, 값 뒤에는 조사를 붙이지 않는다
+        # (목록을 싣는 다른 안내와 같은 규칙 — 받은 값에 따라 '은/는' 이 어긋난다).
         raise ApiError(
             ErrorCode.COMMON_VALIDATION_ERROR,
-            f"요일 값이 올바르지 않아요: {invalid}. mon/tue/wed/thu/fri/sat/sun 중에서.",
+            f"알 수 없는 요일이 있어요: {', '.join(invalid)} — 요일을 다시 골라 주세요.",
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="daysOfWeek",
         )

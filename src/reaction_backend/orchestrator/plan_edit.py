@@ -72,8 +72,21 @@ def _touches_window(block: list[tuple[int, int]], window: list[tuple[int, int]])
 
 
 def _parse_time(raw: object) -> time | None:
+    """정책 payload 의 `"HH:MM"` → time. `"24:00"`(하루 끝)은 `time(0, 0)` 으로 읽는다.
+
+    스케줄러(`goal_structuring._parse_hhmm`)는 같은 값을 `time.max` 로 읽지만 여기서는
+    `time(0, 0)` 이 맞다 — `_window_intervals` 는 끝이 시작보다 앞서면 자정을 넘는 창으로
+    접으므로 16:00~24:00 이 정확히 `[16:00, 24:00)` 한 조각이 된다(`time.max` 로 읽으면
+    23:59 까지라 하루의 마지막 1분이 창에서 빠진다).
+
+    예전엔 `"24:00"` 이 ValueError 로 떨어져 **그 정책을 통째로 건너뛰었다**. 활동 시간대의
+    여집합으로 만든 수면창(08:00~16:00 활동 → 수면 00:00~08:00 · 16:00~24:00)은 저녁 조각이
+    늘 `"24:00"` 로 끝나므로, 주간 편집기가 저녁 수면창을 한 번도 보지 못했다.
+    """
     if not isinstance(raw, str):
         return None
+    if raw.strip() == "24:00":
+        return time(0, 0)
     try:
         return time.fromisoformat(raw)
     except ValueError:

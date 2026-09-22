@@ -239,3 +239,30 @@ def test_other_db_errors_stay_500_with_cors() -> None:
     assert resp.json()["code"] == "COMMON_INTERNAL_ERROR"
     assert "pg error" not in resp.text
     assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+def test_unreadable_body_points_at_no_field() -> None:
+    """본문이 JSON 으로 읽히지 않으면 `field` 는 비어 있다.
+
+    pydantic 은 그때 loc 에 필드 이름 대신 깨진 문자 위치를 넣는다(`("body", 1)`) — 예전엔
+    그게 `field: "1"` 로 나가 FE 가 있지도 않은 '1' 칸을 찾았다.
+    """
+    client = TestClient(_app_with_test_routes())
+    resp = client.post(
+        "/__test__/validate", content=b"{not json", headers={"content-type": "application/json"}
+    )
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["code"] == "COMMON_VALIDATION_ERROR"
+    assert body["field"] is None
+    assert body["message"] == "요청을 읽지 못했어요. 잠시 후 다시 시도해 주세요."
+
+
+def test_a_bad_list_item_still_points_at_its_field() -> None:
+    """배열 원소 오류는 종전 그대로 `필드.인덱스` 를 가리킨다(이름이 있으니 진짜 필드다)."""
+    client = TestClient(_app_with_test_routes())
+    resp = client.post("/__test__/title", json={"title": "x", "tags": [1]})
+
+    assert resp.status_code == 422
+    assert resp.json()["field"] == "tags.0"

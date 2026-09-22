@@ -650,6 +650,12 @@ def _week_bounds(monday: date) -> tuple[datetime, datetime]:
 
 
 def _parse_week_start(raw: str | None) -> date:
+    """`weekStart` → 그 주 월요일. 미지정이면 이번 주.
+
+    문장에 요청 필드 이름(`weekStart`)을 싣지 않는다 — FE 가 422 `message` 를 그대로 띄우는데
+    사용자에게 'weekStart' 는 아무 뜻도 아니다(`/calendar` 의 같은 문구와 맞췄다). 어느 값이
+    문제인지는 `field` 가 그대로 들고 있다.
+    """
     if raw is None:
         return _monday_of(now_kst().date())
     try:
@@ -657,7 +663,7 @@ def _parse_week_start(raw: str | None) -> date:
     except ValueError as e:
         raise ApiError(
             ErrorCode.PLAN_INVALID_TIME,
-            "weekStart 는 YYYY-MM-DD 형식이어야 해요.",
+            "날짜 형식이 올바르지 않아요 (YYYY-MM-DD).",
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="weekStart",
         ) from e
@@ -846,6 +852,8 @@ async def edit_block(
     action_repo: ActionRepoDep,
     policy_repo: PolicyRepoDep,
     fixed_repo: FixedRepoDep,
+    interview_repo: RepoDep,
+    profile_repo: ProfileRepoDep,
     session: SessionDep,
 ) -> BlockEditResponse:
     """블록 15분 snap 이동 + 목표(category)/제목 수정 (S15).
@@ -855,6 +863,10 @@ async def edit_block(
     블록이 매달린 action_item 을 갱신한다(같은 액션의 모든 세션 블록 공유). 정책 검사는
     **변경된 category** 로 수행하고, 변경 반영은 성공 commit 시에만 영속된다(422 면 롤백).
     시각을 지금 그대로 보낸 편집(제목·목표만)은 snap·겹침·정책 검사 없이 시각을 유지한다.
+
+    정책 집합은 DB `time_policies` + **인터뷰(·설정)의 활동 시간대 밖**으로, 승인·재계획과
+    똑같이 `_replan_policies` 로 조립한다 — 같은 시각이 편집기에서는 통과하고 승인에서는
+    막히는 일이 없게.
     """
     block = await repo.get_block(user.id, _parse_block_id(block_id))
     if block is None:
@@ -919,7 +931,14 @@ async def edit_block(
             action.title = body.title.strip()
     category = action.category if action is not None else "other"
     if moving:
-        policies = await policy_repo.list_active(user.id)
+        # 승인·재계획과 **같은 정책 집합**으로 본다 (calendar-P1). 예전엔 DB `time_policies`
+        # 만 봤는데, 그 행을 만드는 FE 화면이 없어 실사용자는 늘 빈 목록이었다 — 편집기는
+        # 사실상 아무것도 막지 않았고, 활동 시간대를 08~16 이라 답한 학생이 블록을 새벽 3시로
+        # 끌어도 200 이었다. 같은 사용자가 승인·재계획에서는 02:00 이 막힌다(그 둘은 인터뷰
+        # 활동 시간대의 여집합을 수면으로 본다). 한 화면 안에서 규칙이 갈리지 않게 재계획과
+        # 같은 조립(`_replan_policies`)을 그대로 쓴다 — 여기서 한 벌 더 만들면 또 갈라진다.
+        outcome = await _replan_outcome(user, interview_repo, profile_repo)
+        policies = _replan_policies(list(await policy_repo.list_active(user.id)), outcome, user)
         violated = find_policy_violation(to_kst(new_start), to_kst(new_end), category, policies)
         if violated is not None:
             raise ApiError(

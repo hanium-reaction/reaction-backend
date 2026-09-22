@@ -43,6 +43,9 @@
   (`COMMON_VALIDATION_ERROR`)도 pydantic 영어 원문 대신 종류별 한국어("꼭 필요한 항목이
   빠졌어요.", "200자까지 입력할 수 있어요. 조금 줄여 주세요." 등)이고, 어느 입력인지는 `field`
   로 알린다. 없는 경로·메서드(404/405)도 한국어. 분기는 `message` 가 아니라 `code` 로 할 것.
+  `field` 는 **요청에 실제로 있는 필드 경로**이거나 `null` 이다 — 본문이 JSON 으로 읽히지도
+  않으면(`{not json`) 가리킬 필드가 없으므로 `null` 이다(v2.30 — 예전엔 pydantic 의 문자 위치가
+  `field: "1"` 로 나갔다). 배열 원소는 `daysOfWeek.0` 처럼 경로 그대로.
   DB 컬럼 길이를 넘는 문자열은 스키마에서 못 막았더라도 500 이 아니라 422
   `COMMON_VALIDATION_ERROR`("입력한 내용이 너무 길어요. 조금 줄여 주세요.")다.
 - 500 `COMMON_INTERNAL_ERROR` 에도 CORS 헤더와 `x-request-id` 가 붙는다(v2.30-auth) —
@@ -666,7 +669,9 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 
 #21-B 구현 메모 (S14/S15 — 영속 `scheduled_blocks` 읽기/이동):
 - Plan 테이블 없음 — `planId` 는 주(週) 논리 식별자(`plan_<weekStart>`). 편집 권한은 `blockId`.
-- `GET /plans/weekly?weekStart=` — 그 주 월요일로 정규화(생략 시 이번 주). 7일 × `blocks[]`
+- `GET /plans/weekly?weekStart=` — 그 주 월요일로 정규화(생략 시 이번 주). 날짜 형식이 아니면 422
+  `PLAN_INVALID_TIME`, `field="weekStart"`, 메시지 "날짜 형식이 올바르지 않아요 (YYYY-MM-DD)."
+  (문장에 요청 필드 이름을 싣지 않는다 — `/calendar` 의 같은 문구와 맞췄다). 7일 × `blocks[]`
   (blockId/actionId/title/category/**goalId**/startAt/endAt/blockStatus/source/**calendarConflict**(v2.27)/**completionStatus**(v2.30-planA)), KST 직렬화. 최상단 `calendar`(v2.27, §10 "캘린더 겹침").
   `blockStatus` 는 `scheduled`/`started`/`finished` 뿐이다(`done`/`failed` 는 없다) — 체크인은 결과와
   무관하게 블록을 `finished` 로 닫는다. 완료·실패 구분은 `completionStatus`
@@ -683,9 +688,17 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
   **이미 시작/끝낸 블록(`blockStatus` started/finished)은 시간을 못 옮긴다**(v2.30-planA) — 다른
   시각이면 422 `PLAN_INVALID_TIME`("이미 시작했거나 끝낸 일정은 옮길 수 없어요…"). 지금 시각을
   그대로 보내고 `title`/`category` 만 바꾸는 편집은 200 이며, 이때 시각·`source` 는 그대로다.
+- **정책 집합은 승인·재계획과 같다**(v2.30-planA 후속): DB `time_policies` + **활동 시간대 밖**
+  (최근 완료 인터뷰의 활동창 — 설정에서 고친 값 우선 — 의 여집합을 수면으로, no_touch 포함.
+  인터뷰가 없으면 설정의 활동 시간대, 그마저 없을 때만 23:00~08:00 기본 수면창). `POST /plans/replan`
+  과 **같은 조립**이다. 예전엔 DB `time_policies` 만 봤는데 그 행을 만드는 FE 화면이 없어 실사용자는
+  늘 빈 목록이었다 — 08~16 시에만 활동한다고 답한 사용자도 블록을 새벽 3시로 옮길 수 있었고, 같은
+  시각이 승인에서는 422 였다.
 - 정책 판정은 순수 함수 `orchestrator/plan_edit.py`. 고정 일정·`no_touch` 는 생성·승인과 같은 busy
-  전개(`fixed_schedules_to_busy`/`time_policies_to_busy`)로 본다(v2.30-planA). `break_min`·캘린더
-  겹침은 편집 때 막지 않는다(캘린더는 `calendarConflict` 로 표시). DB 마이그레이션 없음.
+  전개(`fixed_schedules_to_busy`/`time_policies_to_busy`)로 본다(v2.30-planA). 시각 `"24:00"`(하루 끝)은
+  스케줄러와 같게 읽는다 — 예전엔 그 정책을 통째로 건너뛰어 활동창 여집합의 저녁 조각(16:00~24:00)이
+  검사되지 않았다. `break_min`·캘린더 겹침은 편집 때 막지 않는다(캘린더는 `calendarConflict` 로 표시).
+  DB 마이그레이션 없음.
 - `GET /plans/weekly` 의 `days[].fixedSchedules`(v2.30-planA, additive): 그날의 고정 일정
   `[{title, startAt, endAt}]`(KST, 자정을 넘는 일정은 그날 안의 조각으로). 편집이 막는 시간을
   그리드에 보이게 하려는 것 — FE 는 옮길 수 없는 칸으로 그린다.
@@ -1446,9 +1459,9 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 | PATCH | `/fixed-schedules/{id}` | 부분 수정 |
 | DELETE | `/fixed-schedules/{id}` | soft delete (`archived_at`) |
 
-- `daysOfWeek`: `["mon","tue",…]` 배열 — 비어 있으면 422(PATCH 도), 중복은 한 번만 저장(v2.30). `startTime`/`endTime`: `HH:MM`. **`endTime: "24:00"`(밤 12시까지)을 받는다**(v2.30 — 그날 끝까지 막고, 응답에는 `"23:59"` 로 보인다)
+- `daysOfWeek`: `["mon","tue",…]` 배열 — 비어 있으면 422(PATCH 도), 중복은 한 번만 저장(v2.30). 목록 밖 값이 섞이면 422 `field="daysOfWeek"`, 메시지 "알 수 없는 요일이 있어요: <값, 값> — 요일을 다시 골라 주세요."(v2.30 — 예전엔 파이썬 목록 표기 `['monday', 'wednesday']` 가 그대로 화면에 떴다). `startTime`/`endTime`: `HH:MM`. **`endTime: "24:00"`(밤 12시까지)을 받는다**(v2.30 — 그날 끝까지 막고, 응답에는 `"23:59"` 로 보인다)
 - `title`: 앞뒤 공백을 걷어 저장, 비었거나 200자를 넘으면 422 `field="title"`(v2.30 — 예전엔 공백뿐인 제목이 저장되고 201자는 500 이었다)
-- **자정을 넘는 일정(`startTime > endTime`, 예: 22:00–02:00)은 422** `field="startTime"`, 메시지 "자정을 넘기는 일정은 둘로 나눠 넣어 주세요. 예: 금 22:00–24:00, 토 00:00–02:00". 시작 = 종료는 "시작 시각은 종료 시각보다 빨라야 해요." 형식 오류 메시지에는 필드 코드 대신 "시작 시각"/"종료 시각" 이 들어간다(기계용은 `field`)
+- **자정을 넘는 일정(`startTime > endTime`, 예: 22:00–02:00)은 422** `field="startTime"`, 메시지 "자정을 넘기는 일정은 둘로 나눠 넣어 주세요. 예: 금 22:00–24:00, 토 00:00–02:00". **단 자정을 넘겨 읽었을 때 12시간을 넘는 범위(예: 11:00–10:00 → 23시간)는 거꾸로 적은 것으로 보고** "종료 시각이 시작 시각보다 늦어야 해요. 시작과 종료가 바뀌지 않았는지 확인해 주세요." 를 준다(v2.30 — 같은 422·같은 `field`, 문구만 갈린다). 시작 = 종료는 "시작 시각은 종료 시각보다 빨라야 해요." 형식 오류 메시지에는 필드 코드 대신 "시작 시각"/"종료 시각" 이 들어간다(기계용은 `field`)
 - 같은 요일 시간 겹치면 409 `FIXED_SCHEDULE_OVERLAP` — **v2.30 부터 실제로 검사한다**(그전엔 문서에만 있었다). 맞닿는 건(10:00 끝·10:00 시작) 겹침이 아니다. 사용자별 lock 안에서 검사·저장해 [추가] 연타도 한 줄만 생긴다. PATCH 는 요일·시각을 바꿀 때만 검사한다(자기 자신 제외 — 이미 겹쳐 저장된 예전 일정도 제목은 고칠 수 있다). 온보딩 진행에 최소 1개 필요
 
 ---

@@ -68,3 +68,18 @@ def test_milestones_at_the_limits_pass_validation(client: TestClient, monkeypatc
 
     assert res.status_code == 422
     assert "인터뷰" in res.json()["message"]  # 검증은 통과, 인터뷰가 없어서 멈춘 것
+
+
+def test_a_bad_week_start_is_explained_without_the_field_name(client: TestClient) -> None:
+    """주간 그리드의 날짜 오류 문구에 'weekStart' 가 없다 — 사용자에겐 뜻 없는 말이다.
+
+    어느 값이 문제인지는 `field` 가 그대로 들고 있다(FE 가 쓰는 자리).
+    """
+    res = client.get("/plans/weekly", params={"weekStart": "오늘"})
+
+    assert res.status_code == 422
+    body = res.json()
+    assert body["code"] == "PLAN_INVALID_TIME"
+    assert body["field"] == "weekStart"
+    assert "weekStart" not in body["message"]
+    assert body["message"] == "날짜 형식이 올바르지 않아요 (YYYY-MM-DD)."
