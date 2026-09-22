@@ -259,9 +259,6 @@ class FakeTimePolicyRepo:
         policy.archived_at = datetime.now(UTC)
         policy.is_active = False
 
-    async def count_active(self, user_id: UUID) -> int:
-        return len(await self.list_active(user_id))
-
 
 class FakeFixedScheduleRepo:
     def __init__(self) -> None:
@@ -317,9 +314,6 @@ class FakeFixedScheduleRepo:
 
     async def soft_delete(self, schedule: FixedSchedule) -> None:
         schedule.archived_at = datetime.now(UTC)
-
-    async def count_active(self, user_id: UUID) -> int:
-        return len(await self.list_active(user_id))
 
 
 class FakeNotificationRepo:
@@ -740,9 +734,6 @@ class FakeHabitRepo:
     def seed(self, habit: Habit) -> None:
         """테스트 보조 — habit 직접 주입."""
         self._items[habit.id] = habit
-
-    async def count_active(self, user_id: UUID) -> int:
-        return len(await self.list_active(user_id))
 
 
 class FakeHabitInstanceRepo:

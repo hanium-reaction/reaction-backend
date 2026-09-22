@@ -339,7 +339,7 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 | --- | --- | --- |
 | GET | `/time-policies` | 내 활성 정책 전체 |
 | POST | `/time-policies` | 신규 정책. payload는 type별 다름 |
-| POST | `/time-policies/prefill-from-interview` | S07 진입 시 인터뷰 답 → 정책 prefill |
+| POST | `/time-policies/prefill-from-interview` | S07 진입 시 정책 prefill 후보(DB 미저장). ⚠️ **이름과 달리 인터뷰 답을 반영하지 않는다** — 언제나 `sleep` 23:00–07:00 · `break_min` 15 · `late_night_block` 22:00~ 세 개다(v2.30 문서 정정 — 찾던 슬롯 키가 카탈로그에 없어 처음부터 그랬다). 활동 시간대로 개인화하는 건 후속 결정 |
 | PATCH | `/time-policies/{id}` | 부분 수정 |
 | DELETE | `/time-policies/{id}` | soft delete (`is_active=false`) |
 
@@ -658,21 +658,21 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 >
 > ✅ **이미 세운 계획에도 반영된다(v2.27).** `GET /today/agenda` · `GET /plans/weekly` 가 화면을 열 때마다 캘린더를 읽어 겹치는 블록에 `calendarConflict` 를 달고, 06:00 모닝 브리프가 오늘 겹침을 알린다(§10 "캘린더 겹침"). 주기 동기화·webhook 은 없다 — webhook(`events.watch`)은 일정 제목까지 읽는 스코프가 필요해 ADR-0009 D4 범위 밖이다.
 >
-> ✅ **freebusy 는 계획에 반영된다.** `POST /plans/generate` 와 **`POST /plans/replan`(v2.26)** 이 각자의 지평 전체 캘린더 일정을 **한 번** 조회해 스케줄러의 busy 소스로 넣는다(고정일정·시간정책·기존 블록과 나란히). 캘린더를 못 읽어도 계획 생성은 실패하지 않고, **연결해 둔 사용자에게만** `warnings` 한 줄로 알린다(연결 안 한 사용자에게는 아무 말도 하지 않는다). ⚠️ 지금은 **겹치기 회피까지**다 — 앞뒤 이동 시간(전이 버퍼)과 직전 일정 길이에 따른 부하 감쇠는 아직 없다(ADR-0009 D4 ①②).
+> ✅ **freebusy 는 계획에 반영된다.** `POST /plans/generate` 와 **`POST /plans/replan`(v2.26)** 이 각자의 지평 전체 캘린더 일정을 **한 번** 조회해 스케줄러의 busy 소스로 넣는다(고정일정·시간정책·기존 블록과 나란히). 캘린더를 못 읽어도 계획 생성은 실패하지 않고, **연결해 둔 사용자에게만** `warnings` 한 줄로 알린다(연결 안 한 사용자에게는 아무 말도 하지 않는다). 토큰 갱신이 일시적으로 실패해도(네트워크·5xx) "캘린더 일정을 불러오지 못해서…" 로 알린다(v2.30 전에는 조용히 넘어갔다). **연결이 Google 쪽에서 끊겼으면**(권한 철회·refresh token 만료 — 갱신이 `invalid_grant`) 대신 "Google 캘린더 연결이 끊겨서 이번 계획에는 캘린더 일정을 반영하지 못했어요. 설정에서 다시 연결하면 다음 계획부터 반영돼요." 를 **맨 앞에** 싣는다(v2.30) — 사용자가 다시 연결하거나 `DELETE /calendar/connect` 로 정리할 때까지 매 계획에. ⚠️ 지금은 **겹치기 회피까지**다 — 앞뒤 이동 시간(전이 버퍼)과 직전 일정 길이에 따른 부하 감쇠는 아직 없다(ADR-0009 D4 ①②).
 >
-> ⚠️ **기능 스위치**: `GOOGLE_CALENDAR_ENABLED=false`(기본)이거나 `GOOGLE_OAUTH_CLIENT_ID`/`GOOGLE_OAUTH_CLIENT_SECRET` 이 비어 있으면 connect/disconnect 는 예전처럼 `501 COMMON_NOT_IMPLEMENTED`. Cloud 콘솔 셋업은 사람 손이 필요해서, 준비 전에 배포돼도 사용자가 깨진 동의 화면을 만나지 않게 하는 안전핀이다. 그동안 FE 는 "수동 입력으로 시작"(`POST /fixed-schedules`) 경로를 유지한다.
+> ⚠️ **기능 스위치**: `GOOGLE_CALENDAR_ENABLED=false`(기본)이거나 `GOOGLE_OAUTH_CLIENT_ID`/`GOOGLE_OAUTH_CLIENT_SECRET`·토큰 암호화 키가 비어 있으면 `GET`/`POST /calendar/connect` · `GET /calendar/freebusy` 는 예전처럼 `501 COMMON_NOT_IMPLEMENTED`. **`DELETE /calendar/connect`(해제)는 예외다(v2.30)** — 동의 철회는 스위치와 무관하게 204. 스위치가 꺼져 있는 동안에는 계획 생성·재계획·화면·브리프 **어느 경로도 캘린더를 읽지 않는다**(v2.30 전에는 계획 생성·재계획이 계속 읽었다). Cloud 콘솔 셋업은 사람 손이 필요해서, 준비 전에 배포돼도 사용자가 깨진 동의 화면을 만나지 않게 하는 안전핀이다. 그동안 FE 는 "수동 입력으로 시작"(`POST /fixed-schedules`) 경로를 유지한다.
 
 | Method | Path | 설명 |
 | --- | --- | --- |
-| GET | `/calendar/connect` | 연결 상태. 응답 `{provider, connected, scopes}` — 연결이 없으면 404 가 아니라 `connected: false`, `scopes: []`. 스위치가 꺼져 있으면 501(FE 는 '준비 중') |
-| POST | `/calendar/connect` | OAuth code → 토큰 암호화 저장. **멱등** — 재연결은 새 행이 아니라 기존 연결 갱신. 응답 `{provider, connected, scopes}`. code 는 GIS popup 코드 흐름(`initCodeClient`, 스코프 `calendar.freebusy`)으로 받는다 — 서버가 `redirect_uri=postmessage` 로 교환한다. code 가 만료·재사용이거나, 동의 화면에서 **캘린더 체크를 풀었으면** 422 `COMMON_VALIDATION_ERROR` |
-| DELETE | `/calendar/connect` | 연결 해제 — `revoked_at` soft delete + Google 권한 회수(best-effort). **204, 멱등** — 연결이 없어도 204 다 |
+| GET | `/calendar/connect` | 연결 상태. 응답 `{provider, connected, scopes, needsReconnect}` — 연결이 없으면 404 가 아니라 `connected: false`, `scopes: []`. **`needsReconnect`(v2.30, additive)**: `connected: false` 인데 그게 **Google 쪽에서 끊겨서**면 `true`(권한 철회·refresh token 만료로 갱신 실패). 앱에서 해제했거나 연결한 적이 없으면 `false` — FE 는 `true` 일 때만 "연결이 끊겼어요 · 다시 연결" 을 그린다. 다시 연결하거나 `DELETE` 하면 `false`. 스위치가 꺼져 있으면 501(FE 는 '준비 중') |
+| POST | `/calendar/connect` | OAuth code → 토큰 암호화 저장. **멱등** — 재연결은 새 행이 아니라 기존 연결 갱신. 응답 `{provider, connected, scopes, needsReconnect}`(`needsReconnect` 는 항상 `false`). code 는 GIS popup 코드 흐름(`initCodeClient`, 스코프 `calendar.freebusy`)으로 받는다 — 서버가 `redirect_uri=postmessage` 로 교환한다. code 가 만료·재사용이거나, 동의 화면에서 **캘린더 체크를 풀었으면** 422 `COMMON_VALIDATION_ERROR` |
+| DELETE | `/calendar/connect` | 연결 해제 — `revoked_at` soft delete + Google 권한 회수(best-effort). **204, 멱등** — 연결이 없어도 204 다. **기능 스위치와 무관**(v2.30 — 꺼져 있어도 501 이 아니다). 저장된 토큰을 복호화할 수 없으면 원격 회수만 건너뛴다. Google 쪽에서 이미 끊긴 연결(`needsReconnect: true`)에 부르면 재연결 안내를 거둔다(`needsReconnect: false`, 계획 경고도 멈춘다) |
 | GET | `/calendar/freebusy?from=&to=` | read-only freebusy. `from`/`to` 는 **KST 날짜**(`YYYY-MM-DD`), 양끝 포함, 최대 60일. 연결 없으면 404 `CALENDAR_NOT_CONNECTED`(빈 목록이 **아니다** — "일정 없음" 과 구분돼야 한다), Google 실패는 502. 범위 오류는 422 |
 | POST | `/calendar/sync-preview` | 계획 → 캘린더 이벤트 미리보기 + 충돌 체크 |
 | POST | `/calendar/events/approve-insert` | 사용자 승인 일괄 삽입 (Idempotency-Key) |
 
 가드:
-- 권한 박탈/refresh 실패 → 404 `CALENDAR_NOT_CONNECTED` + 재연결 안내
+- 권한 박탈/refresh 실패(`invalid_grant` 만 — `invalid_client`·429 등 서버 설정·한도 문제로는 연결을 끊지 않는다, v2.30) → `GET /calendar/freebusy` 404 `CALENDAR_NOT_CONNECTED` + `GET /calendar/connect` 의 `needsReconnect: true` + 계획 생성·재계획 `warnings` 의 재연결 안내. 화면(`calendar.status`)은 `not_connected` 그대로다
 - 충돌 발견 → 409 `CALENDAR_CONFLICT` (충돌 블록 목록 포함)
 
 ---
@@ -1307,8 +1307,10 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 | PATCH | `/fixed-schedules/{id}` | 부분 수정 |
 | DELETE | `/fixed-schedules/{id}` | soft delete (`archived_at`) |
 
-- `daysOfWeek`: `["mon","tue",…]` 배열. `startTime`/`endTime`: `HH:MM`
-- 같은 요일 시간 겹치면 409 `FIXED_SCHEDULE_OVERLAP`. 온보딩 진행에 최소 1개 필요
+- `daysOfWeek`: `["mon","tue",…]` 배열 — 비어 있으면 422(PATCH 도), 중복은 한 번만 저장(v2.30). `startTime`/`endTime`: `HH:MM`. **`endTime: "24:00"`(밤 12시까지)을 받는다**(v2.30 — 그날 끝까지 막고, 응답에는 `"23:59"` 로 보인다)
+- `title`: 앞뒤 공백을 걷어 저장, 비었거나 200자를 넘으면 422 `field="title"`(v2.30 — 예전엔 공백뿐인 제목이 저장되고 201자는 500 이었다)
+- **자정을 넘는 일정(`startTime > endTime`, 예: 22:00–02:00)은 422** `field="startTime"`, 메시지 "자정을 넘기는 일정은 둘로 나눠 넣어 주세요. 예: 금 22:00–24:00, 토 00:00–02:00". 시작 = 종료는 "시작 시각은 종료 시각보다 빨라야 해요." 형식 오류 메시지에는 필드 코드 대신 "시작 시각"/"종료 시각" 이 들어간다(기계용은 `field`)
+- 같은 요일 시간 겹치면 409 `FIXED_SCHEDULE_OVERLAP` — **v2.30 부터 실제로 검사한다**(그전엔 문서에만 있었다). 맞닿는 건(10:00 끝·10:00 시작) 겹침이 아니다. 사용자별 lock 안에서 검사·저장해 [추가] 연타도 한 줄만 생긴다. PATCH 는 요일·시각을 바꿀 때만 검사한다(자기 자신 제외 — 이미 겹쳐 저장된 예전 일정도 제목은 고칠 수 있다). 온보딩 진행에 최소 1개 필요
 
 ---
 

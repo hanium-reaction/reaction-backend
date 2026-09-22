@@ -69,8 +69,18 @@ access token(약 1시간)은 조회 시점에 만료 60초 전이면 그때 갱�
   에서 안 오면: 살아 있는 연결이 있으면 그 값을 쓰고, 없으면 동의를 회수해 다음 시도가
   refresh token 을 받게 한다.
 - 동의 화면에서 캘린더 체크를 풀면 교환은 성공하지만 스코프에서 빠진다 — 저장하지 않는다.
-- 권한 박탈 / refresh 실패 → `revoked_at` set + 다음 진입 시 재연결 안내
-  (`CALENDAR_NOT_CONNECTED`).
+- 연결 회수는 토큰 엔드포인트가 **`invalid_grant`** 라고 할 때만이다(`oauth.REVOKED_GRANT`).
+  `invalid_client`·429·JSON 아닌 응답은 서버 쪽 문제라 연결을 두고 이번 조회만 `failed` —
+  secret 오타 하나로 모든 사용자의 연결이 끊기던 문제.
+- `invalid_grant` → `revoked_at` set + **"Google 쪽에서 끊김" 표식**(`expires_at`=1970-01-01,
+  `token_store` 독스트링). 그 뒤로 `GET /calendar/connect` 의 `needsReconnect: true`, 계획·재계획
+  `warnings` 의 `CALENDAR_RECONNECT_WARNING`, `GET /calendar/freebusy` 404 `CALENDAR_NOT_CONNECTED`.
+  재연결(`save`)이나 해제(`DELETE` → `dismiss_reconnect`)가 표식을 지운다. 앱에서 해제한 연결은
+  표식이 없어 조용하다.
+- 기능 스위치(`oauth.is_enabled`)가 꺼져 있으면 `fetch_busy` 가 **어느 경로에서도** 읽지 않는다.
+  해제(`DELETE /calendar/connect`)만은 스위치와 무관하다 — 동의 철회를 막지 않는다.
+- 화면 조회는 토큰 행이 잠겨 있으면(계획 생성이 갱신한 채 LLM 을 기다리는 중) 1초만 기다리고
+  저장을 건너뛴다(`_write_connection`) — 새 토큰은 이번 요청에 그대로 쓴다.
 - **`freebusy` 는 commit 하지 않는다(flush 까지).** 계획 생성·재계획이 트랜잭션 단위
   advisory lock(`user_agent_lock`) 안에서 부르기 때문에, 여기서 commit 하면 lock 이 도중에
   풀린다. 갱신 토큰·회수 표시는 호출자의 commit 에 실린다 — lock 없는 조회 라우트는 스스로

@@ -89,6 +89,21 @@ def test_prefill_returns_default_when_no_interview_answers(client: TestClient) -
     assert all(c["policyId"].startswith("policy_prefill_") for c in items)
 
 
+def test_prefill_is_the_fixed_default_set(client: TestClient) -> None:
+    """prefill 은 인터뷰 답을 읽지 않는다 — 찾던 슬롯 키가 카탈로그에 없어 언제나 기본값이었다.
+
+    죽은 조회를 걷어낸 뒤에도 응답이 바이트 단위로 같아야 한다(동작 보존 리팩터의 핀).
+    """
+    resp = client.post("/time-policies/prefill-from-interview")
+    assert resp.status_code == 200
+    assert [(c["policyType"], c["payload"]) for c in resp.json()] == [
+        ("sleep", {"start_time": "23:00", "end_time": "07:00"}),
+        ("break_min", {"min_minutes": 15}),
+        ("late_night_block", {"start_time": "22:00", "blocked_categories": []}),
+    ]
+    assert [c["policyId"] for c in resp.json()] == [f"policy_prefill_{i}" for i in range(3)]
+
+
 def test_update_policy_is_active(client: TestClient) -> None:
     created = client.post(
         "/time-policies",

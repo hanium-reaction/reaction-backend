@@ -1018,6 +1018,24 @@ async def test_calendar_failure_does_not_break_planning(monkeypatch: Any) -> Non
     )
 
 
+async def test_calendar_cut_by_google_asks_to_reconnect(monkeypatch: Any) -> None:
+    """Google 쪽에서 끊긴 연결 — 예전엔 '연결 안 됨' 과 같아 계획이 수업 위에 조용히 잡혔다."""
+    from reaction_backend.integrations.google_calendar import freebusy as fb
+
+    async def _cut(session: Any, *, user_id: Any, start_day: date, end_day: date) -> Any:
+        return {}, "reconnect_required"
+
+    monkeypatch.setattr(fb, "fetch_busy_by_day", _cut)
+
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+
+    new_state = await first_plan.schedule_blocks(_state(), config)
+
+    assert new_state["scheduled_blocks"], "캘린더 연결이 끊겼다고 계획이 죽으면 안 된다"
+    assert new_state["schedule_warnings"][0] == fb.CALENDAR_RECONNECT_WARNING
+
+
 async def test_no_calendar_connection_is_silent(monkeypatch: Any) -> None:
     """연결 안 한 사용자(대다수)에게는 아무 말도 하지 않는다 — 매번 권유는 알림 피로다."""
     from reaction_backend.integrations.google_calendar import freebusy as fb
