@@ -29,15 +29,21 @@
    '실패노트' 를 그대로 옮긴 경우). 단 금지어만 달랑 있는 입력('실패')은 제외 —
    그건 AI 문장에서 흔히 우연히 겹친다.
 
-'사용자 입력'은 호출자가 넘긴 프롬프트 변수 값이다(`tool_executor.run`). 변수에는
-사용자 답·제목 말고도 이전 AI 출력(분해 결과 JSON, 리뷰 피드백)이 실리지만, 그 문장들은
-이미 이 필터를 **거쳐 저장된** 것이라 새로 빠져나갈 금지어가 없다.
+'사용자 입력'은 호출자가 넘긴 프롬프트 변수 중 **이름을 명시적으로 적어둔 것만**이다
+(`USER_AUTHORED_VARIABLES` / `UserText.from_variables`). 예전엔 변수 **전체**를 사용자
+원문으로 봤는데 그건 틀렸다 — 변수에는 사용자가 쓰지 않은 텍스트도 실린다. 가장 위험한
+건 `materials` 로, 사용자가 **붙여넣은 링크를 서버가 열어 가져온 제3자 웹페이지 본문**이
+들어온다(`first_plan_adapter.materials_for_prompt(fetched=...)` ← `web_fetch.fetcher`).
+`goal_decompose` 프롬프트는 그 본문의 실제 내용을 뼈대로 삼으라고 **지시**하므로 LLM 이
+거기서 두 어절 이상을 그대로 옮겨 쓰는 건 설계된 동작이고, 그 자리를 면제하면 **남이 쓴
+문장**이 금지어 치환과 톤 게이트를 통째로 빠져나간다(AGENTS §2 우회 금지). 공격자도 필요
+없다 — 목차에 '실패 사례 분석' 이 있는 평범한 학습 자료 한 장이면 된다.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 # 어절 경계 — 공백과 문장부호. 따옴표로 감싼 인용("'포기하지 않는 창업가'라는 목표")도
@@ -50,6 +56,58 @@ _EDGE_CHARS = " \t\r\n\"'“”‘’`()[]{}<>「」『』《》〈〉【】,.!?
 _MIN_CONTEXT_CHARS = 4
 # 규칙 2 — 입력 전체를 옮겨 쓴 경우의 하한. '실패'(+0) 는 제외, '실패노트'(+2) 는 면제.
 _MIN_WHOLE_EXTRA_CHARS = 2
+
+
+# ── 어떤 프롬프트 변수를 '사용자 원문'으로 보는가 — 허용 목록 ────────────────────
+# **여기 적힌 이름만** 보호한다. 목록에 없는 변수는 AI·서버가 만든 텍스트로 취급돼 금지어
+# 치환·톤 게이트가 **전과 똑같이** 걸린다. 기본값이 '보호 안 함'이라(fail-tight) 나중에
+# 새 변수가 생겨도 필터에 구멍이 나지 않는다 — 빠뜨렸을 때의 증상은 "사용자 문구가 고쳐짐"
+# (고칠 수 있는 버그)이지 "남의 문장이 필터를 통과함"(잠금 결정 위반)이 아니다.
+#
+# 들어오는 값의 출처는 전부 확인한 것만 적는다:
+#   goal_title/title/success_image/current_level/approach_note — 인터뷰에서 사용자가 쓴 목표 슬롯
+#     (`first_plan_adapter.context_from_outcome`, `study_method_agent`)
+#   answer/last_answer/raw_text/query/user_hint — 요청 본문에 사용자가 직접 친 글
+#     (`interview`, `inbox.classify`, `materials.search`, `mandala` 링 재생성)
+#   statement/measure/current_position/constraints/pillars_hint/locked_axes — 궁극목표 인터뷰
+#     슬롯 (`mandala_adapter.context_from_ultimate`, "사용자가 인터뷰에서 직접 말한 축")
+#   subgoal/sibling_titles/locked_cells — 사용자가 편집·잠근 만다라 축·칸 제목
+#     (`mandala_cell_agent.run_branch`, "사용자가 이미 편집한 셀")
+#
+# 일부러 **뺀** 것:
+#   materials — 서버가 링크를 열어 가져온 제3자 본문이 섞인다(모듈 docstring 참고). 붙여넣은
+#     메모만 들어오는 경우까지 같이 빠지지만, 남의 문장을 면제하느니 사용자 메모가 예전처럼
+#     치환되는 쪽이 낫다.
+#   identity — 사용자 답이 아니라 서버가 **조립한 문장**(`_identity_line`).
+#   요약·JSON·숫자·라벨 전부 — behavioral_summary, failure_summary, review_feedback,
+#     goal_nodes_json, milestones, horizon, total_minutes … 사용자가 쓴 글이 아니다.
+USER_AUTHORED_VARIABLES: frozenset[str] = frozenset(
+    {
+        # 목표 슬롯 (first plan / study method)
+        "goal_title",
+        "title",
+        "success_image",
+        "current_level",
+        "approach_note",
+        # 사용자가 방금 친 글
+        "answer",
+        "last_answer",
+        "raw_text",
+        "query",
+        "user_hint",
+        # 궁극목표 인터뷰 슬롯 (mandala)
+        "statement",
+        "measure",
+        "current_position",
+        "constraints",
+        "pillars_hint",
+        "locked_axes",
+        # 사용자가 편집·잠근 만다라 제목
+        "subgoal",
+        "sibling_titles",
+        "locked_cells",
+    }
+)
 
 
 def _normalize(text: str) -> str:
@@ -68,6 +126,17 @@ class UserText:
     """공백 정규화된 입력들(빈 값 제외)."""
     wholes: tuple[str, ...]
     """`texts` 각각에서 앞뒤 문장부호까지 걷어낸 모양 — 규칙 2 비교용(같은 순서)."""
+
+    @classmethod
+    def from_variables(cls, variables: Mapping[str, object] | None) -> UserText:
+        """프롬프트 변수 중 **사용자가 직접 쓴 값만** 모은다(`USER_AUTHORED_VARIABLES`).
+
+        `tool_executor.run` 이 쓰는 생성자다. 목록에 없는 이름은 조용히 버린다 — 보호하지
+        않는다는 뜻이고, 그게 안전한 기본값이다.
+        """
+        if not variables:
+            return cls.of(())
+        return cls.of(v for k, v in variables.items() if k in USER_AUTHORED_VARIABLES)
 
     @classmethod
     def of(cls, texts: Iterable[object]) -> UserText:

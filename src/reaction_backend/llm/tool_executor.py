@@ -212,10 +212,16 @@ class LLMToolExecutor:
         started = time.monotonic()
         prompt_version = "unknown"
         resolved_prompt_id = prompt_id
-        # 이 호출에 들어간 입력(사용자 답·목표 제목 등). LLM·룰 폴백이 그 문구를 **그대로
-        # 옮겨 쓴 자리**만 금지어 치환·톤 게이트에서 뺀다(llm-1·llm-2, `safety/user_echo`).
-        # AI 가 스스로 쓴 말은 전과 똑같이 걸린다 — 필터를 끄는 게 아니다(AGENTS §2).
-        user_texts = UserText.of((variables or {}).values())
+        # 이 호출에 들어간 **사용자가 직접 쓴** 입력(목표 제목·답 등). LLM·룰 폴백이 그
+        # 문구를 **그대로 옮겨 쓴 자리**만 금지어 치환·톤 게이트에서 뺀다(llm-1·llm-2,
+        # `safety/user_echo`). AI 가 스스로 쓴 말은 전과 똑같이 걸린다 — 필터를 끄는 게
+        # 아니다(AGENTS §2).
+        #
+        # 변수 **전체**가 아니라 `USER_AUTHORED_VARIABLES` 에 이름을 적어둔 것만 본다.
+        # 전체를 넘기면 `materials` 처럼 **사용자가 아닌 쪽이 쓴 텍스트**(서버가 링크를 열어
+        # 가져온 제3자 웹페이지 본문)까지 면제돼, 거기서 베낀 문장이 두 필터를 통째로
+        # 빠져나간다 — 잠금 결정 위반. 목록에 없는 변수는 보호하지 않는 게 기본값이다.
+        user_texts = UserText.from_variables(variables)
 
         # ── 1) 프롬프트 ─────────────────────────────────────────────
         try:
