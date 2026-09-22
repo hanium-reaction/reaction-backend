@@ -883,7 +883,9 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   v3 안에서도 조건부라 obstacle/copingClause 만 있고 이건 null 인 경우가 있다.
   **선두 카드여도 문장이 깨졌으면 그 필드만 null**(v2.30-recovery) — 비었거나, 길이 초과
   (acknowledgment 60자, obstacle/copingClause 120자), 한글·영문·숫자·흔한 문장부호 밖의 글자,
-  날짜/시각 흔적, 카드 제목에 없는 3글자 이상 영단어. `suggestedActionText` 는 그대로다.
+  날짜/시각 흔적, **문장이 끝났는데 다음 문장이 공백·문장부호 없이 바로 붙음**
+  ("…있어요네", "…했어요그리고", v2.30-recovery2), 카드 제목에 없는 3글자 이상 영단어.
+  `suggestedActionText` 는 그대로다.
   FE 는 값이 있을 때만 그리면 된다(없는 게 정상인 경우가 많다).
 - **`recoveryMode: "standard" | "goal_renegotiation"`(#328, 근거 대장 §5.2 L3)** — 동일
   목표 4회 연속 실패 또는 회복 2회 연속 rejected(skipped 포함)면 `goal_renegotiation` 이고,

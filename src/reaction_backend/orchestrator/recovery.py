@@ -580,13 +580,30 @@ _TIMESTAMP_LIKE = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}:\d{2}")
 # ("wait", "let me" 등). 제목에 있는 영어("SQL", "GROUP BY")는 허용한다.
 _ASCII_WORD = re.compile(r"[A-Za-z]{3,}")
 
+# 문장이 끝났는데 공백·문장부호 없이 다음 문장이 바로 붙은 흔적 (재검증 P2 실측 —
+# AVOIDANCE 의 acknowledgment "…무거워질 수 있어요네, 천천히 해봐요"). 사람이 쓴 문장에는
+# 안 나오고, 읽는 사람에게는 오타이거나 말이 끊긴 것처럼 보인다.
+#
+# '요' 앞 음절을 **고정 목록**으로 둔 이유: "받침 없는 음절 + 요" 같은 모음 규칙으로
+# 일반화하면 '화요일'·'재요청'·'마요네즈' 처럼 어미가 아닌 낱말까지 걸려, 멀쩡한 문장이
+# 통째로 버려진다. 아래 목록은 해요체 종결어미(-아/어/여요, -해요, -세요, -네요, -게요,
+# -래요, -봐요, -돼요 …)가 실제로 쓰는 음절만이다.
+# '니다'(합쇼체)는 그 자체로 종결이라 별도 조건이 필요 없다.
+_POLITE_SENTENCE_END = r"(?:[어아에예해세네게래대봐돼와줘여려겨저져쳐펴]요|니다)"
+# 접속부사는 어떤 어미 뒤에 붙든 새 문장의 시작이다 — "…봤다그리고" 처럼 '다'로 끝나는
+# 경우를 인용형('간다고'·'있다는')과 혼동하지 않고 잡는다. '하지만'은 뺐다 —
+# '노력하지만' 처럼 어미(-지만) 안에 그대로 들어 있어 멀쩡한 문장을 버리게 된다.
+_GLUED_CONNECTIVE = r"(?:그리고|그런데|그래서|그러나|그래도|그러니까|그렇지만)"
+_FUSED_SENTENCES = re.compile(rf"{_POLITE_SENTENCE_END}(?=[가-힣])|[가-힣](?={_GLUED_CONNECTIVE})")
+
 
 def clean_coping_text(text: str | None, *, max_length: int, context_title: str) -> str | None:
     """LLM 이 만든 코핑 플랜 보조 문장 하나를 검사해, 쓸 수 없으면 `None`.
 
     `None` 이 되는 경우: 비었음 · `max_length` 초과 · 허용 밖 문자 · 날짜/시각 흔적 ·
-    `context_title`(원본 카드 제목)에 없는 3글자 이상 영단어. if/then 문구는 건드리지 않는다
-    — 이 필드들이 비어도 카드는 그대로 쓸 수 있다(FE 는 값이 있을 때만 그린다).
+    **문장이 끝났는데 다음 문장이 공백 없이 붙었음** · `context_title`(원본 카드 제목)에 없는
+    3글자 이상 영단어. if/then 문구는 건드리지 않는다 — 이 필드들이 비어도 카드는 그대로
+    쓸 수 있다(FE 는 값이 있을 때만 그린다).
     """
     cleaned = " ".join((text or "").split())
     if not cleaned or len(cleaned) > max_length:
@@ -594,6 +611,9 @@ def clean_coping_text(text: str | None, *, max_length: int, context_title: str) 
     if _COPING_TEXT_ALLOWED.fullmatch(cleaned) is None:
         return None
     if _TIMESTAMP_LIKE.search(cleaned):
+        return None
+    if _FUSED_SENTENCES.search(cleaned):
+        # "…있어요네, 천천히 해봐요" — 길이·문자권 검사는 다 통과하지만 읽으면 말이 끊긴다.
         return None
     title_words = {w.lower() for w in _ASCII_WORD.findall(context_title)}
     if any(w.lower() not in title_words for w in _ASCII_WORD.findall(cleaned)):
