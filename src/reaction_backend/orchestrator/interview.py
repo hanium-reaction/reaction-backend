@@ -56,6 +56,7 @@ from reaction_backend.orchestrator.interview_catalog import (
     PLAN_CATALOG,
     InterviewSlot,
     canonical_chip_values,
+    is_duration_slot,
     is_goal_scoped,
 )
 from reaction_backend.schemas.common import now_kst
@@ -119,6 +120,9 @@ HARVEST_MIN_ANSWER_CHARS = 20
 # 사유가 없으면 '모호해서' 로 읽히는데, 지난 마감은 모호한 게 아니라 **또렷하게 지나 있는** 것이라
 # 되묻는 문장이 달라야 한다(#231).
 _RETRY_PAST_DEADLINE = "past_deadline"
+# 보기가 정해진 칩 슬롯인데 답을 보기로 맞출 수 없었다 — 모호한 게 아니라 **보기 밖**이다.
+# 되묻는 문장이 달라야 한다: 사용자는 또렷하게 답했으므로 "조금 모호했다" 고 하면 안 된다.
+_RETRY_OFF_CATALOG = "off_catalog"
 
 
 def _pending(attempts: int, reason: str | None = None) -> dict[str, Any]:
@@ -163,6 +167,13 @@ def _retry_hint(
             "재질문: 사용자가 고른 마감일이 **이미 지난 날짜**다. 모호해서가 아니라 날짜가 지나서 "
             "다시 묻는 것이니, 지났다는 사실을 담백하게 짚고 — 늦은 것을 지적하거나 다그치지 말고 — "
             "'이미 지난 마감을 수습하는 중이라면 실제로 언제까지 끝내고 싶은지' 를 물어라."
+        )
+    if reason == _RETRY_OFF_CATALOG:
+        return (
+            "재질문: 직전 답이 **보기 중에 없는 값**이다. 모호해서가 아니라 보기 밖이라 다시 묻는 "
+            "것이니, 답이 이상하다고 하거나 사용자를 탓하지 말고 — 직전 답을 그대로 짧게 되짚은 뒤 "
+            "보기를 전부 보여주고 그중 가장 가까운 걸 골라 달라고 부드럽게 물어라. "
+            "**임의로 가까운 보기를 대신 고르지 마라.**"
         )
     if slot_key in critical_slots:
         return (
@@ -566,18 +577,25 @@ async def validate_answer(state: InterviewState, config: RunnableConfig) -> Inte
     # ⚠️ **답한 슬롯에만** 적용한다. 수확된 슬롯은 한 답에 여러 날짜가 섞였을 때 어느 것이
     # 어느 슬롯인지 골라야 하는데, 그건 파서가 할 수 없는 판단이다.
     ruled = _rule_first_value(answer_type, answer_text, today=now_kst().date())
-    normalized = ruled if ruled is not None else update.normalized_value
-    if normalized is None:
-        # 칩 답을 LLM 이 정규화하지 못했을 때(타임아웃·예산 소진·금지어 차단으로 룰 폴백)
-        # 보기 글자 그대로 온 답은 룰로 맞춘다. FE 는 칩을 탭해도 **문자열**("3학년")로
-        # 보내므로, 이 길이 없으면 폴백 한 번에 칩 답이 전부 '없음'(스킵)으로 저장되고 —
-        # 이월 슬롯이라 — 다음 인터뷰에서도 다시 묻지 않았다.
-        normalized = _rule_chip_values(
-            answer_type,
-            answer_text,
-            slot=catalog.by_key.get(slot_key),
-            options=_answer_options(config),
-        )
+    slot = catalog.by_key.get(slot_key)
+    # 답이 보기 글자 그대로거나 같은 시간 길이면 룰이 맞춘 보기 (아니면 None).
+    #
+    # 칩 답을 LLM 이 정규화하지 못했을 때(타임아웃·예산 소진·금지어 차단으로 룰 폴백)의
+    # 안전망이기도 하다 — FE 는 칩을 탭해도 **문자열**("3학년")로 보내므로, 이 길이 없으면
+    # 폴백 한 번에 칩 답이 전부 '없음'(스킵)으로 저장되고 — 이월 슬롯이라 — 다음 인터뷰에서도
+    # 다시 묻지 않았다.
+    rule_chips = _rule_chip_values(
+        answer_type, answer_text, slot=slot, options=_answer_options(config)
+    )
+    if ruled is not None:
+        normalized = ruled
+    elif _chip_rule_decides(slot, answer_type, state["last_answer"]):
+        # 길이 슬롯에 **직접 입력**이 온 경우 — 값을 정하는 건 룰이다(`_chip_rule_decides`).
+        normalized = rule_chips
+    elif update.normalized_value is not None:
+        normalized = update.normalized_value
+    else:
+        normalized = rule_chips
 
     slot_answers = dict(state["slot_answers"])
     attempts = _pending_attempts(slot_answers.get(slot_key)) + 1  # 이번 시도 포함
@@ -591,6 +609,9 @@ async def validate_answer(state: InterviewState, config: RunnableConfig) -> Inte
         now_kst().date(),
         critical_slots=catalog.critical_slots,
         deadline_slot=catalog.deadline_slot,
+        # 카탈로그에 고정 보기가 있는 칩/선택 슬롯만 — `goals.heaviest` 처럼 보기를 런타임에
+        # 만드는 슬롯은 핵심 슬롯 경로가 이미 같은 재질문을 한다.
+        has_chip_options=bool(slot and slot.options) and answer_type in {"chip", "select"},
     )
     if stored is not None:  # 실제 값·스킵·pending 모두 저장(영속) — pending 은 '미충족'으로 읽힘
         slot_answers[slot_key] = stored
@@ -924,6 +945,34 @@ def _rule_chip_values(
     return picked or None
 
 
+def _chip_rule_decides(
+    slot: InterviewSlot | None, answer_type: str | None, last_answer: dict[str, Any] | None
+) -> bool:
+    """이 답은 **룰이** 보기를 정하는가 — 길이 칩 슬롯에 직접 입력으로 답한 경우.
+
+    FE 는 칩 슬롯에도 직접 입력을 열어 둔다("직접 입력해도 돼요…"). 거기 적은 값을 LLM 이
+    **가장 가까운 보기로 반올림**해 왔다: `goals.session_length` 에 "20분" 을 적으면 30분,
+    "45분" 도 30분, "7분" 은 15분, "하루종일" 은 240분이 저장되고 슬롯은 '충족' 으로 닫혔다.
+    세션 길이는 모든 블록의 길이이자 주당 분량의 기준이라, 계획 전체가 사용자가 말한 적 없는
+    숫자 위에 세워졌다 — 그리고 사용자는 자기가 20분이라고 적은 걸 기억한다.
+
+    길이 슬롯에서는 **숫자가 곧 답**이라 대조가 정확히 된다(`is_duration_slot`). 그래서 여기서만
+    룰이 결정한다: 보기와 같은 길이면 그 보기로 맞추고("한 시간"·"90분" 같은 다른 표기 포함),
+    아니면 값을 만들지 않는다 → 슬롯이 열린 채 남아 **보기를 들고 다시 묻는다**(v2.30-interview
+    가 문서화한 의도). 의미 추론이 필요한 나머지 칩(학년·시간대·톤 — "지금 방학이에요" → '방학')은
+    종전대로 LLM 이 맡는다. 거긴 반올림할 숫자가 없다.
+
+    `last_answer` 가 이미 칩 구조면(옛 클라이언트가 `{"type":"chip"}` 로 보낸 경우) 관여하지
+    않는다 — 사용자가 **누른** 답을 룰이 거부하면 같은 질문이 반복되는 루프가 된다
+    (`interview_runner._coerce_answer` 의 `drop_unknown=False` 와 같은 이유).
+    """
+    return (
+        answer_type in {"chip", "select"}
+        and is_duration_slot(slot)
+        and (last_answer or {}).get("type") == "text"
+    )
+
+
 def _coerce_normalized(
     answer_type: str | None, norm: Any, *, slot: InterviewSlot | None = None
 ) -> dict[str, Any] | None:
@@ -1077,6 +1126,7 @@ def _decide_storage(
     *,
     critical_slots: frozenset[str] = PLAN_CATALOG.critical_slots,
     deadline_slot: str | None = PLAN_CATALOG.deadline_slot,
+    has_chip_options: bool = False,
 ) -> tuple[dict[str, Any] | None, bool]:
     """직전 답을 어떻게 저장할지 결정하는 **순수 함수** — `(stored, filled_now)`.
 
@@ -1085,6 +1135,8 @@ def _decide_storage(
     - 유효한 구조화/자유서술 값(has_real): 곧바로 저장.
     - 핵심 목표 슬롯(`critical_slots`): '없어/모름' 스킵 불가 → 상한까지 재질문(pending),
       상한(MAX_SLOT_ATTEMPTS) 도달 시 마지막 비지 않은 답을 best-effort 로 채택.
+    - 보기가 정해진 칩 슬롯(`has_chip_options`): 보기로 못 맞춘 답은 '없음'으로 닫지 않고
+      **보기를 들고 다시 묻는다**. 상한 도달 시 핵심 슬롯과 같은 best-effort 경로.
     - 비핵심: 스킵 의사·제약 슬롯·상한 도달이면 스킵(default)로 진행, 아니면 재질문(pending).
     - 마감이 **이미 지난 날짜**면 상한까지 되묻는다 (#231, `_is_past_deadline`).
 
@@ -1152,6 +1204,23 @@ def _decide_storage(
                 return {"type": "text", "raw": answer_text.strip()}, True
             return _SKIP_MARKER, True
         return _pending(attempts), False
+    # 보기가 정해진 칩 슬롯에 보기로 맞출 수 없는 답이 왔다 — '없음' 으로 닫지 않는다.
+    #
+    # `is_constrained` 하나로 곧장 스킵하던 자리다. 그래서 칩 슬롯에 직접 입력한 답이 보기와
+    # 안 맞으면(또는 채점 LLM 이 폴백하면) 사용자는 분명히 답했는데 기록은 '없음' 이 되고,
+    # 계획은 그 슬롯의 기본값으로 만들어졌다 — 되물어 볼 기회도 없었다. v2.30-interview 가
+    # 문서화한 의도는 그 반대다: "칩 보기에 없는 값 … 그 슬롯은 열린 채 남아(필수면 다시 묻는다)".
+    # 보기를 실어 한 번 더 묻고(`_RETRY_OFF_CATALOG`), 그래도 같으면 핵심 슬롯과 **같은**
+    # best-effort 경로로 빠져나간다 — 같은 질문을 무한히 반복하지 않는다.
+    if (
+        has_chip_options
+        and not llm_skip
+        and answer_text.strip()
+        and not _looks_like_skip(answer_text)
+    ):
+        if attempts >= MAX_SLOT_ATTEMPTS:
+            return {"type": "text", "raw": answer_text.strip()}, True
+        return _pending(attempts, _RETRY_OFF_CATALOG), False
     if llm_skip or is_constrained or _looks_like_skip(answer_text) or attempts >= MAX_SLOT_ATTEMPTS:
         return _SKIP_MARKER, True
     return _pending(attempts), False

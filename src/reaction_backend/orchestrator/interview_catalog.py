@@ -13,6 +13,7 @@ import 하는 폴더 규칙 위반이 이미 있었다(별칭 재수출은 두�
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -569,12 +570,61 @@ def canonical_chip(slot: InterviewSlot, raw: str) -> str | None:
     for option in slot.options:
         if "".join(option.split()) == squashed:
             return option
-    minutes = interview_adapter.chip_duration_min({"type": "chip", "values": [cleaned]})
+    minutes = duration_minutes_of(cleaned)
     if minutes is not None:
         for option in slot.options:
-            if interview_adapter.chip_duration_min({"type": "chip", "values": [option]}) == minutes:
+            if duration_minutes_of(option) == minutes:
                 return option
     return None
+
+
+# 우리말 수관형사로 쓴 시간 길이 — "한 시간"·"두 시간 반" 은 보기 "1시간"·"2시간 30분" 과
+# **같은 답**이지 다른 답이 아니다. 칩 슬롯에도 직접 입력이 열려 있어(FE 플레이스홀더
+# "직접 입력해도 돼요…") 이 표기가 실제로 들어온다. 숫자 파서(`chip_duration_min`)는 숫자만
+# 읽으므로, 대조 직전에 숫자 표기로 옮겨 준다 — 보기를 넓히는 게 아니라 **같은 보기의 다른
+# 표기**를 알아보는 것이다.
+_KO_DURATION_NUMERALS: dict[str, str] = {
+    "한": "1",
+    "두": "2",
+    "세": "3",
+    "네": "4",
+    "다섯": "5",
+    "여섯": "6",
+    "일곱": "7",
+    "여덟": "8",
+    "아홉": "9",
+    "열": "10",
+}
+_KO_NUMERAL_RE = re.compile(
+    "(" + "|".join(sorted(_KO_DURATION_NUMERALS, key=len, reverse=True)) + r")\s*(시간|분)"
+)
+# "1시간 반"·"한 시간 반" → 30분을 더한다. '반' 을 먼저 풀어야 수관형사 치환과 겹치지 않는다.
+_HALF_HOUR_RE = re.compile(r"시간\s*반")
+
+
+def duration_minutes_of(text: str) -> int | None:
+    """자유 입력 한 줄에서 시간 길이(분)를 읽는다. 못 읽으면 None.
+
+    `interview_adapter.chip_duration_min` 과 **같은 파서**를 쓰되(단위 오독 사고 v2.00/v2.01
+    이후 파서를 새로 만들지 않는다) 우리말 수관형사·'반' 을 먼저 숫자로 옮긴다.
+    """
+    normalized = _HALF_HOUR_RE.sub("시간 30분", text)
+    normalized = _KO_NUMERAL_RE.sub(
+        lambda m: _KO_DURATION_NUMERALS[m.group(1)] + m.group(2), normalized
+    )
+    return interview_adapter.chip_duration_min({"type": "chip", "values": [normalized]})
+
+
+def is_duration_slot(slot: InterviewSlot | None) -> bool:
+    """보기가 **전부 시간 길이**인 칩 슬롯인가 (15분 / 1시간 30분 / 4시간 이상 …).
+
+    이런 슬롯에서는 **숫자가 곧 답**이다 — "20분" 과 "30분" 은 비슷한 답이 아니라 다른 답이고,
+    그 차이가 모든 블록의 길이와 주당 분량으로 그대로 번진다. 그래서 자유 입력을 보기로
+    맞출 때 의미 추론(LLM)이 아니라 숫자 대조(룰)를 쓴다 — `interview._chip_rule_decides`.
+    """
+    return bool(slot and slot.options) and all(
+        duration_minutes_of(option) is not None for option in (slot.options if slot else ())
+    )
 
 
 def canonical_chip_values(
@@ -648,6 +698,8 @@ __all__ = [
     "is_goal_scoped",
     "canonical_chip",
     "canonical_chip_values",
+    "duration_minutes_of",
+    "is_duration_slot",
     "PLAN_CATALOG",
     "ULTIMATE_CATALOG",
     "ULTIMATE_DOMAIN_OPTIONS",

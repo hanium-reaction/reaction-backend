@@ -1,12 +1,16 @@
 """인터뷰가 **사용자가 말한 적 없는 값**으로 계획을 세우지 않는다 (r2 실측 회귀).
 
-배포 미러에서 한 세션을 끝까지 돌려 확인된 것을 못 박는다.
+배포 미러에서 한 세션을 끝까지 돌려 확인된 네 가지를 못 박는다.
 
 1. 활동 시간대(`time.activity_window`)를 **한 번도 묻지 않았는데** 답이 있었다 —
    "새벽에만 집중이 돼서 밤에 작업해요" 에서 00:00~06:00 이 수확돼 프로필까지 저장됐고,
    계획은 22:00 에 일정을 잡아 놓고 "활동 가능 시간(00:00~06:00)과 겹치지 않아서" 라고
    스스로를 반박했다.
-2. 같은 사용자에게 주당 시간이 두 개였다 — 확인 카드는 "주 3.5시간", 목표 기록은 2시간.
+2. 칩 슬롯에 직접 입력한 길이가 **가장 가까운 보기로 반올림**됐다 — "20분" → 30분,
+   "45분" → 30분, "7분" → 15분. 세션 길이는 모든 블록의 길이라, 계획 전체가 사용자가
+   말한 적 없는 숫자 위에 세워졌다.
+3. FE 는 칩을 탭해도 **문자열**로 보내는데, 채점 LLM 이 폴백하면 그 답이 버려졌다.
+4. 같은 사용자에게 주당 시간이 두 개였다 — 확인 카드는 "주 3.5시간", 목표 기록은 2시간.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from reaction_backend.llm import RunResult, aiClient
 from reaction_backend.orchestrator import (
     interview,
     interview_adapter,
+    interview_catalog,
     interview_runner,
 )
 from reaction_backend.orchestrator.interview import InterviewState
@@ -171,6 +176,147 @@ def test_harvest_excludes_whole_plan_boundaries_but_keeps_goal_content() -> None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# P2 — 칩 보기에 없는 길이를 말없이 반올림하지 않는다
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_typed_session_length_is_not_snapped_to_a_nearby_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "20분" 이라고 적었는데 30분으로 저장되지 않는다 — 대신 보기를 들고 한 번 더 묻는다."""
+    monkeypatch.setattr(aiClient, "run", _stub(normalized="30분"))
+    state = _state_missing("goals.session_length")
+
+    result = await _answer(state, "goals.session_length", "20분")
+
+    stored = result.state["slot_answers"].get("goals.session_length")
+    assert stored != {"type": "chip", "values": ["30분"]}, "사용자가 말한 적 없는 숫자다"
+    assert stored == interview._pending(1, interview._RETRY_OFF_CATALOG)
+    assert interview_adapter.is_filled_answer(stored) is False
+    assert result.state["next_slot_key"] == "goals.session_length"  # 같은 슬롯을 다시 묻는다
+
+
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [
+        ("30분", "30분"),  # (a) 보기 그대로
+        ("1시간30분", "1시간 30분"),  # (a) 공백만 다른 표기
+        ("90분", "1시간 30분"),  # (b) 같은 길이의 다른 표기
+        ("한 시간", "1시간"),  # (b) 우리말 수관형사
+        ("한 시간 반", "1시간 30분"),
+        ("한 번에 2시간 정도요", "2시간"),  # 문장에 섞여도 길이가 같으면 그 보기
+    ],
+)
+async def test_typed_answers_that_mean_an_option_are_accepted(
+    monkeypatch: pytest.MonkeyPatch, typed: str, expected: str
+) -> None:
+    """보기와 **같은 길이**면 그 보기로 받는다 — 표기가 달라도 다시 묻지 않는다.
+
+    채점 LLM 이 다른 보기를 제안해도(여기선 늘 "30분") 길이 슬롯에서는 룰이 이긴다.
+    """
+    monkeypatch.setattr(aiClient, "run", _stub(normalized="30분"))
+    state = _state_missing("goals.session_length")
+
+    result = await _answer(state, "goals.session_length", typed)
+
+    assert result.state["slot_answers"]["goals.session_length"] == {
+        "type": "chip",
+        "values": [expected],
+    }
+    assert result.state["next_slot_key"] != "goals.session_length"  # 다시 묻지 않는다
+
+
+async def test_repeated_off_catalog_answer_ends_instead_of_looping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """같은 답을 계속 적으면 상한에서 best-effort 로 진행한다 — 무한 재질문 금지."""
+    monkeypatch.setattr(aiClient, "run", _stub(normalized="30분"))
+    state = _state_missing("goals.session_length")
+
+    result = await _answer(state, "goals.session_length", "20분")
+    for _ in range(interview.MAX_SLOT_ATTEMPTS - 1):
+        assert result.state["next_slot_key"] == "goals.session_length"
+        result = await _answer(result.state, "goals.session_length", "20분")
+
+    stored = result.state["slot_answers"]["goals.session_length"]
+    assert interview_adapter.is_filled_answer(stored) is True
+    assert stored == {"type": "text", "raw": "20분"}
+    # 반올림한 숫자가 계획으로 새어 나가지 않는다 — 세션 길이는 '미입력' 으로 남고
+    # 계획이 기본값을 쓴다는 걸 분량 경고가 사용자에게 그대로 말한다.
+    assert interview_adapter.chip_duration_min(stored) is None
+
+
+def test_off_catalog_retry_hint_does_not_blame_and_shows_the_options() -> None:
+    """되묻는 이유가 '모호해서' 가 아니다 — 또렷하게 답했는데 보기 밖이었을 뿐이다."""
+    hint = interview._retry_hint("goals.session_length", 1, interview._RETRY_OFF_CATALOG)
+    assert "보기" in hint
+    assert "모호해서가 아니라" in hint  # 기본 재질문 힌트("조금 모호했다")와 다른 문장이다
+    assert "대신 고르지 마라" in hint  # 되물으면서 임의로 보기를 고르면 P2 가 되살아난다
+    assert hint != interview._retry_hint("goals.session_length", 1, None)
+
+
+@pytest.mark.parametrize(
+    ("attempts", "expected"),
+    [
+        (1, (interview._pending(1, interview._RETRY_OFF_CATALOG), False)),
+        (2, (interview._pending(2, interview._RETRY_OFF_CATALOG), False)),
+        (interview.MAX_SLOT_ATTEMPTS, ({"type": "text", "raw": "하루종일"}, True)),
+    ],
+)
+def test_decide_storage_reasks_optioned_chip_slots(
+    attempts: int, expected: tuple[dict[str, Any] | None, bool]
+) -> None:
+    """보기가 정해진 칩 슬롯은 '없음' 으로 닫지 않는다 — 상한까지 되묻고 그다음 진행."""
+    assert (
+        interview._decide_storage(
+            "goals.session_length",
+            "chip",
+            {"type": "text", "raw": "하루종일"},
+            None,
+            0.1,
+            attempts,
+            has_chip_options=True,
+        )
+        == expected
+    )
+
+
+def test_decide_storage_still_skips_when_the_user_says_there_is_none() -> None:
+    """'없어요/모르겠어요' 는 되묻지 않는다 — 스킵 의사는 유효한 답이다."""
+    assert interview._decide_storage(
+        "recovery.downscope_unit",
+        "chip",
+        {"type": "text", "raw": "잘 모르겠어요"},
+        None,
+        0.1,
+        1,
+        has_chip_options=True,
+    ) == (interview._SKIP_MARKER, True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P3 — 탭한 칩이 LLM 폴백에 휩쓸려 사라지지 않는다 (문자열로 오는 실제 FE 기준)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_tapped_chip_sent_as_plain_string_survives_an_llm_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """채점 LLM 이 폴백해도 탭한 칩이 남는다 — FE 는 탭을 **문자열**로 보낸다.
+
+    회귀: 폴백 한 번에 칩 답이 '없음'(스킵)으로 저장되고, 이월 슬롯이라 다음 인터뷰에서도
+    다시 묻지 않아 학년이 영영 '미상' 이었다.
+    """
+    monkeypatch.setattr(aiClient, "run", _stub(normalized=None, clarity=0.0, fell_back=True))
+    state = _state_missing("identity.role")
+
+    result = await _answer(state, "identity.role", "3학년")  # dict 가 아니라 문자열이다
+
+    assert result.state["slot_answers"]["identity.role"] == {"type": "chip", "values": ["3학년"]}
+    assert result.state["next_slot_key"] != "identity.role"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # P4 — 확인 카드의 주당 시간과 계획의 주당 시간이 같다
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -235,3 +381,14 @@ def test_weekly_hours_has_one_source_of_truth() -> None:
         assert outcome.core_goals[0].weekly_hours == interview_adapter.weekly_hours_for_plan(
             answers
         )
+
+
+def test_catalog_duration_slots_are_exactly_the_length_valued_ones() -> None:
+    """길이 슬롯 판정이 카탈로그와 맞는지 — 여기가 틀리면 P2 보호가 엉뚱한 슬롯에 걸린다."""
+    duration = {s.slot_key for s in PLAN_CATALOG.slots if interview_catalog.is_duration_slot(s)}
+    assert duration == {
+        "goals.weekly_time",
+        "goals.session_length",
+        "energy.focus_duration",
+        "recovery.downscope_unit",
+    }
