@@ -21,6 +21,10 @@ from reaction_backend.schemas.study_method import StudyMethodPlan
 
 _NOT_ANSWERED = "(응답 없음)"
 _NOT_GIVEN = "(없음)"
+# 룰 폴백이 질의에 넣는 목표 제목의 최대 길이. 인터뷰 목표 제목엔 길이 제한이 없는데
+# `StudyMethodPlan.book_query` 는 100자가 상한이라, 긴 제목에 접미어(" 목차 커리큘럼", 7자)를
+# 붙이면 스키마 검증이 터져 폴백이 500 이 됐다(inbox-4) — LLM 이 실패한 바로 그 순간에.
+_RULE_TITLE_MAX = 80
 
 
 def _rule_plan(goal: GoalCandidate) -> StudyMethodPlan:
@@ -29,7 +33,7 @@ def _rule_plan(goal: GoalCandidate) -> StudyMethodPlan:
     `api/routes/materials.py::suggest_query` 와 같은 접미어("목차 커리큘럼")를 도서
     질의에 쓴다 — 룰 경로가 기존 자료 검색 흐름과 갈라지지 않게 맞춘다.
     """
-    title = goal.title.strip() or "목표"
+    title = (goal.title.strip() or "목표")[:_RULE_TITLE_MAX].rstrip()
     return StudyMethodPlan(
         approach=f"'{title}' 에 맞는 자료를 찾아 계획에 반영해요.",
         focus_points=[],

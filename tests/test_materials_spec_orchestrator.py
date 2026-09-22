@@ -17,6 +17,7 @@ from reaction_backend.integrations.nl_seoji import client as seoji_client
 from reaction_backend.integrations.youtube import client as youtube_client
 from reaction_backend.orchestrator import materials_spec
 from reaction_backend.schemas.materials_spec import (
+    MAX_TOC_ENTRIES,
     BookChapter,
     BookSpecDetail,
     VideoSpecDetail,
@@ -73,6 +74,34 @@ async def test_book_detail_combines_pages_and_toc(monkeypatch: pytest.MonkeyPatc
     assert [c.title for c in result.detail.chapters] == ["Chapter 1. 서론", "Chapter 2. 본론"]
     assert [c.end_page for c in result.detail.chapters] == [30, 80]
     assert result.notice is None
+
+
+async def test_book_detail_caps_a_very_long_toc_instead_of_failing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """하루 한 단원짜리 단어책은 목차가 100개를 넘는다 — 넘친 채로 응답을 만들면 검증에서
+    터져 도서 상세 전체가 500 이 됐다(inbox-5). 상한까지만 담고 나머지는 진도 계산의
+    '목차 이후 나머지 분량' 이 받는다."""
+
+    async def _long_toc() -> seoji_client.TocResult:
+        return seoji_client.TocResult(
+            lookup=seoji_client.TocLookup(
+                chapters=[
+                    seoji_client.TocChapter(title=f"DAY {i:03d}", end_page=i * 2)
+                    for i in range(1, 151)
+                ]
+            )
+        )
+
+    monkeypatch.setattr(aladin_client, "lookup_book", lambda *a, **k: _ok_lookup(pages=320))
+    monkeypatch.setattr(seoji_client, "lookup_toc", lambda *a, **k: _long_toc())
+
+    result = await materials_spec.book_detail("9788994492049", settings=get_settings())
+
+    assert result.detail is not None
+    assert len(result.detail.chapters) == MAX_TOC_ENTRIES
+    assert result.detail.chapters[-1].title == "DAY 100"
+    assert result.detail.page_count == 320
 
 
 async def test_book_detail_missing_toc_is_not_an_error(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -5,16 +5,28 @@
 계열). 특히 EC2 메타데이터(`169.254.169.254`)와 우리 앱 자신(`127.0.0.1:8000`)은
 이름으로만 막으면 DNS 로 우회되므로 **해석된 IP** 로 검사하는지까지 고정한다.
 
-네트워크는 타지 않는다 — DNS(`resolved_addresses`)와 `requests.get` 을 대체한다.
+네트워크는 타지 않는다 — DNS(`resolved_addresses`)와 IP 고정 세션(`fetcher._pinned_session`)을
+대체한다. IP 고정 자체는 127.0.0.1 에 띄운 로컬 소켓으로만 확인한다(바깥 DNS 조회 없음).
 """
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+import contextlib
+import http.server
+import ipaddress
+import socket
+import threading
+import time
+from collections.abc import Callable
+from typing import Any, ClassVar
+from urllib.parse import urlsplit
 
 import pytest
+from urllib3.connection import HTTPConnection
+from urllib3.exceptions import NewConnectionError
 
-from reaction_backend.integrations.web_fetch import extract, fetcher, url_guard
+from reaction_backend.integrations.web_fetch import extract, fetcher, pinned_http, url_guard
 
 PUBLIC_IP = "93.184.216.34"
 
@@ -111,6 +123,37 @@ def test_guard_does_not_over_block_public_addresses(
     assert url_guard.validate_url("https://public.example/x")
 
 
+def test_guard_resolves_the_same_ascii_host_requests_connects_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """유니코드 호스트는 **`requests` 가 쓸 punycode 이름**으로 해석해야 한다 (inbox-1).
+
+    `socket.getaddrinfo` 는 옛 IDNA2003 으로 `ß` 를 `ss` 로 바꾸고 `requests` 는 UTS46 으로
+    `xn--...` 로 바꾼다 — 다른 이름을 검사하면 공격자가 두 이름을 각각 공인·사설로 해석되게
+    만들어 가드를 통과한다. 가드가 해석한 이름이 돌려준 URL 의 이름과 같아야 한다.
+    """
+    looked_up: list[str] = []
+
+    def _record(host: str) -> list[str]:
+        looked_up.append(host)
+        return [PUBLIC_IP]
+
+    monkeypatch.setattr(url_guard, "resolved_addresses", _record)
+    target = url_guard.pin("http://straße.example/강의계획서")
+
+    connect_host = urlsplit(url_guard.requests.Request("GET", target.url).prepare().url).hostname
+    assert looked_up == ["xn--strae-oqa.example"]
+    assert connect_host == "xn--strae-oqa.example"
+    assert target.addresses == (PUBLIC_IP,)
+
+
+def test_guard_rejects_hosts_requests_cannot_encode() -> None:
+    """정규화에 실패하는 호스트는 해석까지 가지 않고 형식 오류로 막는다."""
+    with pytest.raises(url_guard.UnsafeUrl) as e:
+        url_guard.validate_url("http://.example/")
+    assert e.value.reason == url_guard.REASON_MALFORMED
+
+
 # ── 수집 ──────────────────────────────────────────────────
 
 
@@ -150,17 +193,43 @@ class _FakeResponse:
         return None
 
 
+class _Calls:
+    """가짜 세션이 받은 요청 — URL 과, 그 요청이 **접속하도록 고정된 IP**."""
+
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+        self.addresses: list[tuple[str, ...]] = []
+        self.kwargs: list[dict[str, Any]] = []
+
+
+def _route(monkeypatch: pytest.MonkeyPatch, handler: Callable[..., _FakeResponse]) -> _Calls:
+    """`pinned_http.session` 을 대체한다 — 요청마다 `handler(url, **kwargs)` 를 부른다."""
+    calls = _Calls()
+
+    class _Session:
+        def __init__(self, addresses: tuple[str, ...], watch: object = None) -> None:
+            self._addresses = addresses
+
+        def __enter__(self) -> _Session:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def get(self, url: str, **kwargs: Any) -> _FakeResponse:
+            calls.urls.append(url)
+            calls.addresses.append(self._addresses)
+            calls.kwargs.append(kwargs)
+            return handler(url, **kwargs)
+
+    monkeypatch.setattr(fetcher, "_pinned_session", _Session)
+    return calls
+
+
 def _serve(monkeypatch: pytest.MonkeyPatch, *responses: _FakeResponse) -> list[str]:
     """요청 순서대로 응답을 돌려주고, **실제로 요청된 URL 목록**을 반환한다."""
-    seen: list[str] = []
     queue = list(responses)
-
-    def _get(url: str, **kwargs: Any) -> _FakeResponse:
-        seen.append(url)
-        return queue.pop(0)
-
-    monkeypatch.setattr(fetcher.requests, "get", _get)
-    return seen
+    return _route(monkeypatch, lambda url, **kwargs: queue.pop(0)).urls
 
 
 async def test_fetches_and_strips_html(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -209,6 +278,156 @@ async def test_first_hop_is_validated_at_the_public_entry_point(
     assert not result.ok
     assert result.reason == url_guard.REASON_PRIVATE
     assert seen == [], "사설 주소에 요청이 나갔다"
+
+
+async def test_each_hop_connects_only_to_the_addresses_the_guard_checked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """접속은 가드가 **그 홉에서** 확인한 IP 로만 — 이름을 다시 해석할 틈을 주지 않는다."""
+    _dns(monkeypatch, {"start.example": ["93.184.216.34"], "next.example": ["8.8.8.8"]})
+    calls = _route(
+        monkeypatch,
+        lambda url, **kwargs: (
+            _FakeResponse(status=302, headers={"Location": "https://next.example/real"})
+            if "start" in url
+            else _FakeResponse(body=b"<p>ok</p>")
+        ),
+    )
+    result = await fetcher.fetch_text("https://start.example/")
+    assert result.ok
+    assert calls.addresses == [("93.184.216.34",), ("8.8.8.8",)]
+
+
+class _Recorder(http.server.BaseHTTPRequestHandler):
+    """127.0.0.1 에서만 뜨는 테스트 서버 — 받은 Host 헤더를 남긴다."""
+
+    hosts: ClassVar[list[str]] = []
+
+    def do_GET(self) -> None:  # noqa: N802 — http.server 규약
+        type(self).hosts.append(self.headers.get("Host", ""))
+        body = b"<p>pinned ok</p>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        return None
+
+
+def _local_only_dns(monkeypatch: pytest.MonkeyPatch, port: int) -> list[str]:
+    """가드는 `pinned-host.invalid` → 127.0.0.1 로 '해석' 하고, 테스트용으로 그 IP·포트를
+    허용한다. 그 밖의 **이름 조회는 전부 실패**시키고 기록한다 — 두 번째 DNS 조회가
+    있었다면 여기 이름이 남고 접속은 실패한다."""
+    monkeypatch.setattr(url_guard, "resolved_addresses", lambda host: ["127.0.0.1"])
+    monkeypatch.setattr(url_guard, "_is_public", lambda ip: True)
+    monkeypatch.setattr(url_guard, "_ALLOWED_PORTS", frozenset({80, 443, port}))
+    real_getaddrinfo = socket.getaddrinfo
+    names: list[str] = []
+
+    def _no_dns(host: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            names.append(str(host))
+            raise socket.gaierror(socket.EAI_NONAME, "name lookup is not allowed here") from None
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", _no_dns)
+    return names
+
+
+async def test_connection_goes_to_the_checked_ip_without_a_second_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """실제 소켓으로 확인한다 — 가드가 본 IP 로 접속하고, Host 헤더는 원래 이름 그대로.
+
+    예전 코드는 `requests` 가 이름을 **다시** 해석했다(TTL 0 rebinding 이면 그 사이 답이
+    사설 IP 로 바뀐다). 이 테스트에서 그 두 번째 조회는 실패하도록 막혀 있다.
+    """
+    _Recorder.hosts = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Recorder)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        names = _local_only_dns(monkeypatch, port)
+        result = await fetcher.fetch_text(f"http://pinned-host.invalid:{port}/syllabus")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.ok, result.reason
+    assert "pinned ok" in (result.text or "")
+    assert names == [], f"이름을 다시 해석했다: {names}"
+    assert _Recorder.hosts == [f"pinned-host.invalid:{port}"]
+
+
+async def test_https_keeps_the_original_name_for_sni(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HTTPS 도 고정된 IP 로 다이얼하되, TLS SNI(=인증서 검사 대상)는 원래 이름이어야 한다.
+
+    인증서를 따로 만들지 않고 ClientHello 만 받아 본다 — SNI 는 평문으로 실린다. 핸드셰이크
+    는 실패하지만(서버가 TLS 를 안 한다) 그건 사유 `unavailable` 로 끝나야 한다.
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(5)
+    port = listener.getsockname()[1]
+    hello: list[bytes] = []
+
+    def _accept_once() -> None:
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return
+        with conn, contextlib.suppress(OSError):
+            conn.settimeout(5)
+            hello.append(conn.recv(4096))
+
+    thread = threading.Thread(target=_accept_once, daemon=True)
+    thread.start()
+    try:
+        names = _local_only_dns(monkeypatch, port)
+        result = await fetcher.fetch_text(f"https://pinned-host.invalid:{port}/")
+        thread.join(5)
+    finally:
+        listener.close()
+
+    assert names == [], f"이름을 다시 해석했다: {names}"
+    assert hello and b"pinned-host.invalid" in hello[0], "SNI 에 원래 이름이 실리지 않았다"
+    assert result.reason == fetcher.REASON_UNAVAILABLE
+
+
+def test_dialer_falls_through_to_the_next_checked_address() -> None:
+    """IP 가 여럿이면 순서대로 시도한다 — urllib3 기본 동작과 같게.
+
+    하나만 고정하면 IPv6 경로가 없는 EC2 에서 AAAA 가 먼저 오는 사이트는 전부 실패한다.
+    `::1` 에는 아무도 듣지 않으니(또는 v6 가 없으니) 거절되고 127.0.0.1 로 넘어가야 한다.
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    try:
+        conn = HTTPConnection("pinned-host.invalid", port, timeout=2)
+        sock = pinned_http._Dialer(("::1", "127.0.0.1")).dial(conn)
+        assert sock.getpeername()[:2] == ("127.0.0.1", port)
+        sock.close()
+    finally:
+        listener.close()
+
+
+def test_dialer_reports_failure_the_way_urllib3_does() -> None:
+    """전부 실패하면 urllib3 예외로 — 그래야 `requests` 가 평소처럼 ConnectionError 로 옮긴다."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()  # 아무도 듣지 않는 포트
+    conn = HTTPConnection("pinned-host.invalid", port, timeout=2)
+    with pytest.raises(NewConnectionError):
+        pinned_http._Dialer(("127.0.0.1",)).dial(conn)
 
 
 async def test_redirect_chain_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -282,16 +501,94 @@ async def test_timeout_becomes_a_reason_not_an_exception(monkeypatch: pytest.Mon
     def _timeout(url: str, **kwargs: Any) -> _FakeResponse:
         raise fetcher.requests.Timeout("too slow")
 
-    monkeypatch.setattr(fetcher.requests, "get", _timeout)
+    _route(monkeypatch, _timeout)
     result = await fetcher.fetch_text("https://slow.example/")
     assert result.reason == fetcher.REASON_TIMEOUT
+
+
+async def test_fetch_runs_on_its_own_bounded_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """공용 기본 풀(`asyncio.to_thread`)에서 돌면 느린 링크가 web push·캘린더까지 멈춘다
+    (inbox-8). 전용 풀의 스레드에서 도는지를 이름으로 확인한다."""
+    names: list[str] = []
+
+    def _record(url: str, watch: object) -> fetcher.FetchResult:
+        names.append(threading.current_thread().name)
+        return fetcher.FetchResult("ok", None)
+
+    monkeypatch.setattr(fetcher, "_fetch_sync", _record)
+    result = await fetcher.fetch_text("https://example.com/")
+    assert result.ok
+    assert names and names[0].startswith("web_fetch"), names
+    assert fetcher._EXECUTOR._max_workers == fetcher._MAX_WORKERS
+
+
+def test_read_stops_at_the_deadline_even_while_data_keeps_coming() -> None:
+    """청크가 계속 와도 시한이 지나면 읽기를 멈춘다 — 상한(512KB)까지 끌려가지 않는다."""
+    response = _FakeResponse(body=b"a" * (fetcher._MAX_BYTES * 2))
+    assert fetcher._read_capped(response, deadline=time.monotonic() - 1) is None
+    assert response.served == 8192, "시한이 지났는데도 다음 청크를 읽었다"
+
+
+async def test_hard_timeout_frees_the_worker_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """1바이트씩 흘리는 서버 — 코루틴은 시한에 돌아오고, **스레드도** 곧 풀로 돌아와야 한다.
+
+    예전엔 `wait_for` 가 코루틴만 멈춰서, 사용자에게 '시간 초과' 를 돌려준 뒤에도 스레드가
+    서버가 멈출 때까지 계속 읽었다(재현: 8초 뒤에도 12초 넘게 살아 있었다). 소켓 읽기
+    하나하나는 read timeout 안에 끝나므로 소켓 timeout 으로는 못 끊는다.
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(5)
+    port = listener.getsockname()[1]
+    stop = threading.Event()
+
+    def _drip() -> None:
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return
+        with conn, contextlib.suppress(OSError):
+            conn.recv(4096)
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 100000\r\n\r\n"
+            )
+            for _ in range(200):  # 최대 20초 — 끊기지 않으면 테스트가 먼저 실패한다
+                if stop.is_set():
+                    break
+                conn.sendall(b"a")
+                time.sleep(0.1)
+
+    server = threading.Thread(target=_drip, daemon=True)
+    server.start()
+    finished = threading.Event()
+    real_fetch_sync = fetcher._fetch_sync
+
+    def _tracked(url: str, watch: pinned_http.SocketWatch) -> fetcher.FetchResult:
+        try:
+            return real_fetch_sync(url, watch)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(fetcher, "_fetch_sync", _tracked)
+    monkeypatch.setattr(fetcher, "_HARD_TIMEOUT", 0.5)
+    try:
+        _local_only_dns(monkeypatch, port)
+        result = await fetcher.fetch_text(f"http://pinned-host.invalid:{port}/slow")
+        freed = await asyncio.to_thread(finished.wait, 3.0)
+    finally:
+        stop.set()
+        listener.close()
+
+    assert result.reason == fetcher.REASON_TIMEOUT
+    assert freed, "시한이 지난 뒤에도 스레드가 느린 서버를 계속 읽고 있다"
 
 
 async def test_unexpected_exception_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(url: str, **kwargs: Any) -> _FakeResponse:
         raise RuntimeError("unexpected")
 
-    monkeypatch.setattr(fetcher.requests, "get", _boom)
+    _route(monkeypatch, _boom)
     result = await fetcher.fetch_text("https://example.com/")
     assert result.reason == fetcher.REASON_UNAVAILABLE
 
@@ -305,14 +602,9 @@ async def test_empty_page_is_not_treated_as_material(monkeypatch: pytest.MonkeyP
 
 async def test_request_identifies_itself(monkeypatch: pytest.MonkeyPatch) -> None:
     """브라우저인 척하지 않는다 — 사이트가 우리를 식별할 수 있어야 한다."""
-    captured: dict[str, Any] = {}
-
-    def _get(url: str, **kwargs: Any) -> _FakeResponse:
-        captured.update(kwargs)
-        return _FakeResponse(body=b"<p>ok</p>")
-
-    monkeypatch.setattr(fetcher.requests, "get", _get)
+    calls = _route(monkeypatch, lambda url, **kwargs: _FakeResponse(body=b"<p>ok</p>"))
     await fetcher.fetch_text("https://example.com/")
+    captured = calls.kwargs[0]
     assert "reaction-backend" in captured["headers"]["User-Agent"]
     assert captured["allow_redirects"] is False, "자동 리다이렉트를 켜면 가드가 우회된다"
     assert captured["timeout"] == (fetcher._CONNECT_TIMEOUT, fetcher._READ_TIMEOUT)

@@ -7,6 +7,33 @@
 
 ---
 
+## v2.30-materials — 2026-09-18 (영상 커리큘럼에서 비공개·삭제 영상 제외)
+
+**동작 변경 — `POST /plans/materials/video-detail`.** 요청·응답 스키마 무변경, 마이그레이션 없음.
+
+### 무엇이 잘못됐었나
+
+재생목록에 비공개·삭제된 영상이 섞여 있으면 YouTube 가 그 항목을 영어 고정 제목
+`"Private video"`/`"Deleted video"` 로 주고 재생시간은 주지 않는다. 그대로 담아서
+`curriculum` 에 `{"title":"Private video","minutes":0}` 이 단원처럼 끼었고, `videoCount` 도 그만큼
+부풀었다(실측: 수제비 재생목록 46편 중 2편).
+
+### 이제
+
+- 볼 수 없는 영상(`status.privacyStatus` 가 `private`/`privacyStatusUnspecified`, 제목이 위 두
+  문구, 또는 `videos.list` 가 재생시간을 주지 않은 영상)은 `curriculum`·`videoCount`·
+  `totalMinutes` 에서 모두 뺀다.
+- `videoCount` 는 잘리지 않았으면 `curriculum` 길이와 같고, 200편에서 잘렸으면(`truncated=true`)
+  재생목록 총수에서 지금까지 걸러낸 수를 뺀 값이다.
+- 볼 수 있는 영상이 하나도 없으면 기존 "재생목록을 찾지 못함" 과 같이 `detail=null` + 안내 문구.
+
+### FE 에 미치는 것
+
+할 일 없음. 필드·타입이 그대로라 표시(`{videoCount}개 · {totalMinutes}분`)가 실제 볼 수 있는
+영상 기준으로 바로잡힌다.
+
+---
+
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)
 
 **동작 완화 — `POST /auth/google`.** 요청·응답 스키마 무변경, 마이그레이션 없음. 기존 사용자
