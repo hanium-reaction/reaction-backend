@@ -79,15 +79,49 @@ def test_start_creates_execution_and_adhoc_block(
     assert action.status == "in_progress"
 
 
-def test_start_conflict_when_already_active(
+def test_start_again_returns_the_running_execution(
     client: TestClient,
     fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
 ) -> None:
+    """앱이 죽어 sessionStorage 가 비면 FE 는 [이어서 하기] 에서 start 를 다시 부른다 (today-1).
+
+    예전엔 409 `TODAY_EXECUTION_ALREADY_ACTIVE` 가 끝없이 반복돼 [완료] 가 영영 막혔다.
+    이제 같은 실행을 200 으로 돌려주고, 아무것도 새로 만들지 않는다.
+    """
     action = _seed_action(fake_action_item_repo)
-    _start(client, f"action_{action.id}")
-    resp = _start(client, f"action_{action.id}")
-    assert resp.status_code == 409
-    assert resp.json()["code"] == "TODAY_EXECUTION_ALREADY_ACTIVE"
+    first = _start(client, f"action_{action.id}")
+    assert first.status_code == 201
+    again = _start(client, f"action_{action.id}")
+    assert again.status_code == 200, again.json()
+    body = again.json()
+    assert body["executionId"] == first.json()["executionId"]
+    assert body["actionId"] == f"action_{action.id}"
+    assert body["completionStatus"] == "in_progress"
+    # 타이머를 이어 붙일 기준 — 두 번째 호출 시각이 아니라 처음 시작한 시각
+    assert body["actualStartAt"] == first.json()["actualStartAt"]
+    assert len(fake_execution_repo._executions) == 1
+    assert len(fake_execution_repo._blocks) == 1
+
+    # 돌려받은 id 로 완료할 수 있다 — 막혀 있던 바로 그 경로
+    done = _check_in(client, body["executionId"], "done")
+    assert done.status_code == 200, done.json()
+    assert action.status == "done"
+
+
+def test_start_after_check_in_creates_a_new_execution(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """멱등은 **진행 중일 때만** — 끝난 실행을 되살려 돌려주지 않는다."""
+    action = _seed_action(fake_action_item_repo)
+    first = _start(client, f"action_{action.id}").json()["executionId"]
+    _check_in(client, first, "partial_done")
+    again = _start(client, f"action_{action.id}")
+    assert again.status_code == 201
+    assert again.json()["executionId"] != first
+    assert len(fake_execution_repo._executions) == 2
 
 
 def test_start_404_unknown_action(client: TestClient) -> None:
@@ -221,27 +255,173 @@ def test_resume_accumulates_pause_minutes(
     assert execution.pause_total_minutes == 10
 
 
-def test_pause_conflict_when_already_paused(
+def test_pause_twice_is_idempotent(
     client: TestClient,
     fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
 ) -> None:
+    """정지 응답을 잃은 FE 의 재전송 — 409 대신 200 `paused`, 정지 구간은 하나 (today-5)."""
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    assert _pause(client, exec_id).status_code == 200
+
+    resp = _pause(client, exec_id)
+
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["status"] == "paused"
+    assert len(fake_execution_repo._interruptions) == 1
+
+
+def test_resume_when_not_paused_is_a_no_op(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """재개 응답을 잃은 FE 의 재전송 — 409 대신 200 `in_progress`, 아무것도 안 바꾼다 (today-5)."""
     action = _seed_action(fake_action_item_repo)
     exec_id = _start(client, f"action_{action.id}").json()["executionId"]
     _pause(client, exec_id)
-    resp = _pause(client, exec_id)
-    assert resp.status_code == 409
-    assert resp.json()["code"] == "TODAY_ALREADY_PAUSED"
+    assert _resume(client, exec_id).status_code == 200
+    pause = next(iter(fake_execution_repo._interruptions.values()))
+    settled = (pause.resume_delay_minutes, pause.resumed_after_interrupt)
+
+    resp = _resume(client, exec_id)
+
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["status"] == "in_progress"
+    assert (pause.resume_delay_minutes, pause.resumed_after_interrupt) == settled
+    # 한 번도 정지 안 한 실행도 같다
+    other = _seed_action(fake_action_item_repo, title="다른 카드")
+    other_exec = _start(client, f"action_{other.id}").json()["executionId"]
+    assert _resume(client, other_exec).json()["status"] == "in_progress"
 
 
-def test_resume_conflict_when_not_paused(
+def test_resume_after_the_6h_resolver_still_resumes(
     client: TestClient,
     fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
 ) -> None:
+    """아침에 멈추고 저녁에 [계속] — 6h cron 이 마감 표시한 정지도 재개된다 (sched-14).
+
+    예전엔 409 `TODAY_NOT_PAUSED` 가 영영 반복됐고, 멈춘 시간은 정지 시간에 안 들어갔다.
+    cron 의 '6시간 안에 안 돌아옴'(False) 표시는 그대로 둔다.
+    """
+    import asyncio
+    from datetime import timedelta
+
+    from reaction_backend.repositories.interruption_event_repo import InterruptionEventRepo
+    from reaction_backend.scheduler.interruption_resolver import run_interruption_resolver
+    from reaction_backend.schemas.common import now_kst
+
     action = _seed_action(fake_action_item_repo)
     exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    _pause(client, exec_id)
+    pause = next(iter(fake_execution_repo._interruptions.values()))
+    pause.created_at = pause.created_at - timedelta(hours=10)
+
+    class _Session:  # 실 repo 의 mark_unresumed 는 flush 만 부른다
+        async def flush(self) -> None:
+            return None
+
+    repo = InterruptionEventRepo(_Session())  # type: ignore[arg-type]
+
+    async def _stale(*, before: Any) -> list[Any]:
+        return [pause] if pause.created_at < before else []
+
+    repo.list_stale_unresolved = _stale  # type: ignore[method-assign]
+    assert asyncio.run(run_interruption_resolver(now_kst(), repo=repo)) == 1
+    assert pause.resumed_after_interrupt is False
+
+    # 앱이 '정지 중' 이라고 믿고 다시 보낸 pause 도 새 구간을 열지 않는다.
+    assert _pause(client, exec_id).json()["status"] == "paused"
+    assert len(fake_execution_repo._interruptions) == 1
+
     resp = _resume(client, exec_id)
-    assert resp.status_code == 409
-    assert resp.json()["code"] == "TODAY_NOT_PAUSED"
+
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["status"] == "in_progress"
+    assert resp.json()["pauseTotalMinutes"] == 600
+    assert pause.resume_delay_minutes == 600
+    assert pause.resumed_after_interrupt is False  # cron 의 사실은 덮지 않는다
+    assert _check_in(client, exec_id, "done").status_code == 200
+
+
+def _backdate_start(fake_execution_repo: FakeExecutionRepo, minutes: int) -> Any:
+    from datetime import timedelta
+
+    execution = next(iter(fake_execution_repo._executions.values()))
+    execution.actual_start_at = execution.actual_start_at - timedelta(minutes=minutes)
+    return execution
+
+
+def _backdate_pause(fake_execution_repo: FakeExecutionRepo, minutes: int) -> Any:
+    from datetime import timedelta
+
+    pause = next(iter(fake_execution_repo._interruptions.values()))
+    pause.created_at = pause.created_at - timedelta(minutes=minutes)
+    return pause
+
+
+def test_actual_duration_excludes_paused_time(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """60분 전에 시작해 30분 멈췄다 재개하고 완료 — 실제 소요는 30분 (today-11)."""
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    _backdate_start(fake_execution_repo, 60)
+    _pause(client, exec_id)
+    _backdate_pause(fake_execution_repo, 30)
+    assert _resume(client, exec_id).json()["pauseTotalMinutes"] == 30
+
+    body = _check_in(client, exec_id, "done").json()
+
+    assert body["actualDurationMinutes"] == 30
+
+
+def test_check_in_while_paused_closes_the_pause(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """정지 중에 바로 완료 — 그 정지를 닫고(재개 없이 끝냄) 정지 시간을 소요에서 뺀다 (today-11)."""
+    import asyncio
+
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    execution = _backdate_start(fake_execution_repo, 60)
+    _pause(client, exec_id)
+    pause = _backdate_pause(fake_execution_repo, 20)
+
+    body = _check_in(client, exec_id, "done").json()
+
+    assert body["actualDurationMinutes"] == 40
+    assert pause.resume_delay_minutes == 20
+    assert pause.resumed_after_interrupt is False
+    assert execution.pause_total_minutes == 20
+    assert asyncio.run(fake_execution_repo.get_open_pause(execution.id)) is None
+
+
+def test_evening_reflection_leaves_actual_duration_unknown(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """저녁 회고는 소급 종결 — 회고한 시각은 끝낸 시각이 아니라 소요 시간을 지어내지 않는다.
+
+    예전엔 13:00 에 시작한 30분짜리 카드를 21:30 에 '완료' 로 회고하면 510분이 기록됐다.
+    """
+    action = _seed_action(fake_action_item_repo)
+    exec_id = _start(client, f"action_{action.id}").json()["executionId"]
+    execution = _backdate_start(fake_execution_repo, 510)
+
+    resp = _batch(client, [{"executionId": exec_id, "completionStatus": "done"}])
+
+    assert resp.status_code == 200, resp.json()
+    assert execution.completion_status == "done"
+    assert execution.actual_end_at is not None
+    assert execution.actual_duration_minutes is None
 
 
 def test_pause_conflict_after_check_in(

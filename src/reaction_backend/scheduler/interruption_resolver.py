@@ -5,6 +5,10 @@
 
 ⚠️ 본 모듈은 **job 함수**다. 실제 스케줄 트리거(6h/1h마다)는 Issue #24 에서 등록.
 **idempotent** — 이미 false/true 인 행은 건드리지 않음 (NULL 만 대상). 다회 실행 안전.
+
+이 표시는 '6시간 안에 안 돌아왔다' 는 **사실 기록**일 뿐 정지를 닫지 않는다 — 지연분
+(`resume_delay_minutes`)은 비워 둔다. 사용자가 저녁에 돌아와 [▶ 계속] 을 누르면 그때 지연분이
+채워지고 정지 시간에 더해진다(`ExecutionRepo.get_open_pause`, sched-14).
 """
 
 from __future__ import annotations

@@ -54,7 +54,7 @@ from reaction_backend.orchestrator.weekly_review import ExecutionStat, RecoveryS
 from reaction_backend.repositories.action_item_repo import get_action_item_repo
 from reaction_backend.repositories.consent_repo import get_consent_repo
 from reaction_backend.repositories.daily_brief_repo import get_daily_brief_repo
-from reaction_backend.repositories.execution_repo import get_execution_repo
+from reaction_backend.repositories.execution_repo import ExecutionRepo, get_execution_repo
 from reaction_backend.repositories.fixed_schedule_repo import get_fixed_schedule_repo
 from reaction_backend.repositories.goal_repo import get_goal_repo
 from reaction_backend.repositories.habit_instance_repo import get_habit_instance_repo
@@ -956,10 +956,23 @@ class FakeActionItemRepo:
         return sorted(items, key=lambda a: a.priority)
 
     async def list_by_date(self, user_id: UUID, target_date: date) -> list[ActionItem]:
+        """target_date 가 그날이거나 그날(KST) 시작하는 비-cancelled 블록이 있는 카드 (실 repo
+        규칙 미러 — critic-2). 블록은 `link_blocks` 로 연결된 block repo 에서 본다."""
+        session_today: set[UUID] = set()
+        if self._block_repo is not None:
+            for b in self._block_repo._blocks.values():
+                if (
+                    b.user_id == user_id
+                    and b.block_status != "cancelled"
+                    and b.start_at.astimezone(KST).date() == target_date
+                ):
+                    session_today.add(b.action_item_id)
         items = [
             a
             for a in self._items.values()
-            if a.user_id == user_id and a.target_date == target_date and a.archived_at is None
+            if a.user_id == user_id
+            and (a.target_date == target_date or a.id in session_today)
+            and a.archived_at is None
         ]
         return sorted(items, key=lambda a: a.priority)
 
@@ -988,9 +1001,17 @@ class FakeActionItemRepo:
         return a
 
     async def cancel(self, action: ActionItem) -> None:
-        """`archived_at` 만 세팅 — status 는 건드리지 않는다 (실 repo 규칙 미러)."""
+        """`archived_at` + 미종결 블록 cancel — status 는 건드리지 않는다 (실 repo 규칙 미러)."""
         if action.archived_at is None:
             action.archived_at = datetime.now(UTC)
+        if self._block_repo is not None:
+            for b in self._block_repo._blocks.values():
+                if (
+                    b.user_id == action.user_id
+                    and b.action_item_id == action.id
+                    and b.block_status in ("scheduled", "started")
+                ):
+                    b.block_status = "cancelled"
 
     async def find_adopted_step(
         self,
@@ -1583,6 +1604,45 @@ class FakeExecutionRepo:
         )
         return {e.action_item_id: e.id for e in rows}
 
+    async def list_carried_over_actions(
+        self,
+        user_id: UUID,
+        *,
+        today: date,
+        day_start: datetime,
+        since: datetime,
+        now: datetime,
+    ) -> list[ActionItem]:
+        """자정을 넘겨 이어 보여줄 카드 (실 repo 규칙 미러 — today-3).
+
+        진행 중 실행이 회고 창 안(`reflectable_from() >= since`)이거나, 어제 시작한 미종결
+        블록이 아직 안 끝났거나(`start_at < day_start`, `end_at > now`). 보관 제외.
+        """
+        running = {
+            e.action_item_id
+            for e in self._executions.values()
+            if e.user_id == user_id
+            and e.completion_status == "in_progress"
+            and max(e.plan_start_at, e.actual_start_at or e.plan_start_at) >= since
+        }
+        crossing = {
+            b.action_item_id
+            for b in self._blocks.values()
+            if b.user_id == user_id
+            and b.block_status in ("scheduled", "started")
+            and b.start_at < day_start
+            and b.end_at > now
+        }
+        found = [
+            a
+            for a in self._actions.values()
+            if a.user_id == user_id
+            and a.target_date < today
+            and a.archived_at is None
+            and (a.id in running or a.id in crossing)
+        ]
+        return sorted(found, key=lambda a: (a.target_date, a.priority))
+
     async def find_open_block(self, user_id: UUID, action_item_id: UUID) -> ScheduledBlock | None:
         candidates = [
             b
@@ -1650,6 +1710,22 @@ class FakeExecutionRepo:
     async def get_block(self, block_id: UUID) -> ScheduledBlock | None:
         return self._blocks.get(block_id)
 
+    # 종결 전이는 **실 구현을 그대로** 쓴다(today-13) — 이 fake 의 조회 메서드만 불러서
+    # 동작하므로, 복제본을 두면 라우트 테스트가 실 로직이 아닌 사본을 검증하게 된다.
+    close_execution = ExecutionRepo.close_execution
+
+    async def cancel_remaining_sessions(self, execution: ExecutionEvent) -> None:
+        """완료 체크인 → 이 카드의 남은 scheduled 세션 블록 cancel (실 repo 규칙 미러 — critic-2)."""
+        for b in self._blocks.values():
+            if (
+                b.user_id == execution.user_id
+                and b.action_item_id == execution.action_item_id
+                and b.id != execution.scheduled_block_id
+                and b.block_status == "scheduled"
+                and b.source != "user_edit"
+            ):
+                b.block_status = "cancelled"
+
     async def list_blocks_starting_between(
         self, *, start: datetime, end: datetime
     ) -> list[ScheduledBlock]:
@@ -1661,6 +1737,8 @@ class FakeExecutionRepo:
                 continue
             action = self._actions.get(b.action_item_id)
             if action is None or action.archived_at is not None:
+                continue
+            if action.status in ("done", "over_done"):  # 끝낸 카드엔 '곧 시작' 없음 (critic-2)
                 continue
             b.action_item = action  # 실 repo 는 joinedload — payload(제목)용
             found.append(b)
@@ -1689,8 +1767,7 @@ class FakeExecutionRepo:
             for p in self._interruptions.values()
             if p.execution_id == execution_id
             and p.interruption_type == "user_pause"
-            and p.resume_delay_minutes is None
-            and p.resumed_after_interrupt is None
+            and p.resume_delay_minutes is None  # 6h cron 의 False 표시와 무관 (실 repo 미러)
         ]
         return max(opens, key=lambda p: p.created_at) if opens else None
 

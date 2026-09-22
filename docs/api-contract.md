@@ -685,22 +685,35 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 | GET | `/today/actions/{actionItemId}` | 카드 상세 (S11) | ✅ #19-A |
 | POST | `/today/actions/{actionItemId}/start` | [▶ 시작] → `execution_events` 생성 | ✅ #19-B |
 | POST | `/today/actions/{actionItemId}/cancel` | 카드 취소 = soft delete (`archived_at`, **status 불변**) | ✅ #214 |
-| POST | `/today/focus/{executionId}/pause` | [⏸] + `interruption_events` INSERT | 🚧 #19-B-2 |
-| POST | `/today/focus/{executionId}/resume` | [▶ 계속] | 🚧 #19-B-2 |
+| POST | `/today/focus/{executionId}/pause` | [⏸] + `interruption_events` INSERT (이미 정지 중이면 200 멱등, v2.30-today) | ✅ #83 |
+| POST | `/today/focus/{executionId}/resume` | [▶ 계속] (정지 중이 아니면 200 멱등, v2.30-today) | ✅ #83 |
 | POST | `/today/check-ins` | Quick Check-in 4칩 | ✅ #19-B (context_snapshot 캡처는 #19-B-2) |
 
 `completion_status`: `done` / `partial_done` / `failed` / `over_done`
 
 **#19-A 조회 (구현)**:
 - `GET /today/agenda` — KST 오늘 기준. `brief`(daily_briefs, Morning Brief cron #19-C 가 채움; 없으면 null), `cards`(action_items, 오늘 target_date, priority 오름차순), `habits`(이번 주 habit_instances 진행), `fixedSchedules`(오늘 요일에 걸린 것). ID prefix `action_`/`hinst_`/`habit_`/`fixed_`
+- **자정을 넘긴 카드 (v2.30-today)** — `cards` 는 오늘 target_date 카드 **뒤에**, 날짜는 지났지만 아직 손에서 놓지 않은 카드를 이어 붙이고 `AgendaCard.carriedOver=true` 로 표시한다(오늘 날짜 카드는 항상 `false`, 중복 없음). 대상은 보관 안 된 카드 중 둘 중 하나:
+  1. **진행 중(in_progress) 실행**이 회고 창 안에 있다 — 창 기준은 `/reflection/pending` 과 같다(§11, 계획·착수 시각 중 나중 ≥ 그제 0시). 23:40 에 시작한 카드가 00:00 에 화면에서 사라지지 않고, 창을 벗어나면 만료 cron 이 정리한다. `executionId` 가 실려 있어 그대로 체크인할 수 있다
+  2. **어제 시작해 아직 안 끝난 블록**(`startAt` < 오늘 0시 < `endAt`, 지금 < `endAt`, 미종결)이 있다 — 23:30~00:30 블록을 00:05 에 늦게라도 시작할 수 있게. 다음 날 세션 블록은 여기 안 걸린다
+  체크인으로 끝나면 다음 조회부터 빠진다. FE 는 '어제 이어서' 같은 표시만 얹으면 된다
+- **여러 날로 쪼갠 카드 (v2.30-today)** — 긴 카드는 여러 날의 세션 블록으로 쪼개질 수 있다(주간 재계획 등). 카드는 1장이고 `target_date` 는 가장 이른 블록의 날짜라, 예전엔 둘째 날부터 카드가 오늘 화면에서 사라졌다. 이제 `cards` 는 target_date 가 오늘인 카드에 더해 **오늘(KST) 시작하는, 취소 안 된 세션 블록**이 있는 카드도 오늘 카드로 싣는다(`carriedOver=false`, 중복 없음, 같은 priority 정렬). `finished` 블록도 센다 — 오늘 회차를 체크인해도 카드가 오늘 화면에서 사라지지 않게. 같은 목록을 모닝 브리프·코칭 조언의 '오늘/어제 카드' 도 쓴다
 - `GET /today/actions/{id}` — `action_<uuid>`. 없으면 404 `COMMON_NOT_FOUND`
 **#19-B 실행 쓰기 (구현)**:
-- `POST /today/actions/{id}/start` — 미종결 scheduled_block 있으면 사용, 없으면 **즉석(ad-hoc) 블록 생성**(source=`user_edit`, §5.10)으로 NOT NULL 의존 해소. 같은 카드 in_progress 중복 시 409 `TODAY_EXECUTION_ALREADY_ACTIVE`. 응답 `{ executionId, actionId, completionStatus, actualStartAt }` (201)
+- `POST /today/actions/{id}/start` — 미종결 scheduled_block 있으면 사용, 없으면 **즉석(ad-hoc) 블록 생성**(source=`user_edit`, §5.10)으로 NOT NULL 의존 해소. 응답 `{ executionId, actionId, completionStatus, actualStartAt }` (201)
+  - **같은 카드가 이미 진행 중이면 그 실행을 200 으로 돌려준다**(v2.30-today, 종전 409 `TODAY_EXECUTION_ALREADY_ACTIVE`). 새 실행·블록을 만들지 않고 카드 상태도 안 건드린다. 응답 모양은 같고 `actualStartAt` 은 **처음 시작한 시각**이다 — 앱을 다시 열어 실행 id 를 잃은 FE 가 [이어서 하기] 로 start 를 다시 불러도 같은 실행을 이어받아 체크인할 수 있다. 끝난(체크인한) 실행은 되살리지 않는다 — 그 뒤 start 는 새 실행(201)
+  - 다른 카드가 진행 중이어도 시작은 막지 않는다(종전과 같음). `TODAY_EXECUTION_ALREADY_ACTIVE` 코드는 남아 있지만 이 경로는 더 이상 내보내지 않는다
 - `POST /today/check-ins` — `{ executionId, completionStatus(4칩), userRating?, userFeedback? }`. execution 종결(actual_end_at·duration) + 블록 finished + **`action_item.status` 전이**(execution 레이어의 합의된 유일 지점). feedback 은 at-rest 암호화. 재체크인 409 `TODAY_ALREADY_CHECKED_IN`. 응답 `needsFailureTags=true`(failed/partial_done) → S18 → §11 태깅 → §12 Recovery 로 연결
-- pause/resume(interruption_events) + context_snapshot 캡처는 #19-B-2 후속
+  - **`actualDurationMinutes` = 일한 시간(v2.30-today)** — (체크인 시각 − 착수 시각) − `pauseTotalMinutes`. 예전엔 정지 시간까지 셌다. 정지 중에 체크인하면 그 정지를 체크인 시각에 닫고(재개 없이 끝냄) 그 시간도 뺀다. 주간 리뷰 `effort.actualMinutes` 의 재료다
+  - **`done`/`over_done` 이면 이 카드의 남은 세션 블록을 정리한다**(v2.30-today). 쪼갠 카드의 한 회차에서 '완료' 하면 카드는 끝난 것이라, 아직 `scheduled` 인 다른 회차 블록을 `cancelled` 로 바꾼다 — 주간 그리드에 할 일로 남지 않고 '곧 시작'(pre_card) 알림도 오지 않는다. `finished`(수행 이력)·`started` 블록과 사용자가 직접 옮긴 블록(`source=user_edit`)은 건드리지 않는다. `partial_done`/`failed` 는 '아직 남았다' 라 남은 회차를 그대로 둔다 — 다음 [▶ 시작] 은 가장 이른 미종결 블록을 잡는다. `POST /reflection/batch` 도 같은 규칙. pre_card 알림은 블록 상태와 별개로 **끝낸(done/over_done) 카드의 블록엔 보내지 않는다**(이중 방어)
+- `POST /today/focus/{executionId}/pause`·`/resume` — 응답 `{ executionId, actionItemId, startedAt, endedAt, status(paused|in_progress), pauseTotalMinutes }`. pause 는 user_pause 정지 구간을 열고, resume 은 그 구간을 닫아 정지 시작부터 지금까지를 `pauseTotalMinutes` 에 더한다. 체크인이 끝난 실행은 409 `TODAY_ALREADY_CHECKED_IN`, 없는 실행은 404 `TODAY_EXECUTION_NOT_FOUND`
+  - **둘 다 멱등(v2.30-today)** — 이미 정지 중인데 pause 를 다시 보내면 새 구간을 열지 않고 200 `paused`, 정지 중이 아닌데 resume 을 보내면 아무것도 안 바꾸고 200 `in_progress`(종전 409 `TODAY_ALREADY_PAUSED`/`TODAY_NOT_PAUSED` — 코드 정의는 남아 있지만 이 경로는 더 이상 내보내지 않는다). 응답을 잃은 FE 의 재시도가 영영 실패하지 않게
+  - 6시간 넘게 재개 안 된 정지는 cron 이 '6시간 안에 안 돌아옴' 으로 **표시만** 한다 — 정지는 열린 채라, 저녁에 돌아와 [▶ 계속] 을 눌러도 재개되고 그 시간이 `pauseTotalMinutes` 에 들어간다
+- context_snapshot 캡처는 #19-B-2 후속
 
 **카드 취소 (#214)**:
 - `POST /today/actions/{id}/cancel` → **204**. `archived_at` 만 세팅하고 **`status` 는 바꾸지 않는다**(AGENTS §2 — 원본 status 는 Resilience 지표의 전제). 조회가 전부 `archived_at IS NULL` 로 걸러 오늘 어젠다·백로그에서 빠진다
+- 카드에 걸린 **미종결 블록(`scheduled`/`started`)은 같은 트랜잭션에서 `cancelled`** 가 된다(v2.30-today). 예전엔 카드만 보관돼 블록이 주간 그리드(`GET /plans/weekly`)에 유령으로 남고(눌러 보면 404), 그 시간대로 다른 블록을 옮기면 422 `PLAN_BLOCK_CONFLICT` 로 막혔다. 계획 교체·만료 cron 이 '카드 보관 + 블록 취소' 를 짝으로 처리하는 것과 같은 규칙. `finished` 블록(수행 이력)은 건드리지 않는다
 - **취소 가능 조건 3개 전부**: `status='planned'` + 실행 이력 없음 + `source ∈ {inbox, manual}`. `recovery_*` 는 `resulting_action_item_id` 로 회복 지표와 얽혀 있고, `goal`/`habit` 파생은 계획 정합성이 걸려 있어 제외
 - 조건에 안 맞으면 422 `COMMON_VALIDATION_ERROR`(`field="actionId"`), **사유별로 다른 message** — '이미 시작한 일' 과 '계획에 묶임' 을 FE 가 구분해 안내할 수 있게
 - **이미 취소된 카드에 다시 호출해도 204**(멱등). 없는 카드는 404 `COMMON_NOT_FOUND`
@@ -757,7 +770,9 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 `POST /reflection/batch` — S17 저녁 일괄 회고. 요청 `{ items: [{ executionId, completionStatus(4칩),
 failureTags?(0~2), memo?, taskAversiveness? }] }` (빈 배열 no-op, 상한 50건). 각 항목을 `POST /today/check-ins` 와
 동일하게 종결(execution + 블록 finished + `action_item.status`)하고 failed/partial_done 항목엔
-실패 사유를 함께 기록한다. **전량 사전 검증 후 단일 트랜잭션 적용** — 하나라도 무효(없음
+실패 사유를 함께 기록한다. 단 **소급 종결이라 `actual_duration_minutes` 는 비워 둔다**(v2.30-today) —
+회고한 시각은 끝낸 시각이 아니다(예전엔 13:00 에 시작한 30분 카드를 21:30 에 회고하면 510분이 됐다).
+주간 리뷰 `effort.actualMinutes` 는 이 실행을 0 으로 센다. **전량 사전 검증 후 단일 트랜잭션 적용** — 하나라도 무효(없음
 404 `TODAY_EXECUTION_NOT_FOUND` · 이미 체크인 409 `TODAY_ALREADY_CHECKED_IN` · 중복 executionId 422
 `COMMON_VALIDATION_ERROR` · non-failure 에 태그 422 `REFLECT_NOT_FAILED` · 무효 태그 422 `REFLECT_INVALID_TAG`
 · non-failure 에 정서 문항 422 `REFLECT_NOT_FAILED` · non-failure 에 memo 422 `REFLECT_NOT_FAILED`
