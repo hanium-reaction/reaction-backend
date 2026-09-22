@@ -683,9 +683,17 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
   **이미 시작/끝낸 블록(`blockStatus` started/finished)은 시간을 못 옮긴다**(v2.30-planA) — 다른
   시각이면 422 `PLAN_INVALID_TIME`("이미 시작했거나 끝낸 일정은 옮길 수 없어요…"). 지금 시각을
   그대로 보내고 `title`/`category` 만 바꾸는 편집은 200 이며, 이때 시각·`source` 는 그대로다.
+- **정책 집합은 승인·재계획과 같다**(v2.30-planA 후속): DB `time_policies` + **활동 시간대 밖**
+  (최근 완료 인터뷰의 활동창 — 설정에서 고친 값 우선 — 의 여집합을 수면으로, no_touch 포함.
+  인터뷰가 없으면 설정의 활동 시간대, 그마저 없을 때만 23:00~08:00 기본 수면창). `POST /plans/replan`
+  과 **같은 조립**이다. 예전엔 DB `time_policies` 만 봤는데 그 행을 만드는 FE 화면이 없어 실사용자는
+  늘 빈 목록이었다 — 08~16 시에만 활동한다고 답한 사용자도 블록을 새벽 3시로 옮길 수 있었고, 같은
+  시각이 승인에서는 422 였다.
 - 정책 판정은 순수 함수 `orchestrator/plan_edit.py`. 고정 일정·`no_touch` 는 생성·승인과 같은 busy
-  전개(`fixed_schedules_to_busy`/`time_policies_to_busy`)로 본다(v2.30-planA). `break_min`·캘린더
-  겹침은 편집 때 막지 않는다(캘린더는 `calendarConflict` 로 표시). DB 마이그레이션 없음.
+  전개(`fixed_schedules_to_busy`/`time_policies_to_busy`)로 본다(v2.30-planA). 시각 `"24:00"`(하루 끝)은
+  스케줄러와 같게 읽는다 — 예전엔 그 정책을 통째로 건너뛰어 활동창 여집합의 저녁 조각(16:00~24:00)이
+  검사되지 않았다. `break_min`·캘린더 겹침은 편집 때 막지 않는다(캘린더는 `calendarConflict` 로 표시).
+  DB 마이그레이션 없음.
 - `GET /plans/weekly` 의 `days[].fixedSchedules`(v2.30-planA, additive): 그날의 고정 일정
   `[{title, startAt, endAt}]`(KST, 자정을 넘는 일정은 그날 안의 조각으로). 편집이 막는 시간을
   그리드에 보이게 하려는 것 — FE 는 옮길 수 없는 칸으로 그린다.
