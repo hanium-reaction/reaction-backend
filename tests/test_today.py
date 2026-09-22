@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from reaction_backend.db.models.action_item import ActionItem
@@ -16,6 +17,7 @@ from reaction_backend.db.models.daily_brief import DailyBrief
 from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.domain.missed_check_in import MISSED_CHECK_IN_DELAY
+from reaction_backend.repositories import habit_repo
 from reaction_backend.schemas.common import now_kst
 from tests.conftest import (
     DEMO_USER_UUID,
@@ -256,7 +258,10 @@ def test_agenda_with_brief(
     assert brief["fallbackUsed"] is False
 
 
-def test_agenda_with_habit(client: TestClient) -> None:
+def test_agenda_with_habit(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 등록한 주는 남은 날만큼 목표를 줄인다(v2.30-goals) — 월요일에 만든 것으로 고정해 빈도 그대로.
+    monday = habit_repo.current_week_start_kst()
+    monkeypatch.setattr(habit_repo, "today_kst", lambda: monday)
     client.post(
         "/habits",
         json={

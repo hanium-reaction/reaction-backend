@@ -15,12 +15,34 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import func, select, update
+from sqlalchemy import ColumnElement, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.db.session import get_db
+
+
+def stale_proposed_where(before: datetime) -> list[ColumnElement[bool]]:
+    """잠정 목표 만료(`expire_stale_proposed`) 대상의 WHERE — 프리뷰 스크립트도 이 한 벌을 쓴다.
+
+    만다라 축에서 사용자가 직접 올린 목표(살아 있는 축의 `promoted_goal_id`)는 빼다.
+    """
+    promoted_from_live_axis = (
+        select(GoalNode.id)
+        .where(
+            GoalNode.promoted_goal_id == Goal.id,
+            GoalNode.tree_kind == "mandala",
+            GoalNode.archived_at.is_(None),
+        )
+        .exists()
+    )
+    return [
+        Goal.status == "proposed",
+        Goal.archived_at.is_(None),
+        Goal.created_at < before,
+        ~promoted_from_live_axis,
+    ]
 
 
 class GoalRepo:
@@ -99,6 +121,10 @@ class GoalRepo:
 
         `tree_kind='mandala'` 로 좁힌다 — 계획 트리(`tree_kind='plan'`) 노드 id 를 이 endpoint
         에 잘못 넣어도(예: 다른 endpoint 응답에서 id 를 잘못 복사) 조용히 편집되지 않는다.
+
+        **보관된 궁극목표의 칸도 막는다** — 목표를 지운 뒤 열려 있던 만다라 화면에서 축을
+        승격하거나 "이 축으로 2주" 를 누르면, 사라진 만다라에서 새 목표·계획이 생겼다.
+        삭제가 노드도 보관하지만(`archive_nodes`), 그 전에 보관된 목표까지 여기서 한 번 더 막는다.
         """
         stmt = (
             select(GoalNode)
@@ -108,6 +134,7 @@ class GoalRepo:
                 GoalNode.tree_kind == "mandala",
                 GoalNode.archived_at.is_(None),
                 Goal.user_id == user_id,
+                Goal.archived_at.is_(None),
             )
         )
         result = await self._session.execute(stmt)
@@ -227,6 +254,7 @@ class GoalRepo:
         deadline: date | None = None,
         priority_level: int | None = None,
         goal_tier: str | None = None,
+        clear_deadline: bool = False,
     ) -> Goal:
         if title is not None:
             goal.title = title
@@ -234,6 +262,9 @@ class GoalRepo:
             goal.category = category
         if deadline is not None:
             goal.deadline = deadline
+        elif clear_deadline:
+            # `None` 은 "안 바꿈" 이라 명시적 해제는 따로 받는다(PATCH `deadline: null`).
+            goal.deadline = None
         if priority_level is not None:
             goal.priority_level = priority_level
         if goal_tier is not None:
@@ -264,6 +295,18 @@ class GoalRepo:
         goal.status = "archived"
         await self._session.flush()
 
+    async def archive_nodes(self, nodes: Sequence[GoalNode]) -> None:
+        """노드 soft 보관 — 궁극목표를 지울 때 그 만다라 트리를 함께 닫는다.
+
+        hard delete 가 아니라 `archived_at` 만 찍는다(AGENTS §2). 이미 보관된 노드는 시각을
+        덮어쓰지 않는다 — 다시 세우기로 보관된 옛 트리의 기록을 흐리지 않게.
+        """
+        now = datetime.now(UTC)
+        for n in nodes:
+            if n.archived_at is None:
+                n.archived_at = now
+        await self._session.flush()
+
     async def expire_stale_proposed(self, *, before: datetime, archived_at: datetime) -> int:
         """`before` 이전에 만들어진 잠정(proposed) 목표를 일괄 보관. 반환: 보관된 행 수.
 
@@ -280,18 +323,30 @@ class GoalRepo:
         기준은 `updated_at` 이 아니라 `created_at` 이다 — `updated_at` 은 `onupdate=func.now()`
         라서 무관한 `PATCH /goals/{id}` 한 번이 조용히 TTL 을 새로 사버리고, 그러면 경계가
         비결정적이 되어 테스트로 고정할 수 없다.
+
+        ⚠️ **사용자가 만다라 축에서 직접 올린 목표는 빼다**(살아 있는 만다라 축의
+        `promoted_goal_id`). 그것도 `proposed` 로 태어나지만 인터뷰가 뽑은 잠정 목표가 아니라
+        사용자가 고른 것이다 — 예전엔 14일 뒤 말없이 보관돼, 만다라는 여전히 "이미 학기 목표로
+        올린 축" 이라는데 목표 목록엔 없었다.
         """
         stmt = (
             update(Goal)
-            .where(
-                Goal.status == "proposed",
-                Goal.archived_at.is_(None),
-                Goal.created_at < before,
-            )
+            .where(*stale_proposed_where(before))
             .values(status="archived", archived_at=archived_at)
         )
         result = await self._session.execute(stmt)
         return int(result.rowcount or 0)  # type: ignore[attr-defined]  # CursorResult (UPDATE)
+
+    async def live_goal_ids(self, user_id: UUID, goal_ids: Sequence[UUID]) -> set[UUID]:
+        """이 id 들 중 **보관되지 않은** 이 사용자 목표 — 만다라 축의 승격 배지 판정용."""
+        if not goal_ids:
+            return set()
+        stmt = select(Goal.id).where(
+            Goal.id.in_(goal_ids),
+            Goal.user_id == user_id,
+            Goal.archived_at.is_(None),
+        )
+        return set((await self._session.execute(stmt)).scalars().all())
 
     async def goal_ids_with_plan(self, goal_ids: Sequence[UUID]) -> set[UUID]:
         """이 목표들 중 **계획 트리를 가진** 것의 id.

@@ -401,11 +401,59 @@ def test_list_goals_ignores_archived_and_mandala_trees(
     }
 
 
-def test_single_goal_responses_do_not_claim_unplanned(client: TestClient) -> None:
-    """단건 응답(create)은 계획 트리를 조회하지 않는다 — 기본값이 `True` 여야 한다.
-
-    기본값을 `False` 로 두면 **방금 만든 목표가 미계획으로 잘못 칠해진다**(목록 새로고침
-    전까지). 모르는 것을 "없다" 로 단정하지 않는다.
-    """
+def test_new_goal_is_reported_unplanned(client: TestClient) -> None:
+    """방금 만든 목표는 정의상 계획 트리가 없다 — `hasPlan=false` 여야 '미계획' 배지와
+    '이 목표 계획 세우기' 가 바로 뜬다(goals-14 — 예전엔 단건 응답이 늘 `true`)."""
     body = _new_goal(client, title="새 목표")
-    assert body["hasPlan"] is True
+    assert body["hasPlan"] is False
+
+
+def test_single_goal_responses_ask_the_plan_tree(
+    client: TestClient, fake_goal_repo: FakeGoalRepo
+) -> None:
+    """update/park/complete 응답은 그 목표의 계획 트리를 실제로 묻는다."""
+    planned = _seed_goal_for_has_plan(fake_goal_repo, title="계획 있음")
+    fake_goal_repo._nodes[planned.id] = [_Node()]
+    unplanned = _seed_goal_for_has_plan(fake_goal_repo, title="계획 없음")
+
+    for g, expected in ((planned, True), (unplanned, False)):
+        gid = f"goal_{g.id}"
+        assert (
+            client.patch(f"/goals/{gid}", json={"priorityLevel": 2}).json()["hasPlan"] is expected
+        )
+        assert client.post(f"/goals/{gid}/park").json()["hasPlan"] is expected
+        done = client.post(f"/goals/{gid}/complete", json={"completed": True})
+        assert done.json()["hasPlan"] is expected
+
+
+def test_patch_deadline_null_clears_it_and_omitting_keeps_it(client: TestClient) -> None:
+    """abuse-6 / goals-15 — `deadline: null` 은 마감 해제, 빼면 그대로."""
+    resp = client.post(
+        "/goals",
+        json={
+            "title": "토익",
+            "category": "study",
+            "goalTier": "parked",
+            "priorityLevel": 2,
+            "deadline": "2026-12-01",
+        },
+    )
+    gid = resp.json()["goalId"]
+
+    kept = client.patch(f"/goals/{gid}", json={"title": "토익 900"})
+    assert kept.json()["deadline"] == "2026-12-01"
+
+    cleared = client.patch(f"/goals/{gid}", json={"deadline": None})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["deadline"] is None
+    parked = client.get("/goals").json()["parked"]
+    assert parked[0]["deadline"] is None
+
+
+def test_bad_deadline_message_has_no_field_name(client: TestClient) -> None:
+    gid = _new_goal(client)["goalId"]
+    resp = client.patch(f"/goals/{gid}", json={"deadline": "2026.12.31"})
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["field"] == "deadline"
+    assert "deadline" not in body["message"]

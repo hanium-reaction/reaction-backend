@@ -188,6 +188,56 @@ def test_cells_as_milestones_skips_completed_and_keeps_order() -> None:
     assert all(m.summary == "" for m in milestones), "없는 요약을 지어내지 않는다"
 
 
+def test_cells_as_milestones_skips_repeat_and_rule_placeholder_cells() -> None:
+    """반복형(습관 링크) 칸과 규칙 자리표시 칸("건강 1단계")은 계획 뼈대가 아니다 (goals-11)."""
+    goal_id, axis_id = uuid4(), uuid4()
+    habit_cell = _node(
+        goal_id=goal_id, parent_id=axis_id, title="1일 1문제", depth=2, order_index=0
+    )
+    rule_cell = _node(
+        goal_id=goal_id, parent_id=axis_id, title="건강 1단계", depth=2, order_index=1
+    )
+    rule_cell.source = "rule"
+    edited = _node(goal_id=goal_id, parent_id=axis_id, title="고친 칸", depth=2, order_index=2)
+    edited.source = "user"
+    plain = _node(goal_id=goal_id, parent_id=axis_id, title="보통 칸", depth=2, order_index=3)
+
+    milestones = mandala_cycle.cells_as_milestones(
+        [habit_cell, rule_cell, edited, plain], exclude_ids={habit_cell.id}
+    )
+
+    assert [m.title for m in milestones] == ["고친 칸", "보통 칸"]
+
+
+def test_next_cycle_leaves_habit_linked_cells_out_of_the_milestones(
+    client: TestClient,
+    fake_goal_repo: FakeGoalRepo,
+    fake_interview_repo: FakeInterviewRepo,
+    monkeypatch: Any,
+) -> None:
+    from reaction_backend.orchestrator import mandala_adapter
+
+    monkeypatch.setattr(aiClient, "run", _stub())
+    _seed_finished_session(fake_interview_repo)
+    goal = _ultimate(fake_goal_repo)
+    ids = _seed_tree(fake_goal_repo, goal)
+    repeat_cell = next(
+        n
+        for n in fake_goal_repo._nodes[goal.id]
+        if n.parent_node_id == ids["axis"].id and n.title == "칸1"
+    )
+
+    async def _habits(session: Any, node_ids: Any) -> dict[Any, Any]:
+        return {repeat_cell.id: object()} if repeat_cell.id in set(node_ids) else {}
+
+    monkeypatch.setattr(mandala_adapter, "fetch_habits_for_nodes", _habits)
+
+    res = client.post("/plans/mandala/next-cycle", json={"nodeId": f"node_{ids['axis'].id}"})
+
+    assert res.status_code == 200, res.text
+    assert [m["title"] for m in res.json()["milestones"]] == ["칸2"]
+
+
 # ─────────────────── route (U14) ───────────────────
 
 

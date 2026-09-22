@@ -17,7 +17,7 @@ cron 시간표 (사용자 timezone 기준 — DevBaseline + DB 시나리오 분�
 | 6시간마다 | `expire_stale_drafts` — `plan_drafts.status='draft' AND expires_at < now()` → `expired` (72h, §7.8) | `plan_drafts` UPDATE |
 | 매일 04:00 KST | `expire_unreflected_cards` — 회고 창(3일) 밖 미체크 실행의 카드 → `system_failure_reason='reflection_skipped'` + `archived_at` + 미종결 블록 cancel | `action_items` / `scheduled_blocks` UPDATE |
 | 매일 04:00 KST | `abandon_stale_recoveries` — 회고 창 밖 미완주 회복 → `recovery_result='abandoned'` (같은 job 안에서 만료 뒤 실행) | `recovery_attempts` UPDATE |
-| 매일 04:00 KST | `expire_stale_proposed_goals` — 잠정(proposed) 목표 중 14일 지나도 승격 안 된 것 → `archived` (#178) | `goals` UPDATE |
+| 매일 04:00 KST | `expire_stale_proposed_goals` — 잠정(proposed) 목표 중 14일 지나도 승격 안 된 것 → `archived` (#178). 만다라 축에서 사용자가 직접 올린 목표는 제외(v2.30-goals) | `goals` UPDATE |
 | 매일 04:00 KST | `anonymize_inactive_users` — last_active_at < now()-90d → 익명화 | `users` UPDATE |
 | ~~1시간마다~~ | ~~`oauth_token_refresher`~~ — **두지 않는다**: 캘린더를 읽는 순간(계획·화면·브리프) 만료 60초 전이면 그 자리에서 갱신한다(`google_calendar/freebusy._access_token`) | — |
 | ~~5분마다~~ | ~~`notification_dispatcher` — 예약된 알림 발송~~ — **발송 게이트로 대체** (`safety/push_gate.py`, ADR-0006 §1: 큐 없이 cron → 게이트 직접발송, enforce 지점은 게이트 단일) | — |

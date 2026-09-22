@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_sessionmaker
+from reaction_backend.repositories.goal_repo import stale_proposed_where
 from reaction_backend.scheduler.expire_proposed_goals import proposed_goal_stale_before
 from reaction_backend.schemas.common import now_kst, to_kst
 
@@ -37,13 +38,10 @@ from reaction_backend.schemas.common import now_kst, to_kst
 def expire_candidates_stmt(before: datetime) -> Select[Any]:
     """`GoalRepo.expire_stale_proposed` 의 UPDATE 와 **같은 WHERE** 를 가진 SELECT.
 
-    조건 순서까지 저쪽과 동일하게 유지할 것 — 동기화 테스트가 WHERE 문자열을 대조한다.
+    조건은 `goal_repo.stale_proposed_where` 한 벌을 그대로 쓴다 — 동기화 테스트가 WHERE
+    문자열을 대조한다.
     """
-    return select(Goal).where(
-        Goal.status == "proposed",
-        Goal.archived_at.is_(None),
-        Goal.created_at < before,
-    )
+    return select(Goal).where(*stale_proposed_where(before))
 
 
 async def _preview(session: AsyncSession) -> None:

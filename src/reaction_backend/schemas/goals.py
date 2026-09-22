@@ -4,11 +4,40 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
+from pydantic_core import PydanticCustomError
 
 from reaction_backend.schemas.common import CamelModel, KstDatetime
 
 GoalTier = Literal["focus", "maintain", "parked"]
+
+# `goals.title` 컬럼 길이(db/models/goal.py `String(200)`) — 요청 검증과 서버가 만드는 제목
+# (인박스 → 목표, 궁극목표 문장) 자르기가 같은 숫자를 쓴다. 넘으면 DB 가 500 을 낸다.
+GOAL_TITLE_MAX_LENGTH = 200
+# 목표 소요 시간 상한 — 컬럼이 32bit 정수라 그 이상은 DB 에서 500 이 났다. 1년 내내 매일
+# 몇 시간씩 해도 넘지 않는 넉넉한 값이다.
+GOAL_ESTIMATED_MINUTES_MAX = 1_000_000
+
+
+def clean_title(value: object, *, noun: str, max_length: int) -> object:
+    """사용자가 적는 제목 검사(`mode="before"`) — 앞뒤 공백을 떼고, 비었거나 길면 한국어 422.
+
+    예전엔 길이 상한이 없어 200자를 넘으면 DB(`String(200)`)에서 500 이 났고, 다시 눌러도
+    영영 안 됐다. 공백만 있는 제목은 그대로 저장됐다. `Field(max_length=...)` 만 달면
+    pydantic 영어 문구("String should have at most …")가 뜨는데 FE 는 422 message 를 그대로
+    띄우므로, 여기서 먼저 한국어로 막는다(에러 코드·envelope 는 그대로
+    `COMMON_VALIDATION_ERROR`). 문자열이 아니면 손대지 않고 기본 타입 검사에 맡긴다.
+
+    `noun` 은 받침 있는 말("목표 이름"·"습관 이름")만 넘긴다 — 조사 '을/은' 을 고정해 쓴다.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        raise PydanticCustomError("title_blank", f"{noun}을 적어 주세요.")
+    if len(text) > max_length:
+        raise PydanticCustomError("title_too_long", f"{noun}은 {max_length}자까지 적을 수 있어요.")
+    return text
 
 
 class Goal(CamelModel):
@@ -22,9 +51,10 @@ class Goal(CamelModel):
     deadline: str | None  # YYYY-MM-DD
     estimated_minutes: int | None
     status: str  # active | archived | completed | proposed
-    # 이 목표에 **이번 주기 계획 트리가 있는가**. `GET /goals` 에서만 채운다(목록 조회 시점에
-    # 한 번에 묻는다 — `GoalRepo.goal_ids_with_plan`). 그 외 응답은 기본값 `True` 로 둬서
-    # 단건 응답이 카드를 **미계획으로 잘못 칠하지 않게** 한다(다음 목록 새로고침이 채운다).
+    # 이 목표에 **이번 주기 계획 트리가 있는가**. `GET /goals` 는 목록 조회 시점에 한 번에,
+    # 단건 응답(update/park/complete/promote/ultimate)은 그 목표 하나를 묻는다 —
+    # `GoalRepo.goal_ids_with_plan`. 새로 만든 목표(`POST /goals`)는 정의상 `false`
+    # (v2.30-goals — 예전엔 단건 응답이 늘 `true` 라 '미계획'·'계획 세우기' 가 사라졌다).
     #
     # ⚠️ `status` 로 대신할 수 없다. 계획 승인은 인터뷰가 뽑은 목표를 **전부** `active` 로
     # 승격하는데 계획은 heaviest **하나**에만 생긴다 — 실측으로 계획 없는 active 가 24건.
@@ -51,12 +81,17 @@ class GoalsByTier(CamelModel):
 class GoalCreateRequest(CamelModel):
     """POST /goals 요청."""
 
-    title: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=GOAL_TITLE_MAX_LENGTH)
     category: str
     goal_tier: GoalTier
     priority_level: int = Field(ge=1, le=5)
     deadline: str | None = None
-    estimated_minutes: int | None = None
+    estimated_minutes: int | None = Field(default=None, ge=0, le=GOAL_ESTIMATED_MINUTES_MAX)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title(cls, v: object) -> object:
+        return clean_title(v, noun="목표 이름", max_length=GOAL_TITLE_MAX_LENGTH)
 
 
 class GoalUpdateRequest(CamelModel):
@@ -67,11 +102,16 @@ class GoalUpdateRequest(CamelModel):
     성공 후 실제로 값이 달라졌을 때만 띄운다(자동 재계획·강제 이동 없음).
     """
 
-    title: str | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=GOAL_TITLE_MAX_LENGTH)
     category: str | None = None
     deadline: str | None = None
     priority_level: int | None = Field(default=None, ge=1, le=5)
     goal_tier: GoalTier | None = None
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title(cls, v: object) -> object:
+        return clean_title(v, noun="목표 이름", max_length=GOAL_TITLE_MAX_LENGTH)
 
 
 GoalNodeType = Literal["core", "subgoal", "milestone", "leaf"]

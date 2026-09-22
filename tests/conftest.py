@@ -537,10 +537,10 @@ class FakeGoalRepo:
         return None
 
     async def get_mandala_node(self, user_id: UUID, node_id: UUID) -> Any | None:
-        """실 repo 와 동일 — goal 소유권 + `tree_kind='mandala'` + 미보관만 통과."""
+        """실 repo 와 동일 — goal 소유권(보관된 목표 제외) + `tree_kind='mandala'` + 미보관만."""
         for goal_id, nodes in self._nodes.items():
             goal = self._items.get(goal_id)
-            if goal is None or goal.user_id != user_id:
+            if goal is None or goal.user_id != user_id or goal.archived_at is not None:
                 continue
             for n in nodes:
                 if (
@@ -621,6 +621,7 @@ class FakeGoalRepo:
         deadline: date | None = None,
         priority_level: int | None = None,
         goal_tier: str | None = None,
+        clear_deadline: bool = False,
     ) -> Goal:
         if title is not None:
             goal.title = title
@@ -628,6 +629,9 @@ class FakeGoalRepo:
             goal.category = category
         if deadline is not None:
             goal.deadline = deadline
+        elif clear_deadline:
+            # `None` 은 "안 바꿈" 이라 명시적 해제는 따로 받는다(PATCH `deadline: null`).
+            goal.deadline = None
         if priority_level is not None:
             goal.priority_level = priority_level
         if goal_tier is not None:
@@ -642,16 +646,43 @@ class FakeGoalRepo:
         goal.archived_at = datetime.now(UTC)
         goal.status = "archived"
 
+    async def archive_nodes(self, nodes: Any) -> None:
+        now = datetime.now(UTC)
+        for n in nodes:
+            if n.archived_at is None:
+                n.archived_at = now
+
     async def expire_stale_proposed(self, *, before: datetime, archived_at: datetime) -> int:
         # 실 GoalRepo.expire_stale_proposed 의 WHERE 를 손으로 그대로 옮긴다 (#178) —
         # status=='proposed' + archived_at IS NULL + created_at < before, 셋 다 있어야 한다.
+        # 살아 있는 만다라 축이 승격한 목표는 빼다(goals-7) — 실 repo 의 NOT EXISTS 와 같은 판정.
+        promoted = {
+            getattr(nd, "promoted_goal_id", None)
+            for nodes in self._nodes.values()
+            for nd in nodes
+            if getattr(nd, "tree_kind", "plan") == "mandala" and nd.archived_at is None
+        }
         n = 0
         for g in self._items.values():
-            if g.status == "proposed" and g.archived_at is None and g.created_at < before:
+            if (
+                g.status == "proposed"
+                and g.archived_at is None
+                and g.created_at < before
+                and g.id not in promoted
+            ):
                 g.status = "archived"
                 g.archived_at = archived_at
                 n += 1
         return n
+
+    async def live_goal_ids(self, user_id: UUID, goal_ids: Any) -> set[UUID]:
+        return {
+            gid
+            for gid in goal_ids
+            if (g := self._items.get(gid)) is not None
+            and g.user_id == user_id
+            and g.archived_at is None
+        }
 
 
 class FakeHabitRepo:
@@ -736,6 +767,15 @@ class FakeHabitRepo:
     async def soft_delete(self, habit: Habit) -> None:
         habit.archived_at = datetime.now(UTC)
 
+    async def archive_linked_to_nodes(self, user_id: UUID, node_ids: Any) -> int:
+        wanted = set(node_ids)
+        n = 0
+        for h in self._items.values():
+            if h.user_id == user_id and h.goal_node_id in wanted and h.archived_at is None:
+                h.archived_at = datetime.now(UTC)
+                n += 1
+        return n
+
     def seed(self, habit: Habit) -> None:
         """테스트 보조 — habit 직접 주입."""
         self._items[habit.id] = habit
@@ -762,7 +802,29 @@ class FakeHabitInstanceRepo:
         return items
 
     async def get_for_user(self, user_id: UUID, instance_id: UUID) -> HabitInstance | None:
-        return self._items.get(instance_id)
+        instance = self._items.get(instance_id)
+        if instance is not None and self._habits is not None:
+            # 실 repo 는 habits 조인으로 소유자·보관을 본다 — 습관을 아는 경우에만 흉내 낸다.
+            habit = self._habits._items.get(instance.habit_id)
+            if habit is not None and (habit.user_id != user_id or habit.archived_at is not None):
+                return None
+        return instance
+
+    async def ensure_for_week(self, user_id: UUID, week_start: date) -> None:
+        if self._habits is None:
+            return
+        for habit in await self._habits.list_active(user_id):
+            await self.create_or_get_for_week(habit.id, week_start, habit.target_count)
+
+    async def decrement_done(self, instance: HabitInstance) -> HabitInstance:
+        instance.done_count = max(instance.done_count - 1, 0)
+        return instance
+
+    async def sync_week_target(self, habit_id: UUID, week_start: date, target_count: int) -> None:
+        instance = await self.get_for_week(habit_id, week_start)
+        if instance is not None:
+            instance.target_count = target_count
+            instance.done_count = min(instance.done_count, target_count)
 
     async def list_recent_for_habit(
         self, habit_id: UUID, before_week: date, limit: int = 3
@@ -819,6 +881,9 @@ class FakeInboxRepo:
 
     def __init__(self) -> None:
         self._items: dict[UUID, InboxItem] = {}
+        # 실 repo 는 "이 항목에서 만든 카드가 있는가" 를 action_items 로 확인한다(restore).
+        # fake 는 action repo 를 모르므로 convert-to-action 으로 옮긴 id 를 따로 기억한다.
+        self._promoted_to_action: set[UUID] = set()
 
     async def list_by_status(self, user_id: UUID, status: str | None = None) -> list[InboxItem]:
         mine = [i for i in self._items.values() if i.user_id == user_id]
@@ -836,6 +901,10 @@ class FakeInboxRepo:
             return None
         return i
 
+    async def get_by_id_for_update(self, user_id: UUID, inbox_id: UUID) -> InboxItem | None:
+        # 행 잠금은 fake 에서 의미가 없다 — 실 SQL 의 FOR UPDATE 는 test_inbox_repo_sql 이 고정.
+        return await self.get_by_id(user_id, inbox_id)
+
     async def get_by_id_any(self, user_id: UUID, inbox_id: UUID) -> InboxItem | None:
         i = self._items.get(inbox_id)
         if i is None or i.user_id != user_id:
@@ -846,7 +915,10 @@ class FakeInboxRepo:
         if item.archived_at is None:
             return item
         item.archived_at = None
-        item.status = "classified" if item.ai_category_guess is not None else "captured"
+        if item.promoted_goal_id is not None or item.id in self._promoted_to_action:
+            item.status = "promoted"
+        else:
+            item.status = "classified" if item.ai_category_guess is not None else "captured"
         return item
 
     async def create(
@@ -903,6 +975,7 @@ class FakeInboxRepo:
 
     async def mark_promoted_to_action(self, item: InboxItem) -> InboxItem:
         item.status = "promoted"
+        self._promoted_to_action.add(item.id)
         return item
 
     async def soft_delete(self, item: InboxItem) -> None:

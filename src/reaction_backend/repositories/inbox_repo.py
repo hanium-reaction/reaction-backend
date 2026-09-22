@@ -18,6 +18,7 @@ from fastapi import Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.inbox_item import InboxItem
 from reaction_backend.db.session import get_db
 
@@ -50,6 +51,25 @@ class InboxRepo:
             InboxItem.id == inbox_id,
             InboxItem.user_id == user_id,
             InboxItem.archived_at.is_(None),
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_by_id_for_update(self, user_id: UUID, inbox_id: UUID) -> InboxItem | None:
+        """승격(convert-*)용 잠금 읽기 — `get_by_id` 와 같은 조건 + `FOR UPDATE`.
+
+        두 번 탭한 두 요청이 모두 "아직 승격 전" 을 읽고 카드·목표를 하나씩 만들던 경로다.
+        행을 잠그면 뒤 요청은 앞 요청이 commit 한 `status='promoted'` 를 본다(READ COMMITTED
+        에서 잠금 대기 뒤 행을 다시 읽는다). 읽기 전용 조회에는 쓰지 않는다.
+        """
+        stmt = (
+            select(InboxItem)
+            .where(
+                InboxItem.id == inbox_id,
+                InboxItem.user_id == user_id,
+                InboxItem.archived_at.is_(None),
+            )
+            .with_for_update()
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
@@ -143,13 +163,34 @@ class InboxRepo:
         """보관 해제 — archived_at 클리어 + status 를 활성 상태로 복원. 이미 활성이면 no-op(멱등).
 
         AI 분류가 있던 항목은 classified 로, 아니면 captured 로 되돌린다(분류 결과 보존).
+
+        **이미 목표·할 일로 옮긴 항목은 `promoted` 로 돌아온다.** 보관이 status 를
+        `archived` 로 덮어써서, 되살리면 옮기기 버튼이 다시 나타나 같은 메모로 카드·목표가
+        하나 더 생겼다. 목표는 `promoted_goal_id` 가, 할 일은 이 항목에서 만든 카드가 증거다
+        (inbox 에는 할 일 링크 컬럼이 없다). 추천 자료(system)는 승격 대상이 아니라 제외 —
+        '한 걸음 채택' 카드도 `inbox_item_id` 를 달지만 승격이 아니다.
         """
         if item.archived_at is None:
             return item
         item.archived_at = None
-        item.status = "classified" if item.ai_category_guess is not None else "captured"
+        if await self._was_promoted(item):
+            item.status = "promoted"
+        else:
+            item.status = "classified" if item.ai_category_guess is not None else "captured"
         await self._session.flush()
         return item
+
+    async def _was_promoted(self, item: InboxItem) -> bool:
+        if item.promoted_goal_id is not None:
+            return True
+        if item.source == "system":
+            return False
+        stmt = (
+            select(func.count())
+            .select_from(ActionItem)
+            .where(ActionItem.user_id == item.user_id, ActionItem.inbox_item_id == item.id)
+        )
+        return int((await self._session.execute(stmt)).scalar_one()) > 0
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_db)]

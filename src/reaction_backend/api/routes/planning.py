@@ -36,7 +36,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from typing import Annotated, Any, Literal, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from langchain_core.runnables import RunnableConfig
@@ -57,6 +57,7 @@ from reaction_backend.orchestrator import (
     first_plan_adapter,
     first_plan_milestones,
     goal_cycle,
+    goal_policy,
     inbox_resources,
     interview_adapter,
     interview_projection,
@@ -1385,8 +1386,6 @@ async def approve_mandala_draft(
 # 승격(멱등) → 시드 교체 → 같은 First Plan 경로 → Draft. 승인은 기존 approve 그대로다.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_MANDALA_TIER_LIMITS: dict[str, int] = {"focus": 3, "maintain": 5}  # parked 자유(§1.4)
-
 
 async def _promote_axis_for_cycle(
     session: AsyncSession,
@@ -1401,34 +1400,10 @@ async def _promote_axis_for_cycle(
     반환: (Goal, 이 호출이 새로 승격했는지). tier 한도는 **새로 만들 때만** 잰다 — 이미 있는
     목표를 다시 여는 데 한도를 걸면 Focus 가 꽉 찬 사용자가 자기 목표의 다음 주기를 못 연다.
     """
-    if node.promoted_goal_id is not None:
-        existing = await goal_repo.get_by_id(user_id, node.promoted_goal_id)
-        if existing is not None:
-            return existing, False
-
-    limit = _MANDALA_TIER_LIMITS.get(goal_tier)
-    if limit is not None and await goal_repo.count_by_tier(user_id, goal_tier) + 1 > limit:
-        raise ApiError(
-            ErrorCode.GOAL_TIER_LIMIT_EXCEEDED,
-            f"{goal_tier.capitalize()} 목표는 최대 {limit}개까지 가질 수 있어요.",
-            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-            field="goalTier",
-        )
-
-    goal = Goal()
-    goal.id = uuid4()
-    goal.user_id = user_id
-    goal.title = node.title
-    goal.category = "other"  # 만다라 축엔 category 개념이 없다(`promote_mandala_node` 와 동일)
-    goal.goal_tier = goal_tier
-    goal.status = "proposed"
-    goal.priority_level = 3
-    goal.is_ultimate = False
-    goal.why_now = node.why_text
-    session.add(goal)
-    await session.flush()
-    node.promoted_goal_id = goal.id
-    return goal, True
+    # 승격 규칙(멱등 판정을 lock 뒤에서 다시 읽기·한도·목표 만들기)은 `promote` 와 한 벌이다.
+    return await goal_policy.promote_axis(
+        session, goal_repo, node=node, user_id=user_id, goal_tier=goal_tier
+    )
 
 
 async def _cycle_seed_outcome(
@@ -1532,7 +1507,8 @@ async def open_mandala_next_cycle(
             for n in await goal_repo.list_nodes(node.goal_id, tree_kind="mandala")
             if n.parent_node_id == node.id and n.depth == 2
         ]
-        milestones = mandala_cycle.cells_as_milestones(cells) or None
+        repeat_cells = await mandala_adapter.fetch_habits_for_nodes(session, [c.id for c in cells])
+        milestones = mandala_cycle.cells_as_milestones(cells, exclude_ids=set(repeat_cells)) or None
 
     # 승격은 계획 생성 전에 커밋한다 — 분해(LLM)가 실패해도 축이 목표로 남아야 사용자가
     # 다시 눌렀을 때 중복 목표가 생기지 않는다(`_promote_axis_for_cycle` 의 멱등 전제).

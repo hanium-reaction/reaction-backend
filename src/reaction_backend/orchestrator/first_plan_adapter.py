@@ -39,6 +39,7 @@ from reaction_backend.orchestrator.escalation import (
     L1_CONSECUTIVE_FAILURE_THRESHOLD,
     L3_GOAL_FAILURE_THRESHOLD,
 )
+from reaction_backend.orchestrator.goal_policy import TIER_LIMITS
 from reaction_backend.orchestrator.goal_structuring import (
     BusyBlock,
     DraftPlan,
@@ -2842,11 +2843,10 @@ async def materialize_goals(
     return goal_rows, heaviest
 
 
-# Focus ≤ 3 / Maintain ≤ 5 (DevBaseline §1.4). `goals.py::_TIER_LIMITS` 와 값이 같아야
-# 한다 — 직접 생성 경로와 승인 경로가 다른 한도를 쓰면 안 된다. `orchestrator` 가
-# `api/routes`(상위 계층)를 import 할 수 없어(§5 import 방향) 공유 상수로 못 묶고 여기
-# 복제한다(`api/routes/planning.py::_MANDALA_TIER_LIMITS` 도 같은 이유로 이미 복제돼 있다).
-_TIER_LIMITS: dict[str, int] = {"focus": 3, "maintain": 5}
+# Focus ≤ 3 / Maintain ≤ 5 (DevBaseline §1.4) — 직접 생성 경로와 승인 경로가 다른 한도를 쓰면
+# 안 되므로 `goal_policy.TIER_LIMITS` 한 벌을 쓴다(예전엔 라우터 쪽 상수를 import 할 수 없어
+# 여기 복제했다 — 지금은 같은 orchestrator 계층에 있다).
+_TIER_LIMITS = TIER_LIMITS
 
 
 async def _park_tier_overflow_on_approval(

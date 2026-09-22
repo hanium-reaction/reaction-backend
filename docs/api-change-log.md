@@ -385,6 +385,84 @@ done 인데 남은 회차 블록은 `scheduled` 로 남아 주간표에 할 일�
   주간 리뷰는 0 으로 센다. 응답 모양 무변경.
 - 이미 저장된 값은 소급해 고치지 않는다.
 
+## v2.30-goals — 2026-09-18 (목표·습관·인박스 정합성)
+
+동작 수정 + additive 변경만. 응답 envelope·에러 형태·기존 필드/코드 무변경, 마이그레이션 없음.
+
+### `DELETE /goals/{id}` — 지운 목표의 카드·블록·만다라·습관이 멈춘다
+
+- 예전엔 목표 행만 보관해서, 지운 목표의 예정 카드가 오늘 화면·주간 캘린더·아침 브리프·`pre_card`
+  알림에 계속 떴다(취소는 "계획에 묶여 있어" 거절). 이제 **완료와 같은 정리**를 한다 — 예정 카드
+  `archivedAt`, 블록 `cancelled`. 시작·완료·실패한 카드와 사용자가 옮긴(`user_edit`) 카드는 보존.
+- 궁극목표를 지우면 만다라 노드를 보관하고, 그 칸에서 만든 반복형 습관도 보관한다.
+- 보관된 궁극목표의 만다라 칸은 편집·승격·반복형 전환·다음 주기 모두 404 `GOAL_NOT_FOUND`.
+
+### Focus ≤ 3 / Maintain ≤ 5 가 동시 요청에서도 지켜진다
+
+- 한도를 거는 모든 쓰기(`POST /goals`, tier 를 바꾸는 `PATCH /goals/{id}`, 완료 되돌리기,
+  축 `promote`, `POST /plans/mandala/next-cycle`, 인박스 `convert-to-goal`)가 **세기 전에 사용자 단위
+  advisory lock** 을 잡는다. 두 번 탭이 둘 다 통과해 Focus 4개가 되던 경합이 막힌다. 뒤 요청은
+  보통 422 `GOAL_TIER_LIMIT_EXCEEDED`, 5초 안에 차례가 안 오면 기존 409 `AGENT_CONCURRENT_ACCESS`.
+- 422 문구가 화면 이름으로 바뀐다 — `Focus 목표는…` → `집중 목표는 최대 3개까지예요. …`.
+  코드·`field="goalTier"` 는 그대로. category 오류 문구도 영문 enum 목록 대신 "목표 분류 값이 올바르지 않아요."
+
+### 인박스 옮기기 — 한 메모는 한 번만 옮겨진다
+
+- `convert-to-goal` / `convert-to-action` 이 **멱등**이 된다 — 같은 쪽으로 다시 누르면 새로 만들지
+  않고 지금 항목을 200 으로(두 번 탭·재시도로 카드·목표가 하나씩 더 생기던 경로). 다른 쪽으로
+  옮기려 하면 409 `INBOX_ALREADY_PROMOTED`(기존 코드 — 발생 지점만 생겼다, FE 는 문구를 이미 매핑).
+  동시에 온 두 요청은 항목 행 잠금으로 직렬화된다.
+- `convert-to-goal` 의 목표 제목은 메모 앞 200자(`goals.title` 길이, 넘으면 `…`). 예전엔 200자 넘는
+  메모가 500 이었고 다시 눌러도 영영 안 됐다. 원문은 인박스 항목에 그대로 남는다.
+- `restore` — 이미 옮긴 항목은 `promoted` 로 돌아온다(예전엔 옮기기 버튼이 다시 떴다).
+- `PATCH /inbox/{id}` — 옮긴 항목을 `captured`/`classified` 로 되돌리면 409 `INBOX_ALREADY_PROMOTED`.
+  `status="archived"` 는 `archive` 와 같은 보관(`archivedAt` 까지).
+- `GET /inbox?status=<없는 값>` 은 500 대신 422 `COMMON_VALIDATION_ERROR`.
+
+### 제목·숫자 입력 상한 — 500 대신 한국어 422
+
+- 목표·습관 `title`(`POST`/`PATCH /goals`, `POST`/`PATCH /habits`, 반복형 전환 `title`)은 앞뒤 공백을 떼고
+  1~200자. 예전엔 200자를 넘으면 DB 가 500 을 냈고("잠시 후 다시 시도" — 다시 해도 영영 안 됐다),
+  공백뿐인 제목이 그대로 저장됐다. 이제 422 `COMMON_VALIDATION_ERROR` + 한국어 문구(`field="title"`).
+- `estimatedMinutes` 0~1,000,000, `minutesPerSession` 1~1440 — 32bit 를 넘는 값이 500 이던 경로.
+- `POST /goals/ultimate` — 인터뷰 문장이 200자를 넘으면 제목만 앞 200자(`…`)로 저장. 예전엔 인터뷰를
+  다 마치고도 저장이 계속 실패했다.
+- 만다라 축(1~10자)·칸(1~16자) 제목 — 허용 범위는 그대로, 영어 pydantic 문구 대신
+  "축 이름은 1~10자로 적어 주세요." 처럼 한국어로. `field` 는 예전처럼 `subgoals.3.title`.
+
+### 습관 — 체크가 맞는 주·맞는 목표로 들어가고, 되돌릴 수 있다
+
+- **새 endpoint** `POST /habit-instances/{id}/uncheck` — 1회 되돌리기(0 아래로 안 내려감). 응답은 `check` 와 같다.
+- `Habit` 응답에 **`currentInstanceId`**(additive) — `POST /habits`·반복형 전환 응답에만 이번 주 인스턴스
+  id 를 싣는다(방금 만든 습관의 체크가 서버에 안 올라가던 경로). 그 외 응답은 `null`.
+- 등록한 주의 목표는 남은 날만큼(`ceil(빈도 × 남은 날 / 7)`, 최소 1) — 토요일에 '매일' 을 만들면 0/7 대신 0/2.
+- `check` 가 지난 주 인스턴스로 오면 이번 주 인스턴스를 올려 돌려준다(지난 주 기록은 그대로).
+  `GET /habit-instances`(이번 주)는 cron 전에도 없는 인스턴스를 채운다. 동시에 온 두 체크는 둘 다 센다.
+- `PATCH /habits/{id}` 빈도 변경·빈도 줄이기 수락이 **이번 주 `targetCount`** 도 바꾼다(한 횟수는 새 목표에서 멈춤).
+- `POST /habits` 의 `category` 가 목표 전용 값(`project`/`schedule`/`career`)이면 `other` 로 받는다(예전 422).
+- 빈도 줄이기 후보: 주 1회 습관은 제외(“주 1회 → 1회” 카드가 사라짐), 안내 문구는 소수 평균 대신 3주 합계.
+
+### 목표 마감 해제·완료 되돌리기
+
+- `PATCH /goals/{id}` — `deadline: null`(또는 `""`)을 명시하면 마감 해제, 빼면 그대로(예전엔 해제 불가).
+  형식 오류 문구에서 필드 이름을 뺐다("마감일은 2026-12-31 처럼 연-월-일로 적어 주세요.").
+- `POST /goals/{id}/complete` `{completed:false}` 는 완료한 목표만 되돌린다. `proposed`·`active` 엔 no-op 200
+  (예전엔 `proposed` 가 `active` 로 승격돼 계획 승인·tier 한도를 건너뛰었다).
+
+### 목표 카드·만다라·코칭 안내가 사실과 맞는다
+
+- 단건 목표 응답의 `hasPlan` 이 실제 값이다 — `POST /goals` 는 `false`, `PATCH`·`park`·`complete`·`promote`·
+  `ultimate` 는 그 목표의 계획 트리를 물어 채운다(예전엔 늘 `true`).
+- 만다라 중앙 칸 = 궁극목표 문장 — 목표 제목을 고치면(또는 재인터뷰) 중앙 칸도, 중앙 칸을 고치면 목표 제목도
+  바뀐다. 이미 어긋난 트리도 `GET /goals/{id}/mandala` 가 중앙 칸에 `statement` 를 싣는다.
+- 만다라 축에서 올린 목표는 14일 잠정 목표 만료에서 빠진다. 올린 목표를 지우면 그 축의 `promotedGoalId` 는
+  `null` 로 나간다(예전엔 "이미 학기 목표로 올린 축" 배지가 남았다).
+- `POST /plans/mandala/next-cycle` 의 칸 → 마일스톤에서 반복형(습관 링크) 칸과 규칙 자리표시 칸(`source="rule"`)을 뺀다.
+- 주간 리뷰 `mandala.untouchedAxisTitles`·`staleAxisProposals` — 칸을 다 끝낸 축은 "손 못 댄 축" 이 아니다.
+- `GET /inbox/coaching-advice` 의 마지막 안내는 진행 중·보류 아님·궁극목표 아님인 목표에서만(없으면 생략).
+- 축 승격(`promote`)과 `POST /plans/mandala/next-cycle` 이 같은 승격 규칙을 쓴다 — 같은 축을 두 요청이 동시에
+  올려도 목표는 하나(두 번째는 첫 목표를 그대로 돌려준다). 응답 형태는 그대로.
+
 ---
 
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)
