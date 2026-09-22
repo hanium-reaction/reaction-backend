@@ -650,6 +650,12 @@ def _week_bounds(monday: date) -> tuple[datetime, datetime]:
 
 
 def _parse_week_start(raw: str | None) -> date:
+    """`weekStart` → 그 주 월요일. 미지정이면 이번 주.
+
+    문장에 요청 필드 이름(`weekStart`)을 싣지 않는다 — FE 가 422 `message` 를 그대로 띄우는데
+    사용자에게 'weekStart' 는 아무 뜻도 아니다(`/calendar` 의 같은 문구와 맞췄다). 어느 값이
+    문제인지는 `field` 가 그대로 들고 있다.
+    """
     if raw is None:
         return _monday_of(now_kst().date())
     try:
@@ -657,7 +663,7 @@ def _parse_week_start(raw: str | None) -> date:
     except ValueError as e:
         raise ApiError(
             ErrorCode.PLAN_INVALID_TIME,
-            "weekStart 는 YYYY-MM-DD 형식이어야 해요.",
+            "날짜 형식이 올바르지 않아요 (YYYY-MM-DD).",
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="weekStart",
         ) from e

@@ -666,7 +666,9 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 
 #21-B 구현 메모 (S14/S15 — 영속 `scheduled_blocks` 읽기/이동):
 - Plan 테이블 없음 — `planId` 는 주(週) 논리 식별자(`plan_<weekStart>`). 편집 권한은 `blockId`.
-- `GET /plans/weekly?weekStart=` — 그 주 월요일로 정규화(생략 시 이번 주). 7일 × `blocks[]`
+- `GET /plans/weekly?weekStart=` — 그 주 월요일로 정규화(생략 시 이번 주). 날짜 형식이 아니면 422
+  `PLAN_INVALID_TIME`, `field="weekStart"`, 메시지 "날짜 형식이 올바르지 않아요 (YYYY-MM-DD)."
+  (문장에 요청 필드 이름을 싣지 않는다 — `/calendar` 의 같은 문구와 맞췄다). 7일 × `blocks[]`
   (blockId/actionId/title/category/**goalId**/startAt/endAt/blockStatus/source/**calendarConflict**(v2.27)/**completionStatus**(v2.30-planA)), KST 직렬화. 최상단 `calendar`(v2.27, §10 "캘린더 겹침").
   `blockStatus` 는 `scheduled`/`started`/`finished` 뿐이다(`done`/`failed` 는 없다) — 체크인은 결과와
   무관하게 블록을 `finished` 로 닫는다. 완료·실패 구분은 `completionStatus`
