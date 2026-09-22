@@ -4,12 +4,12 @@
 순수 함수 — LLM/DB 무관.
 
 - `context_from_outcome`: LLM 분해 프롬프트(`planning/goal_decompose`) 변수 + 룰
-  스케줄러(`goal_structuring.GoalStructuringInput`) 조립에 쓸 요약 dict.
-- `time_policies_from_outcome` / `action_placements`: 룰 스케줄러
-  (`goal_structuring.py`) 가 free/busy 계산·배치에 그대로 쓰는 구조적 입력으로 환원.
-  ORM 없이 Protocol(TimePolicyLike/HabitLike)만 만족시키므로 LLM/DB 무관.
-- 실제 DB 영속화(`db_apply_first_plan`)는 사용자 [수락] 후 라우터/SAVING 노드에서만
-  수행 (AGENTS.md §1.4 자동 적용 금지) — 본 베이스라인에서는 시그니처만 정의.
+  스케줄러 조립에 쓸 요약 dict.
+- `time_policies_from_outcome` / `plan_actions_from_decomposition`: 다일 스케줄러
+  (`plan_scheduler.py`)와 busy 계산(`goal_structuring.py`)이 그대로 쓰는 구조적 입력으로
+  환원. ORM 없이 Protocol(TimePolicyLike)만 만족시키므로 LLM/DB 무관.
+- 실제 DB 영속화(`db_apply_first_plan`)는 사용자 [수락] 후 승인 라우트에서만 수행한다
+  (AGENTS.md §1.4 자동 적용 금지). 이 부분은 DB 를 쓰는 예외 구간이다.
 """
 
 from __future__ import annotations
@@ -44,7 +44,6 @@ from reaction_backend.orchestrator.goal_structuring import (
     BusyBlock,
     DraftPlan,
     DraftScheduledBlock,
-    HabitLike,
     PolicyViolationError,
     TimeInterval,
     TimePolicyLike,
@@ -55,6 +54,7 @@ from reaction_backend.orchestrator.plan_scheduler import PlanAction, PlanWindow
 from reaction_backend.repositories.goal_repo import GoalRepo
 from reaction_backend.repositories.recovery_repo import RecoveryOutcomeContext
 from reaction_backend.repositories.review_repo import TopFailureContext
+from reaction_backend.safety import banned_words
 from reaction_backend.schemas.common import now_kst, to_kst
 from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome, TimeRange
 from reaction_backend.schemas.planning import (
@@ -187,8 +187,58 @@ def materials_for_prompt(note: str | None, *, fetched: str | None = None) -> str
     return _fence(_clip(note))
 
 
+def heaviest_goal(outcome: InterviewOutcome) -> GoalCandidate:
+    """이번 계획이 다루는 목표 — `is_heaviest` 인 첫 목표, 없으면 첫 목표.
+
+    분해·세션 길이·케이던스·안내 문구가 모두 이 한 목표를 기준으로 한다. 예전엔 같은
+    `next(...)` 식이 이 파일과 `first_plan`·`first_plan_milestones` 에 스무 번 넘게 복사돼
+    있어 규칙을 바꾸려면 전부 고쳐야 했다(planB-18). 선택 규칙은 **그대로** 옮겼다 —
+    자리표시자도 걸러내지 않고(그건 라우트 게이트 몫), 목표가 비면 IndexError 다.
+    """
+    return next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+
+
+def heaviest_goal_or_none(outcome: InterviewOutcome) -> GoalCandidate | None:
+    """`heaviest_goal` 과 같은 규칙, 목표가 없으면 None — 목표 없이도 도는 노드용."""
+    return heaviest_goal(outcome) if outcome.core_goals else None
+
+
 # 다른 목표를 문구에 몇 개까지 나열할지 — 그 이상은 "외 N개" 로 접는다.
 _DEFERRED_GOALS_SHOWN = 3
+
+
+def format_title_list(titles: Sequence[str], *, limit: int = _DEFERRED_GOALS_SHOWN) -> str:
+    """제목 목록 → "'A' · 'B' · 'C' 외 N개" — 안내 문구가 목록을 싣는 **한 가지** 모양.
+
+    ⚠️ **이 결과 뒤에 조사를 붙이지 않는다.** 은/는·을/를은 마지막 글자의 받침에 따라
+    갈리는데 목록 끝은 사용자·LLM 이 지은 제목이거나 '외 N개' 라 받침을 알 수 없다. 예전엔
+    다섯 곳이 제각기 `{listed}는` 을 붙여 "'토익 900점' · '운동'는" 같은 틀린 문장이 첫 계획
+    화면에 나갔다(planB-11·journey-9). 목록은 "…: {목록} — …" 처럼 절 끝이나 콜론 뒤에만 둔다
+    (`missing_milestones_notice` 가 먼저 쓰던 문형).
+    """
+    shown = list(titles)[:limit]
+    rest = len(titles) - len(shown)
+    return " · ".join(f"'{t}'" for t in shown) + (f" 외 {rest}개" if rest > 0 else "")
+
+
+def ko_date(value: date | str | None, *, today: date | None = None) -> str:
+    """날짜 → "10월 15일" (해가 `today` 와 다르면 "2027년 8월 30일"). 안내 문구 전용.
+
+    예전엔 ISO 문자열("2026-10-15 까지고")을 그대로 문장에 끼워 넣었다(planB-11) — 화면이
+    개발자용 표기를 보여 주는 셈이다. 날짜로 읽히지 않는 값은 받은 그대로 돌려준다.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        try:
+            day = date.fromisoformat(value)
+        except ValueError:
+            return value
+    else:
+        day = value
+    if today is not None and day.year != today.year:
+        return f"{day.year}년 {day.month}월 {day.day}일"
+    return f"{day.month}월 {day.day}일"
 
 
 def other_goals_deferred_notice(outcome: InterviewOutcome) -> str | None:
@@ -210,12 +260,9 @@ def other_goals_deferred_notice(outcome: InterviewOutcome) -> str | None:
         return None
     heaviest = next((g for g in real if g.is_heaviest), real[0])
     others = [g.title for g in real if g is not heaviest]
-    shown = others[:_DEFERRED_GOALS_SHOWN]
-    rest = len(others) - len(shown)
-    listed = " · ".join(f"'{t}'" for t in shown) + (f" 외 {rest}개" if rest else "")
     return (
         f"이번 계획은 '{heaviest.title}' 한 가지에 집중했어요. "
-        f"{listed}는 이번 계획에 넣지 않았어요 — 다음 계획에서 다룰 수 있어요."
+        f"이번 계획에 넣지 않은 목표: {format_title_list(others)} — 다음 계획에서 다룰 수 있어요."
     )
 
 
@@ -233,7 +280,7 @@ def materials_link_only_warning(
     - 못 열었으면 그 사유를 담은 `fetch_notice` 를 쓴다("로그인이 필요한 페이지라…").
       사유를 못 받았을 때만 기존 문구로 폴백한다.
     """
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    heaviest = heaviest_goal(outcome)
     if not materials_is_link_only(heaviest.materials_note):
         return None
     if fetched:
@@ -323,7 +370,7 @@ def session_min_for(outcome: InterviewOutcome, *, default: int = _DEFAULT_SESSIO
     고쳤지만, 상한이 실행 불가능한 값이 되는 경로를 여기서 한 번 더 막는다 — "한 번에 15분도
     집중 못 한다" 는 답은 계획을 세울 수 없다는 뜻이지 15분 미만 카드를 만들라는 뜻이 아니다.
     """
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    heaviest = heaviest_goal(outcome)
     value = heaviest.session_length_min or outcome.preferences.focus_duration_min
     resolved = value if value and value > 0 else default
     return max(resolved, _MIN_ACTION_MINUTES)
@@ -349,7 +396,7 @@ def planned_session_min_for(outcome: InterviewOutcome) -> int:
     빈도·주당 시간 중 하나라도 없으면 화해할 게 없으므로 집중 용량을 그대로 쓴다.
     """
     capacity = session_min_for(outcome)
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    heaviest = heaviest_goal(outcome)
     freq, hours = heaviest.frequency_per_week, heaviest.weekly_hours
     if not freq or freq <= 0 or not hours or hours <= 0:
         return capacity
@@ -371,31 +418,57 @@ def volume_shortfall_warning(
 
     부족분을 조용히 삼키지 않고 conflict_report 로 올리는 이유는 그대로다 — 두 답이 서로 맞지
     않는다는 사실 자체가 사용자가 판단할 정보다(AGENTS §1).
+
+    ⚠️ **사용자가 말하지 않은 숫자를 사용자 말처럼 인용하지 않는다** (planB-7). 새 인터뷰는
+    길이·빈도를 답하면 주당 시간을 묻지 않고 `max(1, round(길이×빈도))` 로 **반올림해** 채운다
+    (`interview_adapter.derived_weekly_hours`). 그 값을 그대로 쓰면 '30분씩 주 3회'(1.5시간)가
+    "주 2시간 쓸 수 있다고 하셨는데" 가 되고, 올림분 30분이 허용 오차를 먹어 LLM 이 세션을
+    조금만 줄여도 경고가 떴다. 주당 시간이 길이×빈도의 반올림과 같으면 **길이×빈도 그대로**를
+    기준으로 삼고 그 두 답을 인용한다. 직접 답한 다른 값(주 5시간 · 주 3회 · 1시간)이면 종전대로
+    그 값을 인용한다 — 그때의 어긋남은 사용자가 판단할 진짜 정보다.
+
+    집중 가능한 시간도 같다 — 목표별 길이도 전역 집중 시간도 답하지 않아 기본값(50분)이면
+    "~라고 하셨거든요" 대신 기본값으로 잡았다고 말한다.
     """
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    heaviest = heaviest_goal(outcome)
     hours = heaviest.weekly_hours
     if not hours or hours <= 0 or planned_minutes <= 0 or span_days <= 0:
         return None
-    stated_min = hours * 60
+    freq, length = heaviest.frequency_per_week, heaviest.session_length_min
+    derived = bool(
+        freq and freq > 0 and length and length > 0 and hours == max(1, round(freq * length / 60))
+    )
+    stated_min = freq * length if derived and freq and length else hours * 60
     actual_weekly_min = planned_minutes * 7 / span_days
     if actual_weekly_min >= stated_min - _SHORTFALL_TOLERANCE_MIN:
         return None
 
     # 원인이 '한 번에 집중 가능한 시간' 이면 그걸 짚어준다 — 사용자가 바꿀 수 있는 레버라서.
-    freq, capacity = heaviest.frequency_per_week, session_min_for(outcome)
+    capacity = session_min_for(outcome)
+    capacity_answered = bool(length or outcome.preferences.focus_duration_min)
     reason = ""
     if freq and freq > 0 and round(stated_min / freq) > capacity:
+        told = (
+            f"한 번에 집중 가능한 시간을 {capacity}분이라고 하셨거든요"
+            if capacity_answered
+            else f"한 번에 얼마나 집중할 수 있는지는 아직 몰라서 기본값 {capacity}분으로 잡았거든요"
+        )
         reason = (
-            f" 주 {freq}회로 나누면 한 번에 {round(stated_min / freq)}분씩 해야 하는데 "
-            f"한 번에 집중 가능한 시간을 {capacity}분이라고 하셨거든요 — "
+            f" 주 {freq}회로 나누면 한 번에 {round(stated_min / freq)}분씩 해야 하는데 {told} — "
             "횟수를 늘리거나 한 번에 하는 시간을 늘리면 더 담을 수 있어요."
         )
     else:
         reason = " 목표를 더 잘게 나누면 남은 시간도 채울 수 있어요."
-    return (
-        f"주 {hours}시간 쓸 수 있다고 하셨는데 이번 계획은 "
-        f"주 {actual_weekly_min / 60:.1f}시간이에요.{reason}"
+    # 사용자가 고른 칩 그대로 되읽는다 — '매일' 을 고른 사람에게 '주 7회' 라고 하지 않는다.
+    cadence = "매일" if freq == 7 else f"주 {freq}회"
+    said = (
+        # 시간 표기는 소수 한 자리까지 — 자유 입력 길이(20·40분)면 길이×빈도가 딱 안 떨어져
+        # `:g` 로는 '주 2.33333시간' 이 나갔다.
+        f"{cadence} {length}분씩(주 {_hours_label(stated_min)}) 하고 싶다고 하셨는데"
+        if derived
+        else f"주 {hours}시간 쓸 수 있다고 하셨는데"
     )
+    return f"{said} 이번 계획은 주 {actual_weekly_min / 60:.1f}시간이에요.{reason}"
 
 
 # 세션 하한(분). 이보다 짧으면 체크인 단위로서 의미가 없어 하한으로 올린다(9분 garbage 방지).
@@ -535,6 +608,31 @@ def placement_days_needed(planned_min: int, weekly_min: int) -> int:
     return max(1, -(-max(planned_min, 0) * 7 // max(weekly_min, 1)))
 
 
+def requested_sessions_per_week(outcome: InterviewOutcome) -> int | None:
+    """사용자가 **직접 말한** 주당 횟수('매일'=7, '주 3회'=3). 말하지 않았으면 None.
+
+    `target_sessions_per_week` 와 같은 클램프(상한 14)를 쓰되, 주당 시간·density 에서
+    **파생한** 개수는 돌려주지 않는다 — 그건 시간을 길이로 나눈 값이지 약속한 횟수가 아니라
+    (`cadence_session_cap` 과 같은 구분), 주 단위 개수를 묶을 근거가 못 된다.
+    """
+    heaviest = heaviest_goal(outcome)
+    freq = heaviest.frequency_per_week
+    if not freq or freq <= 0:
+        return None
+    return max(1, min(freq, _MAX_SESSIONS_PER_WEEK))
+
+
+def cadence_days_needed(session_count: int, per_week: int) -> int:
+    """세션 `session_count` 개를 주 `per_week` 회로 놓는 데 필요한 **일 수** (최소 1).
+
+    `placement_days_needed` 의 개수판이다. 빈도를 말한 목표는 횟수가 곧 사용자의 답이라,
+    분으로만 창을 재면 LLM 이 세션을 짧게 잡는 순간(ADR-0009 D2 가 허용한다) 창이 줄어
+    같은 개수가 더 적은 날에 몰린다 — 실측: '매일 30분' 28세션이 740분이라 25일 창을 받아
+    하루에 두 번씩 잡힌 날이 생겼고, '주 5회' 20세션은 26일 창에서 한 주에 6개가 들어갔다.
+    """
+    return max(1, -(-max(session_count, 0) * 7 // max(per_week, 1)))
+
+
 def horizon_minute_budget(
     outcome: InterviewOutcome,
     density: str,
@@ -623,7 +721,7 @@ def session_count_rule(
             f"그보다 많아지고 긴 작업 위주면 적어진다. 개수를 맞추려고 길이를 조정하지 마라. "
             f"다만 {_MAX_LLM_SESSIONS}개는 넘기지 마라(한 번에 처리할 수 있는 양의 한계)."
         )
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    heaviest = heaviest_goal(outcome)
     return (
         f"세션 수는 **정확히 {count}개**로 하라 — 사용자가 '주 {heaviest.frequency_per_week}회' 라는 "
         f"횟수를 직접 말했고, 이 값이 그 케이던스다. 개수를 늘리면 그만큼 뒤쪽 세션이 잘려 "
@@ -707,7 +805,7 @@ def shape_action_plan(
     """
     items = normalize_action_minutes(outcome, list(goal_plan.action_items))
     nodes = list(goal_plan.goal_nodes)
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    heaviest = heaviest_goal(outcome)
     has_rate = (heaviest.weekly_hours and heaviest.weekly_hours > 0) or (
         heaviest.frequency_per_week and heaviest.frequency_per_week > 0
     )
@@ -748,7 +846,7 @@ def cadence_session_cap(
     그래서 빈도가 있으면 개수 상한을, 없으면 분 예산만 적용한다. 둘 다 있으면 먼저 닿는 쪽이
     이긴다 — 케이던스도 볼륨도 사용자가 말한 값이라 어느 쪽도 넘기지 않는다.
     """
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    heaviest = heaviest_goal(outcome)
     freq = heaviest.frequency_per_week
     if not freq or freq <= 0:
         return None
@@ -815,6 +913,139 @@ def drop_waiting_steps(goal_plan: GoalDecomposition) -> tuple[GoalDecomposition,
         return goal_plan, []
     kept = [a for a in goal_plan.action_items if not _WAITING_TITLE_RE.search(a.title)]
     return goal_plan.model_copy(update={"action_items": kept}), dropped
+
+
+def attach_orphan_actions(goal_plan: GoalDecomposition) -> GoalDecomposition:
+    """트리에 없는 `node_id` 를 가리키는 카드에 leaf 노드를 만들어 root 아래에 단다 (planB-14).
+
+    `GoalDecomposition` 에는 참조 검증이 없어 LLM 이 `leaf_extra_1` 처럼 트리에 없는 노드로
+    카드를 내면 그대로 통과했다(미러 실측: 마감이 먼 토익 계획의 카드 2장). 승인은
+    `node_by_temp.get(item.node_id)` 가 None 이라 `goal_node_id` 없이 저장했고, 그 카드는
+    캘린더엔 있는데 목표 화면의 단계 트리·진행률·이어가기 채우기 문맥에서 빠졌다.
+
+    버리지 않고 달아 준다 — 카드 내용은 멀쩡하고, 버리면 사용자가 받을 분량이 조용히 준다.
+    같은 없는 id 를 여러 카드가 가리키면 노드는 하나다(첫 카드 제목). root 가 없으면
+    부모 없는 첫 노드, 그것도 없으면 첫 노드 아래에 단다. 고칠 게 없으면 받은 그대로 돌려준다.
+    """
+    known = {n.node_id for n in goal_plan.goal_nodes}
+    orphan_titles: dict[str, str] = {}
+    for item in goal_plan.action_items:
+        if item.node_id not in known and item.node_id not in orphan_titles:
+            orphan_titles[item.node_id] = item.title
+    if not orphan_titles:
+        return goal_plan
+    nodes = list(goal_plan.goal_nodes)
+    parent = next(
+        (n for n in nodes if n.node_type == "root"),
+        next((n for n in nodes if n.parent_id is None), nodes[0]),
+    )
+    siblings = sum(1 for n in nodes if n.parent_id == parent.node_id)
+    if parent.is_leaf:
+        # 자식이 생기므로 더는 leaf 가 아니다 — 트리 모양을 사실대로 둔다.
+        nodes = [n.model_copy(update={"is_leaf": False}) if n is parent else n for n in nodes]
+    for i, (node_id, title) in enumerate(orphan_titles.items()):
+        nodes.append(
+            GoalNodeDraft(
+                node_id=node_id,
+                parent_id=parent.node_id,
+                title=title,
+                node_type="leaf",
+                order_index=siblings + i,
+                is_leaf=True,
+            )
+        )
+    _log.info("orphan_actions_attached", extra={"count": len(orphan_titles)})
+    return goal_plan.model_copy(update={"goal_nodes": nodes})
+
+
+# 금지어 사전의 낱말(긴 것부터) — 사용자 문구에서 금지어를 걷어낸 '고유한 부분' 을 재는 데 쓴다.
+_BANNED_KEYS_RE = re.compile(
+    "|".join(re.escape(k) for k in sorted(banned_words.BANNED_REPLACEMENTS, key=len, reverse=True))
+)
+# 금지어·공백을 걷어내고 이만큼은 남아야 문구가 **어디에 나오든**(부분 문자열) 되돌린다.
+_MIN_OWN_CHARS = 2
+
+
+def _user_phrase_pairs(phrases: Sequence[str | None]) -> list[tuple[str, str, bool]]:
+    """사용자 문구 → (금지어 치환이 만든 모양, 원문, 제목 전체일 때만) 쌍. 치환에 안 걸리는
+    문구는 빠진다.
+
+    긴 것부터 돌려준다 — 한 문구가 다른 문구를 품으면(목표 제목 ⊂ 마일스톤 제목) 긴 쪽을
+    먼저 되돌려야 짧은 쪽이 긴 쪽의 일부만 바꿔 놓지 않는다.
+
+    ⚠️ **문구가 사실상 금지어 자체면**(예: 마일스톤 제목을 '포기' 로 적음) 부분 문자열로
+    되돌리지 않는다 — 그 치환 모양('잠깐 쉬어가는')은 LLM 이 제 말로 쓴 금지어를 치환한 결과와
+    구별되지 않아, 계획 안 모든 자리의 필터가 풀린다(planB-3 리뷰). 그런 문구는 제목 **전체**가
+    그 모양일 때만 되돌린다 — 사용자 제목을 그대로 옮겨 쓴 자리만 잡는다.
+    """
+    pairs: list[tuple[str, str, bool]] = []
+    seen: set[tuple[str, str]] = set()
+    for phrase in phrases:
+        if not phrase:
+            continue
+        filtered = banned_words.enforce(phrase).text
+        if filtered == phrase or (filtered, phrase) in seen:
+            continue
+        seen.add((filtered, phrase))
+        own = _WS_RE.sub("", _BANNED_KEYS_RE.sub("", phrase))
+        pairs.append((filtered, phrase, len(own) < _MIN_OWN_CHARS))
+    return sorted(pairs, key=lambda p: len(p[0]), reverse=True)
+
+
+def _restore(text: str, pairs: Sequence[tuple[str, str, bool]]) -> str:
+    for filtered, original, whole_only in pairs:
+        if whole_only:
+            if text.strip() == filtered:
+                return original
+        elif filtered in text:
+            text = text.replace(filtered, original)
+    return text
+
+
+def restore_user_phrases(
+    goal_plan: GoalDecomposition, phrases: Sequence[str | None]
+) -> GoalDecomposition:
+    """금지어 치환이 **사용자가 직접 쓴 문구**까지 바꿔 놓은 자리를 원문으로 되돌린다 (planB-3).
+
+    금지어 필터(DevBaseline §4.2)는 `aiClient.run` 이 LLM 출력 전체에 건다. 그런데 분해는
+    사용자 목표 제목을 root·branch·카드 제목에 **그대로 옮겨 쓰고**, 룰 폴백도 '{제목} N회차'
+    를 만든다. 그래서 '포기하지 않고 영어 회화 끝내기' 가 '잠깐 쉬어가는하지 않고 영어 회화
+    끝내기' 로 저장돼 목표 화면에 떴다(미러 실측) — 사용자에겐 앱이 자기 말을 망가뜨린 것이다.
+
+    **필터를 끄지 않는다** — 사용자 원문이 치환된 **정확한 모양**만 원문으로 돌린다. 원문에
+    없던 LLM 문장('포기하지 마세요')은 그대로 치환된 채 남는다. 사용자 문구는 필터 대상이
+    아니라는 계약(api-contract: "사용자 문구는 금지어 필터를 거치지 않는다")을 지키는 것이지
+    AI 문장의 필터를 우회하는 게 아니다(AGENTS §2).
+
+    치환어는 전부 원어보다 길거나 같아서 되돌리면 길이가 줄기만 한다 — 제목 길이 제한을
+    새로 넘길 일이 없다.
+    """
+    pairs = _user_phrase_pairs(phrases)
+    if not pairs:
+        return goal_plan
+    nodes = [n.model_copy(update={"title": _restore(n.title, pairs)}) for n in goal_plan.goal_nodes]
+    items = [
+        a.model_copy(
+            update={"title": _restore(a.title, pairs), "first_step": _restore(a.first_step, pairs)}
+        )
+        for a in goal_plan.action_items
+    ]
+    return goal_plan.model_copy(update={"goal_nodes": nodes, "action_items": items})
+
+
+def restore_user_phrases_in_milestones(
+    milestones: Sequence[MilestoneDraft], phrases: Sequence[str | None]
+) -> list[MilestoneDraft]:
+    """`restore_user_phrases` 의 마일스톤(Stage A)판 — 제목·요약에서 사용자 원문을 되돌린다."""
+    pairs = _user_phrase_pairs(phrases)
+    if not pairs:
+        return list(milestones)
+    return [
+        m.model_copy(
+            update={"title": _restore(m.title, pairs), "summary": _restore(m.summary, pairs)}
+        )
+        for m in milestones
+    ]
 
 
 # 확정 마일스톤 제목 대조용 정규화 — 공백만 걷어낸다. LLM 이 "React 기초" → "React 기초 문법"
@@ -1001,23 +1232,23 @@ def missing_milestones_notice(missing: list[str], *, confirmed: int) -> str | No
     """
     if not missing:
         return None
-    listed = " · ".join(f"'{t}'" for t in missing[:3])
-    more = f" 외 {len(missing) - 3}개" if len(missing) > 3 else ""
     return (
         f"확정하신 중간 목표 {confirmed}개 중 이번 계획에 아직 넣지 않은 게 있어요 — "
-        f"{listed}{more}. 한 번에 4주까지만 세우고 나머지는 다음 계획에서 이어받거든요. "
+        f"{format_title_list(missing)}. 한 번에 4주까지만 세우고 나머지는 다음 계획에서 이어받거든요. "
         "지금 다 담고 싶으면 계획 분량을 늘리거나 중간 목표를 더 굵게 묶어보세요."
     )
 
 
 def waiting_steps_notice(dropped: list[str]) -> str | None:
-    """대기 단계를 세션으로 만들지 않았음을 알리는 문구 — 조용히 빼지 않는다."""
+    """대기 단계를 세션으로 만들지 않았음을 알리는 문구 — 조용히 빼지 않는다.
+
+    제목 뒤에 조사를 붙이지 않는다(`format_title_list`).
+    """
     if not dropped:
         return None
-    listed = " · ".join(f"'{t}'" for t in dropped[:3])
-    more = f" 외 {len(dropped) - 3}개" if len(dropped) > 3 else ""
     return (
-        f"{listed}{more}는 상대의 처리를 기다리는 단계라 오늘 할 일로 만들지 않았어요 — "
+        "상대의 처리를 기다리는 단계라 오늘 할 일로 만들지 않은 것: "
+        f"{format_title_list(dropped)} — "
         "계획의 큰 그림에는 남아 있고, 때가 되면 재계획에서 이어받아요."
     )
 
@@ -1077,11 +1308,9 @@ def out_of_cycle_notice(dropped: list[str]) -> str | None:
     """
     if not dropped:
         return None
-    listed = " · ".join(f"'{t}'" for t in dropped[:3])
-    more = f" 외 {len(dropped) - 3}개" if len(dropped) > 3 else ""
     return (
-        f"{listed}{more}는 이번 계획에 넣지 않았어요 — 지금 구간에서 하기엔 앞선 단계가 "
-        "먼저예요. 이어지는 주기에서 받아요."
+        f"이번 계획에 넣지 않은 단계: {format_title_list(dropped)} — 지금 구간에서 하기엔 "
+        "앞선 단계가 먼저예요. 이어지는 주기에서 받아요."
     )
 
 
@@ -1172,7 +1401,7 @@ def extend_action_plan_to_horizon(
     스스로 밝힌 것이므로 존중하고 보충하지 않는다(프롬프트가 그렇게 지시한다). 억지로 채우면
     항목 수가 정해진 과제에 의미 없는 회차가 붙는다.
     """
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    heaviest = heaviest_goal(outcome)
     freq = heaviest.frequency_per_week
     if not freq or freq <= 0:
         return goal_plan
@@ -1278,18 +1507,63 @@ def horizon_coverage_notice(
     # 캡 판정은 올림(그 주 수만큼 '필요' 하므로), 사용자에게 보여줄 숫자는 반올림
     # (64일을 '약 10주' 라고 하면 과장이라 '약 9주' 로 읽히게).
     weeks_to_deadline = max(1, -(-days_to_deadline // 7))
+    deadline_label = ko_date(deadline, today=target_date)
+    last_label = ko_date(last_planned_day, today=target_date)
     if weeks_to_deadline > max_weeks:
         return (
-            f"마감({outcome.horizon})까지는 약 {round(days_to_deadline / 7)}주인데, "
+            f"마감({deadline_label})까지는 약 {round(days_to_deadline / 7)}주인데, "
             "한 번에 세우는 계획은 "
-            f"{max_weeks}주까지만 잡아요. 그래서 이번 계획은 {last_planned_day} 까지고, "
+            f"{max_weeks}주까지만 잡아요. 그래서 이번 계획은 {last_label}까지고, "
             "그 뒤는 매주 재계획에서 진행 상황을 보고 이어서 채웁니다 — 빠뜨린 게 아니에요."
         )
     return (
-        f"이번 계획은 {last_planned_day} 까지예요 — 이 목표를 나눈 분량이 거기까지라서요. "
-        f"마감({outcome.horizon})까지 남은 기간은 매주 재계획에서 이어집니다. "
+        f"이번 계획은 {last_label}까지예요 — 이 목표를 나눈 분량이 거기까지라서요. "
+        f"마감({deadline_label})까지 남은 기간은 매주 재계획에서 이어집니다. "
         "지금 더 촘촘히 하고 싶으면 계획 분량을 올려서 다시 만들어 보세요."
     )
+
+
+def same_day_deadline_notice(
+    horizon: str | None,
+    *,
+    start_day: date,
+    today: date,
+    placed: int,
+    unplaced: int,
+) -> str | None:
+    """마감이 계획 첫날(대개 오늘)이라 그 하루에 몰아 잡았거나 다 못 넣었을 때의 안내 (planB-10).
+
+    지난 마감(#231)은 창을 펴서 따라잡게 하지만 **마감 = 첫날** 은 그 안전장치 밖이었다.
+    창이 그 하루로 줄어, 사용자가 '주 3회' 를 골랐어도 오늘 밤에 세 번을 연달아 잡거나
+    (미러: 18:00~20:55), 활동 시간이 이미 지났으면 블록 0개에 "'…' — 배치할 가용 시간을
+    찾지 못했어요. 다른 시간으로 옮겨볼까요?" 만 세 줄 나갔다 — 옮길 일정이 없는데 옮기라는 말이다.
+
+    마감 날짜는 날짜 선택기에서도, '이번 달' 같은 말을 정규화한 값에서도 올 수 있어 사용자가
+    의도한 게 아닐 수 있다. 그래서 나무라지 않고 무슨 일이 있었는지와 새 마감을 정하는 길만
+    말한다(`overdue_deadline_notice` 와 같은 결). 한 장만 잡히고 빠진 게 없으면 말할 게 없다.
+    """
+    if not horizon:
+        return None
+    try:
+        deadline = date.fromisoformat(horizon)
+    except ValueError:
+        return None
+    if deadline != start_day or (unplaced <= 0 and placed <= 1):
+        return None
+    because = (
+        "마감이 오늘이라"
+        if start_day == today
+        else f"마감({ko_date(deadline, today=today)})이 계획을 시작하는 날이라"
+    )
+    ask = "언제까지 끝내고 싶은지 새로 정해 주시면 그 기준으로 다시 세울게요."
+    if placed <= 0:
+        return f"{because} 그날 남은 활동 시간 안에는 세션을 잡을 자리가 없었어요 — {ask}"
+    if unplaced > 0:
+        return (
+            f"{because} 그날 남은 활동 시간에 들어가는 {placed}개만 잡았고 {unplaced}개는 "
+            f"자리가 없었어요 — {ask}"
+        )
+    return f"{because} {placed}개 세션을 그날 안에 이어서 잡았어요 — 부담되면 {ask}"
 
 
 def overdue_deadline_notice(
@@ -1310,14 +1584,54 @@ def overdue_deadline_notice(
         else ""
     )
     return (
-        f"적어주신 마감({horizon})이 이미 지난 날짜라, 그 날짜에 맞추면 오늘 하루에 전부 "
+        f"적어주신 마감({ko_date(horizon, today=start_day)})이 이미 지난 날짜라, "
+        "그 날짜에 맞추면 오늘 하루에 전부 "
         f"몰아넣게 돼요. 대신{span} 따라잡는 흐름으로 잡았어요. "
         "언제까지 끝내고 싶은지 새로 정해주시면 그 기준으로 다시 세울게요."
     )
 
 
+# 다시 만들어도 같은 결과가 나올 폴백 사유 — 이때는 '잠시 뒤 다시' 를 권하지 않는다.
+# 금지어·톤 게이트는 같은 목표·같은 프롬프트면 같은 표현이 또 걸리고(원인 수정은 llm 쪽 몫),
+# 프롬프트 누락은 배포 전까지 그대로다. 권하면 하루 생성 횟수만 쓰고 같은 칸이 또 나온다.
+_FALLBACK_RETRY_WONT_HELP = frozenset({"banned", "tone_gate", "no_prompt"})
+
+
+def decompose_fallback_notice(reason: str | None) -> str | None:
+    """분해가 룰 폴백으로 끝났을 때 맨 앞에 싣는 안내. LLM 이 만들었으면(`reason is None`) None.
+
+    폴백 계획은 전부 '{목표} N회차' 자리표시자에 첫걸음도 같다. 예전엔 이 사실을 알리는
+    문장이 없어 `aiSource="rule"` 만 남았고, 화면은 그걸 '오프라인 모드(룰 기반)' 라는 알 수
+    없는 말로 보여 줬다(planB-5). 무엇이 비어 있고 사용자가 무엇을 할 수 있는지를 말한다.
+
+    예산 소진은 다시 눌러도 오늘은 같은 결과라 '내일' 을 말한다. 금지어·톤 게이트처럼 다시
+    불러도 같은 사유(`_FALLBACK_RETRY_WONT_HELP`)는 다시 만들기를 권하지 않고 직접 채우는 길만
+    말한다. 그 밖의 사유(지연·일시 오류 등)는 잠시 뒤 다시 만들면 풀릴 수 있다.
+    """
+    if reason is None:
+        return None
+    if reason == "budget":
+        return (
+            "오늘은 AI가 쓸 수 있는 분량을 다 써서, 이번 계획은 세부 내용 없이 칸만 잡아 뒀어요 — "
+            "카드를 눌러 직접 채우거나 내일 다시 만들어 보세요."
+        )
+    if reason in _FALLBACK_RETRY_WONT_HELP:
+        return (
+            "이번엔 AI가 이 목표의 세부 내용을 만들지 못해 칸만 잡아 뒀어요 — "
+            "카드를 눌러 하고 싶은 내용으로 직접 채워 주세요."
+        )
+    return (
+        "이번엔 AI가 세부 내용을 만들지 못해 칸만 잡아 뒀어요 — "
+        "카드를 눌러 직접 채우거나 잠시 뒤 다시 만들어 보세요."
+    )
+
+
 def coverage_extended_warning(
-    added: int, horizon: str | None, *, max_weeks: int = _MAX_PLAN_WEEKS
+    added: int,
+    horizon: str | None,
+    *,
+    max_weeks: int = _MAX_PLAN_WEEKS,
+    target_date: date | None = None,
 ) -> str | None:
     """회차 세션으로 보충했음을 알리는 문구 — 내용까지 지어낸 게 아님을 분명히 한다.
 
@@ -1329,10 +1643,28 @@ def coverage_extended_warning(
     마감 없는 습관형도 보충 대상이라 horizon 이 없을 수 있다 — 그때 "마감까지" 라고 쓰면
     없는 마감을 지어내는 셈이라, 계획 지평(`max_weeks`, 기본 4주 · 만다라 유래 목표는
     2주) 기준으로 말한다.
+
+    **마감이 계획 지평보다 멀어도 같다** (planB-9). 보충은 `max_weeks` 까지만 붙는데 예전엔
+    마감이 있기만 하면 "2027-08-30까지 채우려고" 라고 해, 같은 화면의 "이번 계획은 10월
+    12일까지" (`horizon_coverage_notice`)와 맞부딪쳤다. 마감이 지평 안(같은 올림 주 수 규칙)에
+    있을 때만 마감 날짜를 말한다. `target_date` 를 모르면 종전대로 마감을 쓴다(하위호환).
     """
     if added <= 0:
         return None
-    until = f"{horizon}" if horizon else f"이번 계획 구간({max_weeks}주)"
+    until = f"이번 계획 구간({max_weeks}주)"
+    if horizon:
+        try:
+            deadline: date | None = date.fromisoformat(horizon)
+        except ValueError:
+            deadline = None
+        if deadline is not None and (
+            target_date is None
+            or (
+                deadline >= target_date
+                and max(1, -(-(deadline - target_date).days // 7)) <= max_weeks
+            )
+        ):
+            until = ko_date(deadline, today=target_date)
     return (
         f"{until}까지 채우려고 '이어가기' 회차 {added}개를 덧붙였어요. "
         "아직 내용은 비어 있어요 — 지금 정하면 안 해 본 걸 정하는 셈이라서요. "
@@ -1372,8 +1704,7 @@ def target_sessions_per_week(outcome: InterviewOutcome, density: str) -> int:
        세션 수를 뽑고 density 배율(light 0.7 / standard 1.0 / intense 1.3)로 가감한다.
     3) 둘 다 없으면 density 프리셋(3/5/8)으로 폴백. 세션 길이는 목표별(session_length) 우선.
     """
-    goals = outcome.core_goals
-    heaviest = next((g for g in goals if g.is_heaviest), goals[0])
+    heaviest = heaviest_goal(outcome)
     freq = heaviest.frequency_per_week
     if freq and freq > 0:
         return max(1, min(freq, _MAX_SESSIONS_PER_WEEK))
@@ -1468,7 +1799,7 @@ def daily_overload_notice(
     hours = totals[worst] / 60
     tail = f" (이런 날이 {len(over)}일 있어요)" if len(over) > 1 else ""
     reason = (
-        f"마감({horizon})까지 담으려면 이만큼이 필요해서예요"
+        f"마감({ko_date(horizon, today=worst)})까지 담으려면 이만큼이 필요해서예요"
         if horizon
         else "이번 계획 분량을 담으려면 이만큼이 필요해서예요"
     )
@@ -1504,7 +1835,7 @@ def cadence_shortfall_notice(
 
     빈도를 안 고른 목표('몰아서')는 지킬 케이던스가 없으므로 None.
     """
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    heaviest = heaviest_goal(outcome)
     freq = heaviest.frequency_per_week
     if not freq or freq <= 0 or not placed:
         return None
@@ -1556,7 +1887,7 @@ def context_from_outcome(
     목표는 호출자가 2주를 넘긴다(`max_plan_weeks_for`, ADR-0008 §3).
     """
     goals = outcome.core_goals
-    heaviest = next((g for g in goals if g.is_heaviest), goals[0])
+    heaviest = heaviest_goal(outcome)
     per_week = target_sessions_per_week(outcome, density)
     horizon_weeks = _horizon_weeks(target_date, outcome.horizon, max_weeks=max_weeks)
     window_coverage = _window_coverage(target_date, outcome.horizon, horizon_weeks)
@@ -1682,7 +2013,7 @@ def _total_capacity(outcome: InterviewOutcome, target_date: date | None) -> str:
     마감이 없으면 총량이라는 개념 자체가 없다 — 리듬형 목표는 마일스톤을 만들지 않는 게
     맞다(ADR-0007 §12). 그 판단을 프롬프트가 할 수 있도록 사실을 그대로 알린다.
     """
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    heaviest = heaviest_goal(outcome)
     hours = heaviest.weekly_hours
     weeks = full_horizon_weeks(target_date, outcome.horizon)
     if weeks is None:
@@ -1837,7 +2168,7 @@ def _time_policy_summary(outcome: InterviewOutcome) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-# NOTE: TimePolicyLike/HabitLike Protocol 은 settable 속성을 요구하므로(ORM 모델이 만족하는
+# NOTE: TimePolicyLike Protocol 은 settable 속성을 요구하므로(ORM 모델이 만족하는
 # 형태) frozen 으로 두지 않는다. 어댑터가 만든 뒤 변형하지 않으므로 사실상 불변으로 쓴다.
 @dataclass(slots=True)
 class _RuleTimePolicy:
@@ -1846,24 +2177,6 @@ class _RuleTimePolicy:
     policy_type: str
     payload: Mapping[str, Any]
     is_active: bool = True
-
-
-@dataclass(slots=True)
-class _ActionPlacement:
-    """`HabitLike` 구조적 만족 — action_item 을 룰 스케줄러의 배치 단위로 환원.
-
-    `reserve_habit_sessions` 가 priority_level 오름차순 + time_preference 윈도우로
-    배치하므로, 분해 순서를 priority_level 로, estimated_minutes 를 세션 길이로 매핑한다.
-    """
-
-    id: uuid.UUID
-    title: str
-    category: str
-    minutes_per_session: int
-    time_preference: str
-    priority_level: int
-    # HabitLike 는 위 6개 필드만 요구. 배치 후 node_id 복원용 메타.
-    node_id: str = field(default="", compare=False)
 
 
 def _hhmm_to_min(value: str, *, as_end: bool = False) -> int:
@@ -1922,7 +2235,7 @@ def _preferred_extension_span(outcome: InterviewOutcome) -> tuple[int, int] | No
     선호가 아예 무의미해지므로 — 예외로 그 시간대를 가용에 포함한다
     (#per-goal-time-availability, '아침 운동': 활동창이 저녁뿐인 사용자).
     """
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    heaviest = heaviest_goal(outcome)
     pref = _PEAK_CHIP_WINDOWS.get((heaviest.preferred_time or "").strip())
     if pref is None:
         return None
@@ -1941,7 +2254,7 @@ def preferred_time_extension_warning(outcome: InterviewOutcome) -> str | None:
     """
     if _preferred_extension_span(outcome) is None:
         return None
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    heaviest = heaviest_goal(outcome)
     a = outcome.availability
     return (
         f"이 목표는 선호하신 '{heaviest.preferred_time}' 시간대에 잡았어요 — 활동 가능 시간"
@@ -2086,28 +2399,6 @@ def time_policies_from_outcome(outcome: InterviewOutcome) -> list[TimePolicyLike
     return policies
 
 
-def action_placements(action_items: list[ActionItemDraft]) -> list[HabitLike]:
-    """분해된 action_item → 룰 스케줄러 배치 단위(`HabitLike`).
-
-    분해 목록 순서를 priority_level(1=최우선)로, estimated_minutes 를 세션 길이로 매핑한다.
-    배치 결과 블록의 `origin_id` 로 다시 node_id 를 복원할 수 있도록 `node_id` 를 싣는다.
-    """
-    placements: list[HabitLike] = []
-    for index, item in enumerate(action_items):
-        placements.append(
-            _ActionPlacement(
-                id=uuid.uuid4(),
-                title=item.title,
-                category=item.category,
-                minutes_per_session=item.estimated_minutes,
-                time_preference="anytime",
-                priority_level=index + 1,
-                node_id=item.node_id,
-            )
-        )
-    return placements
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 다일(multi-day) 스케줄러 입력 환원 (`orchestrator/plan_scheduler.py`)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2178,7 +2469,7 @@ def peak_windows_for_plan(outcome: InterviewOutcome) -> list[PlanWindow]:
 
     `_earliest_fit` 이 이 리스트를 **순서대로** 시도하므로 순서 자체가 우선순위다.
     """
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), outcome.core_goals[0])
+    heaviest = heaviest_goal(outcome)
     globals_ = peak_windows_from_outcome(outcome)
     bounds = _PEAK_CHIP_WINDOWS.get((heaviest.preferred_time or "").strip())
     if bounds is None:
@@ -2211,6 +2502,37 @@ def break_min_from_outcome(outcome: InterviewOutcome) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 MAX_SAVE_RETRIES = 3  # ADR-0005 §2.5.1 — DB Agent 최대 3회 재시도 후 PLAN_SAVE_FAILED.
+
+# 저장 컬럼 길이 — `goals.title`·`goal_nodes.title` 은 VARCHAR(200), `action_items.title` 은
+# VARCHAR(300). 모델과 갈리면 tests/test_materialize_goals.py 가 잡는다.
+GOAL_TITLE_MAX_CHARS = 200
+NODE_TITLE_MAX_CHARS = 200
+ACTION_TITLE_MAX_CHARS = 300
+
+
+def fit_title(text: str, limit: int) -> str:
+    """제목을 저장 컬럼 길이 안에 넣는다 — 넘치면 낱말 경계에서 자르고 '…' 를 붙인다.
+
+    인터뷰 답은 길이 제한이 없다. 선택지가 마음에 안 들어 '가장 무거운 목표' 를 세 번 길게
+    설명하거나 머릿속 일을 한 문단으로 쏟아내면 그 문장이 통째로 목표 제목이 된다. 그대로
+    INSERT 하면 VARCHAR 초과로 **인터뷰 마지막 턴이 500** 이 되고, 다시 눌러도 같은 행을
+    넣으려다 또 죽어 인터뷰 전체를 잃는다(미러 실측: 214자 답 → finish 500 반복).
+    잘라서라도 저장하는 게 낫다 — 제목은 목표 화면에서 사용자가 언제든 고칠 수 있다.
+
+    같은 원문은 항상 같은 결과를 낸다 — 재사용 대조(`materialize_goals`·`heaviest_goal_id`)가
+    이 값을 키로 쓰기 때문이다.
+    """
+    if len(text) <= limit:
+        return text  # 손대지 않는다 — 기존 행과의 대조 키가 바뀌면 같은 목표가 두 번 생긴다.
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    # 낱말 중간에서 끊지 않되, 공백이 너무 앞에 있으면(한 낱말이 긴 경우) 그냥 자른다.
+    space = cut.rfind(" ")
+    if space >= limit // 2:
+        cut = cut[:space]
+    return cut.rstrip() + "…"
 
 
 @dataclass(frozen=True, slots=True)
@@ -2307,6 +2629,69 @@ def protected_card_ids(live_blocks: Sequence[ScheduledBlock]) -> set[uuid.UUID]:
     return {b.action_item_id for b in live_blocks if b.source == "user_edit"}
 
 
+async def _supersede_candidates(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    goal_id: uuid.UUID,
+    for_update: bool,
+    include_mandala: bool = False,
+    include_recovery: bool = False,
+) -> tuple[list[ActionItem], list[ScheduledBlock], set[uuid.UUID]]:
+    """교체 후보 카드 · 그 카드들의 살아 있는 블록 · 보호할 카드 id — 교체 규칙의 **한 벌**.
+
+    `superseded_card_ids`(generate, 읽기 전용)와 `supersede_previous_plan`(approve, 변형)이
+    같은 규칙을 쓴다고 적어 두고 두 벌을 들고 있었다 — 두 쿼리가 `FOR UPDATE` 하나 말고는
+    같았다(planB-18). 한쪽만 고치면 generate 가 피하지 않은 슬롯을 approve 가 지우거나 그
+    반대가 된다.
+
+    SQL WHERE 로 좁히고 파이썬 술어로 한 번 더 거른다 — WHERE 를 평가하지 않는 구조적 fake
+    session(테스트)에서도 규칙이 유지된다. 반환 카드 목록이 비면 블록 조회를 하지 않는다.
+    """
+    allowed_sources = ("goal", *RECOVERY_SOURCE_VALUES) if include_recovery else ("goal",)
+    stmt = select(ActionItem).where(
+        ActionItem.user_id == user_id,
+        ActionItem.goal_id == goal_id,
+        ActionItem.source.in_(allowed_sources),
+        ActionItem.status == "planned",
+        ActionItem.archived_at.is_(None),
+    )
+    if for_update:
+        stmt = stmt.with_for_update()
+    rows = (await session.execute(stmt)).scalars().all()
+    node_ids = {a.goal_node_id for a in rows if a.goal_node_id is not None}
+    # 만다라 판정 쿼리는 실제로 쓸 때만 — 완료 경로(include_mandala)는 결과를 안 보므로 건너뛴다.
+    mandala_node_ids = (
+        frozenset() if include_mandala else await _mandala_node_ids_among(session, node_ids)
+    )
+    candidates = [
+        a
+        for a in rows
+        if _replaceable_action(
+            a,
+            goal_id,
+            mandala_node_ids=mandala_node_ids,
+            include_mandala=include_mandala,
+            include_recovery=include_recovery,
+        )
+    ]
+    if not candidates:
+        return [], [], set()
+    candidate_ids = {a.id for a in candidates}
+    block_stmt = select(ScheduledBlock).where(
+        ScheduledBlock.user_id == user_id,
+        ScheduledBlock.action_item_id.in_(candidate_ids),
+        ScheduledBlock.block_status != "cancelled",
+    )
+    live_blocks = [
+        b
+        for b in (await session.execute(block_stmt)).scalars().all()
+        if b.action_item_id in candidate_ids and b.block_status != "cancelled"
+    ]
+    # 사용자가 직접 옮긴(user_edit) 블록을 가진 카드는 교체 대상에서 제외.
+    return candidates, live_blocks, protected_card_ids(live_blocks)
+
+
 async def superseded_card_ids(
     session: AsyncSession, *, user_id: uuid.UUID, goal_id: uuid.UUID | None
 ) -> set[uuid.UUID]:
@@ -2324,33 +2709,10 @@ async def superseded_card_ids(
     """
     if goal_id is None:
         return set()
-    stmt = select(ActionItem).where(
-        ActionItem.user_id == user_id,
-        ActionItem.goal_id == goal_id,
-        ActionItem.source == "goal",
-        ActionItem.status == "planned",
-        ActionItem.archived_at.is_(None),
+    candidates, _blocks, protected_ids = await _supersede_candidates(
+        session, user_id=user_id, goal_id=goal_id, for_update=False
     )
-    rows = (await session.execute(stmt)).scalars().all()
-    node_ids = {a.goal_node_id for a in rows if a.goal_node_id is not None}
-    mandala_node_ids = await _mandala_node_ids_among(session, node_ids)
-    candidates = [
-        a for a in rows if _replaceable_action(a, goal_id, mandala_node_ids=mandala_node_ids)
-    ]
-    if not candidates:
-        return set()
-    candidate_ids = {a.id for a in candidates}
-    block_stmt = select(ScheduledBlock).where(
-        ScheduledBlock.user_id == user_id,
-        ScheduledBlock.action_item_id.in_(candidate_ids),
-        ScheduledBlock.block_status != "cancelled",
-    )
-    live_blocks = [
-        b
-        for b in (await session.execute(block_stmt)).scalars().all()
-        if b.action_item_id in candidate_ids and b.block_status != "cancelled"
-    ]
-    return candidate_ids - protected_card_ids(live_blocks)
+    return {a.id for a in candidates} - protected_ids
 
 
 async def supersede_previous_plan(
@@ -2407,50 +2769,16 @@ async def supersede_previous_plan(
     로 재현됐다. 지금은 그쪽이 `ActionItemRepo.get_by_id_for_update` 를 쓴다. 카드를
     변경하는 경로를 새로 만들 때도 같은 잠금 읽기를 쓸 것.
     """
-    allowed_sources = ("goal", *RECOVERY_SOURCE_VALUES) if include_recovery else ("goal",)
-    stmt = (
-        select(ActionItem)
-        .where(
-            ActionItem.user_id == user_id,
-            ActionItem.goal_id == goal_id,
-            ActionItem.source.in_(allowed_sources),
-            ActionItem.status == "planned",
-            ActionItem.archived_at.is_(None),
-        )
-        .with_for_update()
+    candidates, live_blocks, protected_ids = await _supersede_candidates(
+        session,
+        user_id=user_id,
+        goal_id=goal_id,
+        for_update=True,
+        include_mandala=include_mandala,
+        include_recovery=include_recovery,
     )
-    rows = (await session.execute(stmt)).scalars().all()
-    node_ids = {a.goal_node_id for a in rows if a.goal_node_id is not None}
-    # 만다라 판정 쿼리는 실제로 쓸 때만 — 완료 경로(include_mandala)는 결과를 안 보므로 건너뛴다.
-    mandala_node_ids = (
-        frozenset() if include_mandala else await _mandala_node_ids_among(session, node_ids)
-    )
-    candidates = [
-        a
-        for a in rows
-        if _replaceable_action(
-            a,
-            goal_id,
-            mandala_node_ids=mandala_node_ids,
-            include_mandala=include_mandala,
-            include_recovery=include_recovery,
-        )
-    ]
     if not candidates:
         return 0
-
-    candidate_ids = {a.id for a in candidates}
-    block_stmt = select(ScheduledBlock).where(
-        ScheduledBlock.user_id == user_id,
-        ScheduledBlock.action_item_id.in_(candidate_ids),
-        ScheduledBlock.block_status != "cancelled",
-    )
-    fetched = (await session.execute(block_stmt)).scalars().all()
-    live_blocks = [
-        b for b in fetched if b.action_item_id in candidate_ids and b.block_status != "cancelled"
-    ]
-    # 사용자가 직접 옮긴(user_edit) 블록을 가진 카드는 교체 대상에서 제외 (superseded_card_ids 와 공유).
-    protected_ids = protected_card_ids(live_blocks)
     stale = [a for a in candidates if a.id not in protected_ids]
     if not stale:
         return 0
@@ -2463,6 +2791,30 @@ async def supersede_previous_plan(
         if block.action_item_id in stale_ids:
             block.block_status = "cancelled"
     return len(stale)
+
+
+async def _milestone_rows(session: AsyncSession, goal_id: uuid.UUID) -> list[GoalNode]:
+    """이 목표의 확정 마일스톤 행 — plan 트리 · node_type='milestone' · 미보관, `order_index` 순.
+
+    ⚠️ **세 곳이 같은 술어를 써야 한다** — `_sync_milestones`(쓰기 전 '이미 있나?'),
+    `fetch_confirmed_milestones`(Stage A 재사용), `completed_milestone_cursor`(주기 커서).
+    갈리면 "읽을 땐 없고 쓸 땐 있다" 가 되어 매 주기 새 마일스톤이 쌓이거나 커서가 다른
+    목록을 가리킨다. 예전엔 세 곳이 같은 쿼리를 각자 들고 있었다(planB-18).
+
+    정렬이 없으면 `_sync_milestones` 의 대조에서 **어느 행을 잇느냐가 DB 반환 순서에
+    맡겨진다** — 곧 어느 행이 `completed_at` 을 안고 보관되느냐라, 진척이 임의로 사라질 수 있다.
+    """
+    stmt = (
+        select(GoalNode)
+        .where(
+            GoalNode.goal_id == goal_id,
+            GoalNode.tree_kind == "plan",
+            GoalNode.node_type == "milestone",
+            GoalNode.archived_at.is_(None),
+        )
+        .order_by(GoalNode.order_index.asc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 async def _sync_milestones(
@@ -2505,25 +2857,21 @@ async def _sync_milestones(
 
     반환값은 **새로 만든** 노드들(`activatedGoalNodes` 집계용) — 유지·보관된 것은 제외한다.
     """
+    # 제목은 저장 컬럼(VARCHAR 200)에 맞춰 **대조 전에** 자른다(interview-10). 긴 목표 제목을
+    # 룰 폴백이 '{제목} 준비·기초' 로 잇거나 LLM 이 그대로 옮겨 쓰면 200자를 넘고, 사용자가
+    # 그대로 확정하면 승인이 INSERT 에서 죽어 세 번 재시도 끝에 실패한다. 자른 제목으로 키를
+    # 만들어야 다음 승인·Stage A 재사용(저장된 = 잘린 제목을 되읽는다)과 같은 행을 잇는다 —
+    # 원문으로 대조하면 매 승인마다 새 행을 만들고 옛것(진척 포함)을 보관한다.
+    milestones = [
+        m.model_copy(update={"title": fit_title(m.title, NODE_TITLE_MAX_CHARS)}) for m in milestones
+    ]
     # 정규화 제목이 빈 항목은 뼈대가 아니다 — 대조 키를 만들 수 없어 매 승인 재생성된다.
     milestones = [m for m in milestones if _norm_title(m.title)]
     if not milestones:
         return []
-    existing_stmt = (
-        select(GoalNode)
-        .where(
-            GoalNode.goal_id == goal_id,
-            GoalNode.tree_kind == "plan",
-            GoalNode.node_type == "milestone",
-            GoalNode.archived_at.is_(None),
-        )
-        # 정렬이 없으면 아래 대조에서 **어느 행을 잇느냐가 DB 반환 순서에 맡겨진다** —
-        # 곧 어느 행이 `completed_at` 을 안고 보관되느냐라, 진척이 임의로 사라질 수 있다.
-        .order_by(GoalNode.order_index.asc())
-    )
     existing_rows = [
         n
-        for n in (await session.execute(existing_stmt)).scalars().all()
+        for n in await _milestone_rows(session, goal_id)
         if n.goal_id == goal_id
         and n.tree_kind == "plan"
         and n.node_type == "milestone"
@@ -2594,17 +2942,7 @@ async def fetch_confirmed_milestones(
     **읽기 전용이다.** Stage A 는 계약상 "lock 없음 · DB 쓰기 0" 이라 이 경로도 아무것도
     쓰지 않는다.
     """
-    stmt = (
-        select(GoalNode)
-        .where(
-            GoalNode.goal_id == goal_id,
-            GoalNode.tree_kind == "plan",
-            GoalNode.node_type == "milestone",
-            GoalNode.archived_at.is_(None),
-        )
-        .order_by(GoalNode.order_index.asc())
-    )
-    rows = (await session.execute(stmt)).scalars().all()
+    rows = await _milestone_rows(session, goal_id)
     return [MilestoneDraft(title=n.title, summary=n.why_text or "") for n in rows]
 
 
@@ -2618,21 +2956,10 @@ async def completed_milestone_cursor(session: AsyncSession, *, goal_id: uuid.UUI
     (Stage A 가 저장된 뼈대를 그대로 돌려주므로 입력이 매번 같다, PR-2.5).
 
     `fetch_confirmed_milestones` 와 **같은 술어**(plan 트리 · milestone · 미보관 · order_index
-    정렬)를 쓴다 — 갈리면 커서가 다른 목록을 가리킨다.
+    정렬)를 쓴다(`_milestone_rows`) — 갈리면 커서가 다른 목록을 가리킨다.
     """
-    stmt = (
-        select(GoalNode)
-        .where(
-            GoalNode.goal_id == goal_id,
-            GoalNode.tree_kind == "plan",
-            GoalNode.node_type == "milestone",
-            GoalNode.archived_at.is_(None),
-        )
-        .order_by(GoalNode.order_index.asc())
-    )
-    rows = (await session.execute(stmt)).scalars().all()
     cursor = 0
-    for n in rows:
+    for n in await _milestone_rows(session, goal_id):
         if n.completed_at is None:
             break
         cursor += 1
@@ -2721,11 +3048,15 @@ def _node_depths(goal_nodes: Sequence[GoalNodeDraft]) -> dict[str, int]:
     return depths
 
 
-async def _mandala_owned_goal_ids(session: AsyncSession) -> frozenset[uuid.UUID]:
-    """만다라 트리(`tree_kind='mandala'`)를 소유한 goal 의 id 집합 (W3, `1ee508b967ba`).
+async def _mandala_owned_goal_ids(
+    session: AsyncSession, goal_ids: Sequence[uuid.UUID]
+) -> frozenset[uuid.UUID]:
+    """`goal_ids` 중 만다라 트리(`tree_kind='mandala'`)를 소유한 goal 의 id 집합 (W3, `1ee508b967ba`).
 
-    user_id 로 좁히지 않는다 — 호출자가 이미 user 범위 목표 목록에서 멤버십만 확인하므로
-    (`_active_goals`), goal_id 는 어차피 한 user 소속이라 cross-user 유출이 없다.
+    ⚠️ **후보 목표로 좁혀 goal_id 만 읽는다** (planB-16). 예전엔 조건 없이 `goal_nodes` 전체
+    (모든 사용자의 계획·만다라 노드, 만다라 하나가 73칸)를 ORM 행으로 읽고 tree_kind 를
+    파이썬에서 걸렀다. 계획 생성 한 번에 이 경로를 2~4번 타고, 그 요청은 advisory lock
+    트랜잭션을 쥔 채라 가입자가 늘수록 모두의 계획 만들기·승인이 느려졌다.
 
     이 집합에 들어간 goal 은 `_active_goals`(→ `materialize_goals`/`heaviest_goal_id`
     제목 매칭)에서 제외된다 — 궁극목표(§3.2, `status='active'`) 제목이 계획 인터뷰
@@ -2733,9 +3064,26 @@ async def _mandala_owned_goal_ids(session: AsyncSession) -> frozenset[uuid.UUID]
     만다라 73칸이 `_archive_goal_nodes`/`supersede_previous_plan` 에 통째로 삼켜진다
     (W1/W2 가 막는 사고의 **성립 조건** 자체를 여기서 끊는다).
     """
-    stmt = select(GoalNode).where(GoalNode.archived_at.is_(None))
-    rows = (await session.execute(stmt)).scalars().all()
-    return frozenset(n.goal_id for n in rows if n.tree_kind == "mandala")
+    if not goal_ids:
+        return frozenset()
+    stmt = (
+        select(GoalNode.goal_id)
+        .where(
+            GoalNode.tree_kind == "mandala",
+            GoalNode.archived_at.is_(None),
+            GoalNode.goal_id.in_(list(goal_ids)),
+        )
+        .distinct()
+    )
+    owned: set[uuid.UUID] = set()
+    for row in (await session.execute(stmt)).scalars().all():
+        if isinstance(row, GoalNode):
+            # 테스트의 fake session 은 WHERE 를 무시하고 행 전체를 돌려준다 — 같은 조건을 여기서.
+            if row.tree_kind == "mandala" and row.archived_at is None:
+                owned.add(row.goal_id)
+        else:
+            owned.add(row)
+    return frozenset(owned)
 
 
 async def _active_goals(session: AsyncSession, user_id: uuid.UUID) -> list[Goal]:
@@ -2755,7 +3103,7 @@ async def _active_goals(session: AsyncSession, user_id: uuid.UUID) -> list[Goal]
         Goal.status != "completed",
     )
     rows = (await session.execute(stmt)).scalars().all()
-    mandala_owner_ids = await _mandala_owned_goal_ids(session)
+    mandala_owner_ids = await _mandala_owned_goal_ids(session, [g.id for g in rows])
     return [g for g in rows if g.id not in mandala_owner_ids]
 
 
@@ -2783,8 +3131,10 @@ async def heaviest_goal_id(
             break
     if heaviest_title is None:
         return None
+    # 저장할 때와 같은 키로 대조한다 — 긴 제목은 잘려 저장되므로(`fit_title`) 원문과는 안 맞는다.
+    key = fit_title(heaviest_title, GOAL_TITLE_MAX_CHARS)
     for g in await _active_goals(session, user_id):
-        if g.title == heaviest_title:
+        if g.title == key:
             return g.id
     return None
 
@@ -2820,17 +3170,19 @@ async def materialize_goals(
     for gc in core_goals:
         if is_placeholder_goal(gc):
             continue
-        g = existing.get(gc.title)
+        # 긴 자유 답이 제목이 된 경우 컬럼 길이로 자른다 — 대조 키도 같은 값이어야 재사용된다.
+        title = fit_title(gc.title, GOAL_TITLE_MAX_CHARS)
+        g = existing.get(title)
         if g is None:
             g = Goal()
             g.user_id = user_id
-            g.title = gc.title
+            g.title = title
             g.category = _normalize_goal_category(gc.category)
             g.goal_tier = _normalize_goal_tier(gc.tentative_tier)
             g.deadline = date.fromisoformat(gc.deadline) if gc.deadline else None
             g.status = status
             session.add(g)
-            existing[gc.title] = g
+            existing[title] = g
         elif status == "active" and g.status == "proposed":
             # 승인 = 이 목표를 실제로 하겠다는 결정 → 잠정에서 승격.
             g.status = "active"
@@ -2899,15 +3251,15 @@ async def _park_tier_overflow_on_approval(
 def tier_park_notice(demoted: list[str]) -> str | None:
     """tier 한도 초과로 parked 로 내린 목표를 알리는 문구 (#371) — 조용히 내리지 않는다.
 
-    `waiting_steps_notice`/`out_of_cycle_notice` 와 같은 원칙·형식.
+    `waiting_steps_notice`/`out_of_cycle_notice` 와 같은 원칙·형식. 한도는 목표 화면과 같은
+    말(집중·유지·보류)로 적는다 — 예전엔 'Focus 3 · Maintain 5'·'parked' 같은 내부 표기가
+    그대로 나갔다(planB-11).
     """
     if not demoted:
         return None
-    listed = " · ".join(f"'{t}'" for t in demoted[:3])
-    more = f" 외 {len(demoted) - 3}개" if len(demoted) > 3 else ""
     return (
-        f"{listed}{more}는 집중/유지 한도(Focus 3 · Maintain 5)를 넘어 대기(parked)로 "
-        "옮겼어요 — 목표 화면에서 자리를 만들면 다시 올릴 수 있어요."
+        "집중 목표 3개·유지 목표 5개 한도를 넘어 보류로 옮긴 목표: "
+        f"{format_title_list(demoted)} — 목표 화면에서 자리를 만들면 다시 올릴 수 있어요."
     )
 
 
@@ -3010,7 +3362,6 @@ async def _apply_once(
         # 분해된 노드는 소속시킬 goal 이 없고(GoalNode.goal_id 는 NOT NULL) 의미도 없다.
         node_by_temp: dict[str, GoalNode] = {}
         action_by_node: dict[str, ActionItem] = {}
-        block_count = 0
         if heaviest is None:
             # 빈 계획도 승인 자체는 성립 — 부수 기록(Draft 승인 등)은 같은 트랜잭션으로.
             if on_success is not None:
@@ -3048,7 +3399,8 @@ async def _apply_once(
         for nd in goal_nodes:
             n = GoalNode()
             n.goal_id = heaviest.id
-            n.title = nd.title
+            # 분해 LLM 은 목표 제목을 root 에 그대로 옮겨 쓴다 — 긴 제목이면 여기서도 넘친다.
+            n.title = fit_title(nd.title, NODE_TITLE_MAX_CHARS)
             n.node_type = _NODE_TYPE_MAP.get(nd.node_type, "subgoal")
             n.depth = depths.get(nd.node_id, 0)
             n.order_index = nd.order_index
@@ -3081,15 +3433,15 @@ async def _apply_once(
         for item in action_items:
             row = ActionItem()
             row.user_id = user_id
-            row.title = item.title
+            # 룰 카드('{목표} N회차')도 목표 제목을 품는다 — 긴 제목이면 300자를 넘을 수 있다.
+            row.title = fit_title(item.title, ACTION_TITLE_MAX_CHARS)
             row.target_date = block_date_by_node.get(item.node_id, target_date)
             row.estimated_minutes = item.estimated_minutes
             row.category = _normalize_category(item.category)
             row.status = "planned"  # 신규 카드 — 원본 status 변경 아님(AGENTS §2)
             row.source = "goal"
             row.first_step = item.first_step
-            if heaviest is not None:
-                row.goal_id = heaviest.id
+            row.goal_id = heaviest.id  # 위에서 heaviest 없음은 이미 반환했다
             node = node_by_temp.get(item.node_id)
             if node is not None:
                 row.goal_node_id = node.id

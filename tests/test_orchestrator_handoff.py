@@ -1650,7 +1650,8 @@ def test_horizon_coverage_notice_explains_why_plan_ends_early() -> None:
         far, last_planned_day=date(2026, 9, 21), target_date=start
     )
     assert capped is not None
-    assert "4주" in capped and "2026-09-21" in capped
+    assert "4주" in capped and "9월 21일" in capped
+    assert "2026-" not in capped  # 개발자용 ISO 표기를 문장에 싣지 않는다(planB-11)
     assert "빠뜨린 게 아니에요" in capped  # 버그 아님을 분명히
 
     # 상한이 아니라 분량이 모자라 일찍 끝난 경우 — 다른 안내(분량을 올리라고).
@@ -2356,7 +2357,6 @@ async def test_first_plan_graph_runs_to_approval(monkeypatch: pytest.MonkeyPatch
 
     assert final["goal_plan"] is not None
     assert final["review"].approved is True
-    assert final["missing_fields"] == []  # 모든 필수 슬롯 충족
     assert final["used_fallback"] is False
 
 
@@ -3514,10 +3514,15 @@ def test_next_cycle_milestones_are_named_even_when_the_llm_never_made_them() -> 
 
 
 def test_tier_park_notice_names_the_demoted_goals() -> None:
-    """tier 한도 초과로 내린 목표를 조용히 넘어가지 않는다(#371) — waiting_steps_notice 와 같은 형식."""
+    """tier 한도 초과로 내린 목표를 조용히 넘어가지 않는다(#371) — waiting_steps_notice 와 같은 형식.
+
+    한도는 목표 화면과 같은 말(집중·유지·보류)로 — 'Focus 3'·'parked' 같은 내부 표기는 싣지
+    않는다(planB-11).
+    """
     notice = first_plan_adapter.tier_park_notice(["부수입 만들기"])
     assert notice is not None
-    assert "부수입 만들기" in notice and "Focus 3" in notice and "parked" in notice
+    assert "부수입 만들기" in notice and "집중 목표 3개" in notice and "보류" in notice
+    assert "Focus" not in notice and "Maintain" not in notice and "parked" not in notice
     assert first_plan_adapter.tier_park_notice([]) is None
     # 4개 이상이면 앞 3개 + 'N개' 요약.
     many = first_plan_adapter.tier_park_notice(["a", "b", "c", "d"])

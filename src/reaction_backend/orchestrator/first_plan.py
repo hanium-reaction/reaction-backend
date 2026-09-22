@@ -6,26 +6,28 @@
 
 흐름:
 
-    validate_inputs → decompose_goal → schedule_blocks → review_plan ─┐
-                            ▲                                          │ should_replan
-                            └──────────── replan (≤2회) ───────────────┤
-                                                          approve ─────┴→ END
+    validate_inputs → decompose_goal → schedule_blocks ─┬→ review_plan ─┐
+                            ▲                             │ after_schedule │ after_review
+                            │                             └→ END (검토 생략)│
+                            └──────────── replan (≤2회) ────────────────────┤
+                                                              approve ─────┴→ END
 
 - 입력은 Deep Interview(#6) 의 경계 계약 `InterviewOutcome` **하나**. InterviewState 를
   절대 import 하지 않는다 → 두 이슈 병렬 개발, 계약만 고정.
 - LLM(②③④)은 Node 안 `aiClient.run(...)` 만. 스케줄링은 **룰만**(LLM 0회) —
-  기존 `goal_structuring.py` 재사용(ADR-0005 §1.2). 8s timeout / rate limit → 룰 fallback.
-- 산출물은 비활성 Draft. 실제 영속화는 사용자 [수락] 후 SAVING 단일 트랜잭션
+  `plan_scheduler.schedule_actions_multiday` + `goal_structuring.py` busy 계산(ADR-0005
+  §1.2). 분해·검토는 호출마다 `config.llm_planning_timeout_seconds`(45초) × 재시도 —
+  타임아웃·예산·금지어/톤 게이트면 룰 fallback. 최악 대기 상한은 `after_schedule` 참고.
+- 산출물은 비활성 Draft. 실제 영속화는 사용자 [수락] 후 승인 라우트의 단일 트랜잭션
   (`first_plan_adapter.db_apply_first_plan`) — AGENTS.md §1.4 자동 적용 금지.
-
-본 파일은 **베이스라인 구조**다. LLM 프롬프트 연결·룰 스케줄러 통합·SAVING 트랜잭션의
-세부 구현은 #32 본 구현 PR 에서 노드 본문을 채운다.
 """
 
 from __future__ import annotations
 
 import json
+import time as _time
 from collections import defaultdict
+from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta
 from typing import Any, Literal, TypedDict
 from uuid import UUID
@@ -45,6 +47,7 @@ from reaction_backend.orchestrator.goal_structuring import (
     pad_busy,
     time_policies_to_busy,
 )
+from reaction_backend.orchestrator.interview_adapter import is_placeholder_goal
 from reaction_backend.orchestrator.plan_scheduler import schedule_actions_multiday
 from reaction_backend.repositories.fixed_schedule_repo import FixedScheduleRepo
 from reaction_backend.repositories.recovery_repo import RecoveryOutcomeContext, RecoveryRepo
@@ -70,6 +73,21 @@ __all__ = [
 ]
 
 MAX_REPLAN = 2  # Review feedback cycle 최대 2회, 3회째 그대로 HITL (무한 cycle 방지)
+
+# 검토·재분해를 **새로 시작해도 되는** 그래프 경과 시간(초). 분해 한 번이 정상일 때 25~35초
+# (config.llm_planning_timeout_seconds 주석의 실측)라, 첫 분해+검토가 건강하면 이 안에 끝난다.
+# 그 뒤에 검토(최악 3×45초)나 재분해(최악 3×45초)를 또 시작하면 사용자는 스피너만 몇 분을 본다
+# (planB-4 실측 추정: 최악 4.5~8분). 넘겼으면 지금 계획을 그대로 HITL 로 넘긴다 — 검토 폴백도
+# 원래 '그대로 승인' 이라 잃는 건 재분해 한 번의 기회뿐이다.
+_REVIEW_DEADLINE_SECONDS = 90.0
+
+# 분해 폴백 사유 중 **곧바로 다시 불러 봐야 결과가 같은** 것들 (`RunResult.reason`).
+# 예전엔 자리표시자 계획도 검토에 넘겼고, 검토가 그걸 반려하면 같은 실패를 한 번 더 겪었다 —
+# 타임아웃이면 135초를 또 기다리고, 예산·톤 게이트면 토큰만 쓰고 같은 자리표시자가 나온다.
+# `validation`·`provider_error` 는 일시적일 수 있어 종전대로 검토(→ 재분해 기회)를 남긴다.
+_RETRY_FUTILE_FALLBACKS = frozenset(
+    {"timeout", "budget", "rate_limited", "unavailable", "no_prompt", "banned", "tone_gate"}
+)
 
 # 스케줄러가 배치 실패 시 내는 문구의 식별 조각 (`plan_scheduler` 와 동기화).
 # 같은 원인으로 전부 실패했을 때 이 줄들을 한 줄로 대체하기 위해 쓴다 (#252).
@@ -103,8 +121,8 @@ class FirstPlanState(TypedDict):
     # 이 목표에서 연속 실패가 쌓여 분량 프리셋을 낮췄으면 **원래 고른 값**. 안 낮췄으면 None.
     # `density` 자체는 낮춘 값으로 덮어써서 분해·룰 폴백·하루 상한이 한 값을 보게 한다.
     density_damped_from: str | None
-    missing_fields: list[str]
-    tier_violation: str | None  # Focus≤3 / Maintain≤5 초과 (DevBaseline §1.4)
+    # 그래프가 시작된 시각(`time.monotonic()`) — 검토·재분해를 새로 시작할지 가르는 기준.
+    started_at: float
     # 링크로만 준 참고 자료를 열어봤는가 (#226). 열었으면 되묻지 않고, 못 열었으면
     # 그 사유가 담긴 문구를 warnings 로 내보낸다.
     materials_fetched: bool
@@ -117,6 +135,9 @@ class FirstPlanState(TypedDict):
     coverage_extended: int
     # 세션에서 걷어낸 '외부 대기' 단계 제목들 — warnings 고지용 (#225).
     waiting_dropped: list[str]
+    # **마지막** 분해가 룰 폴백이었으면 그 사유(`RunResult.reason`), LLM 이 만들었으면 None.
+    # 응답 aiSource 와 '칸만 잡아 뒀어요' 고지는 이 값을 본다 — 검토 폴백과 섞지 않는다.
+    decompose_fallback_reason: str | None
 
     # PLANNING (룰 스케줄러 산출 — LLM 0회)
     scheduled_blocks: list[ScheduledBlockPreview]
@@ -153,14 +174,14 @@ def initial_state(
         milestone_cursor=milestone_cursor,
         out_of_cycle_dropped=[],
         density_damped_from=None,
-        missing_fields=[],
-        tier_violation=None,
+        started_at=_time.monotonic(),
         materials_fetched=False,
         materials_notice=None,
         planning_context={},
         goal_plan=None,
         coverage_extended=0,
         waiting_dropped=[],
+        decompose_fallback_reason=None,
         scheduled_blocks=[],
         schedule_warnings=[],
         review=None,
@@ -192,8 +213,7 @@ def _rule_decomposition(state: FirstPlanState) -> GoalDecomposition:
     회차 세션을 만들어 빈 계획으로 떨어지지 않게 한다. category 는 영속화(approve) 시
     `_normalize_category` 가 enum 으로 정규화한다.
     """
-    goals = state["outcome"].core_goals
-    heaviest = next((g for g in goals if g.is_heaviest), goals[0])
+    heaviest = first_plan_adapter.heaviest_goal(state["outcome"])
     # LLM 경로와 동일하게, 주당 가용 시간(weekly_hours)이 있으면 그 시간 기반으로 세션 수를 잡고
     # 없으면 density 프리셋으로 폴백 — 룰 폴백도 사용자의 실제 시간에 맞춘 분량을 낸다.
     session_count = first_plan_adapter.target_sessions_per_week(state["outcome"], state["density"])
@@ -291,6 +311,17 @@ def tier_violation_for(outcome: InterviewOutcome) -> str | None:
     return None
 
 
+def plannable_goal_missing(outcome: InterviewOutcome) -> bool:
+    """계획을 세울 **실제 목표**가 하나도 없는가 — 미입력 placeholder(#88)만 남은 outcome.
+
+    `tier_violation_for` 와 같은 자리의 순수 판정이다. 첫 질문에서 [충분해요]를 누르면
+    outcome 에는 '(미입력 목표)' 하나만 남는데, 예전엔 그걸 그대로 분해해 LLM 이 일반론
+    20세션을 지어냈고(미러 실측), 승인하면 소속시킬 목표가 없어 0건이 저장되는데도 200 이
+    나가 온보딩이 텅 빈 채 끝났다. 라우트가 LLM 을 부르기 **전에** 이걸로 되돌려 보낸다.
+    """
+    return all(is_placeholder_goal(g) for g in outcome.core_goals)
+
+
 async def _failure_contexts(
     session: Any, user_id: UUID, reference_date: date, goal_id: UUID | None
 ) -> tuple[list[TopFailureContext], Literal["goal", "user"]]:
@@ -370,22 +401,20 @@ async def _goal_failure_streak(session: Any, user_id: UUID, goal_id: UUID | None
 
 
 async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> FirstPlanState:
-    """VALIDATING — 필수 슬롯 누락 + Focus/Maintain cap 검증.
+    """VALIDATING — 분해에 쓸 재료(자료·실패 이력·분량)를 모은다.
 
-    누락은 outcome.unresolved_slots 를 그대로 승계(인터뷰가 이미 결정적으로 계산).
-    Focus ≤ 3 / Maintain ≤ 5 초과 시 tier_violation 기록 (DevBaseline §1.4 잠금) —
-    라우터가 GOAL_TIER_LIMIT_EXCEEDED 422. cap 판정 자체는 `tier_violation_for`.
+    입력 검증은 라우트가 그래프에 들어오기 **전에** 한다 — Focus ≤ 3 / Maintain ≤ 5 초과
+    (`tier_violation_for` → 422 GOAL_TIER_LIMIT_EXCEEDED, DevBaseline §1.4 잠금)와 실제 목표
+    없음(`plannable_goal_missing` → 422). 예전엔 여기서 `missing_fields`·`tier_violation`
+    을 상태에 적었지만 아무도 읽지 않아, 검증처럼 보이는 죽은 값이 '목표 없음' 계획을
+    통과시킨 채 남아 있었다(planB-1·planB-17).
     """
     outcome = state["outcome"]
-    violation = tier_violation_for(outcome)
     target_date = date.fromisoformat(state["target_date"])
     # 참고 자료를 링크로만 줬으면 여기서 한 번 열어본다 (#226). I/O 는 이 노드가 하고
     # 컨텍스트 조립은 순수 함수로 남긴다. 실패해도 예외는 안 나오고, 그때는 예전처럼
     # '(없음)' 으로 내려가 프롬프트의 지어내기 방지 가드가 그대로 작동한다.
-    heaviest = next(
-        (g for g in outcome.core_goals if g.is_heaviest),
-        outcome.core_goals[0] if outcome.core_goals else None,
-    )
+    heaviest = first_plan_adapter.heaviest_goal_or_none(outcome)
     materials = await materials_resolver.resolve(heaviest.materials_note if heaviest else None)
     # 목표 해석은 **한 번만** 한다 — 아래 세 조회가 같은 goal_id 를 쓴다.
     session = _session(config)
@@ -411,8 +440,6 @@ async def validate_inputs(state: FirstPlanState, config: RunnableConfig) -> Firs
         **state,
         "density": density,
         "density_damped_from": requested_density if density != requested_density else None,
-        "missing_fields": list(outcome.unresolved_slots),
-        "tier_violation": violation,
         "materials_fetched": materials.ok,
         "materials_notice": materials.notice,
         "planning_context": first_plan_adapter.context_from_outcome(
@@ -523,6 +550,25 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
     # 과다 생성해도, 밴드로 가두고 주당 시간만큼으로 잘라 이번 주 분량이 weekly_hours 에 맞게
     # 한다(#per-goal). 목표별 입력이 없으면 no-op.
     goal_plan = result.value
+    # 분해 결과가 없으면(값 없는 폴백) 목표를 볼 일도 없다 — 그때는 outcome 을 읽지 않는다.
+    heaviest_goal = (
+        first_plan_adapter.heaviest_goal_or_none(state["outcome"])
+        if goal_plan is not None
+        else None
+    )
+    if goal_plan is not None and heaviest_goal is not None:
+        # 금지어 치환이 사용자가 쓴 목표 제목·확정 마일스톤 제목까지 바꿔 놓았으면 원문으로
+        # 되돌린다(planB-3) — LLM·룰 폴백 두 경로 모두 여기를 지난다. 마일스톤 제목도 넣는
+        # 이유: 사용자가 고친 제목이 치환되면 branch 제목과 어긋나 `missing_milestone_titles`
+        # 가 멀쩡한 단계를 '빠졌다' 고 알린다.
+        goal_plan = first_plan_adapter.restore_user_phrases(
+            goal_plan,
+            [heaviest_goal.title, *(m.title for m in state.get("milestones") or [])],
+        )
+    if goal_plan is not None:
+        # 트리에 없는 노드를 가리키는 카드는 root 아래 leaf 로 달아 준다(planB-14) — 아래
+        # 걷어내기·가지치기·누락 고지와 승인의 goal_node_id 연결이 모두 같은 트리를 보게.
+        goal_plan = first_plan_adapter.attach_orphan_actions(goal_plan)
     extended = 0
     waiting_dropped: list[str] = []
     out_of_cycle: list[str] = []
@@ -540,10 +586,6 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
         # 자연스럽지 않아서다. 그런 목표에서 걷어내면 되채울 수단이 없어 4주 계획이
         # 이틀치로 무너지고, `volume_shortfall_warning` 은 **배치된 구간** 기준이라
         # 침묵한다(계획이 짧아지면 그 안에서는 비율이 맞아 보인다). 실측: 12세션 → 3세션.
-        heaviest_goal = next(
-            (g for g in state["outcome"].core_goals if g.is_heaviest),
-            state["outcome"].core_goals[0] if state["outcome"].core_goals else None,
-        )
         can_refill = bool(heaviest_goal and (heaviest_goal.frequency_per_week or 0) > 0)
         if can_refill:
             goal_plan, out_of_cycle = first_plan_adapter.drop_out_of_cycle_branches(
@@ -573,6 +615,7 @@ async def decompose_goal(state: FirstPlanState, config: RunnableConfig) -> First
         "goal_plan": goal_plan,
         "coverage_extended": extended,
         "waiting_dropped": waiting_dropped,
+        "decompose_fallback_reason": (result.reason or "unknown") if result.fell_back else None,
         "used_fallback": state["used_fallback"] or result.fell_back,
     }
 
@@ -739,12 +782,24 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
     # 기본값에서 ~1주치 세션이 먼 마감(예: 이번 학기) 전체에 균등 분산돼 이번 주가 텅 빈다.
     # 마감이 그보다 가까우면 _schedule_end 캡이 그대로 이겨(마감까지 몰기) 유지된다. 이후 주는
     # 주간 재계획이 채운다(비지속 초안이라 안전).
+    per_week = first_plan_adapter.requested_sessions_per_week(outcome)
     if action_items:
         # 배치 창 너비 — 근거와 산식은 `placement_days_needed` 참고 (ADR-0009 D1).
         days_needed = first_plan_adapter.placement_days_needed(
             sum(a.estimated_minutes for a in action_items),
             first_plan_adapter.weekly_minutes(outcome, state["density"]),
         )
+        if per_week is not None:
+            # 빈도를 말한 목표는 **개수**로도 창을 잰다 — 분 기준만 쓰면 짧은 세션이 섞일 때
+            # 창이 줄어 같은 개수가 더 적은 날에 몰린다(`cadence_days_needed`). 둘 중 넓은
+            # 쪽을 쓰고, 계획 지평(주)을 넘지는 않는다 — 마감 없는 경로도 바운드가 남는다.
+            days_needed = max(
+                days_needed,
+                min(
+                    first_plan_adapter.cadence_days_needed(len(action_items), per_week),
+                    state["max_plan_weeks"] * 7,
+                ),
+            )
         density_end = start_day + timedelta(days=days_needed - 1)
         if state["scope"] == "horizon" and (not outcome.horizon or overdue_deadline):
             # 마감 없는 습관형 목표(예: '매일 운동')는 _schedule_end 가 배치 창을 **하루로
@@ -809,6 +864,17 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         ]
 
     break_min = first_plan_adapter.break_min_from_outcome(outcome)
+    # 하루 상한은 density 프리셋과 **이번 계획의 최장 세션** 중 큰 쪽 — 세션 하나가 상한을
+    # 넘으면 1차 배치가 모든 '이미 뭔가 있는 날' 을 걸러내 케이던스가 무너진다. 집중 용량이
+    # 아니라 실제 최장 세션을 쓰는 이유는 `daily_cap_for_plan` 참고 (ADR-0009 D3).
+    # ⚠️ **한 번만 계산해 배치와 과부하 안내가 같은 값을 본다** (planB-13). 예전엔 안내만
+    # 최장 세션 없이 따로 계산해(= 집중 용량 240분) 배치가 180분 상한을 넘긴 날을 놓쳤고,
+    # 잡더라도 기준 시간을 틀리게 말했다.
+    daily_cap = first_plan_adapter.daily_cap_for_plan(
+        outcome,
+        state["density"],
+        longest_action_min=max((a.estimated_minutes for a in actions), default=0),
+    )
 
     def roomy_busy_for_day(day: date) -> list[BusyBlock]:
         """1차 배치용 busy — **기존 승인 블록에만** 앞뒤 휴식 여백을 덧댄다(#191).
@@ -842,27 +908,36 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         peak_windows=first_plan_adapter.peak_windows_for_plan(outcome),
         focus_chunk_min=first_plan_adapter.focus_chunk_min_from_outcome(outcome),
         break_min=break_min,
-        # 상한은 density 프리셋과 **이번 계획의 최장 세션** 중 큰 쪽 — 세션 하나가 상한을
-        # 넘으면 1차 배치가 모든 '이미 뭔가 있는 날' 을 걸러내 케이던스가 무너진다. 집중
-        # 용량이 아니라 실제 최장 세션을 쓰는 이유는 `daily_cap_for_plan` 참고 (ADR-0009 D3).
-        daily_focus_cap_min=first_plan_adapter.daily_cap_for_plan(
-            outcome,
-            state["density"],
-            longest_action_min=max((a.estimated_minutes for a in actions), default=0),
-        ),
+        daily_focus_cap_min=daily_cap,
         committed_min_by_day=first_plan_adapter.committed_minutes_by_day(existing_busy),
         roomy_busy_for_day=roomy_busy_for_day,
+        # ⚠️ 달력 주(월~일) 단위 개수 상한은 **걸지 않는다** (planB-6 리뷰). 마감 계획의 세션
+        # 수는 '주 N회 × 올림(일수/7)' 이라 창이 주 중간에 시작·끝나면 온전한 주가 상한에
+        # 막히고, 넘친 몫이 짧은 첫·끝 주의 며칠에 하루 여러 개로 쌓였다(실측: '매일' 토요일
+        # 시작·16일 창 → 일요일 하루 5~6개). 케이던스는 위의 개수 기준 창 넓히기가 지킨다.
     )
 
     # 세션 하나가 활동창의 연속 가용 길이보다 길어 어디에도 안 들어간 경우(#252):
     # 배치 실패는 **전부 같은 원인**이므로, 항목마다 같은 문장을 반복하는 대신 원인과 다음
     # 행동을 담은 한 줄로 바꾼다(실측: 같은 경고 12줄 → 1줄). 실패가 없으면 아무것도 안 한다.
+    unplaced_count = sum(1 for w in warnings if _UNPLACED_MARKER in w)
     narrow_window = first_plan_adapter.narrow_activity_window_notice(outcome)
     if narrow_window and warnings:
         warnings = [
             narrow_window,
             *(w for w in warnings if _UNPLACED_MARKER not in w),
         ]
+    # 마감이 계획 첫날이면 창이 그 하루로 줄어 전부 몰리거나 못 들어간다(planB-10). 없는
+    # 블록을 '옮겨볼까요?' 로 되풀이하지 않고 원인과 다음 행동을 한 줄로 말한다 — 위와 같은 수법.
+    same_day = first_plan_adapter.same_day_deadline_notice(
+        outcome.horizon,
+        start_day=start_day,
+        today=now.date(),
+        placed=len(placed),
+        unplaced=unplaced_count,
+    )
+    if same_day:
+        warnings = [same_day, *(w for w in warnings if _UNPLACED_MARKER not in w)]
 
     # 캘린더를 연결해 뒀는데 못 읽은 경우만 알린다 (ADR-0009 D4). 연결하지 않은 사용자
     # (대다수)에게는 아무 말도 하지 않는다 — 캘린더는 선택 기능이라 매번 권유가 되면
@@ -928,8 +1003,17 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         # "확정하신 중간 목표 1개 중…" 이라고 말한다. 필터링은 창으로, 개수는 전체로.
         confirmed=len(state.get("milestones") or []),
     )
-    if missing_notice:
+    # 분해가 룰 폴백이면 계획 전체가 '{목표} N회차' 자리표시자다(planB-5). 그 사실을 맨 앞에
+    # 밝히고, 폴백과 어긋나는 설명은 싣지 않는다 — 확정 마일스톤·'이어가기'·지평 안내는 모두
+    # "앞쪽엔 내용이 있다" 를 전제로 한 문장이라, 자리표시자 계획에 붙으면 사실과 달라진다
+    # (미러 실측: 빈 칸 12장에 "'이어가기' 회차 9개를 덧붙였어요", 1주 폴백에 "4주까지만 잡아요").
+    fallback_reason = state.get("decompose_fallback_reason")
+    placeholder_plan = fallback_reason is not None
+    if missing_notice and not placeholder_plan:
         warnings = [missing_notice, *warnings]
+    fallback_notice = first_plan_adapter.decompose_fallback_notice(fallback_reason)
+    if fallback_notice:
+        warnings = [fallback_notice, *warnings]
     # 선호 시간이 활동창과 전혀 안 겹쳐 창 **밖**에 배치한 경우 — 확장은 의도된 동작이지만
     # (#per-goal-time-availability), 말해주지 않으면 사용자가 창 밖 블록을 버그로 읽는다.
     extension = first_plan_adapter.preferred_time_extension_warning(outcome)
@@ -951,13 +1035,16 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
     )
     if waiting:
         warnings = [*warnings, waiting]
-    if out_of_cycle_note:
+    if out_of_cycle_note and not placeholder_plan:
         warnings = [*warnings, out_of_cycle_note]
     # 회차 세션으로 마감까지 채웠으면 그 사실을 밝힌다 — 내용까지 지어낸 게 아님을 알 수 있게.
     extended = first_plan_adapter.coverage_extended_warning(
-        state.get("coverage_extended", 0), outcome.horizon, max_weeks=state["max_plan_weeks"]
+        state.get("coverage_extended", 0),
+        outcome.horizon,
+        max_weeks=state["max_plan_weeks"],
+        target_date=start_day,
     )
-    if extended:
+    if extended and not placeholder_plan:
         warnings = [*warnings, extended]
     # 계획이 마감까지 안 닿으면 **왜 그런지** 알린다. 상한(만다라 유래면 2주, 아니면 4주)은
     # 의도된 설계인데, 말해주지 않으면 마감 전에 끝난 계획을 사용자가 버그로 읽는다.
@@ -968,7 +1055,7 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
         target_date=start_day,
         max_weeks=state["max_plan_weeks"],
     )
-    if coverage:
+    if coverage and not placeholder_plan:
         warnings = [*warnings, coverage]
     # 마감이 이미 지나 있으면 계획을 어떤 기준으로 잡았는지 밝힌다 — 인터뷰가 되묻지 못하고
     # 통과시킨 경우의 마지막 고지이자, 새 마감을 정하도록 이끄는 자리다 (#231).
@@ -989,7 +1076,7 @@ async def schedule_blocks(state: FirstPlanState, config: RunnableConfig) -> Firs
     overload = first_plan_adapter.daily_overload_notice(
         placed,
         committed_min_by_day=first_plan_adapter.committed_minutes_by_day(existing_busy),
-        cap_min=first_plan_adapter.daily_cap_for_plan(outcome, state["density"]),
+        cap_min=daily_cap,
         # 마감이 없으면 마감을 이유로 대지 않는다 — 없는 마감을 지어내던 문구 봉합.
         horizon=outcome.horizon,
     )
@@ -1143,6 +1230,51 @@ def should_replan(state: FirstPlanState) -> Literal["replan", "approve"]:
     return "approve"
 
 
+def _past_review_deadline(state: FirstPlanState) -> bool:
+    started = state.get("started_at")
+    if started is None:
+        return False
+    return _time.monotonic() - started > _REVIEW_DEADLINE_SECONDS
+
+
+def after_schedule(state: FirstPlanState) -> Literal["review", "done"]:
+    """배치 뒤 검토를 **시작할지** — 그래프 엣지 전용(오프라인 하네스는 노드를 직접 부른다).
+
+    안 하는 두 경우 (planB-4):
+    - 분해가 다시 불러도 같은 이유로 폴백했다(`_RETRY_FUTILE_FALLBACKS`). 자리표시자를 검토에
+      넘기면 반려 → 재분해로 같은 실패를 또 겪는다 — 타임아웃이면 스피너가 몇 분 더 돈다.
+    - 이미 `_REVIEW_DEADLINE_SECONDS` 를 넘겼다.
+    검토를 건너뛰는 건 검토 폴백(`_rule_review`, 그대로 승인)과 같은 결과다 — HITL 이 최종 게이트.
+    """
+    if state.get("decompose_fallback_reason") in _RETRY_FUTILE_FALLBACKS:
+        return "done"
+    if _past_review_deadline(state):
+        return "done"
+    return "review"
+
+
+def after_review(state: FirstPlanState) -> Literal["replan", "approve"]:
+    """검토 뒤 재분해 여부 — `should_replan` 에 시간 상한만 더한다(그래프 엣지 전용).
+
+    `should_replan` 자체는 순수 판정으로 둔다 — M33 하네스(`scripts/l1_7b_m33_run.py`)가
+    반려 여부를 그걸로 재는데, 벽시계가 끼면 같은 원자료가 실행 속도에 따라 달리 채점된다.
+    """
+    if should_replan(state) == "replan" and not _past_review_deadline(state):
+        return "replan"
+    return "approve"
+
+
+def plan_ai_source(final: Mapping[str, Any]) -> Literal["llm", "rule"]:
+    """응답 `aiSource` — **보여 주는 계획을 누가 만들었는가**(마지막 분해 기준).
+
+    예전엔 `used_fallback`(어느 LLM 노드든 폴백하면 참)을 그대로 썼다. 그래서 분해는 LLM 이
+    다 했는데 검토만 타임아웃나도 '룰 기반' 으로 표시됐다(planB-5). 검토 폴백은 '그대로
+    승인' 이라 계획 내용과 무관하다. `used_fallback` 은 M33 하네스가 검토 폴백 감지에 쓰므로
+    뜻을 바꾸지 않고 둔다.
+    """
+    return "rule" if final.get("decompose_fallback_reason") is not None else "llm"
+
+
 def build_first_plan_graph() -> CompiledStateGraph[
     FirstPlanState, Any, FirstPlanState, FirstPlanState
 ]:
@@ -1156,10 +1288,14 @@ def build_first_plan_graph() -> CompiledStateGraph[
     graph.set_entry_point("validate_inputs")
     graph.add_edge("validate_inputs", "decompose_goal")
     graph.add_edge("decompose_goal", "schedule_blocks")
-    graph.add_edge("schedule_blocks", "review_plan")
+    graph.add_conditional_edges(
+        "schedule_blocks",
+        after_schedule,
+        {"review": "review_plan", "done": END},
+    )
     graph.add_conditional_edges(
         "review_plan",
-        should_replan,
+        after_review,
         {"replan": "decompose_goal", "approve": END},
     )
     return graph.compile()

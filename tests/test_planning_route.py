@@ -20,6 +20,7 @@ from reaction_backend.api.routes.planning import _max_plan_weeks
 from reaction_backend.config import get_settings
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.interview_session import InterviewSession as InterviewSessionRow
+from reaction_backend.db.models.interview_slot_answer import InterviewSlotAnswer
 from reaction_backend.db.models.llm_run import LlmRun
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.session import get_db
@@ -221,6 +222,17 @@ def test_generate_marks_rule_source_on_fallback(client: TestClient, monkeypatch:
     assert res.json()["aiSource"] == "rule"
 
 
+def _seed_goal_list(repo: FakeInterviewRepo, session_id: UUID) -> None:
+    """목표 하나를 답한 세션 — 목표가 없으면 generate 가 LLM 전에 422 로 되돌린다(planB-1)."""
+    ans = InterviewSlotAnswer()
+    ans.id = uuid4()
+    ans.session_id = session_id
+    ans.slot_key = "goals.list"
+    ans.value = {"type": "text", "raw": "토익 900", "normalized": ["토익 900"]}
+    ans.is_required = True
+    repo._answers[session_id]["goals.list"] = ans
+
+
 def test_generate_from_interview_session(
     client: TestClient, fake_interview_repo: FakeInterviewRepo, monkeypatch: Any
 ) -> None:
@@ -235,6 +247,7 @@ def test_generate_from_interview_session(
     row.ambiguity_final = 0.1
     fake_interview_repo._sessions[row.id] = row
     fake_interview_repo._answers[row.id] = {}
+    _seed_goal_list(fake_interview_repo, row.id)
 
     res = client.post("/plans/generate", json={"interviewSessionId": str(row.id)})
     assert res.status_code == 200
@@ -284,6 +297,7 @@ def _seed_finished_session(
     row.used_fallback = False
     repo._sessions[row.id] = row
     repo._answers[row.id] = {}
+    _seed_goal_list(repo, row.id)
     return row
 
 
@@ -353,9 +367,25 @@ def test_generate_falls_back_to_rule_on_timeout(client: TestClient, monkeypatch:
     assert res.json()["aiSource"] == "rule"
 
 
+def _force_provider_error(monkeypatch: Any) -> None:
+    """provider 가 일시 오류(`provider_error`)로 실패 — 다시 불러 볼 가치가 있는 폴백."""
+    from reaction_backend.llm.provider import ProviderError
+
+    monkeypatch.setenv("LLM_MAX_RETRIES", "1")
+    get_settings.cache_clear()
+
+    async def _boom(**kwargs: Any) -> Any:
+        raise ProviderError("boom")
+
+    monkeypatch.setattr("reaction_backend.llm.tool_executor.generate_structured", _boom)
+
+
 def test_generate_logs_each_llm_call_to_llm_runs(client: TestClient, monkeypatch: Any) -> None:
-    """LLM 호출(decompose·review) 각각 llm_runs 1행 기록 — module/fallback_used 포함 (DoD)."""
-    _force_provider_timeout(monkeypatch)
+    """LLM 호출(decompose·review) 각각 llm_runs 1행 기록 — module/fallback_used 포함 (DoD).
+
+    일시 오류 폴백이라 검토가 그대로 돈다(`first_plan.after_schedule`).
+    """
+    _force_provider_error(monkeypatch)
     cap = _CapturingSession()
     _use_session(client, cap)
 
@@ -367,6 +397,61 @@ def test_generate_logs_each_llm_call_to_llm_runs(client: TestClient, monkeypatch
     assert all(r.module == "planning" for r in runs)
     assert all(r.fell_back for r in runs)
     assert {r.prompt_id for r in runs} == {"planning/goal_decompose", "planning/plan_quality"}
+
+
+def test_timed_out_decompose_skips_the_review_and_says_the_plan_is_empty(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """분해가 타임아웃으로 폴백하면 검토를 부르지 않고, 칸만 잡았다고 밝힌다 (planB-4·5).
+
+    회귀: 자리표시자 계획도 검토에 넘겨 같은 타임아웃(최악 3×45초)을 또 기다렸고, 검토가
+    반려하면 재분해까지 돌아 스피너가 몇 분을 돌았다. 결과 화면엔 '오프라인 모드' 뿐이라
+    사용자는 계획이 비어 있는 이유를 몰랐다.
+    """
+    _force_provider_timeout(monkeypatch)
+    cap = _CapturingSession()
+    _use_session(client, cap)
+
+    res = client.post("/plans/generate", json=_body(_outcome()))
+    assert res.status_code == 200
+    body = res.json()
+    assert body["aiSource"] == "rule"
+    runs = [o for o in cap.added if isinstance(o, LlmRun)]
+    assert [r.prompt_id for r in runs] == ["planning/goal_decompose"]
+    assert "칸만 잡아 뒀어요" in body["warnings"][0]
+    assert not [w for w in body["warnings"] if "4주까지만" in w or "이어가기" in w]
+
+
+def test_review_fallback_alone_does_not_label_an_llm_plan_as_rule(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """분해는 LLM 이 했고 검토만 폴백했으면 aiSource 는 'llm' 이다 (planB-5).
+
+    검토 폴백은 '그대로 승인' 이라 계획 내용과 무관한데, 예전엔 그것만으로 화면에
+    '오프라인 모드(룰 기반)' 가 떴다.
+    """
+    action = ActionItemDraft(
+        node_id="n1", title="작업", estimated_minutes=30, category="study", first_step="시작"
+    )
+    ok = _stub(action_items=[action])
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        result = await ok(**kwargs)
+        if kwargs["schema"] is PlanReview:
+            return RunResult(
+                value=result.value,
+                fell_back=True,
+                reason="timeout",
+                prompt_id=kwargs["prompt_id"],
+                prompt_version="v1",
+            )
+        return result
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+    res = client.post("/plans/generate", json=_body(_outcome()))
+    assert res.status_code == 200
+    assert res.json()["aiSource"] == "llm"
+    assert not [w for w in res.json()["warnings"] if "칸만 잡아 뒀어요" in w]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -590,17 +675,20 @@ def _placeholder_outcome() -> InterviewOutcome:
     )
 
 
-def test_approve_skips_placeholder_goal(client: TestClient, monkeypatch: Any) -> None:
+def test_approve_skips_placeholder_goal(
+    client: TestClient, fake_plan_draft_repo: FakePlanDraftRepo
+) -> None:
     """goals.list 미입력 시 '(미입력 목표)' placeholder 는 실제 Goal 로 영속되지 않는다 (#88).
 
     placeholder 만 있으면 소속시킬 goal 이 없어 트리/액션도 만들지 않는다 → 목표 관리
     화면에 정체불명 카드가 노출되지 않는다.
+
+    이제 `generate` 가 그런 outcome 을 422 로 되돌리므로(planB-1) 여기 닿는 건 그 게이트
+    이전에 저장된 Draft 뿐이다 — 그래서 Draft 를 직접 심는다.
     """
-    action = ActionItemDraft(
-        node_id="n1", title="작업", estimated_minutes=30, category="study", first_step="시작"
-    )
-    monkeypatch.setattr(aiClient, "run", _stub(action_items=[action]))
-    plan_id = client.post("/plans/generate", json=_body(_placeholder_outcome())).json()["planId"]
+    plan_id = _seed_draft(fake_plan_draft_repo, blocks=[])
+    draft = fake_plan_draft_repo._items[plan_id]
+    draft.payload = {**draft.payload, "outcome": _placeholder_outcome().model_dump(mode="json")}
 
     res = client.post(f"/plans/{plan_id}/approve")
     assert res.status_code == 200
@@ -609,6 +697,47 @@ def test_approve_skips_placeholder_goal(client: TestClient, monkeypatch: Any) ->
     assert j["activatedGoals"] == 0  # placeholder 제외 → 실제 Goal 0개
     assert j["activatedGoalNodes"] == 0
     assert j["activatedActionItems"] == 0
+
+
+def _counting_stub() -> tuple[Any, list[Any]]:
+    calls: list[Any] = []
+
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        calls.append(kwargs["schema"])
+        raise AssertionError("LLM 을 부르면 안 된다")
+
+    return stub_run, calls
+
+
+def test_generate_refuses_placeholder_only_outcome_before_the_llm(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """첫 질문에서 [충분해요]로 끝나 목표가 placeholder 뿐이면 422 — LLM 0회 (planB-1).
+
+    회귀(미러 실측): '(미입력 목표)' 로 LLM 이 일반론 20세션을 지어냈고, 승인은 0건을 저장하고도
+    200 을 돌려 온보딩이 목표·카드 없이 끝났다.
+    """
+    stub_run, calls = _counting_stub()
+    monkeypatch.setattr(aiClient, "run", stub_run)
+    res = client.post("/plans/generate", json=_body(_placeholder_outcome()))
+    assert res.status_code == 422
+    err = res.json()
+    assert err["code"] == "COMMON_VALIDATION_ERROR"
+    assert err["field"] == "goals.list"
+    assert "목표" in err["message"]
+    assert calls == []
+
+
+def test_milestones_refuses_placeholder_only_outcome_before_the_llm(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """Stage A 도 같은 게이트 — 없는 목표로 중간 목표를 지어내지 않는다 (planB-1)."""
+    stub_run, calls = _counting_stub()
+    monkeypatch.setattr(aiClient, "run", stub_run)
+    res = client.post("/plans/milestones", json=_body(_placeholder_outcome()))
+    assert res.status_code == 422
+    assert res.json()["field"] == "goals.list"
+    assert calls == []
 
 
 def test_approve_policy_violation_rolls_back(
@@ -922,8 +1051,11 @@ def test_milestones_llm_run_is_committed_not_just_added(
 
 
 def test_generate_llm_runs_are_committed(client: TestClient, monkeypatch: Any) -> None:
-    """`/plans/generate` 도 같다 — 분해·검토 2행이 **커밋**돼야 한다."""
-    _force_provider_timeout(monkeypatch)
+    """`/plans/generate` 도 같다 — 분해·검토 2행이 **커밋**돼야 한다.
+
+    일시 오류 폴백으로 둔다 — 타임아웃이면 검토를 건너뛰어 1행이다(`after_schedule`).
+    """
+    _force_provider_error(monkeypatch)
     cap = _CapturingSession()
     _use_session(client, cap)
 

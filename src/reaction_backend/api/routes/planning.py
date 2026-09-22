@@ -265,6 +265,16 @@ def _interview_not_found() -> ApiError:
     )
 
 
+def _goal_missing() -> ApiError:
+    """계획할 실제 목표가 없을 때(placeholder 만 남은 outcome) — LLM 을 부르기 전에 되돌린다."""
+    return ApiError(
+        ErrorCode.COMMON_VALIDATION_ERROR,
+        "계획을 세울 목표가 아직 없어요. 하고 싶은 일을 한 가지만 알려 주시면 거기서부터 세울게요.",
+        http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+        field="goals.list",
+    )
+
+
 def _tier_limit_exceeded() -> ApiError:
     return ApiError(
         ErrorCode.GOAL_TIER_LIMIT_EXCEEDED,
@@ -436,7 +446,10 @@ async def _max_plan_weeks(session: AsyncSession, user_id: UUID, outcome: Intervi
     (ADR-0008 §3). `first_plan_adapter`/`first_plan` 은 DB 무관을 지키므로 이 판정은
     여기(라우터)에서 한다 — 만다라 축에서 왔으면 2주, 아니면 전역 기본(4주).
     """
-    heaviest = next((g for g in outcome.core_goals if g.is_heaviest), None)
+    # 계획이 실제로 다루는 목표와 **같은 규칙**(is_heaviest 없으면 첫 목표)으로 고른다 —
+    # 예전엔 is_heaviest 가 없으면 None 으로 떨어져, 첫 목표가 만다라 승격 목표여도 4주로
+    # 잡혔다(planB-18).
+    heaviest = first_plan_adapter.heaviest_goal_or_none(outcome)
     if heaviest is None:
         return first_plan_adapter.max_plan_weeks_for(is_mandala_derived=False)
     promoted_titles = await mandala_adapter.fetch_promoted_goal_titles_for_user(session, user_id)
@@ -467,6 +480,10 @@ async def generate_milestones(
     outcome = await _with_settings_edits(
         *await _resolve_outcome(body, user.id, repo), user=user, profile_repo=profile_repo
     )
+    # 계획할 실제 목표가 없으면 LLM 을 부르기 전에 되돌린다 (planB-1) — 일반론 마일스톤을
+    # 지어내지 않는다. `/plans/generate` 는 `_run_first_plan` 안에서 같은 검사를 한다.
+    if first_plan.plannable_goal_missing(outcome):
+        raise _goal_missing()
     goal_id = await first_plan_adapter.heaviest_goal_id(session, user_id=user.id, outcome=outcome)
     if goal_id is not None:
         saved = await first_plan_adapter.fetch_confirmed_milestones(session, goal_id=goal_id)
@@ -554,6 +571,9 @@ async def _run_first_plan(
     호출자가 outcome 을 확정해서 넘긴다(rate limit·가용시간 덮어쓰기도 호출자 몫).
     """
     resolved_target = _resolve_target_date(target_date)
+    # 미입력 placeholder 만 있으면 분해할 목표가 없다 — 일반론 계획을 지어내지 않는다.
+    if first_plan.plannable_goal_missing(outcome):
+        raise _goal_missing()
     max_plan_weeks = await _max_plan_weeks(session, user.id, outcome)
 
     async with user_agent_lock(session, user.id, _LOCK_AGENT):
@@ -590,7 +610,7 @@ async def _run_first_plan(
         final = await graph.ainvoke(state, config=config)
 
         gp = final["goal_plan"]
-        ai_source: Literal["llm", "rule"] = "rule" if final["used_fallback"] else "llm"
+        ai_source: Literal["llm", "rule"] = first_plan.plan_ai_source(final)
         payload = _build_payload(
             outcome=outcome,
             goal_nodes=gp.goal_nodes if gp is not None else [],

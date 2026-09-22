@@ -12,15 +12,22 @@ from uuid import uuid4
 
 import pytest
 
+from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
+from reaction_backend.orchestrator import goal_cycle
 from reaction_backend.orchestrator.first_plan_adapter import (
+    ACTION_TITLE_MAX_CHARS,
+    GOAL_TITLE_MAX_CHARS,
+    NODE_TITLE_MAX_CHARS,
     _derive_goal_category,
+    fit_title,
+    heaviest_goal_id,
     materialize_goals,
     supersede_proposed_goals,
 )
 from reaction_backend.orchestrator.interview_adapter import PLACEHOLDER_GOAL_TITLE
-from reaction_backend.schemas.interview import GoalCandidate, normalize_deadline
+from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome, normalize_deadline
 
 
 class _Result:
@@ -381,6 +388,58 @@ async def test_supersede_proposed_goals_ignores_mandala_owned_goal() -> None:
     assert mandala_owner.status == "proposed" and mandala_owner.archived_at is None
 
 
+class _SqlCapturingSession:
+    """실 DB 처럼 WHERE 를 **적용해서** 돌려주는 fake — 쿼리 모양과 결과를 함께 본다(planB-16).
+
+    `goal_nodes` 조회는 goal_id 컬럼만 돌려준다(실제 `select(GoalNode.goal_id)` 결과처럼).
+    """
+
+    def __init__(self, goals: list[Goal], mandala_owner_ids: set[Any]) -> None:
+        self._goals = goals
+        self._mandala_owner_ids = mandala_owner_ids
+        self.sql: list[str] = []
+
+    async def execute(self, stmt: Any) -> _Result:
+        self.sql.append(str(stmt).lower())
+        if stmt.column_descriptions[0]["entity"] is Goal:
+            return _Result(self._goals)
+        return _Result(sorted(self._mandala_owner_ids, key=str))
+
+
+async def test_mandala_owner_lookup_is_scoped_to_the_users_goals() -> None:
+    """만다라 소유 판정이 **모든 사용자의 goal_nodes 전체**를 읽지 않는다 (planB-16).
+
+    예전 쿼리는 `select(GoalNode).where(archived_at IS NULL)` 뿐이라 가입자가 늘수록 계획
+    요청마다 모두의 노드(만다라 한 개가 73칸)를 ORM 행으로 몇 번씩 읽었다.
+    """
+    from reaction_backend.orchestrator.first_plan_adapter import _active_goals
+
+    uid = uuid4()
+    plan_goal, mandala_goal = Goal(), Goal()
+    for g, title in ((plan_goal, "토익"), (mandala_goal, "궁극목표")):
+        g.id = uuid4()
+        g.user_id = uid
+        g.title = title
+        g.status = "active"
+        g.archived_at = None
+    sess = _SqlCapturingSession([plan_goal, mandala_goal], {mandala_goal.id})
+
+    active = await _active_goals(sess, uid)  # type: ignore[arg-type]
+
+    assert active == [plan_goal]
+    node_sql = next(q for q in sess.sql if "goal_nodes" in q)
+    assert "tree_kind" in node_sql and " in " in node_sql
+    assert "goal_nodes.title" not in node_sql  # ORM 행 전체가 아니라 goal_id 만
+
+
+async def test_mandala_owner_lookup_skips_the_query_without_goals() -> None:
+    sess = _SqlCapturingSession([], set())
+    from reaction_backend.orchestrator.first_plan_adapter import _active_goals
+
+    assert await _active_goals(sess, uuid4()) == []  # type: ignore[arg-type]
+    assert not [q for q in sess.sql if "goal_nodes" in q]
+
+
 async def test_month_only_deadline_does_not_crash_the_interview() -> None:
     """월만 말한 마감(`2026-10-00`)이 인터뷰 마지막 턴을 500 으로 죽이던 회귀 (라이브 8/29).
 
@@ -423,3 +482,116 @@ def test_normalize_deadline_reads_only_real_dates() -> None:
     assert normalize_deadline("내년 봄쯤") is None
     assert normalize_deadline("") is None
     assert normalize_deadline(None) is None
+
+
+# ───────────────────── 긴 자유 답이 제목이 된 경우 (interview-10) ─────────────────────
+
+_LONG_ANSWER = (
+    "솔직히 제시된 선택지 중에는 딱 맞는 게 없는데 제일 신경 쓰이는 건 다음 달 토익 시험이고 "
+    "그 전에 학교 중간고사랑 동아리 발표 준비도 겹쳐서 매일 조금씩이라도 영어 공부 시간을 "
+    "확보하고 싶고 주말에는 모의고사를 한 번씩 풀어 보면서 점수를 확인하고 싶어요 그리고 "
+    "가능하면 운동도 조금씩 하고 싶은데 그건 나중 문제고 지금은 토익이 제일 급해요 정말로요 "
+    "이번에는 꼭 끝까지 해 보고 싶어요"
+)
+
+
+def test_title_limits_match_the_db_columns() -> None:
+    """상수가 모델 컬럼 길이와 같아야 자르기가 의미가 있다 — 갈리면 여기서 먼저 터진다."""
+    assert Goal.__table__.c.title.type.length == GOAL_TITLE_MAX_CHARS  # type: ignore[attr-defined]
+    assert GoalNode.__table__.c.title.type.length == NODE_TITLE_MAX_CHARS  # type: ignore[attr-defined]
+    assert ActionItem.__table__.c.title.type.length == ACTION_TITLE_MAX_CHARS  # type: ignore[attr-defined]
+
+
+def test_fit_title_leaves_short_titles_untouched() -> None:
+    """짧은 제목은 공백까지 그대로 — 기존 행과의 대조 키가 바뀌면 같은 목표가 두 번 생긴다."""
+    assert fit_title(" 토익 900 ", 200) == " 토익 900 "
+    cut = fit_title(_LONG_ANSWER, 200)
+    assert len(cut) <= 200 and cut.endswith("…")
+    assert fit_title(_LONG_ANSWER, 200) == cut  # 같은 원문 → 같은 키
+    assert len(fit_title("가" * 500, 200)) == 200  # 공백 없는 긴 낱말도 자른다
+
+
+async def test_long_free_text_goal_title_is_clipped_instead_of_crashing_the_interview() -> None:
+    """214자 답이 목표 제목이 돼도 VARCHAR(200) 을 넘기지 않는다 (interview-10).
+
+    회귀(미러 실측): goals.heaviest 를 긴 문장으로 세 번 답하자 finish 가 500 을 내고, 다시
+    눌러도 같은 INSERT 로 또 죽어 인터뷰 전체를 잃었다. 두 번째 호출(계획 승인)은 잘린
+    제목으로 같은 목표를 **재사용**해야 한다 — 대조 키도 같은 값이어야 한다.
+    """
+    assert len(_LONG_ANSWER) > GOAL_TITLE_MAX_CHARS
+    uid = uuid4()
+    sess = _FakeSession()
+    goals = [_goal(_LONG_ANSWER, heaviest=True, tier="focus"), _goal("운동")]
+    rows, heaviest = await materialize_goals(sess, user_id=uid, core_goals=goals)  # type: ignore[arg-type]
+    assert heaviest is not None
+    assert all(len(g.title) <= GOAL_TITLE_MAX_CHARS for g in rows)
+
+    for g in rows:
+        g.id = uuid4()
+        g.archived_at = None
+    again = _FakeSession(existing=list(rows))
+    _, heaviest_again = await materialize_goals(
+        again,  # type: ignore[arg-type]
+        user_id=uid,
+        core_goals=goals,
+        status="active",
+    )
+    assert again.added == []  # 재사용 — 같은 목표가 두 번 생기지 않는다
+    assert heaviest_again is heaviest
+
+    outcome = InterviewOutcome.model_validate(
+        {
+            "session_id": "t",
+            "generated_at": "2026-09-18T10:00:00+09:00",
+            "end_reason": "completed",
+            "ambiguity_final": 0.1,
+            "analysis_source": "llm",
+            "identity": {"role": "대3", "season": "학기중"},
+            "core_goals": [g.model_dump() for g in goals],
+            "availability": {
+                "activity_window": {"start": "09:00", "end": "23:00"},
+                "peak_window": [],
+            },
+            "preferences": {"recovery_tone": "담백", "rest_ok": True, "downscope_unit_min": 10},
+        }
+    )
+    found = await heaviest_goal_id(again, user_id=uid, outcome=outcome)  # type: ignore[arg-type]
+    assert found == heaviest.id
+
+
+def test_seed_outcome_finds_the_template_of_a_clipped_goal_title() -> None:
+    """잘려 저장된 목표로 다음 계획을 열어도 인터뷰에서 답한 슬롯을 잃지 않는다 (interview-10 리뷰).
+
+    `goal_cycle.seed_outcome` 은 저장된 제목과 인터뷰 원문을 대조해 이미 답한 주당 시간·세션
+    길이를 이어 쓴다. 저장 쪽만 자르고 대조는 원문으로 하면 긴 제목 목표는 그 슬롯을 버렸다.
+    """
+    base = InterviewOutcome.model_validate(
+        {
+            "session_id": "t",
+            "generated_at": "2026-09-18T10:00:00+09:00",
+            "end_reason": "completed",
+            "ambiguity_final": 0.1,
+            "analysis_source": "llm",
+            "identity": {"role": "대3", "season": "학기중"},
+            "core_goals": [
+                _goal(_LONG_ANSWER, heaviest=True, tier="focus")
+                .model_copy(update={"session_length_min": 40, "frequency_per_week": 3})
+                .model_dump()
+            ],
+            "availability": {
+                "activity_window": {"start": "09:00", "end": "23:00"},
+                "peak_window": [],
+            },
+            "preferences": {"recovery_tone": "담백", "rest_ok": True, "downscope_unit_min": 10},
+        }
+    )
+    stored = Goal()
+    stored.id = uuid4()
+    stored.title = fit_title(_LONG_ANSWER, GOAL_TITLE_MAX_CHARS)
+    stored.category = "study"
+    stored.goal_tier = "focus"
+
+    got = goal_cycle.seed_outcome(base=base, goal=stored).core_goals[0]
+
+    assert (got.session_length_min, got.frequency_per_week) == (40, 3)
+    assert got.title == stored.title

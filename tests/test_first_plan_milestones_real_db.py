@@ -738,3 +738,27 @@ async def test_cursor_ignores_archived_milestones(real_db_session: AsyncSession)
     await real_db_session.flush()
 
     assert await completed_milestone_cursor(real_db_session, goal_id=goal.id) == 0
+
+
+async def test_long_milestone_title_is_clipped_and_stays_idempotent(
+    real_db_session: AsyncSession,
+) -> None:
+    """200자를 넘는 마일스톤 제목도 승인이 INSERT 에서 죽지 않는다 (interview-10 리뷰).
+
+    긴 목표 제목을 룰 폴백이 '{제목} 준비·기초' 로 잇거나 LLM 이 그대로 옮겨 쓰면 VARCHAR(200)
+    을 넘는다 — 사용자가 그대로 확정하면 승인이 세 번 재시도 끝에 실패했다. 잘라서 저장하고,
+    같은 목록(또는 Stage A 가 되읽은 잘린 제목)을 다시 보내도 새 행을 만들지 않아야 한다.
+    """
+    goal = await _seed_goal(real_db_session)
+    long_title = "다음 달 토익 시험과 중간고사 동아리 발표가 겹쳐서 " * 8 + "준비·기초"
+    assert len(long_title) > 200
+    same = [MilestoneDraft(title=long_title, summary=""), MilestoneDraft(title="실전", summary="")]
+
+    created = await _sync_milestones(real_db_session, goal_id=goal.id, milestones=same)
+    assert len(created) == 2
+    assert len(created[0].title) <= 200 and created[0].title.endswith("…")
+
+    assert await _sync_milestones(real_db_session, goal_id=goal.id, milestones=same) == []
+    reread = await fetch_confirmed_milestones(real_db_session, goal_id=goal.id)
+    assert await _sync_milestones(real_db_session, goal_id=goal.id, milestones=reread) == []
+    assert await _plan_node_count(real_db_session, goal_id=goal.id, node_type="milestone") == 2
