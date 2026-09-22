@@ -362,6 +362,15 @@ class FakeNotificationRepo:
     async def set_push_subscription(
         self, setting: NotificationSetting, subscription: dict[str, Any]
     ) -> NotificationSetting:
+        # 실 repo 와 같은 규칙 — 같은 endpoint 를 가진 다른 사용자의 구독은 지운다 (sched-4).
+        endpoint = subscription.get("endpoint")
+        for other in self._items.values():
+            if (
+                other.user_id != setting.user_id
+                and other.push_subscription is not None
+                and other.push_subscription.get("endpoint") == endpoint
+            ):
+                other.push_subscription = None
         setting.push_subscription = subscription
         return setting
 
@@ -441,13 +450,23 @@ class FakeWebPushSender:
     def __init__(self, outcome: str = "ok") -> None:
         self.outcome = outcome
         self.calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        # 호출별 전달 옵션(ttl·urgency) — 게이트가 클래스별 값을 싣는지 검증용 (sched-2)
+        self.options: list[dict[str, Any]] = []
 
     @property
     def is_configured(self) -> bool:
         return self.outcome != "unconfigured"
 
-    async def send(self, subscription: dict[str, Any], payload: dict[str, Any]) -> str:
+    async def send(
+        self,
+        subscription: dict[str, Any],
+        payload: dict[str, Any],
+        *,
+        ttl: int | None = None,
+        urgency: str | None = None,
+    ) -> str:
         self.calls.append((subscription, payload))
+        self.options.append({"ttl": ttl, "urgency": urgency})
         return self.outcome
 
 
@@ -2215,10 +2234,16 @@ class FakePrivacyRepo:
 
     def __init__(self) -> None:
         self.anonymized_user: UUID | None = None
+        self.purged_user: UUID | None = None
 
     async def anonymize_user(self, user_id: UUID) -> int:
         self.anonymized_user = user_id
         return 3
+
+    async def purge_account_text(self, user_id: UUID) -> int:
+        """계정 삭제 전용 추가 마스킹 (auth-9) — 호출 기록만."""
+        self.purged_user = user_id
+        return 5
 
 
 class FakeUserRepo:
@@ -2265,15 +2290,27 @@ class FakeUserRepo:
             and getattr(u, "anonymized_at", None) is None
         ]
 
+    async def touch_login(self, user: User, profile: GoogleProfile) -> User:
+        """실 repo 와 같은 규칙 — 이름·활동 시각 갱신 + 익명화 플래그 해제 (auth-1)."""
+        user.name = profile.name
+        user.last_active_at = datetime.now(UTC)
+        if getattr(user, "is_anonymized", False) or getattr(user, "anonymized_at", None):
+            user.is_anonymized = False
+            user.anonymized_at = None
+        return user
+
+    async def touch_last_active(self, user: User) -> None:
+        user.last_active_at = datetime.now(UTC)
+
     async def upsert_from_google(self, profile: GoogleProfile) -> User:
         existing = self._by_email.get(profile.email)
         if existing is not None:
-            existing.name = profile.name
-            return existing
+            return await self.touch_login(existing, profile)
         u = User()
         u.id = uuid4()
         u.email = profile.email
         u.name = profile.name
+        u.last_active_at = datetime.now(UTC)
         u.timezone = "Asia/Seoul"
         u.onboarding_state = "WELCOME"
         u.tone_mode = None

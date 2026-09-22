@@ -286,7 +286,10 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     # 웹 새로고침 뒤에도 하루 동안 로그인 상태가 유지되도록 access token 자체를 24시간 유지한다.
-    # refresh token은 기존 14일을 유지하며, 명시적 로그아웃/계정 삭제 시에는 즉시 차단된다.
+    # refresh token은 기존 14일. 계정 삭제는 access·refresh 모두 즉시 막힌다(사용자 조회 필터).
+    # ⚠️ 로그아웃은 refresh 의 jti 만 **프로세스 메모리**(`auth/revoke.py`)에 등록한다 — 이미
+    # 발급된 access token 은 만료(24시간)까지 살아 있고, 재배포·재기동하면 로그아웃한 refresh
+    # 도 다시 통한다. 영구 차단은 DB 저장소(마이그레이션 필요)가 들어와야 성립한다.
     jwt_access_token_ttl_minutes: int = 24 * 60
     jwt_refresh_token_ttl_days: int = 14
     # refresh 쿠키(`reaction_refresh`, #323)를 심을 경로들. 웹은 Vercel rewrite

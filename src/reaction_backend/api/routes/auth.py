@@ -28,6 +28,7 @@ Issue #324 — 신규 가입 게이트 (기존 사용자 로그인은 완전히 
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -197,7 +198,10 @@ async def login_with_google(
     기존 사용자(email 이미 존재)는 게이트를 전혀 거치지 않는다 — lock 도 신규 가입
     판정 이후에만 잡는다(로그인은 이미 가입한 사람이라 경합 대상이 아니다).
     """
-    claims = verify_google_id_token(body.id_token)
+    # 검증은 Google 공개키를 HTTPS 로 가져오는 **동기** 호출이다 — 이벤트 루프에서 그대로
+    # 부르면 그동안 다른 모든 사용자의 요청이 멈춘다(단일 워커). 스레드로 내린다.
+    claims = await asyncio.to_thread(verify_google_id_token, body.id_token)
+    profile = GoogleProfile(email=claims.email, name=claims.name)
     existing = await user_repo.get_by_email(claims.email)
 
     if existing is None:
@@ -209,18 +213,15 @@ async def login_with_google(
                 code_row = await _validate_new_signup(
                     body, user_repo=user_repo, invite_repo=invite_repo
                 )
-                user = await user_repo.upsert_from_google(
-                    GoogleProfile(email=claims.email, name=claims.name),
-                )
+                user = await user_repo.upsert_from_google(profile)
                 if code_row is not None:
                     await invite_repo.mark_used(code_row, used_by_user_id=user.id)
-                await session.commit()
             else:
-                user = existing
+                user = await user_repo.touch_login(existing, profile)
+            await session.commit()
     else:
-        user = await user_repo.upsert_from_google(
-            GoogleProfile(email=claims.email, name=claims.name),
-        )
+        # 이미 읽은 행을 그대로 갱신한다 — upsert_from_google 은 email 로 한 번 더 조회한다.
+        user = await user_repo.touch_login(existing, profile)
         await session.commit()
 
     access = issue_access_token(user.id)
@@ -238,6 +239,7 @@ async def refresh_access_token(
     body: RefreshRequest,
     revoke_store: Annotated[RevokeStore, Depends(get_revoke_store)],
     user_repo: Annotated[UserRepo, Depends(get_user_repo)],
+    session: Annotated[AsyncSession, Depends(get_db)],
     reaction_refresh: Annotated[str | None, Cookie()] = None,
 ) -> AccessToken:
     """refresh → 새 access. refresh 회전 X (refresh 자체 재발급 안 함).
@@ -252,6 +254,9 @@ async def refresh_access_token(
     대신 `UserRepo.get_by_id` 의 `archived_at IS NULL` 필터로 막는다. `get_current_user`
     가 이미 같은 필터로 access token 을 막고 있으니, 여기도 같은 기준을 적용해야
     "삭제된 계정은 refresh 로도 못 살아난다"가 성립한다.
+
+    통과하면 `last_active_at` 을 갱신한다 — 90일 비활성 판정이 "마지막 로그인"이 아니라
+    "마지막 사용"을 기준으로 하게(auth-6).
     """
     token = body.refresh_token or reaction_refresh
     if token is None:
@@ -283,12 +288,19 @@ async def refresh_access_token(
             http_status=HTTPStatus.UNAUTHORIZED,
         )
 
-    if await user_repo.get_by_id(decoded.user_id) is None:
+    user = await user_repo.get_by_id(decoded.user_id)
+    if user is None:
         raise ApiError(
             ErrorCode.AUTH_INVALID_TOKEN,
             "사용자를 찾을 수 없습니다.",
             http_status=HTTPStatus.UNAUTHORIZED,
         )
+
+    # 활동 기록 — 90일 비활성 익명화(잠금 §1.4)의 기준값. 로그인에서만 쓰면 refresh token
+    # 14일 동안 앱을 써도 값이 안 움직여, 실제 비활성 76~78일 만에 익명화될 수 있었다.
+    # access token 이 24시간이라 쓰는 동안은 하루 한 번 이상 여기를 지난다.
+    await user_repo.touch_last_active(user)
+    await session.commit()
 
     new_access = issue_access_token(decoded.user_id)
     return AccessToken(access_token=new_access.token)

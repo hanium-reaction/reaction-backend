@@ -10,11 +10,15 @@ from fastapi.testclient import TestClient
 
 from reaction_backend.config import get_settings
 from reaction_backend.db.models.notification_send import NotificationSend
+from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.user import User
 from reaction_backend.schemas.common import KST
 from tests.conftest import DEMO_USER_UUID, FakeNotificationRepo, FakeNotificationSendRepo
 
-_SUBSCRIPTION = {"endpoint": "https://push.example.com/x", "keys": {"p256dh": "k", "auth": "a"}}
+_SUBSCRIPTION = {
+    "endpoint": "https://fcm.googleapis.com/fcm/send/x",
+    "keys": {"p256dh": "k", "auth": "a"},
+}
 
 
 def test_get_settings_returns_defaults_for_new_user(client: TestClient) -> None:
@@ -101,7 +105,7 @@ def test_subscribe_rejects_missing_webpush_keys(client: TestClient) -> None:
     """p256dh/auth 없는 구독 객체는 저장 전에 422 — 발송 시점 crash 예방."""
     resp = client.post(
         "/notifications/subscribe",
-        json={"endpoint": "https://push.example.com/x", "keys": {"p256dh": "k"}},
+        json={"endpoint": "https://fcm.googleapis.com/fcm/send/x", "keys": {"p256dh": "k"}},
     )
     assert resp.status_code == 422
     assert resp.json()["code"] == "COMMON_VALIDATION_ERROR"
@@ -220,3 +224,77 @@ def test_mark_opened_404_for_another_users_notification(
 
     assert resp.status_code == 404
     assert row.opened_at is None
+
+
+# ───── 구독 endpoint 허용 목록 (sched-5 / abuse-10 — blind SSRF 차단) ─────
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://169.254.169.254/latest/meta-data/",  # 인스턴스 메타데이터
+        "https://169.254.169.254/x",  # https 라도 IP 리터럴
+        "http://127.0.0.1:2019/stop",  # 내부 서비스
+        "https://127.0.0.1/push",
+        "http://fcm.googleapis.com/fcm/send/abc",  # 알려진 호스트라도 http
+        "https://evil.example.com/push",  # 허용 목록 밖
+        "https://evilpush.apple.com/x",  # 접미사 흉내
+        "https://fcm.googleapis.com@evil.example.com/x",  # userinfo 혼동
+        "https://fcm.googleapis.com:8443/fcm/send/abc",  # 다른 포트
+    ],
+)
+def test_subscribe_rejects_non_push_service_endpoint(
+    client: TestClient, fake_notification_repo: FakeNotificationRepo, endpoint: str
+) -> None:
+    resp = client.post(
+        "/notifications/subscribe",
+        json={"endpoint": endpoint, "keys": {"p256dh": "k", "auth": "a"}},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["code"] == "COMMON_VALIDATION_ERROR"
+    assert body["field"] == "endpoint"
+    assert "다시 켜 주세요" in body["message"]
+    setting = fake_notification_repo._items.get(DEMO_USER_UUID)
+    assert setting is None or setting.push_subscription is None
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://fcm.googleapis.com/fcm/send/abc:APA91b",
+        "https://updates.push.services.mozilla.com/wpush/v2/gAAAA",
+        "https://web.push.apple.com/QGx",
+        "https://db5p.notify.windows.com/w/?token=abc",
+    ],
+)
+def test_subscribe_accepts_real_push_services(client: TestClient, endpoint: str) -> None:
+    resp = client.post(
+        "/notifications/subscribe",
+        json={"endpoint": endpoint, "keys": {"p256dh": "k", "auth": "a"}},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["pushSubscribed"] is True
+
+
+def test_subscribe_takes_the_endpoint_away_from_other_users(
+    client: TestClient, fake_notification_repo: FakeNotificationRepo
+) -> None:
+    """같은 브라우저(endpoint)는 한 사람 몫 — 마지막으로 켠 사람에게 간다 (sched-4)."""
+    previous_owner = uuid4()
+    their = fake_notification_repo._items.setdefault(previous_owner, NotificationSetting())
+    their.user_id = previous_owner
+    their.push_subscription = dict(_SUBSCRIPTION)
+    elsewhere = uuid4()
+    other = fake_notification_repo._items.setdefault(elsewhere, NotificationSetting())
+    other.user_id = elsewhere
+    other.push_subscription = {
+        "endpoint": "https://fcm.googleapis.com/fcm/send/other-phone",
+        "keys": {"p256dh": "k", "auth": "a"},
+    }
+
+    resp = client.post("/notifications/subscribe", json=_SUBSCRIPTION)
+
+    assert resp.status_code == 201
+    assert their.push_subscription is None
+    assert other.push_subscription is not None

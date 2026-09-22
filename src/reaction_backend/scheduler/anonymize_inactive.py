@@ -9,9 +9,11 @@
 
 ## 무엇을 하는가 — `POST /settings/anonymize`(#23-B)와 **같은 정의**의 익명화
 
-사용자가 직접 누르는 익명화와 정확히 같은 일을 한다: `*_encrypted` 컬럼을
-`[anonymized]` sentinel 로 덮고, 이름을 마스킹하고, `is_anonymized`/`anonymized_at` 을
-세운다. hard delete 아님(AGENTS §2) — 행은 보존된다.
+사용자가 직접 누르는 익명화와 정확히 같은 일을 한다 — 같은 함수
+`privacy_repo.anonymize_account` 를 부른다: 캘린더 연결을 끊고(Google 쪽 권한도 회수),
+`*_encrypted` 컬럼과 그 평문 사본·자유서술을 `[anonymized]` sentinel 로 덮고, 이름을
+마스킹하고, `is_anonymized`/`anonymized_at` 을 세운다. hard delete 아님(AGENTS §2) — 행은
+보존된다.
 
 **email 은 건드리지 않는다.** 이건 계정 삭제(`POST /settings/delete-account`, #321)와
 갈리는 지점이고 의도적이다:
@@ -43,9 +45,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from reaction_backend.repositories.privacy_repo import PrivacyRepo
+from reaction_backend.repositories.privacy_repo import (
+    PrivacyMasker,
+    PrivacyRepo,
+    anonymize_account,
+    revoke_calendar_grant,
+)
 from reaction_backend.repositories.user_repo import UserRepo
-from reaction_backend.safety.encryption import ANONYMIZED_SENTINEL
 from reaction_backend.schemas.common import now_kst
 
 if TYPE_CHECKING:
@@ -83,7 +89,7 @@ async def run_anonymize_inactive_users(
     *,
     now: datetime | None = None,
     user_repo: UserRepo | None = None,
-    privacy_repo: PrivacyRepo | None = None,
+    privacy_repo: PrivacyMasker | None = None,
 ) -> AnonymizeResult:
     """90일 넘게 안 돌아온 사용자를 익명화하고 **사용자별로** commit.
 
@@ -91,7 +97,7 @@ async def run_anonymize_inactive_users(
     **idempotent** — `anonymized_at IS NULL` 필터가 이미 처리된 사용자를 걸러낸다.
     """
     users_repo = user_repo or UserRepo(session)
-    priv_repo = privacy_repo or PrivacyRepo(session)
+    priv_repo: PrivacyMasker = privacy_repo or PrivacyRepo(session)
     now_dt = now or now_kst()
 
     users = await users_repo.list_inactive_for_anonymization(
@@ -100,16 +106,17 @@ async def run_anonymize_inactive_users(
     anonymized = failed = 0
     for user in users:
         try:
-            await priv_repo.anonymize_user(user.id)
-            user.is_anonymized = True
-            user.anonymized_at = now_dt
-            user.name = ANONYMIZED_SENTINEL
+            # 수동 익명화와 같은 함수 — 캘린더 해제·마스킹·플래그가 세 경로에서 어긋나지 않게.
+            outcome = await anonymize_account(session, user, privacy_repo=priv_repo, now=now_dt)
             await session.commit()  # 사용자 단위 commit — 모듈 docstring
             anonymized += 1
         except Exception:  # noqa: BLE001 — 한 사용자 실패가 배치를 멈추지 않게
             failed += 1
             _log.exception("anonymize_inactive failed for user %s", user.id)
             await session.rollback()
+            continue
+        # Google 쪽 캘린더 권한 회수 — commit 뒤 best-effort(절대 예외를 올리지 않는다).
+        await revoke_calendar_grant(outcome.calendar_refresh_token)
 
     # 되돌릴 수 없는 마스킹이라 건수를 남긴다 — 사고 시 영향 범위 산정용
     # (`expire_proposed_goals` 와 같은 이유).

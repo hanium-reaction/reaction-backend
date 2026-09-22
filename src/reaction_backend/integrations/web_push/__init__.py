@@ -5,9 +5,10 @@
 """
 
 from reaction_backend.integrations.web_push.sender import (
+    PushUrgency,
     SendOutcome,
     WebPushSender,
     get_web_push_sender,
 )
 
-__all__ = ["SendOutcome", "WebPushSender", "get_web_push_sender"]
+__all__ = ["PushUrgency", "SendOutcome", "WebPushSender", "get_web_push_sender"]

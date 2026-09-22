@@ -57,6 +57,71 @@
   provider 를 부르지 않고 룰 폴백(`aiSource="rule"`)으로 내린다. 요청 필드 길이 상한은 각
   엔드포인트 스키마 소관이라 여기서 바꾸지 않았다.
 
+## v2.30-auth — 2026-09-18 (인증·개인정보·푸시 감사 수정)
+
+요청·응답 스키마 무변경, 마이그레이션 없음. 아래는 **동작** 변경이다.
+
+- **익명화 뒤 다시 로그인하면 익명화 플래그가 내려간다** — `POST /auth/google`(기존 사용자).
+  90일 비활성 익명화(또는 수동 익명화) 뒤 돌아온 사용자는 예전엔 `is_anonymized` 가 영영
+  남아 습관 인스턴스·아침 브리프·저녁 회고·시작 알림 sweep 에서 빠졌고, 다시 떠나도 새
+  텍스트가 익명화되지 않았으며, `POST /settings/anonymize` 는 409 였다. 이제 재로그인은 새
+  활동 기간의 시작이다. 이미 가린 과거 텍스트는 그대로(되살리지 않는다). FE 할 일 없음.
+- **`POST /auth/refresh` 성공도 활동으로 기록한다**(`users.last_active_at`). 90일 비활성
+  익명화 기준이 "마지막 로그인"이 아니라 "마지막 사용"이 된다 — 예전엔 refresh token(14일)
+  으로 쓰는 동안 값이 멈춰 실제 비활성 76~78일 만에 익명화될 수 있었다. 실패한 refresh
+  (만료·로그아웃·삭제 계정)는 기록하지 않는다. FE 할 일 없음.
+- **`POST /auth/google` — Google 공개키 조회 실패는 503 `COMMON_INTERNAL_ERROR`**(기존 코드,
+  새 코드 아님). 예전엔 500 이었다(토큰 문제가 아니라 Google 쪽 일시 장애). 공개키 조회에
+  5초 상한을 걸고(라이브러리 기본 120초), 검증을 이벤트 루프 밖 스레드로 옮겨 로그인 한 건이
+  서버 전체를 붙잡지 않는다. FE: 503 은 "잠시 후 다시" 안내로 충분(메시지 그대로 표시 가능).
+- **`POST /notifications/subscribe` — `endpoint` 는 알려진 push 서비스의 https 주소만**
+  (`fcm.googleapis.com`, `*.push.services.mozilla.com`, `*.push.apple.com`,
+  `*.notify.windows.com`). IP 리터럴·http·다른 포트·목록 밖 호스트는 422
+  `COMMON_VALIDATION_ERROR`(`field: "endpoint"`). 서버가 이 URL 로 POST 를 보내므로 내부 주소로
+  향하는 blind SSRF 를 막는다. 이미 저장된 목록 밖 구독은 발송 직전에 걸러져 정리되고(요청
+  없음), push 서비스의 리다이렉트는 따라가지 않는다. FE 할 일 없음 — 브라우저가 만든 구독은
+  전부 목록 안이다.
+- **Web Push 에 전달 유효 시간(TTL)·Urgency 를 싣는다.** 예전엔 TTL 0(pywebpush 기본)이라
+  절전(Doze)·오프라인 기기 몫을 push 서비스가 즉시 버렸는데, 서버는 201 을 보고 발송으로 기록해
+  주 3건 예산을 썼다. 이제 pre_card 7분·high, evening_reflection 23시까지, morning_brief 3시간 —
+  모두 23:00(quiet hours 시작)을 넘지 않게 자른다. FE 할 일 없음.
+- **익명화·계정 삭제의 마스킹 범위를 넓혔다** — `POST /settings/anonymize`,
+  `POST /settings/delete-account`, 90일 cron. 암호문만 가리고 평문 사본(인박스 → 할 일·목표
+  제목)과 인터뷰 자유 입력 답이 그대로 남던 구멍을 막았다. 삭제는 목표·할 일·습관·일정 제목과
+  push 구독까지 지운다(행은 보존). 범위는 api-contract §16. 응답 스키마 무변경(`maskedCount`
+  숫자가 커질 수 있다).
+- **익명화·삭제가 캘린더 연결을 끊고 Google 쪽 권한을 회수한다.** 예전엔 토큰만 `[anonymized]`
+  로 덮어 연결이 "연결됨"으로 남았고(조회는 전부 실패), Google 계정에는 권한이 영영 남아 같은
+  계정으로 다시 가입하면 첫 캘린더 연결이 실패했다.
+- **2단계 확인 문구를 사용자 말로** — `message` 에서 "확인 토큰으로 한 번 더 요청해 주세요"
+  같은 API 설명을 빼고, 가려지는 범위·5분 안에 한 번 더 눌러야 한다는 것을 말한다. 만료 422
+  (`PRIVACY_INVALID_CONFIRMATION`, 코드 그대로) 문구도 "확인 시간이 지났어요. 처음부터 한 번 더
+  눌러 주세요." FE 후속: 이 코드를 받으면 확인 단계를 처음으로 되돌리고, 삭제 완료 `message`
+  를 로그아웃 뒤 화면에 보여 주기.
+- **`POST /notifications/subscribe` — 같은 endpoint 는 마지막 구독자에게만.** 공용 PC·친구 폰에서
+  A 가 알림을 켜고 로그아웃한 뒤 B 가 같은 브라우저로 켜면, 예전엔 두 사람 모두 그 기기로 알림을
+  받았다(A 의 카드 제목이 B 앞에). 이제 A 의 구독이 지워진다. FE 후속: 로그아웃 때
+  `unsubscribePush()` + `DELETE /notifications/subscribe` 를 먼저 부르기.
+- **알림 설정 첫 조회가 동시에 와도 500 이 나지 않는다** — `GET/PATCH /notifications/settings`·
+  `POST /notifications/subscribe` 의 행 생성이 `ON CONFLICT DO NOTHING` 으로 바뀌었다.
+- **에러 `message` 가 한국어로** — 요청 검증 422(`COMMON_VALIDATION_ERROR`)가 pydantic 영어 원문
+  ('String should have at least 1 character', 'Field required' …)을 그대로 내보내던 것을 종류별
+  한국어로 바꿨다(`field` 는 그대로, 스키마가 직접 쓴 한국어 문구는 그대로). Starlette 기본
+  404/405('Not Found'…)도 한국어. 코드·envelope 무변경 — 분기는 `code` 로.
+- **DB 컬럼 길이를 넘는 입력은 500 대신 422** `COMMON_VALIDATION_ERROR`("입력한 내용이 너무 길어요.
+  조금 줄여 주세요.", `field` 없음). 제목 등 스키마 길이 상한이 빠진 곳의 안전망이다(상한 자체는
+  각 도메인 스키마가 `field` 와 함께 먼저 막는다). 다른 DB 오류는 종전대로 500.
+- **push payload `url` 이 모든 클래스에서 `/`** — 예전 `/today`·`/reflection`·`/reviews/weekly`
+  는 FE 에 라우트가 없어 알림을 누르면 빈 화면이 떴다(설치형 PWA 는 빠져나올 방법도 없었다). FE
+  후속: catch-all 라우트(또는 경로 → 화면 매핑)와 Vercel SPA rewrite 를 넣으면 BE 가 클래스별
+  딥링크를 다시 쓴다.
+- **`GET /health` 의 `db.error` 가 고정 값 `"db_unavailable"`** — 예전엔 DB 예외 원문을 200자까지
+  실어, 장애 중 누구나 내부 DB 주소·사용자 이름을 볼 수 있었다(인증 없는 공개 경로). 원문은 서버
+  로그에만 남는다. 모니터링이 문자열을 파싱하고 있었다면 `status`/`db.ok` 로 판단할 것.
+- **500 응답에도 CORS·`x-request-id` 헤더가 붙는다.** 예전엔 처리 안 된 예외의 500 만 CORS 바깥에서
+  만들어져, 크로스오리진 네이티브 앱은 네트워크 오류로 받았다. FE 후속: 목표 화면의 "백엔드
+  미동작 — 더미 목표 추가" 폴백 제거.
+
 ---
 
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)

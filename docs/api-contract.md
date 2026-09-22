@@ -39,6 +39,14 @@
 
 - `code` — 도메인 prefix UPPER_SNAKE_CASE
 - 표준 HTTP status code 매핑: 400 / 401 / 403 / 404 / 409 / 422 / 500
+- `message` — **화면에 그대로 띄울 수 있는 한국어**(v2.30-auth). 요청 검증 422
+  (`COMMON_VALIDATION_ERROR`)도 pydantic 영어 원문 대신 종류별 한국어("꼭 필요한 항목이
+  빠졌어요.", "200자까지 입력할 수 있어요. 조금 줄여 주세요." 등)이고, 어느 입력인지는 `field`
+  로 알린다. 없는 경로·메서드(404/405)도 한국어. 분기는 `message` 가 아니라 `code` 로 할 것.
+  DB 컬럼 길이를 넘는 문자열은 스키마에서 못 막았더라도 500 이 아니라 422
+  `COMMON_VALIDATION_ERROR`("입력한 내용이 너무 길어요. 조금 줄여 주세요.")다.
+- 500 `COMMON_INTERNAL_ERROR` 에도 CORS 헤더와 `x-request-id` 가 붙는다(v2.30-auth) —
+  크로스오리진 네이티브 앱도 네트워크 오류가 아니라 이 envelope 을 받는다.
 
 ### 1.4 에러 코드 도메인 prefix
 
@@ -190,6 +198,10 @@ email)에만 순서대로 3중 검사가 적용된다:
 코드는 대소문자·앞뒤 공백 무관하게 정규화해 비교한다. 유효한 코드는 그 가입에서 **1회만**
 소비되며(재사용 불가), `scripts/manage_invite_codes.py` 로 운영자가 미리 발급한다(admin
 API 없음 — 이 레포의 다른 운영 작업과 같은 CLI 스크립트 관례).
+
+**Google 공개키 조회 실패(v2.30-auth)** — `POST /auth/google` 이 id_token 서명을 확인하려고
+Google 공개키를 가져오다 실패·지연(5초 상한)하면 503 `COMMON_INTERNAL_ERROR`("잠시 후 다시
+시도해 주세요"). 토큰 자체가 틀린 경우(401 `AUTH_INVALID_ID_TOKEN`)와 구분된다.
 
 **계정 삭제 후 refresh 차단(#321)** — `POST /auth/refresh` 는 이제 `decoded.user_id` 로
 사용자 존재를 조회하고, soft-delete(`archived_at` set, §16 `/settings/delete-account`)
@@ -1111,7 +1123,15 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 ```
 
 - `keys.p256dh` / `keys.auth` 누락·빈 값 → 422 `COMMON_VALIDATION_ERROR` (발송 암호화에 필수)
+- `endpoint` 는 알려진 push 서비스의 **https** 주소만 받는다 — `fcm.googleapis.com`,
+  `updates.push.services.mozilla.com`(`*.push.services.mozilla.com`), `web.push.apple.com`
+  (`*.push.apple.com`), `*.notify.windows.com`. IP 리터럴·http·443 외 포트·목록 밖 호스트는
+  422 `COMMON_VALIDATION_ERROR`(`field: "endpoint"`) — 서버가 이 URL 로 요청을 보내기 때문
+  (SSRF 차단, v2.30-auth). 발송은 리다이렉트를 따라가지 않는다
 - 재구독은 덮어쓰기 (1 device 1 subscription — Issue #16)
+- 같은 `endpoint`(= 한 기기의 브라우저)는 **마지막으로 구독한 사용자에게만** 남는다 — 다른
+  사용자 행에 같은 endpoint 가 있으면 그쪽 구독을 지운다(공용 기기에서 남의 알림이 뜨지 않게,
+  v2.30-auth). FE 는 로그아웃할 때 `DELETE /notifications/subscribe` 를 먼저 부르는 것을 권장
 - 응답은 `GET /notifications/settings` 와 같은 형태. `pushSubscribed` 는 저장된 구독 유무에서 파생
 
 가드 (서버 측 enforce — 발송 게이트 `safety/push_gate.py` 단일 지점, ADR-0006):
@@ -1124,9 +1144,16 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
   (알림 피로 최소화 — 베이스라인 §1.4 잠금의 문면 그대로, 해석 근거 ADR-0006 §2)
 - 같은 클래스 하루(KST) 1건 — "24h 중복 금지"의 달력일 구현 (래칫 방지, ADR-0006 §3)
 - 저녁 회고 알림은 **회고할 카드가 있을 때만** (경계는 `GET /reflection/pending` 과 동일).
-  **일요일은 문구·딥링크만 갈라진다**(`title`/`body`/`url: /reviews/weekly`) — 같은 클래스에
-  주간 만다라 리포트를 얹는다. 새 클래스·새 발송 조건 없음(ADR-0008 §4, §8 "F")
+  **일요일은 문구만 갈라진다**(`title`/`body`) — 같은 클래스에 주간 만다라 리포트 예고를
+  얹는다. 새 클래스·새 발송 조건 없음(ADR-0008 §4, §8 "F")
+- push payload 의 `url` 은 모든 클래스가 **`/`**(v2.30-auth). FE 라우터가 `/` 하나만 그려서
+  예전 `/today`·`/reflection`·`/reviews/weekly` 는 알림을 누르면 빈 화면이었다. SW 가
+  `?notificationId=` 를 붙여 열람 기록은 그대로 남는다. FE 가 화면별 경로를 지원하면 클래스별
+  딥링크로 되돌린다
 - pre_card 는 opt-in(`preCardEnabled`) + 시작 2~7분 전 (2분 리드 + 5분 폴)
+- 전달 유효 시간(RFC 8030 TTL)·Urgency — pre_card 7분·`high`, evening_reflection 23:00 까지,
+  morning_brief 3시간, 모두 23:00(quiet hours 시작)에서 자른다. 기기가 잠깐 꺼져 있어도 이
+  시간 안에 켜지면 받는다(예전 TTL 0 은 "즉시 못 전하면 버림"이었다 — v2.30-auth)
 - morning_brief 는 **재관여 대상이 있을 때만** — 오늘이 채택된 PARK/CARRY_OVER 회복의
   재관여 앵커 날짜인 사용자에게, `morning_brief` 클래스를 재사용해 발송한다(새 클래스
   아님, 근거 대장 §6.2 T2). 대상 없으면 그날은 발송 없음. `morningTime` 이 06:00~06:59
@@ -1174,16 +1201,30 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 - `/settings/profile` — 지속형 선호(에너지·시간·톤)의 **단일 진실 소스**. 온보딩 딥 인터뷰 완료 시 자동 영속(`behavioral_profiles`·`interaction_styles`), 이후 이 endpoint 로 조회/편집(#A). 인터뷰를 다시 하지 않아도 값 변경 가능. `PATCH` 는 부분 갱신(미지정 필드 유지), 행 없으면 생성.
 - 톤모드 적용: 시스템 프롬프트 prefix 1줄(`llm/prompt_compose.py`). `aiClient.run(tone_mode=...)` 배선 완료(ADR-0003 addendum 0003-llm-tool-executor.md) — **모든 LLM 호출**: inbox·recovery·morning_brief(#23-C) + interview·first_plan(#23-D, LangGraph는 config 채널).
 - S28 Privacy(anonymize·consent)는 #23-B — consent 는 append-only `user_consents` 테이블(마이그레이션 동반).
-- 자동 익명화: `last_active_at < now()-90d` 매일 04:00 KST cron — **구현 완료**(#24,
+- 자동 익명화: `last_active_at < now()-90d` 매일 04:00 KST cron (`last_active_at` 은 Google
+  로그인과 `POST /auth/refresh` 성공 때 갱신 — v2.30-auth) — **구현 완료**(#24,
   `scheduler/anonymize_inactive.py`). `POST /settings/anonymize` 와 **같은 정의**의
   익명화이되 트리거만 다르다(사람 vs 시간). email 은 양쪽 다 안 건드린다 — 로그인 1차
   키라 마스킹하면 익명화가 아니라 사실상 계정 삭제가 되기 때문(그건 `/settings/delete-account`
   소관, #321). API 계약 변경 없음 — endpoint·스키마·에러코드 그대로.
+- 익명화는 **그때까지의** 텍스트를 가리는 일이다. 익명화된 사용자가 Google 로 다시 로그인하면
+  `is_anonymized`/`anonymized_at` 이 내려가 새 활동 기간이 시작된다(v2.30-auth) — 알림·습관
+  sweep 에 다시 포함되고, 또 90일 비활성이면 새로 쓴 텍스트도 다시 익명화된다. 이미 가린
+  과거 텍스트는 되살리지 않는다.
 
 #23-B 구현 메모:
 - `GET /privacy/consent` — consent_type(`required`/`marketing`/`research`) 별 **최신 1행**(`{ consentType, isGranted, updatedAt }`). 미기록 시 `[]`.
 - `POST /privacy/consent` `{ consentType, granted }` — **append-only** 새 행 INSERT 후 갱신 현황 반환. 잘못된 type 422 `COMMON_VALIDATION_ERROR`.
 - `POST /settings/anonymize` — **2단계**: 본문 없으면 `confirmationToken` 발급(`status="confirmation_required"`, 5분 TTL, HMAC). 토큰 동봉 재요청 시 검증 후 `_encrypted` 컬럼 7종 + 이름을 `[anonymized]` 마스킹 + `is_anonymized`/`anonymized_at` set(`status="anonymized"`). 토큰 위조/만료 422 `PRIVACY_INVALID_CONFIRMATION`, 이미 익명화 409 `PRIVACY_ALREADY_ANONYMIZED`. hard delete 아님(행 보존).
+- **마스킹 범위(v2.30-auth)** — 익명화(수동·90일 cron·삭제 공통, `PrivacyRepo.anonymize_user`):
+  `_encrypted` 컬럼 7종 + 이름 + **그 평문 사본**(인박스에서 만든 할 일 `source=inbox` 과
+  인박스에서 승격한 목표의 제목·whyNow·firstStep) + **자유서술**(인터뷰 자유 입력 답 — 붙여넣은
+  자료 포함, 빈 답·선택지 답 제외 / 회복 결정 사유 `decision_reason`). 캘린더 연결은 `revoked_at`
+  까지 찍어 끊고, Google 쪽 권한도 원래 refresh token 으로 회수한다(best-effort, 커밋 뒤).
+  직접 만든 목표·습관·일정 같은 계획 구조와 push 구독은 남긴다(계정을 계속 쓰는 경우).
+- 2단계 확인 `message` 는 화면에 그대로 띄울 수 있는 문구다 — 무엇이 가려지는지·5분 안에 한 번
+  더 눌러야 한다는 것을 말한다. 만료·위조 422 문구는 "확인 시간이 지났어요. 처음부터 한 번 더
+  눌러 주세요." (FE: 이 코드면 확인 단계를 처음으로 되돌리면 된다.)
 - ⚠️ **새 마이그레이션** `c2d3e4f5a6b7`(user_consents) — AGENTS §8 팀 합의 동반.
 - 톤 prefix 의 `aiClient.run()` 배선은 **여전히 후속**(ADR-0003 addendum) — #23-B 범위 아님.
 
@@ -1193,6 +1234,10 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
   이름 `[anonymized]` + **email 을 `deleted-{userId}@reaction.invalid` 로 마스킹**(email
   에 hard UNIQUE 제약이 있어 원본을 남기면 그 주소로 재가입이 영구히 막힌다) + **`archivedAt`
   set(soft delete, hard delete 아님 — AGENTS §2)**.
+- 삭제는 익명화 범위에 더해 **나머지 텍스트도 가린다**(`PrivacyRepo.purge_account_text`,
+  v2.30-auth): 목표·할 일·습관·고정 일정·만다라 노드의 제목과 설명, 회복 제안 문구, 브리프·
+  리뷰 문구, 중단 지점 메모, 계획 초안 스냅샷(`{}`), push 구독(NULL). 상태·카테고리·시각·숫자는
+  통계용으로 남긴다. 행은 전부 보존(UPDATE 만).
 - `archivedAt` 이 서기 되는 순간 `UserRepo.get_by_id`/`get_by_email` 의 기존
   `archived_at IS NULL` 필터에 걸린다 — 이미 발급된 **access token 은 다음 요청부터**
   `get_current_user` 에서 401 `AUTH_INVALID_TOKEN`(새 블랙리스트 불필요). **refresh
@@ -1213,6 +1258,10 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 | Method | Path | 설명 |
 | --- | --- | --- |
 | GET | `/health` | `{ status, app, version, env, server_time }` — 인증 불필요 |
+
+- `db` = `{ ok, latency_ms, error }`. DB 에 닿지 못하면 `status: "degraded"`, `db.error:
+  "db_unavailable"` — **고정 값**이다(v2.30-auth). 공개 경로라 DB 예외 원문(내부 주소·DB 사용자
+  이름)은 싣지 않고 서버 로그에만 남긴다. DB 미설정이면 종전대로 `"DATABASE_URL not configured"`.
 
 ---
 
