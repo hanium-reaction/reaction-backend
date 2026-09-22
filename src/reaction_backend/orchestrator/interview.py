@@ -282,6 +282,22 @@ def _fill_goal(text: str, state: InterviewState) -> str:
     return text.replace("{goal}", _heaviest_goal_hint(state)) if "{goal}" in text else text
 
 
+# LLM 이 실제 이름을 모를 때 채워 넣는 자리표시자 — "수험서 (ㅇㅇ 출판사)", "유튜브 ㅁㅁㅁ
+# 채널", "○○ 강의", "OO대학교". 추천 답변 카드는 **탭 한 번이 곧 사용자의 답**이라, 이런
+# 카드를 누르면 지어낸 틀이 그대로 슬롯에 저장되고 계획 프롬프트까지 흘러간다(2026-09-18
+# 배포 미러에서 goals.materials 카드 4장 중 2장이 이 모양이었다).
+_PLACEHOLDER_CARD = re.compile(r"[ㄱ-ㅎ]{2,}|[○◯△□×]{2,}|(?<![A-Za-z])(?:OO|XX|xx)(?![A-Za-z])")
+
+
+def drop_placeholder_cards(cards: Sequence[str]) -> list[str]:
+    """자리표시자가 섞인 추천 답변 카드를 버린다 — 고칠 수 없으니 통째로 뺀다.
+
+    카드가 줄어드는 건 괜찮다(프롬프트도 "확신이 없으면 빈 배열"을 허용한다). 사용자는
+    언제든 직접 입력할 수 있고, 지어낸 틀을 답으로 고르게 두는 것보다 낫다.
+    """
+    return [c for c in cards if not _PLACEHOLDER_CARD.search(c)]
+
+
 def _rule_next_question(state: InterviewState, slot_key: str) -> NextQuestionSchema:
     """카탈로그 기본 질문으로 회귀 — LLM 죽어도 인터뷰가 끊기지 않는다."""
     catalog = CATALOGS[state["kind"]]
@@ -330,11 +346,16 @@ def _rule_summary(state: InterviewState) -> InterviewSummary:
     if v["weekly_load"] != _NOT_SET:
         time_summary += f" 이 목표에는 {v['weekly_load']} 정도 쓰게 돼요."
 
-    preference_summary = f"못 한 날엔 '{v['tone']}' 톤을 선호하세요."
+    # 톤을 답하지 않았으면(조기 종료) 선호라고 말하지 않는다 — 예전엔 기본값 '담백' 을
+    # "담백한 회복 톤을 선호하시는군요" 처럼 사용자의 선호로 적었다.
+    prefs: list[str] = []
+    if v["tone"] != _NOT_SET:
+        prefs.append(f"못 한 날엔 '{v['tone']}' 톤을 선호하세요.")
     if v["rest_ok"] != _NOT_SET:
-        preference_summary += f" 휴식 제안은 '{v['rest_ok']}'."
+        prefs.append(f"휴식 제안은 '{v['rest_ok']}'.")
     if v["downscope_unit"] != _NOT_SET:
-        preference_summary += f" 밀리면 {v['downscope_unit']} 단위로 줄여볼게요."
+        prefs.append(f"밀리면 {v['downscope_unit']} 단위로 줄여볼게요.")
+    preference_summary = " ".join(prefs) or "회복 방식은 계획을 써 보면서 함께 맞춰 갈게요."
 
     return InterviewSummary(
         headline=f"{v['identity']} · 핵심 목표 {goals}",
@@ -546,6 +567,17 @@ async def validate_answer(state: InterviewState, config: RunnableConfig) -> Inte
     # 어느 슬롯인지 골라야 하는데, 그건 파서가 할 수 없는 판단이다.
     ruled = _rule_first_value(answer_type, answer_text, today=now_kst().date())
     normalized = ruled if ruled is not None else update.normalized_value
+    if normalized is None:
+        # 칩 답을 LLM 이 정규화하지 못했을 때(타임아웃·예산 소진·금지어 차단으로 룰 폴백)
+        # 보기 글자 그대로 온 답은 룰로 맞춘다. FE 는 칩을 탭해도 **문자열**("3학년")로
+        # 보내므로, 이 길이 없으면 폴백 한 번에 칩 답이 전부 '없음'(스킵)으로 저장되고 —
+        # 이월 슬롯이라 — 다음 인터뷰에서도 다시 묻지 않았다.
+        normalized = _rule_chip_values(
+            answer_type,
+            answer_text,
+            slot=catalog.by_key.get(slot_key),
+            options=_answer_options(config),
+        )
 
     slot_answers = dict(state["slot_answers"])
     attempts = _pending_attempts(slot_answers.get(slot_key)) + 1  # 이번 시도 포함
@@ -860,6 +892,38 @@ def _rule_first_value(answer_type: str | None, text: str, *, today: date) -> Any
     return None
 
 
+def _rule_chip_values(
+    answer_type: str | None,
+    text: str,
+    *,
+    slot: InterviewSlot | None,
+    options: Sequence[str],
+) -> list[str] | None:
+    """칩/선택 슬롯의 답이 **보기 글자 그대로**면 그 보기들. 아니면 `None`(= 판단하지 않음).
+
+    쉼표로 여러 개를 고른 답("저녁, 심야")도 나눠서 맞춘다. 단 답 전체가 보기 하나와
+    같으면 나누지 않는다 — `goals.heaviest` 의 보기는 사용자가 적은 목표 제목이라 쉼표가
+    들어 있을 수 있다("토익, 오픽 준비").
+
+    카탈로그 보기가 있으면 `canonical_chip_values`(공백·시간 표기 정규화)로, 없으면
+    (`goals.heaviest` 처럼 런타임에 만든 보기) 라우터가 넘긴 보기와 **정확히 같을 때만**
+    받는다. 보기에 없는 말은 버린다 — 지어낸 값으로 슬롯을 닫느니 다시 묻는다.
+    """
+    if answer_type not in {"chip", "select"}:
+        return None
+    whole = text.strip()
+    if not whole:
+        return None
+    parts = [whole] if whole in options else [p.strip() for p in _TEXT_SPLIT_RE.split(whole)]
+    parts = [p for p in parts if p]
+    if slot is not None and slot.options:
+        picked = canonical_chip_values(slot, parts, drop_unknown=True)
+    else:
+        allowed = set(options)
+        picked = list(dict.fromkeys(p for p in parts if p in allowed))
+    return picked or None
+
+
 def _coerce_normalized(
     answer_type: str | None, norm: Any, *, slot: InterviewSlot | None = None
 ) -> dict[str, Any] | None:
@@ -1078,8 +1142,13 @@ def _decide_storage(
         # 스킵하는 것과 같은 탈출구를 핵심 슬롯에도 열어준다 — `is_filled_answer` 가
         # 스킵 마커를 '충족'으로 읽고, `build_outcome` 이 `unresolved_slots` 에 기록해
         # First Plan 이 보완 질문으로 이어받는다(핵심 슬롯도 이미 이 경로로 설계돼 있다).
+        #
+        # '모르겠어요'·'딱히 없어요' 같은 **스킵 의사는 채택하지 않는다** — 세 번 솔직하게
+        # 답한 학생에게 '음 잘 모르겠어요' 라는 Focus 목표가 생기고, 그 이름으로 목표별
+        # 질문과 계획까지 만들어졌다(미러 실측). 스킵 마커로 두면 `unresolved_slots` 에 남아
+        # outcome 은 자리표시자 목표를 쓰고, 그 자리표시자는 영속되지 않는다(#88).
         if attempts >= MAX_SLOT_ATTEMPTS:
-            if answer_text.strip():
+            if answer_text.strip() and not _looks_like_skip(answer_text):
                 return {"type": "text", "raw": answer_text.strip()}, True
             return _SKIP_MARKER, True
         return _pending(attempts), False
@@ -1110,11 +1179,18 @@ def _answer_text(answer: dict[str, Any] | None) -> str:
     return ""
 
 
+# 러닝 요약의 값 하나당 최대 글자 수 — 붙여넣은 자료 원문(최대 2만 자)이 뒤이은 질문
+# 생성 호출마다 통째로 다시 실려, 호출당 토큰이 크게 늘고 8초 타임아웃에 가까워져 룰 폴백
+# 질문이 잦아졌다. 질문 말투를 이어가는 데는 앞부분이면 충분하다. 계획 파이프라인은 이
+# 요약이 아니라 슬롯 원문(`_materials_note`)을 읽으므로 자료 내용은 잃지 않는다.
+_CONTEXT_VALUE_MAX = 120
+
+
 def _answered_context(state: InterviewState) -> str:
     """앞서 채워진 슬롯 → 다음 질문용 짧은 러닝 요약("태그=값 / …").
 
     아직 답이 없으면 명시 문구. LLM 이 이전 답을 이어받아(맥락 반복 없이) 자연스럽게 묻게 한다.
-    태그 맵은 `state["kind"]` 로 카탈로그를 조회해 얻는다.
+    태그 맵은 `state["kind"]` 로 카탈로그를 조회해 얻는다. 값은 `_CONTEXT_VALUE_MAX` 자에서 자른다.
     """
     answers = state["slot_answers"]
     parts: list[str] = []
@@ -1123,6 +1199,8 @@ def _answered_context(state: InterviewState) -> str:
         if not _is_filled(value):
             continue
         text = _answer_text(value).strip()
+        if len(text) > _CONTEXT_VALUE_MAX:
+            text = text[:_CONTEXT_VALUE_MAX].rstrip() + "…"
         if text:
             parts.append(f"{tag}={text}")
     return " / ".join(parts) if parts else "(아직 답한 내용 없음)"
@@ -1166,7 +1244,9 @@ def _summary_variables(state: InterviewState) -> dict[str, str]:
         else _NOT_SET
     )
     peak = ", ".join(_slot_chips(answers.get("time.peak_window"))) or _NOT_SET
-    tone = _slot_first_chip(answers.get("recovery.tone")) or "담백"
+    # 미답이면 기본값('담백')이 아니라 _NOT_SET — 요약 프롬프트가 "말하지 않은 사실을 지어내지
+    # 말 것" 규칙대로 생략하게 한다. outcome 의 안전 기본값과 요약 문구는 다른 문제다.
+    tone = _slot_first_chip(answers.get("recovery.tone")) or _NOT_SET
     rest_ok = _slot_first_chip(answers.get("recovery.rest_ok")) or _NOT_SET
     downscope_unit = _slot_first_chip(answers.get("recovery.downscope_unit")) or _NOT_SET
     identity = f"{role} {season}".strip()

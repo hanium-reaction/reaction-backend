@@ -6,8 +6,9 @@ interview_sessions/slot_answers 재조립·영속(FakeInterviewRepo)을 HTTP 레
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
@@ -413,6 +414,43 @@ def test_suggested_answers_only_for_free_text_slots(client: TestClient, monkeypa
     assert body["currentQuestion"]["suggestedAnswers"] == ["캡스톤 마무리", "토익 900점"]
 
 
+def test_placeholder_suggested_answers_are_dropped(client: TestClient, monkeypatch: Any) -> None:
+    """LLM 이 이름을 몰라 채운 자리표시자 카드("ㅇㅇ 출판사", "ㅁㅁㅁ 채널")는 노출되지 않는다.
+
+    카드는 탭 한 번이 곧 사용자의 답이라, 지어낸 틀이 슬롯에 저장되고 계획까지 흘러간다
+    (2026-09-18 배포 미러에서 goals.materials 카드 4장 중 2장이 이 모양이었다).
+    """
+    monkeypatch.setattr(
+        aiClient,
+        "run",
+        _stub(
+            suggested=(
+                "정보처리기사 실기 수험서 (ㅇㅇ 출판사)",
+                "인터넷 강의 (유튜브 ㅁㅁㅁ 채널)",
+                "○○ 스터디 자료",
+                "스터디 그룹에서 공유받은 자료",
+            )
+        ),
+    )
+    start = client.post("/interview/sessions").json()
+    sid = start["sessionId"]
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.role", "value": ["3학년"], "clientTurn": 1},
+    )
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.season", "value": ["방학"], "clientTurn": 2},
+    )
+    body = client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "time.peak_window", "value": ["오전"], "clientTurn": 3},
+    ).json()
+
+    assert body["currentQuestion"]["slotKey"] == "goals.list"
+    assert body["currentQuestion"]["suggestedAnswers"] == ["스터디 그룹에서 공유받은 자료"]
+
+
 def test_slot_catalog_includes_options(client: TestClient) -> None:
     """슬롯 카탈로그가 chip 보기를 노출(텍스트 슬롯은 빈 배열)."""
     res = client.get("/interview/slot-catalog")
@@ -617,3 +655,361 @@ def test_carry_over_never_seeds_goal_slots() -> None:
         ultimate_adapter.ULTIMATE_CARRY_OVER_SLOT_KEYS,
     ):
         assert not [k for k in keys if k.startswith("goals.")]
+
+
+def test_drop_placeholder_cards_keeps_real_names() -> None:
+    """실제 이름·영문 약어는 남긴다 — 자리표시자 패턴만 뺀다."""
+    from reaction_backend.orchestrator.interview import drop_placeholder_cards
+
+    cards = [
+        "OO대학교 도서관 자료",
+        "XX 강의",
+        "시나공 정보처리기사 실기",
+        "OOP 개념 정리 노트",
+        "BOOK 챌린지",
+        "ㅋㅋ 그냥 해볼래요",
+    ]
+    assert drop_placeholder_cards(cards) == [
+        "시나공 정보처리기사 실기",
+        "OOP 개념 정리 노트",
+        "BOOK 챌린지",
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 답 제출 밖에서 마지막 슬롯이 채워진 세션의 재개 (interview-4)
+#
+# 자료 확정(`POST /plans/materials/spec-confirm`)은 `goals.materials` 를 슬롯에 **직접**
+# 쓴다. 재인터뷰에서는 활동창·회복 슬롯이 이월돼 materials 가 마지막 빈 슬롯이 되는데,
+# 그걸 채운 뒤 재개(`next-question`)하면 물을 슬롯 없이 빈 질문만 돌아왔다 — FE 는
+# "다음 질문을 받지 못했어요" 를 되풀이했고 인터뷰는 영영 끝나지 않았다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _fill_all_but_materials(client: TestClient) -> str:
+    """plan 세션을 `goals.materials` 직전까지 채운다(실제 답 제출 경로)."""
+    body = client.post("/interview/sessions").json()
+    sid = str(body["sessionId"])
+    turn = 0
+    while body["currentQuestion"] is not None:
+        question = body["currentQuestion"]
+        if question["slotKey"] == "goals.materials":
+            return sid
+        turn += 1
+        body = client.post(
+            f"/interview/sessions/{sid}/answers",
+            json={
+                "slotKey": question["slotKey"],
+                "value": _answer_for(question),
+                "clientTurn": turn,
+            },
+        ).json()
+        assert turn <= 40
+    raise AssertionError("goals.materials 에 닿기 전에 인터뷰가 끝났다")
+
+
+def _spec_confirm_directly(repo: FakeInterviewRepo, sid: str) -> None:
+    """spec-confirm 이 하는 일 — 답 제출을 거치지 않고 슬롯에 바로 쓴다."""
+    asyncio.run(
+        repo.upsert_slot_answer(
+            UUID(sid),
+            "goals.materials",
+            {"type": "spec", "items": [{"kind": "book", "title": "토익 보카"}]},
+            is_required=True,
+        )
+    )
+
+
+def test_next_question_finalizes_when_the_last_slot_was_filled_out_of_band(
+    client: TestClient, fake_interview_repo: FakeInterviewRepo, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr(aiClient, "run", _stub(echo_normalized=True))
+    sid = _fill_all_but_materials(client)
+    # 활동창·회복 슬롯은 재인터뷰에서 이월된다 — materials 를 마지막 빈 슬롯으로 만든다.
+    row_id = UUID(sid)
+    for slot_key, value in (
+        ("time.activity_window", {"type": "range", "start": "09:00", "end": "23:00"}),
+        ("recovery.tone", {"type": "chip", "values": ["담백"]}),
+        ("recovery.rest_ok", {"type": "chip", "values": ["네"]}),
+        ("recovery.downscope_unit", {"type": "chip", "values": ["10분"]}),
+    ):
+        asyncio.run(
+            fake_interview_repo.upsert_slot_answer(row_id, slot_key, value, is_required=True)
+        )
+    _spec_confirm_directly(fake_interview_repo, sid)
+
+    res = client.post(f"/interview/sessions/{sid}/next-question")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["endReason"] == "completed"
+    assert body["currentQuestion"] is None
+    assert body["outcome"] is not None
+    assert body["outcome"]["unresolvedSlots"] == []
+    assert fake_interview_repo._sessions[row_id].end_reason == "completed"
+
+    # 다시 불러도 같은 종료 응답이다(재마감·중복 영속 없음).
+    again = client.post(f"/interview/sessions/{sid}/next-question").json()
+    assert again["endReason"] == "completed"
+    assert again["currentQuestion"] is None
+    assert again["outcome"] is not None
+
+
+def test_next_question_still_asks_when_slots_remain(client: TestClient, monkeypatch: Any) -> None:
+    """재개는 여전히 재개다 — 빈 슬롯이 남아 있으면 마감하지 않고 그 슬롯을 묻는다."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    sid = client.post("/interview/sessions").json()["sessionId"]
+
+    body = client.post(f"/interview/sessions/{sid}/next-question").json()
+    assert body["endReason"] is None
+    assert body["currentQuestion"]["slotKey"] == "identity.role"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 인터뷰 종료가 답하지 않은 칸을 프로필에 쓰지 않는다 (interview-6·8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _complete_plan_interview(client: TestClient) -> dict[str, Any]:
+    body = client.post("/interview/sessions").json()
+    sid = body["sessionId"]
+    turn = 0
+    while body["currentQuestion"] is not None:
+        question = body["currentQuestion"]
+        turn += 1
+        body = client.post(
+            f"/interview/sessions/{sid}/answers",
+            json={
+                "slotKey": question["slotKey"],
+                "value": _answer_for(question),
+                "clientTurn": turn,
+            },
+        ).json()
+        assert turn <= 40
+    return body
+
+
+def test_reinterview_keeps_profile_values_edited_in_settings(
+    client: TestClient, fake_profile_repo: Any, monkeypatch: Any
+) -> None:
+    """⚠️ 내 정보에서 고친 집중 길이·최소 단위를 재인터뷰가 되돌리지 않는다 (interview-8).
+
+    45분·20분은 칩 보기에 없어 시드로 못 옮긴다. 고치기 전엔 그때 지난 인터뷰 원답(5분)이
+    대신 이월돼, 재인터뷰를 열고 [충분해요] 만 눌러도 최소 단위가 5분으로, 집중 길이는
+    `or 30` 기본값으로 덮였다 — 설정 화면이 "인터뷰를 다시 하지 않아도 반영돼요" 라고
+    약속한 값이었다.
+    """
+    from reaction_backend.orchestrator import profile_memory
+
+    monkeypatch.setattr(aiClient, "run", _stub(echo_normalized=True))
+    monkeypatch.setattr(profile_memory, "ProfileRepo", lambda _session: fake_profile_repo)
+
+    first = _complete_plan_interview(client)
+    assert first["endReason"] == "completed"
+    edited = client.patch("/settings/profile", json={"attentionSpan": 45, "downscopeUnitMin": 20})
+    assert edited.status_code == 200, edited.text
+
+    sid = client.post("/interview/sessions").json()["sessionId"]
+    assert client.post(f"/interview/sessions/{sid}/finish").status_code == 200
+
+    profile = client.get("/settings/profile").json()
+    assert profile["behavioral"]["attentionSpan"] == 45
+    assert profile["downscopeUnitMin"] == 20
+
+
+def test_reinterview_asks_again_what_an_early_exit_left_unanswered(
+    client: TestClient, fake_profile_repo: Any, monkeypatch: Any
+) -> None:
+    """몇 문항만 답하고 [충분해요] 한 뒤 다시 시작하면, 안 답한 칸은 **다시 묻는다** (interview-6).
+
+    고치기 전엔 그 종료가 피크 '변동'·톤 '담백'·휴식 '네'·최소 단위 10분을 프로필에 썼고,
+    다음 세션이 그걸 시드로 읽어 네 칸을 묻지 않았다(ambiguityScore 17 → 13).
+    """
+    from reaction_backend.orchestrator import profile_memory
+
+    monkeypatch.setattr(aiClient, "run", _stub())
+    monkeypatch.setattr(profile_memory, "ProfileRepo", lambda _session: fake_profile_repo)
+
+    sid = client.post("/interview/sessions").json()["sessionId"]
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.role", "value": ["3학년"], "clientTurn": 1},
+    )
+    assert client.post(f"/interview/sessions/{sid}/finish").status_code == 200
+
+    again = client.post("/interview/sessions").json()
+    # 역할 하나만 이월된다 — 나머지 필수 17칸은 그대로 열려 있다.
+    assert again["ambiguityScore"] == 17
+    assert client.get("/settings/profile").json()["interaction"] is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 온보딩 진행 상태 — 목표를 남긴 계획 인터뷰 종료가 WELCOME 을 벗어나게 한다 (critic-3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_finishing_the_onboarding_interview_moves_to_goal_confirm(
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
+) -> None:
+    """⚠️ 인터뷰를 끝낸 온보딩 사용자는 ONBOARDING_CONFIRM 이 된다 (critic-3).
+
+    고치기 전엔 WELCOME 에서 나가는 전이가 아무 데도 없어, 계획 생성을 기다리다 앱을 껐다
+    켜면 소개 화면과 새 인터뷰부터 다시 해야 했다. 두 번 불러도(종료 응답 재조회) 그대로다.
+    """
+    monkeypatch.setattr(aiClient, "run", _stub(echo_normalized=True))
+    demo_user_orm.onboarding_state = "WELCOME"
+
+    body = _complete_plan_interview(client)
+    assert body["endReason"] == "completed"
+    assert demo_user_orm.onboarding_state == "ONBOARDING_CONFIRM"
+    assert client.get("/auth/me").json()["onboardingState"] == "ONBOARDING_CONFIRM"
+
+    again = client.post(f"/interview/sessions/{body['sessionId']}/finish")
+    assert again.status_code == 200
+    assert demo_user_orm.onboarding_state == "ONBOARDING_CONFIRM"
+
+
+def test_early_finish_with_goals_also_moves_to_goal_confirm(
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
+) -> None:
+    """[충분해요] 로 끝내도 목표가 저장됐으면 분류 단계에서 이어간다."""
+    monkeypatch.setattr(aiClient, "run", _stub(echo_normalized=True))
+    demo_user_orm.onboarding_state = "ONBOARDING_INTERVIEW"
+
+    body = client.post("/interview/sessions").json()
+    sid = body["sessionId"]
+    turn, answered = 0, ""
+    while answered != "goals.list":  # 목표를 적은 직후 [충분해요]
+        question = body["currentQuestion"]
+        answered = question["slotKey"]
+        turn += 1
+        body = client.post(
+            f"/interview/sessions/{sid}/answers",
+            json={"slotKey": answered, "value": _answer_for(question), "clientTurn": turn},
+        ).json()
+        assert turn <= 10
+    assert client.post(f"/interview/sessions/{sid}/finish").json()["endReason"] == "early_user"
+    assert demo_user_orm.onboarding_state == "ONBOARDING_CONFIRM"
+
+
+def test_early_finish_without_goals_keeps_welcome(
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
+) -> None:
+    """목표 없이 끝난 인터뷰(역할만 답하고 종료)는 이어갈 게 없다 — 상태를 올리지 않는다."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    demo_user_orm.onboarding_state = "WELCOME"
+
+    sid = client.post("/interview/sessions").json()["sessionId"]
+    client.post(
+        f"/interview/sessions/{sid}/answers",
+        json={"slotKey": "identity.role", "value": ["3학년"], "clientTurn": 1},
+    )
+    assert client.post(f"/interview/sessions/{sid}/finish").status_code == 200
+    assert demo_user_orm.onboarding_state == "WELCOME"
+
+
+def test_reinterview_by_active_user_keeps_active(
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
+) -> None:
+    """온보딩을 마친 사용자의 재인터뷰는 상태를 되돌리지 않는다."""
+    monkeypatch.setattr(aiClient, "run", _stub(echo_normalized=True))
+    demo_user_orm.onboarding_state = "ACTIVE"
+
+    assert _complete_plan_interview(client)["endReason"] == "completed"
+    assert demo_user_orm.onboarding_state == "ACTIVE"
+
+
+def test_ultimate_interview_does_not_touch_onboarding_state(
+    client: TestClient, demo_user_orm: Any, monkeypatch: Any
+) -> None:
+    """궁극목표 인터뷰 종료는 계획 온보딩 단계와 무관하다."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    demo_user_orm.onboarding_state = "WELCOME"
+
+    sid = client.post("/interview/sessions", json={"kind": "ultimate"}).json()["sessionId"]
+    assert client.post(f"/interview/sessions/{sid}/finish").status_code == 200
+    assert demo_user_orm.onboarding_state == "WELCOME"
+
+
+def test_reinterview_asks_the_season_again(
+    client: TestClient, fake_profile_repo: Any, monkeypatch: Any
+) -> None:
+    """학기 중/방학은 재인터뷰에서 다시 묻는다 — 역할은 그대로 이월된다 (interview-19).
+
+    고치기 전엔 8월에 '방학' 이라 답하면 9월 재인터뷰에서도 묻지 않고, 고칠 곳도 없어 계획이
+    계속 방학 맥락으로 만들어졌다.
+    """
+    from reaction_backend.orchestrator import profile_memory
+
+    monkeypatch.setattr(aiClient, "run", _stub(echo_normalized=True))
+    monkeypatch.setattr(profile_memory, "ProfileRepo", lambda _session: fake_profile_repo)
+
+    assert _complete_plan_interview(client)["endReason"] == "completed"
+
+    again = client.post("/interview/sessions").json()
+    assert again["currentQuestion"]["slotKey"] == "identity.season"  # 역할은 이월, 학기는 다시
+
+
+def test_start_is_refused_once_the_daily_interview_limit_is_reached(
+    client: TestClient, fake_interview_repo: FakeInterviewRepo, monkeypatch: Any
+) -> None:
+    """일일 인터뷰 한도에 닿았으면 시작부터 429 로 알린다 (interview-14).
+
+    고치기 전엔 시작만 한도 검사를 건너뛰어, 첫 질문(LLM 호출)은 받고 그 뒤 모든 답이 429 로
+    실패했다. 거절된 시작은 세션을 만들지도, 진행 중 세션을 닫지도 않는다.
+    """
+    from reaction_backend.safety import endpoint_rate_limit
+
+    async def _exhausted(*_args: Any, **kwargs: Any) -> None:
+        raise endpoint_rate_limit.EndpointCallLimitExceeded(kwargs["module"], used=60, limit=60)
+
+    monkeypatch.setattr(aiClient, "run", _stub())
+    monkeypatch.setattr(endpoint_rate_limit, "check", _exhausted)
+
+    res = client.post("/interview/sessions")
+    assert res.status_code == 429
+    assert res.json()["code"] == "RATE_LIMIT_DAILY_CALLS_EXCEEDED"
+    assert res.headers["Retry-After"].isdigit()
+    assert fake_interview_repo._sessions == {}
+
+
+def test_only_slots_that_keep_every_pick_are_marked_multiple(client: TestClient) -> None:
+    """`multiple` 은 어댑터가 목록 전체를 쓰는 슬롯에만 true 다 (interview-17).
+
+    FE 는 모든 칩 질문에 "여러 개 골라도 돼요" 를 띄웠는데, 역할·가장 무거운 목표·빈도 등은
+    첫 값만 쓰여 두 번째 선택이 말없이 버려졌다. 이 플래그로 단일/복수 선택을 가른다.
+    """
+    plan = client.get("/interview/slot-catalog").json()
+    assert {e["slotKey"] for e in plan if e["multiple"]} == {"time.peak_window"}
+    ultimate = client.get("/interview/slot-catalog", params={"kind": "ultimate"}).json()
+    assert {e["slotKey"] for e in ultimate if e["multiple"]} == {"ultimate.values"}
+
+
+def test_multi_select_slots_are_read_as_lists_by_the_adapters() -> None:
+    """복수 선택으로 내보낸 슬롯은 어댑터가 실제로 **모든 값**을 쓴다 — 첫 값만 쓰는 슬롯을
+    복수로 표시하면 같은 사고가 반대로 난다."""
+    from reaction_backend.orchestrator import interview_adapter, ultimate_adapter
+
+    outcome = interview_adapter.build_outcome(
+        session_id="s1",
+        slot_answers={"time.peak_window": {"type": "chip", "values": ["저녁", "심야"]}},
+        ambiguity_final=0.5,
+        end_reason="early_user",
+        analysis_source="rule",
+    )
+    assert outcome.availability.peak_window == ["저녁", "심야"]
+    ultimate = ultimate_adapter.build_ultimate_outcome(
+        session_id="s1",
+        slot_answers={"ultimate.values": {"type": "chip", "values": ["성장", "자유"]}},
+        ambiguity_final=0.5,
+        end_reason="early_user",
+        analysis_source="rule",
+    )
+    assert ultimate.values == ["성장", "자유"]
+
+
+def test_single_choice_question_is_not_multiple(client: TestClient, monkeypatch: Any) -> None:
+    """첫 질문(역할)은 단일 선택이다 — `currentQuestion.multiple=false`."""
+    monkeypatch.setattr(aiClient, "run", _stub())
+    question = client.post("/interview/sessions").json()["currentQuestion"]
+    assert question["slotKey"] == "identity.role"
+    assert question["multiple"] is False

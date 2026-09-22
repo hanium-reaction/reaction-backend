@@ -66,10 +66,13 @@ REQUIRED_SLOT_KEYS: tuple[str, ...] = (
 # 않는다(#reduce-reask). 목표 관련(goals.*)과 이번 주 한정(energy.weekly_drain '이번 주 컨디션')은
 # 계획 주기마다 바뀌므로 제외하고 새로 묻는다. 프로필은 설정에서 수정 가능하므로, 여기서 이어받아도
 # 사용자가 언제든 바꿀 수 있다.
+#
+# ⚠️ `identity.season`(학기 중/방학)은 **이월하지 않는다** — 학기 단위로 바뀌는데 설정에 고칠
+# 칸이 없어, 8월에 '방학' 이라 답한 사용자가 9월 재인터뷰에서도 다시 묻지 않고 계획이 계속
+# 방학 맥락으로 만들어졌다. 다시 묻는 비용은 칩 한 번이다.
 CARRY_OVER_SLOT_KEYS: frozenset[str] = frozenset(
     {
         "identity.role",
-        "identity.season",
         "identity.major",
         "time.activity_window",
         "time.peak_window",

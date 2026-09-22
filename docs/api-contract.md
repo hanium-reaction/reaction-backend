@@ -278,6 +278,7 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 | 트리거 endpoint | from | to |
 | --- | --- | --- |
+| 계획 인터뷰 종료 — `POST /interview/sessions/{id}/answers`(마지막 답)·`/finish`·`/next-question`·`POST /interview/sessions`(시드로 마감), **목표가 1개 이상 저장됐을 때만** (v2.30-interview) | `WELCOME` / `ONBOARDING_INTERVIEW` | `ONBOARDING_CONFIRM` |
 | `POST /fixed-schedules` | `ONBOARDING_CALENDAR` / `ONBOARDING_MANUAL_SCHEDULE` | `ONBOARDING_POLICIES` |
 | `POST /time-policies` | `ONBOARDING_POLICIES` | `ONBOARDING_FIRST_PLAN` |
 | `POST /plans/{planId}/approve` | 온보딩 단계 전체 (`WELCOME` … `ONBOARDING_NOTIFICATIONS`) | `ACTIVE` |
@@ -291,12 +292,12 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 | Method | Path | 설명 |
 | --- | --- | --- |
-| POST | `/interview/sessions` | 신규 세션 + FSM 첫 질문. 본문 `{ kind? }` (`"plan"` 생략 시 기본, `"ultimate"` 궁극목표). `sessionId` 는 UUID |
+| POST | `/interview/sessions` | 신규 세션 + FSM 첫 질문. 본문 `{ kind? }` (`"plan"` 생략 시 기본, `"ultimate"` 궁극목표). `sessionId` 는 UUID. 이월 시드만으로 필수 슬롯이 다 차 물을 게 없으면 빈 질문 대신 **곧바로 종료 응답**(`endReason=completed` + `summary`·`outcome`/`ultimateOutcome`)을 201 로 준다 (v2.30-interview) |
 | GET | `/interview/sessions/{id}` | 진행 상태 — `ambiguityScore`, `totalTurns`, `currentQuestion`. 종료 세션이면 `kind` 에 따라 `outcome` 또는 `ultimateOutcome` 동봉 |
 | POST | `/interview/sessions/{id}/answers` | 슬롯 답 UPSERT — `{ slotKey, value, clientTurn }`. 종료 시 `summary`+`outcome`/`ultimateOutcome` |
-| POST | `/interview/sessions/{id}/next-question` | 현재 슬롯 질문 재생성 (resume용, LLM 호출) |
+| POST | `/interview/sessions/{id}/next-question` | 현재 슬롯 질문 재생성 (resume용, LLM 호출). 답 제출 밖에서 마지막 빈 슬롯이 채워진 세션(예: `POST /plans/materials/spec-confirm` 이 `goals.materials` 를 씀)이면 질문 대신 `answers` 의 마지막 답과 **같은 종료 응답**(`endReason=completed` + `summary`·`outcome`/`ultimateOutcome`)을 준다 — 목표 영속·프로필 영속도 같다. 이미 종료된 세션이면 종료 응답 재조회 (v2.30-interview) |
 | POST | `/interview/sessions/{id}/finish` | 조기 종료 `[충분해요]` → `endReason=early_user` + `outcome`/`ultimateOutcome` |
-| GET | `/interview/slot-catalog?kind=plan\|ultimate` | 슬롯 카탈로그 — `slotKey·label·answerType·isRequired·category·options`. `kind` 쿼리 생략 시 `plan`(하위호환). ⚠️ **`goals.why_now` 는 v2.12 에서 빠졌다** — 묻지도 하베스팅하지도 않아 계획·마일스톤 프롬프트가 영원히 빈 값을 받고 있었다 |
+| GET | `/interview/slot-catalog?kind=plan\|ultimate` | 슬롯 카탈로그 — `slotKey·label·answerType·isRequired·category·options·multiple`. `kind` 쿼리 생략 시 `plan`(하위호환). `multiple`(additive, v2.30-interview)은 보기를 여러 개 골라도 **전부 쓰이는** 슬롯만 true(`time.peak_window`·`ultimate.values`) — 나머지 칩·select 는 첫 값만 쓰인다. ⚠️ **`goals.why_now` 는 v2.12 에서 빠졌다** — 묻지도 하베스팅하지도 않아 계획·마일스톤 프롬프트가 영원히 빈 값을 받고 있었다 |
 
 응답 예: `GET /interview/sessions/{id}` (kind="plan")
 ```json
@@ -309,7 +310,8 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
     "slotKey": "goals.deadlines",
     "text": "마감일이 정해진 게 있어요?",
     "answerType": "date_picker",
-    "options": []
+    "options": [],
+    "multiple": false
   },
   "summary": null,
   "outcome": null,
@@ -319,15 +321,21 @@ WELCOME → ONBOARDING_INTERVIEW → ONBOARDING_CONFIRM
 
 - `ambiguityScore`(int) = **남은 미해결 필수 슬롯 수** (진행될수록 감소, **정상 종료 시 항상 0**). `kind` 에 따라 분모가 다르다 — `plan` 최대 18개, `ultimate` 9개. **다른 답에서 유도돼 묻지 않는 슬롯은 세지 않는다**: `goals.weekly_time`(주당 시간)은 `goals.session_length × goals.frequency` 로 계산되므로 그 둘을 답하면 질문도 안 나가고 분모에서도 빠져 `plan` 이 17개가 된다(빈도를 '몰아서 · 상관없음' 으로 답해 계산이 안 될 때만 18개). FSM 이 묻지 않는 슬롯을 세면 사용자가 채울 방법이 없어 진행바가 100%에 닿지 못한다 (v1.70).
 - `currentQuestion.options` = chip/select 보기 (카탈로그 기반). `goals.heaviest`(`kind="plan"` 전용) 는 두 출처를 합쳐 동적 생성한다(ADR-0008 §8 "B"): ① 방금 답한 `goals.list` ② 사용자가 만다라 축에서 승격해 둔 목표(`GET /goals` 의 `promotedFromAxis` 카드들의 실제 `title`) — 먼저 두고, `goals.list` 응답과 겹치는 제목은 한 번만 남긴다. 승격만 해 두고 `goals.list` 에 다시 타이핑하지 않아도 이번 학기 목표로 바로 고를 수 있다. `goals.heaviest` 로 고른 제목이 `goals.list` 에 없었더라도 `core_goals`(→ `materialize_goals`)에 자동 포함된다 — 안 그러면 마감·주당시간 같은 heaviest 전용 필드가 title 매칭 실패로 유실된다. text/date/range 는 `[]`.
+- `currentQuestion.multiple`(bool, additive, v2.30-interview) = 보기를 여러 개 담아도 전부 쓰이는가(카탈로그의 `multiple` 과 같다). **false 면 단일 선택**으로 받아야 한다 — 서버는 첫 값만 쓴다(역할·가장 무거운 목표·빈도·세션 길이·톤 등). 두 번째 선택이 말없이 버려지지 않게 FE 는 false 인 질문에서 "여러 개 골라도 돼요" 안내를 빼고 단일 선택으로 토글한다.
 - 종료 턴(`endReason` 채워지고 `currentQuestion=null`)에는 `summary`(확인 카드) + `outcome`(`kind="plan"`, First Plan 시드) **또는** `ultimateOutcome`(`kind="ultimate"`, 만다라 시드)이 채워진다 — `kind` 별로 **정확히 하나만** 채워지고 나머지는 `null`. `outcome` 을 union 으로 바꾸지 않아 기존 FE 계획 인터뷰 타입은 무변경.
+- ⚠️ **자리표시자 목표** — `outcome.coreGoals` 는 최소 1개가 계약이라, 목표를 답하지 않고 끝나면(`[충분해요]` 를 목표 질문 전에 누르거나, 목표 질문에 세 번 '모르겠어요' 로 답해 `unresolvedSlots` 에 `goals.list` 가 남은 경우) `{ "title": "(미입력 목표)", "confidence": 0.0 }` 한 개가 실린다. 이 항목은 **목표가 아니다** — 영속되지 않아 `GET /goals` 에 없고, 계획 승인도 건너뛴다(#88). FE 는 `confidence === 0 && title === "(미입력 목표)"` 인 후보를 목표 카드로 그리지 말고, 남는 게 없으면 인터뷰로 돌아가게 안내한다 (v2.30-interview 문서화).
 - 단일 활성 세션 + **재시작 승리(restart-wins)**: `POST /interview/sessions` 는 진행 중(`endReason=null`) **같은 kind** 세션이 있으면 그 세션을 `endReason=abandoned` 로 닫고 새 세션을 만든다 — **항상 201**. 다른 kind 의 진행 중 세션은 건드리지 않는다(계획 인터뷰와 궁극목표 인터뷰는 독립적으로 동시에 진행 가능). 이어하기는 저장해 둔 sessionId 로 `next-question` 재개. (v1.12 이전의 409 `INTERVIEW_SESSION_EXISTS` 는 클라이언트가 sessionId 를 잃으면 복구 불가라 폐기 — 코드 자체는 하위호환 위해 enum 에 유지.)
 - 동시성 lock(ADR-0005 §7.6): 모든 mutating 진입점(`sessions`·`answers`·`next-question`·`finish`)은 `user_id × interview:{kind}` advisory lock 으로 보호(kind 별 독립 락) — 다른 디바이스가 **같은 kind** 를 점유 중이면 409 `AGENT_CONCURRENT_ACCESS` 즉시 fail.
 - `kind` 값이 `"plan"`/`"ultimate"` 밖이면 요청 자체가 422 `COMMON_VALIDATION_ERROR` — 텍스트 슬롯으로 조용히 폴백하지 않는다.
-- 궁극목표 인터뷰(S29, 필수 9슬롯: `ultimate.statement`·`domain`·`horizon`·`measure`·`success_image`·`identity`·`current_position`·`pillars_hint`·`constraints`, 선택 3슬롯: `values`·`assets`·`role_model`)는 계획 인터뷰와 **양방향 이월**된다: 계획 인터뷰의 `identity.*`/`recovery.*` 등은 궁극목표 인터뷰 시작 시드로, 궁극목표 인터뷰의 `ultimate.*` 전량은 계획 인터뷰 시작 시드로 회수된다 — 단 `goals.list` 같은 **다른 슬롯을 자동으로 채우지는 않는다**(그 목표는 사용자가 직접 고른다).
+- 궁극목표 인터뷰(S29, 필수 9슬롯: `ultimate.statement`·`domain`·`horizon`·`measure`·`success_image`·`identity`·`current_position`·`pillars_hint`·`constraints`, 선택 3슬롯: `values`·`assets`·`role_model`)는 계획 인터뷰와 **양방향 이월**된다: 계획 인터뷰의 `identity.*`/`recovery.*` 등은 궁극목표 인터뷰 시작 시드로(단 학기 중/방학 `identity.season` 은 학기마다 바뀌어 **이월하지 않고 다시 묻는다**, v2.30-interview), 궁극목표 인터뷰의 `ultimate.*` 전량은 계획 인터뷰 시작 시드로 회수된다 — 단 `goals.list` 같은 **다른 슬롯을 자동으로 채우지는 않는다**(그 목표는 사용자가 직접 고른다). ⚠️ **궁극목표 → 궁극목표로는 이월하지 않는다**(v2.30-interview) — 궁극목표 인터뷰를 다시 열면 `ultimate.statement` 부터 다시 묻는다(`ambiguityScore=9`). 예전엔 지난 답 전부가 이월돼 시작부터 필수 슬롯이 다 찼고, `currentQuestion=null`·`endReason=null` 로 멈춰 다시 세울 길이 없었다.
 - 궁극목표 세션 완료는 계획 목표 영속 경로(`materialize_goals`/`supersede_proposed_goals`)를 타지 않는다 — 직전 계획 인터뷰의 잠정 목표가 지워지지 않는다.
 - 구현 상태(#6, #6-B): 엔진+영속화 배선 + 단일 활성 세션(restart-wins, kind 별) + 동시성 lock(kind 별) + 궁극목표 인터뷰(kind="ultimate") 완료. **후속**: 재조립 시 transient 상태(stall_count·used_fallback) 영속. `POST /goals/ultimate`(U1, `UltimateGoalOutcome` → `Goal` 영속)는 `goal_nodes.tree_kind` 도입(§6 후속 PR)과 함께 배선된다.
 - `answers`/`next-question`(LLM 호출) 은 사용자별 일일 호출 상한 대상 — 초과 시 429
-  `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(§1.10, #325).
+  `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(§1.10, #325). **`POST /interview/sessions`(시작)도 같은
+  상한으로 막는다**(v2.30-interview) — 첫 질문 생성도 LLM 을 불러 같은 한도에 잡히는데, 시작만
+  열려 있어 한도에 닿은 사용자가 첫 질문을 받고 그 뒤 모든 답이 429 로 실패했다. 거절된
+  시작은 세션을 만들지도, 진행 중 세션을 닫지도 않는다. `finish` 는 막지 않는다(끝내기는
+  언제나 가능해야 한다).
 
 ---
 
@@ -1288,7 +1296,7 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 | --- | --- | --- | --- |
 | GET | `/settings` | 내 설정 메타 (tone, language, timezone, 알림 요약) | ✅ #23-A |
 | PATCH | `/settings/tone-mode` | `gentle` / `strict` / `encouraging` | ✅ #23-A |
-| GET | `/settings/profile` | 지속형 프로필 메모리 — behavioral(energyCycle·attentionSpan·timeChunkPreference·선호시각) + interaction(recoveryTone·suggestionStyle·explanationDepth·reminderFrequency). 인터뷰가 아직 안 채웠으면 각 항목 null | ✅ #A |
+| GET | `/settings/profile` | 지속형 프로필 메모리 — behavioral(energyCycle·attentionSpan·timeChunkPreference·선호시각) + interaction(recoveryTone·suggestionStyle·explanationDepth·reminderFrequency). 인터뷰가 아직 안 채웠으면 각 항목 null. 인터뷰 종료는 **사용자가 답한 칸만** 쓴다 — [충분해요]·이탈로 비어 끝난 칸의 안전 기본값(피크 '변동'·활동창 09~23시·톤·최소 단위 10분·휴식 수용)은 쓰지 않고, 묻지 않은 집중 길이·최소 단위는 내 정보에서 고친 값을 그대로 둔다 (v2.30-interview) | ✅ #A |
 | PATCH | `/settings/profile` | 프로필 메모리 부분 수정 — 지정 필드만 갱신(미지정 유지), 행 없으면 생성. enum 외 값 422 | ✅ #A |
 | POST | `/settings/anonymize` | 즉시 익명화 (2단계 확인 토큰 필수) | ✅ #23-B |
 | GET | `/privacy/consent` | 동의 기록 | ✅ #23-B |

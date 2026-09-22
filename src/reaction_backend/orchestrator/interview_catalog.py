@@ -602,8 +602,17 @@ def is_goal_scoped(slot_key: str) -> bool:
 
 CATALOGS: dict[str, InterviewCatalog] = {"plan": PLAN_CATALOG, "ultimate": ULTIMATE_CATALOG}
 
+# 보기를 **여러 개** 담아도 전부 쓰는 칩 슬롯 — 나머지 칩·select 는 어댑터가 첫 값만 읽는다
+# (`interview_adapter._first`: 역할·학기·가장 무거운 목표·빈도·세션 길이·톤 등). FE 가 모든
+# 칩 질문에 "여러 개 골라도 돼요" 를 띄워, 두 번째로 고른 목표·빈도가 말없이 버려졌다.
+# `Question.multiple`·`SlotCatalogEntry.multiple` 로 내보내 FE 가 단일/복수 선택을 가른다.
+# ⚠️ 어댑터가 목록 전체를 읽는 슬롯(`time.peak_window` → peak_window, `ultimate.values` →
+# values)과 **같아야** 한다 — `tests/test_interview_route.py` 가 못 박는다.
+MULTI_SELECT_SLOTS: frozenset[str] = frozenset({"time.peak_window", "ultimate.values"})
+
 __all__ = [
     "CATALOGS",
+    "MULTI_SELECT_SLOTS",
     "GLOBAL_SCOPE_HINT",
     "is_goal_scoped",
     "canonical_chip",

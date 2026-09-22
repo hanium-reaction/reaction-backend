@@ -463,6 +463,87 @@ done 인데 남은 회차 블록은 `scheduled` 로 남아 주간표에 할 일�
 - 축 승격(`promote`)과 `POST /plans/mandala/next-cycle` 이 같은 승격 규칙을 쓴다 — 같은 축을 두 요청이 동시에
   올려도 목표는 하나(두 번째는 첫 목표를 그대로 돌려준다). 응답 형태는 그대로.
 
+## v2.30-interview — 2026-09-18 (인터뷰가 끝나야 할 때 끝나고, 답한 값이 그대로 남는다)
+
+**동작 변경 — `/interview/*`.** 응답 스키마·envelope·에러 코드 무변경, 마이그레이션 없음.
+
+### 재개(`next-question`)가 이미 다 찬 세션을 마감한다
+
+- 답 제출 밖에서 마지막 빈 슬롯이 채워지는 경로가 있다 — 자료 확정
+  (`POST /plans/materials/spec-confirm`)이 `goals.materials` 를 직접 쓴다. 재인터뷰에선 활동창·
+  회복 슬롯이 이월돼 materials 가 마지막 빈 슬롯이 되는데, 그 뒤 `next-question` 이
+  `currentQuestion=null`·`endReason=null` 을 돌려줘 인터뷰가 영영 끝나지 않았다.
+- 이제 그 경우 `answers` 의 마지막 답과 **같은 종료 응답**(`endReason=completed` + `summary` +
+  `outcome`/`ultimateOutcome`)을 준다. 목표 영속·프로필 영속도 같은 출구를 지난다. 두 번 불러도
+  종료 응답 재조회라 안전하다.
+
+### 궁극목표 인터뷰를 다시 열면 처음부터 묻는다
+
+- 지난 궁극목표 답(`ultimate.*`)은 **계획 인터뷰로만** 이월한다. 궁극목표 → 궁극목표 이월은
+  필수 슬롯을 시작부터 전부 채워, 두 번째 궁극목표 인터뷰가 질문 없이 멈췄다.
+- 방어선: `POST /interview/sessions` 가 시드만으로 필수 슬롯이 다 차면 빈 질문 대신 곧바로
+  종료 응답(201, `endReason=completed`)을 준다.
+
+### 인터뷰 종료가 답하지 않은 칸을 프로필에 쓰지 않는다
+
+- 조기 종료([충분해요]·재진입 때의 자동 종료 포함)는 빈 필수 슬롯을 안전 기본값으로 채운 outcome 을
+  만든다(`unresolved_slots` 에 키가 남는다). 그 기본값이 그대로 프로필 메모리에 쓰여, 다음
+  재인터뷰가 그것을 시드로 읽고 **묻지도 않은 피크 시간·회복 톤·휴식 수용·최소 단위를 건너뛰었다**.
+  이제 `unresolved_slots` 에 든 칸은 프로필(`behavioral`·`interaction`·`focus_mode_preferences`)과
+  `users.tone_mode` 시드에 쓰지 않는다.
+- 집중 길이(`energy.focus_duration`, 필수 아님)는 답했을 때만 `attentionSpan`·`timeChunkPreference`
+  에 쓴다 — 예전엔 `or 30` 으로 늘 30 이 쓰였다.
+- 내 정보에서 칩 보기에 없는 값(집중 45분·최소 단위 20분 등)으로 고쳤으면, 재인터뷰가 지난
+  인터뷰 원답을 이월해 그 값을 되돌리지 않는다 — 그 슬롯은 열린 채 남아(필수면 다시 묻는다)
+  답하지 않으면 설정 값이 유지된다.
+
+### 온보딩 중 계획 인터뷰를 끝내면 `ONBOARDING_CONFIRM` 이 된다
+
+- `users.onboarding_state` 를 `WELCOME` 에서 옮기는 전이가 아무 데도 없어, 인터뷰·일정
+  설정을 다 마치고 계획 생성(20~50초)을 기다리다 앱이 다시 열리면 `GET /auth/me` 가 여전히
+  `WELCOME` 이라 소개 화면과 새 인터뷰부터 다시 해야 했다.
+- 이제 계획 인터뷰가 **목표를 1개 이상 저장하고** 끝나면(완료·[충분해요]·재개·시드 마감 모두)
+  `WELCOME`/`ONBOARDING_INTERVIEW` → `ONBOARDING_CONFIRM`(목표 분류 S03). 목표 없이 끝난
+  종료, 궁극목표 인터뷰, 이미 더 진행된 상태(`ACTIVE` 등)는 그대로다(멱등).
+- 그 뒤 단계(`ONBOARDING_CALENDAR`…)는 기존 트리거 그대로이고, 계획 승인은 어느 단계에서든
+  `ACTIVE` 로 마감한다.
+
+### 재인터뷰가 학기 중/방학을 다시 묻는다
+
+- `identity.season` 은 더 이상 지난 인터뷰에서 이월하지 않는다 — 학기 단위로 바뀌는데 설정에
+  고칠 칸이 없어, 8월의 '방학' 이 9월 재인터뷰와 계획에 계속 남았다. 재인터뷰의
+  `ambiguityScore` 가 그만큼(1) 커질 수 있다. 역할(`identity.role`) 등 나머지 이월은 그대로.
+
+### 인터뷰 시작도 일일 호출 상한을 본다
+
+- `POST /interview/sessions` 가 `answers`/`next-question` 과 같은 일일 상한을 검사해, 넘었으면
+  429 `RATE_LIMIT_DAILY_CALLS_EXCEEDED`(+ `Retry-After`)를 준다. 예전엔 시작만 열려 있어 첫
+  질문을 받은 뒤 모든 답이 실패했다. 에러 코드·envelope 는 기존 그대로.
+
+### 질문·카탈로그에 `multiple` (additive)
+
+- `Question.multiple`·`SlotCatalogEntry.multiple`(bool, 기본 false) 추가. 보기를 여러 개 골라도
+  전부 쓰이는 슬롯만 true — 계획 `time.peak_window`, 궁극목표 `ultimate.values`. 나머지는 서버가
+  첫 값만 쓴다. 기존 필드는 무변경.
+
+### FE 에 미치는 것
+
+- `next-question` 응답에 `endReason` 이 올 수 있다 — `answers` 의 종료 응답과 같은 분기로
+  처리하면 된다(자료 확정 후 재개가 확인 단계로 이어진다).
+- 화면 진입 때 저장된 세션을 `finish` 로 닫지 말고 `next-question` 으로 이어가거나 새로
+  `POST /interview/sessions` 를 부르면 된다(restart-wins 가 부수효과 없이 닫는다). `finish` 는
+  사용자의 [충분해요] 에만 — 그래야 몇 문항만 답한 세션이 '조기 종료' 로 굳지 않는다.
+- 앱을 다시 열어 `onboardingState=ONBOARDING_CONFIRM` 으로 목표 분류 화면에 들어오면, 메모리의
+  outcome 이 없을 수 있다 — `GET /goals`(인터뷰가 저장한 잠정 목표)로 채우면 된다.
+- `RATE_LIMIT_DAILY_CALLS_EXCEEDED` 는 아직 FE 문구 표에 없어 "요청 처리 중 오류" 로 보인다 —
+  "오늘 이용 가능한 횟수를 다 썼어요. 자정 이후에 이어서 할 수 있어요." 처럼 매핑하고
+  `Retry-After` 를 쓰면 된다. 인터뷰 시작에서도 이 코드가 올 수 있다.
+- 칩 질문의 "탭해서 담기 · 여러 개 골라도 돼요" 안내는 `currentQuestion.multiple=true` 일 때만
+  띄우고, false 면 단일 선택으로 토글하면 된다 — 지금은 두 번째로 고른 목표·빈도가 말없이
+  버려진다.
+- `outcome.coreGoals` 의 자리표시자 `(미입력 목표)`(`confidence=0`)는 목표가 아니다 — 목표 분류
+  화면에서 걸러 주면 된다(api-contract §4 에 문서화, 응답 형태는 무변경).
+
 ---
 
 ## v2.29 — 2026-09-17 (신규 가입 제한 해제 — 초대코드·30명 상한 기본 끔)

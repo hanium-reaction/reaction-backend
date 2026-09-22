@@ -57,10 +57,12 @@ from reaction_backend.orchestrator._common import user_agent_lock
 from reaction_backend.orchestrator.interview import InterviewState
 from reaction_backend.orchestrator.interview_catalog import (
     CATALOGS,
+    MULTI_SELECT_SLOTS,
 )
 from reaction_backend.repositories.goal_repo import GoalRepo, get_goal_repo
 from reaction_backend.repositories.interview_repo import InterviewRepo, get_interview_repo
 from reaction_backend.repositories.profile_repo import ProfileRepo, get_profile_repo
+from reaction_backend.repositories.user_repo import UserRepo
 from reaction_backend.safety import endpoint_rate_limit
 from reaction_backend.schemas.errors import ApiError, ErrorCode
 from reaction_backend.schemas.interview import (
@@ -282,6 +284,8 @@ def _to_question(
 
     보기(options)는 카탈로그 고정 진실 소스. `suggested_answers`(LLM 추천 답변 카드)는
     고정 보기가 없는 자유서술 슬롯에서만 노출한다(chip/select 는 보기로 답하므로 제외).
+    자리표시자 카드("ㅇㅇ 출판사")는 여기 **응답 경계에서** 거른다 — 노드가 아니라 노출
+    지점에 두어야 룰 폴백·재개(next-question) 어느 경로로 만든 질문이든 같은 문을 지난다.
     """
     nq = state["next_question"]
     slot_key = state["next_slot_key"]
@@ -300,7 +304,8 @@ def _to_question(
         text=nq.question,
         answer_type=slot.answer_type if slot else "text",
         options=options,
-        suggested_answers=[] if options else list(nq.suggested_answers),
+        suggested_answers=[] if options else interview.drop_placeholder_cards(nq.suggested_answers),
+        multiple=slot_key in MULTI_SELECT_SLOTS,
     )
 
 
@@ -404,6 +409,80 @@ async def _persist_turn(
     )
 
 
+async def _finalize_and_respond(
+    *,
+    session: AsyncSession,
+    repo: InterviewRepo,
+    row: InterviewSessionRow,
+    user: User,
+    result: interview_runner.TurnResult,
+    default_reason: InterviewEndReason,
+) -> InterviewSession:
+    """마감된 턴(`result.done`)을 영속하고 종료 응답을 만든다 — 모든 종료 경로의 단일 출구.
+
+    답 제출로 끝나든([다음] 마지막 답), [충분해요] 로 끝나든, 재개했더니 이미 다 차 있든
+    (`next-question`), 시작했더니 시드로 다 차 있든(`start`) **같은 일**을 해야 한다: 세션
+    종결 → (계획 인터뷰면) 목표 영속·지난 잠정 목표 정리·프로필 영속 → commit. 경로마다
+    손으로 복사해 두면 한 곳만 빠지는 사고가 난다(#96 은 [충분해요] 경로에 목표 영속이
+    빠져 있던 것이다).
+
+    kind="ultimate" 는 `result.outcome` 이 None(대신 `result.ultimate_outcome`)이라 목표·
+    프로필 블록이 구조적으로 스킵된다 — 궁극목표 세션이 직전 계획 인터뷰의 proposed 목표를
+    `supersede_proposed_goals(keep=[])` 로 지워버리는 사고(#186 함정)를 "outcome 이
+    InterviewOutcome 일 때만" 이라는 구조 자체가 막는다.
+
+    호출자는 이 함수 **전에** `_persist_turn` 으로 슬롯을 영속해 둔다.
+    """
+    reason = result.end_reason or default_reason
+    await repo.finalize(
+        row,
+        end_reason=reason,
+        total_turns=result.state["total_turns"],
+        ambiguity_final=result.state["ambiguity_score"],
+        used_fallback=result.state["used_fallback"],
+    )
+    if result.outcome is not None:
+        # 인터뷰에서 추출한 목표를 즉시 영속(#96) → 목표 분류 화면(GET /goals)이 표시·
+        # 재분류할 수 있게 한다. 이후 계획 승인은 같은 목표를 재사용(중복 X).
+        goal_rows, _ = await first_plan_adapter.materialize_goals(
+            session, user_id=user.id, core_goals=result.outcome.core_goals
+        )
+        # 지난 인터뷰의 잠정 목표 중 이번에 다시 안 나온 것은 보관 — 세션 restart-wins 를
+        # 목표에도 적용해, 계획으로 이어지지 않은 목표가 계속 쌓이지 않게 한다.
+        await first_plan_adapter.supersede_proposed_goals(
+            session,
+            user_id=user.id,
+            keep=goal_rows,
+            onboarding_state=user.onboarding_state,
+        )
+        # 지속형 선호(에너지/톤/시간/회복)를 프로필 메모리에 영속 (#A-1) — 그동안 첫
+        # 계획에만 쓰이고 버려지던 Policy Snapshot 레이어를 채운다. 설정에서 편집(#A-2).
+        # best-effort: 프로필 영속 실패가 인터뷰 완료를 깨지 않게 (#130 리뷰).
+        await _persist_profile_best_effort(session, user=user, outcome=result.outcome)
+        # 온보딩 중에 목표를 하나라도 남기고 계획 인터뷰를 끝냈으면 '목표 분류' 단계로 올린다.
+        # 그동안 WELCOME 에서 나가는 전이가 아무 데도 없어, 인터뷰·일정 설정을 다 마치고 계획
+        # 생성(20~50초)을 기다리다 앱을 껐다 켜면 소개 화면과 **새 인터뷰**부터 다시 해야
+        # 했다. 이제 목표가 저장된 분류 화면에서 이어간다. 목표가 없는 종료(역할만 답하고
+        # [충분해요] 등)는 이어갈 게 없어 그대로 둔다. 궁극목표 인터뷰는 이 블록 밖이고,
+        # 이미 더 진행된 상태(ACTIVE 등)는 `advance_onboarding` 이 no-op 이다(멱등).
+        if goal_rows:
+            await UserRepo(session).advance_onboarding(
+                user,
+                expected_from=("WELCOME", "ONBOARDING_INTERVIEW"),
+                to="ONBOARDING_CONFIRM",
+            )
+    await session.commit()
+    return _response(
+        row.id,
+        result.state,
+        kind=row.kind,
+        end_reason=reason,
+        summary=result.summary,
+        outcome=result.outcome,
+        ultimate_outcome=result.ultimate_outcome,
+    )
+
+
 async def _carry_over_slots(
     repo: InterviewRepo, user_id: UUID, *, source_kind: str, keys: frozenset[str]
 ) -> dict[str, dict[str, Any]]:
@@ -423,15 +502,18 @@ async def _carry_over_answers(
     repo: InterviewRepo, profile_repo: ProfileRepo, user: User, *, target_kind: str = "plan"
 ) -> dict[str, dict[str, Any]]:
     """재인터뷰 시드 — 지난 인터뷰의 지속형 슬롯 원답 위에, **설정에서 수정 가능한 프로필**을
-    덮어써 최신 진실을 반영한다(#reduce-reask). 새로 시작하는 인터뷰의 kind 와 무관하게 두
-    방향 모두 회수한다(§2.6) — 두 카탈로그의 슬롯키 이름공간(`identity.*`/`goals.*`/... vs
-    `ultimate.*`)이 겹치지 않아 병합해도 충돌이 없고, 상대 kind 가 안 쓰는 슬롯은 그 FSM 이
-    그냥 읽지 않는다:
-    - plan 세션의 `CARRY_OVER_SLOT_KEYS`(자기 자신 — identity·활동창 등, 프로필이 못 담는
-      슬롯까지 faithful 하게 회수).
-    - ultimate 세션의 `ULTIMATE_CARRY_OVER_SLOT_KEYS`(자기 자신 + 교차 — ultimate.* 는 몇 년에
-      한 번 바뀌는 값이라 전량 이월 대상. `goals.list` 같은 **다른** 슬롯은 자동으로 채우지
-      않는다 — 그 목표는 사용자가 직접 고르게 한다).
+    덮어써 최신 진실을 반영한다(#reduce-reask). 두 카탈로그의 슬롯키 이름공간
+    (`identity.*`/`goals.*`/... vs `ultimate.*`)이 겹치지 않아 병합해도 충돌이 없고, 상대
+    kind 가 안 쓰는 슬롯은 그 FSM 이 그냥 읽지 않는다(§2.6):
+    - plan 세션의 `CARRY_OVER_SLOT_KEYS`(identity·활동창 등, 프로필이 못 담는 슬롯까지
+      faithful 하게 회수).
+    - ultimate 세션의 `ULTIMATE_CARRY_OVER_SLOT_KEYS` — **계획 인터뷰로만** 넘긴다(교차).
+      `goals.list` 같은 **다른** 슬롯은 자동으로 채우지 않는다 — 목표는 사용자가 직접 고른다.
+
+    ⚠️ **궁극목표 → 궁극목표로는 이월하지 않는다.** 궁극목표 인터뷰의 슬롯은 전부
+    `ultimate.*` 라, 이월하면 필수 슬롯이 시작부터 전부 차서 **물을 질문이 없다**. 궁극목표
+    인터뷰를 다시 여는 사람은 그 목표를 다시 세우려는 것이다(만다라트 전에 나갔거나, 보관하고
+    새로 세우려는 경우) — 지난 답으로 닫아 버리면 다시 세울 길이 없었다.
 
     프로필 오버레이(behavioral/interaction/focus_mode)는 `target_kind="plan"` 일 때만 적용한다
     — 그 프로필들은 계획 인터뷰 슬롯(피크·집중길이·톤·최소단위·휴식수용)에만 매핑돼 있다.
@@ -445,21 +527,34 @@ async def _carry_over_answers(
             repo, user.id, source_kind="plan", keys=interview_adapter.CARRY_OVER_SLOT_KEYS
         )
     )
-    base.update(
-        await _carry_over_slots(
-            repo,
-            user.id,
-            source_kind="ultimate",
-            keys=ultimate_adapter.ULTIMATE_CARRY_OVER_SLOT_KEYS,
+    if target_kind == "plan":
+        base.update(
+            await _carry_over_slots(
+                repo,
+                user.id,
+                source_kind="ultimate",
+                keys=ultimate_adapter.ULTIMATE_CARRY_OVER_SLOT_KEYS,
+            )
         )
-    )
 
     if target_kind == "plan":
+        behavioral = await profile_repo.get_behavioral(user.id)
+        interaction = await profile_repo.get_interaction(user.id)
+        focus_mode_prefs = user.focus_mode_preferences or {}
         overlay = profile_memory.seed_slots_from_profile(
-            behavioral=await profile_repo.get_behavioral(user.id),
-            interaction=await profile_repo.get_interaction(user.id),
-            focus_mode_prefs=user.focus_mode_preferences or {},
+            behavioral=behavioral,
+            interaction=interaction,
+            focus_mode_prefs=focus_mode_prefs,
+            carried=base,
         )
+        # 프로필이 값을 가졌는데 칩 보기로 못 옮긴 슬롯(내 정보에서 고른 45분·20분 등)은 지난
+        # 인터뷰 원답도 치운다 — 안 그러면 옛 원답이 이월돼 인터뷰 종료 때 프로필에 다시 쓰이고,
+        # 설정에서 바꾼 값이 조용히 되돌아간다. 슬롯은 열린 채 남아 묻거나(필수) 영속되지 않는다.
+        owned = profile_memory.profile_owned_slots(
+            behavioral=behavioral, interaction=interaction, focus_mode_prefs=focus_mode_prefs
+        )
+        for key in owned - overlay.keys():
+            base.pop(key, None)
         base.update(overlay)  # 설정 수정이 반영된 프로필이 지난 인터뷰 원답을 덮는다(최신 우선).
     return base
 
@@ -491,6 +586,10 @@ async def start_session(
     동시성 lock(ADR-0005 §7.6, kind 스코프) 안에서 검사+생성해 다중 디바이스 race 를 막는다.
     """
     kind = body.kind if body else "plan"
+    # 시작도 첫 질문 생성에 LLM 을 부르고 그 호출이 같은 일일 한도에 잡힌다. 여기서 막지 않으면
+    # 한도에 닿은 사용자가 첫 질문까지는 보고, 그 뒤 **모든 답이** 실패했다 — 시작에서 바로
+    # 알려 준다(답 제출·재개와 같은 429, 같은 Retry-After). `enforce` 는 세기만 하고 늘리지 않는다.
+    await endpoint_rate_limit.enforce(session, user_id=user.id, module="interview")
     async with user_agent_lock(session, user.id, _lock_agent(kind)):
         stale = await repo.get_active_session(user.id, kind=kind)
         if stale is not None:
@@ -523,6 +622,15 @@ async def start_session(
             seed_answers=seed,
         )
         await _persist_turn(repo, row, result.state)
+        if result.done:  # 시드만으로 필수 슬롯이 다 찼다 — 빈 질문 대신 곧바로 마감
+            return await _finalize_and_respond(
+                session=session,
+                repo=repo,
+                row=row,
+                user=user,
+                result=result,
+                default_reason="completed",
+            )
         await session.commit()
         titles = await _mandala_goal_titles_if_needed(
             session, user.id, result.state.get("next_slot_key"), kind=kind
@@ -547,6 +655,7 @@ async def get_slot_catalog(
             is_required=s.is_required,
             category=s.category,
             options=list(s.options),
+            multiple=s.slot_key in MULTI_SELECT_SLOTS,
         )
         for s in CATALOGS[kind].slots
     ]
@@ -618,45 +727,13 @@ async def submit_answer(
         await _persist_turn(repo, row, result.state)
 
         if result.done:
-            reason = result.end_reason or "completed"
-            await repo.finalize(
-                row,
-                end_reason=reason,
-                total_turns=result.state["total_turns"],
-                ambiguity_final=result.state["ambiguity_score"],
-                used_fallback=result.state["used_fallback"],
-            )
-            # 인터뷰에서 추출한 목표를 즉시 영속(#96) → 목표 분류 화면(GET /goals)이 표시·
-            # 재분류할 수 있게 한다. 이후 계획 승인은 같은 목표를 재사용(중복 X).
-            # kind="ultimate" 는 result.outcome 이 애초에 None(대신 result.ultimate_outcome)
-            # 이라 이 블록이 자연히 스킵된다 — 궁극목표 세션이 직전 계획 인터뷰의 proposed
-            # 목표를 supersede_proposed_goals(keep=[]) 로 지워버리는 사고(#186 함정)를
-            # "outcome 이 InterviewOutcome 타입일 때만" 이라는 구조 자체가 막는다.
-            if result.outcome is not None:
-                goal_rows, _ = await first_plan_adapter.materialize_goals(
-                    session, user_id=user.id, core_goals=result.outcome.core_goals
-                )
-                # 지난 인터뷰의 잠정 목표 중 이번에 다시 안 나온 것은 보관 — 세션 restart-wins 를
-                # 목표에도 적용해, 계획으로 이어지지 않은 목표가 계속 쌓이지 않게 한다.
-                await first_plan_adapter.supersede_proposed_goals(
-                    session,
-                    user_id=user.id,
-                    keep=goal_rows,
-                    onboarding_state=user.onboarding_state,
-                )
-                # 지속형 선호(에너지/톤/시간/회복)를 프로필 메모리에 영속 (#A-1) — 그동안 첫
-                # 계획에만 쓰이고 버려지던 Policy Snapshot 레이어를 채운다. 설정에서 편집(#A-2).
-                # best-effort: 프로필 영속 실패가 인터뷰 완료를 깨지 않게 (#130 리뷰).
-                await _persist_profile_best_effort(session, user=user, outcome=result.outcome)
-            await session.commit()
-            return _response(
-                row.id,
-                result.state,
-                kind=row.kind,
-                end_reason=reason,
-                summary=result.summary,
-                outcome=result.outcome,
-                ultimate_outcome=result.ultimate_outcome,
+            return await _finalize_and_respond(
+                session=session,
+                repo=repo,
+                row=row,
+                user=user,
+                result=result,
+                default_reason="completed",
             )
 
         await session.commit()
@@ -683,6 +760,22 @@ async def next_question(
             return _ended_response(row, await repo.list_slot_answers(row.id))
         slot_rows = await repo.list_slot_answers(row.id)
         state = _state_from_db(row, slot_rows)
+        # 답 제출 밖에서 마지막 빈 슬롯이 채워졌으면(자료 확정 spec-confirm 이 goals.materials
+        # 를 직접 쓴다) 물을 슬롯이 없다. 빈 질문을 돌려주면 FE 는 "다음 질문을 받지 못했어요"
+        # 만 되풀이하고 인터뷰가 영영 끝나지 않았다 — 답 제출과 같은 마감 경로로 끝낸다.
+        done = await interview_runner.finalize_if_complete(
+            state=state, session=session, tone_mode=user.tone_mode
+        )
+        if done is not None:
+            await _persist_turn(repo, row, done.state)
+            return await _finalize_and_respond(
+                session=session,
+                repo=repo,
+                row=row,
+                user=user,
+                result=done,
+                default_reason="completed",
+            )
         state = await interview.ask_question(
             state, _config(session, _slot_meta(state["slot_answers"], kind=row.kind))
         )
@@ -714,37 +807,12 @@ async def finish_session(
             state=state, session=session, tone_mode=user.tone_mode
         )
         await _persist_turn(repo, row, result.state)
-        reason = result.end_reason or "early_user"
-        await repo.finalize(
-            row,
-            end_reason=reason,
-            total_turns=result.state["total_turns"],
-            ambiguity_final=result.state["ambiguity_score"],
-            used_fallback=result.state["used_fallback"],
-        )
-        # 조기 종료([충분해요])도 완료 경로(submit_answer)와 대칭으로 영속한다 — 순서도 동일.
-        # kind="ultimate" 는 result.outcome 이 None(대신 result.ultimate_outcome)이라 자연히
-        # 스킵된다 — pitfall #186과 동일 근거(submit_answer 주석 참고).
-        if result.outcome is not None:
-            # 추출한 목표를 영속(#96). 없으면 [충분해요] 로 끝낸 사용자는 목표 분류 화면이 빈 상태.
-            goal_rows, _ = await first_plan_adapter.materialize_goals(
-                session, user_id=user.id, core_goals=result.outcome.core_goals
-            )
-            await first_plan_adapter.supersede_proposed_goals(
-                session,
-                user_id=user.id,
-                keep=goal_rows,
-                onboarding_state=user.onboarding_state,
-            )
-            # 지속형 선호를 프로필 메모리에 영속 (#A-1, best-effort #130).
-            await _persist_profile_best_effort(session, user=user, outcome=result.outcome)
-        await session.commit()
-        return _response(
-            row.id,
-            result.state,
-            kind=row.kind,
-            end_reason=reason,
-            summary=result.summary,
-            outcome=result.outcome,
-            ultimate_outcome=result.ultimate_outcome,
+        # 조기 종료([충분해요])도 완료 경로(submit_answer)와 같은 출구로 영속한다.
+        return await _finalize_and_respond(
+            session=session,
+            repo=repo,
+            row=row,
+            user=user,
+            result=result,
+            default_reason="early_user",
         )

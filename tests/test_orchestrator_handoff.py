@@ -2688,6 +2688,23 @@ def test_rule_summary_omits_unset_optional_fields() -> None:
     assert "단위로 줄여" not in s.preference_summary
 
 
+def test_summary_does_not_state_an_unanswered_tone_as_a_preference() -> None:
+    """톤을 답하지 않고 끝낸 인터뷰의 요약이 '담백' 을 사용자 선호로 적지 않는다 (interview-15).
+
+    고치기 전엔 _summary_variables 가 미답 톤을 '담백' 으로 채워, [충분해요] 뒤 요약이
+    "담백한 회복 톤을 선호하시는군요" 라고 말했다.
+    """
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = {
+        "goals.list": {"type": "text", "raw": "캡스톤", "normalized": ["캡스톤"]},
+    }
+
+    assert interview._summary_variables(state)["tone"] == interview._NOT_SET
+    s = interview._rule_summary(state)
+    assert "담백" not in s.preference_summary
+    assert s.preference_summary  # 빈 문장은 아니다
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 다음 질문 러닝 컨텍스트 (P2-a)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2704,6 +2721,20 @@ def test_answered_context_summarizes_filled_slots() -> None:
     ctx = interview._answered_context(state)
     assert "학년/시기=3학년" in ctx
     assert "목표=캡스톤, 토익" in ctx
+
+
+def test_answered_context_truncates_long_pasted_material() -> None:
+    """붙여넣은 자료 원문(최대 2만 자)이 뒤이은 질문 호출마다 통째로 실리지 않는다 (interview-18)."""
+    state = interview.initial_state(session_id=uuid4(), user_id=uuid4())
+    state["slot_answers"] = {
+        "identity.role": {"type": "chip", "values": ["3학년"]},
+        "goals.materials": {"type": "text", "raw": "x" * 20000},
+    }
+
+    ctx = interview._answered_context(state)
+    assert len(ctx) < 1000
+    assert "학년/시기=3학년" in ctx  # 짧은 값은 그대로
+    assert "x" * interview._CONTEXT_VALUE_MAX + "…" in ctx
 
 
 def test_answered_context_empty_when_no_answers() -> None:
