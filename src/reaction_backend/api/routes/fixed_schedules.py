@@ -159,9 +159,12 @@ def _validate_days(days: list[str]) -> list[str]:
         )
     invalid = [d for d in days if d not in _VALID_DAYS]
     if invalid:
+        # 파이썬 목록 표기(`['monday', 'wednesday']`)가 그대로 화면에 떴다 — 대괄호·따옴표는
+        # 사용자에게 아무 뜻도 아니다. 쉼표로 이어 쓰고, 값 뒤에는 조사를 붙이지 않는다
+        # (목록을 싣는 다른 안내와 같은 규칙 — 받은 값에 따라 '은/는' 이 어긋난다).
         raise ApiError(
             ErrorCode.COMMON_VALIDATION_ERROR,
-            f"요일 값이 올바르지 않아요: {invalid}. mon/tue/wed/thu/fri/sat/sun 중에서.",
+            f"알 수 없는 요일이 있어요: {', '.join(invalid)} — 요일을 다시 골라 주세요.",
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="daysOfWeek",
         )

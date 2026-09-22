@@ -729,6 +729,11 @@ done 인데 남은 회차 블록은 `scheduled` 로 남아 주간표에 할 일�
 - 형식 오류 메시지에서 `startTime`/`endTime` 같은 필드 코드를 뺐다("시작 시각 형식이…").
 - 제목은 앞뒤 공백을 걷어 저장하고, 비었거나 200자를 넘으면 422 `field="title"`(201자는 500 이었다).
   요일은 비면 422(PATCH 도), 중복은 한 번만 저장한다.
+- 요일 값 오류 문구에서 파이썬 목록 표기를 걷어냈다: "요일 값이 올바르지 않아요:
+  `['monday', 'wednesday']`. mon/tue/wed/thu/fri/sat/sun 중에서." → **"알 수 없는 요일이 있어요:
+  monday, wednesday — 요일을 다시 골라 주세요."** 대괄호·따옴표·영문 코드 목록은 사용자에게 아무
+  뜻도 아니다. 값 뒤에 조사를 붙이지 않는 것은 목록을 싣는 다른 안내와 같은 규칙이다. 422 코드와
+  `field="daysOfWeek"` 는 그대로(받는 값은 종전대로 `mon`~`sun`).
 
 FE 가 할 일(고정 일정): `SetupScreen.addSchedule` 은 422 를 `friendlyError` 로 바꿔 '입력값을 확인해 주세요' 만
 보여 준다 — `CalendarConnectCard` 처럼 422 면 `err.message` 를 그대로 보여 줄 것(위 문구들이 그대로

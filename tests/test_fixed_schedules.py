@@ -251,6 +251,20 @@ def test_overnight_window_explains_how_to_enter_it(client: TestClient) -> None:
     assert "자정" in body["message"] and "나눠" in body["message"]
 
 
+def test_bad_day_codes_are_listed_in_plain_korean(client: TestClient) -> None:
+    """예전엔 파이썬 목록 표기가 그대로 떴다 — "…: ['monday', 'wednesday']. mon/tue/…"."""
+    resp = _post(client, title="수업", daysOfWeek=["monday", "wednesday"], endTime="11:00")
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["field"] == "daysOfWeek"
+    assert (
+        body["message"] == "알 수 없는 요일이 있어요: monday, wednesday — 요일을 다시 골라 주세요."
+    )
+    for repr_bit in ("[", "]", "'", "mon/tue"):
+        assert repr_bit not in body["message"]
+
+
 def test_a_reversed_same_day_range_is_told_what_is_wrong(client: TestClient) -> None:
     """11:00–10:00 은 거의 언제나 오타다 — '둘로 나눠 넣으라'는 자정 넘김 안내가 나가면
     사용자는 무엇이 틀렸는지 모른 채 같은 실수를 반복한다."""
