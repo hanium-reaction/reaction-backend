@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
 from reaction_backend.db.models.action_item import ACTION_CATEGORY_VALUES
+from reaction_backend.db.models.behavioral_profile import BehavioralProfile
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
 from reaction_backend.db.models.plan_draft import PlanDraft
@@ -64,6 +65,7 @@ from reaction_backend.orchestrator import (
     mandala,
     mandala_adapter,
     mandala_cycle,
+    profile_memory,
     replan,
     ultimate_adapter,
 )
@@ -73,7 +75,17 @@ from reaction_backend.orchestrator.goal_structuring import (
     fixed_schedules_to_busy,
     time_policies_to_busy,
 )
-from reaction_backend.orchestrator.plan_edit import find_policy_violation, snap_to_15min
+from reaction_backend.orchestrator.plan_edit import (
+    DraftBlockEdit,
+    DraftEditError,
+    EditedDraft,
+    apply_draft_edits,
+    card_title_from,
+    find_policy_violation,
+    first_busy_overlap,
+    snap_to_15min,
+    spanned_days,
+)
 from reaction_backend.repositories.action_item_repo import ActionItemRepo, get_action_item_repo
 from reaction_backend.repositories.fixed_schedule_repo import (
     FixedScheduleRepo,
@@ -117,8 +129,10 @@ from reaction_backend.schemas.mandala import (
 )
 from reaction_backend.schemas.planning import (
     ActionItemDraft,
+    BlockCompletionStatus,
     BlockEditRequest,
     BlockEditResponse,
+    FirstPlanApproveRequest,
     FirstPlanApproveResponse,
     FirstPlanGenerateRequest,
     FirstPlanResponse,
@@ -130,6 +144,7 @@ from reaction_backend.schemas.planning import (
     ReplanResponse,
     ScheduledBlockPreview,
     WeeklyBlock,
+    WeeklyFixedSchedule,
     WeeklyPlanDay,
     WeeklyPlanResponse,
     WeeklyReplanApproveResponse,
@@ -165,6 +180,7 @@ ActionRepoDep = Annotated[ActionItemRepo, Depends(get_action_item_repo)]
 PolicyRepoDep = Annotated[TimePolicyRepo, Depends(get_time_policy_repo)]
 GoalRepoDep = Annotated[GoalRepo, Depends(get_goal_repo)]
 InboxRepoDep = Annotated[InboxRepo, Depends(get_inbox_repo)]
+FixedRepoDep = Annotated[FixedScheduleRepo, Depends(get_fixed_schedule_repo)]
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 
 # S14/S15 (#21-B) — 주간 그리드/블록 편집. planId 는 주 논리 식별자(Plan 테이블 없음), 편집 권한은 blockId.
@@ -208,16 +224,19 @@ _project_session_outcome = interview_projection.project_session_outcome
 
 async def _resolve_outcome(
     body: FirstPlanGenerateRequest, user_id: UUID, repo: InterviewRepo
-) -> InterviewOutcome:
+) -> tuple[InterviewOutcome, datetime | None]:
     """요청에서 First Plan 시드 `InterviewOutcome` 을 확정한다.
 
     우선순위: ① 인라인 `outcome` → ② `interviewSessionId` 로 종료 세션 투영 →
     ③ **빈 본문이면 최근 '정상 종료' 인터뷰 세션으로 자동 복구** — FE 가 새로고침 등으로
     sessionId(메모리 보관)를 잃어도 계획 생성이 가능하도록 (abandoned 제외).
     셋 다 불가하면 422.
+
+    두 번째 값은 그 인터뷰가 끝난 시각 — 그 뒤에 설정에서 고친 프로필을 얹을지 가른다
+    (`_with_settings_edits`). 인라인 outcome 이면 알 수 없어 None.
     """
     if body.outcome is not None:
-        return body.outcome
+        return body.outcome, None
     if body.interview_session_id:
         try:
             session_uuid = UUID(body.interview_session_id)
@@ -226,13 +245,14 @@ async def _resolve_outcome(
         row = await repo.get_active(user_id, session_uuid)
         if row is None:
             raise _interview_not_found()
-        return await _project_session_outcome(row, repo)
+        return await _project_session_outcome(row, repo), row.ended_at
     latest = await repo.get_latest_finished(user_id)
     if latest is not None:
-        return await _project_session_outcome(latest, repo)
+        return await _project_session_outcome(latest, repo), latest.ended_at
     raise ApiError(
         ErrorCode.COMMON_VALIDATION_ERROR,
-        "완료된 인터뷰가 없어요. 인터뷰를 먼저 진행하거나 outcome/interviewSessionId 를 보내주세요.",
+        # 화면에 그대로 뜨는 문구다 — 요청 필드 이름 같은 개발자용 말을 넣지 않는다 (planA-16).
+        "목표 인터뷰를 먼저 마쳐 주세요. 인터뷰가 끝나면 계획을 만들어 드릴게요.",
         http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
     )
 
@@ -344,6 +364,73 @@ def _apply_edited_availability(outcome: InterviewOutcome, user: User) -> Intervi
     return outcome.model_copy(update={"availability": availability})
 
 
+# 인터뷰 완료(finalize)는 같은 요청에서 프로필을 쓴다 — 그 쓰기와 '나중에 설정에서 고친 것'을
+# 가르는 여유. 설정 편집은 계획 화면을 지난 뒤라 분 단위로 늦다.
+_PROFILE_EDIT_SLACK = timedelta(minutes=1)
+
+
+def _apply_edited_profile(
+    outcome: InterviewOutcome,
+    behavioral: BehavioralProfile | None,
+    *,
+    interview_ended_at: datetime | None,
+) -> InterviewOutcome:
+    """'내 정보'에서 고친 **집중 길이·집중 시간대**를 outcome 에 얹는다 (critic-5).
+
+    설정 화면은 "여기서 바꾸면 인터뷰를 다시 하지 않아도 반영돼요" 라고 약속하는데, 계획은
+    인터뷰 outcome 만 읽어 `behavioral_profiles` 수정이 어디에도 안 닿았다(활동 시간대만
+    `_apply_edited_availability` 로 반영됐다).
+
+    **인터뷰가 끝난 뒤에 프로필이 바뀌었고, 그 값이 인터뷰 답에서 나올 값과 다를 때만** 덮는다.
+    인터뷰 완료가 쓴 프로필(같은 값)로 덮으면 목표별 세션 길이 같은 더 구체적인 답을 잃는다.
+    - 집중 길이(attention_span): 전역 집중 길이로 쓰고, 목표별 세션 길이는 비운다 — 설정의
+      '한 번에 집중하는 길이' 를 바꿨는데 목표별 값이 이기면 바꾼 게 안 보인다.
+    - 집중 시간대(energy_cycle): 전역 피크 칩으로. 목표별 선호 시간은 그대로(더 구체적인 답).
+    """
+    if behavioral is None or interview_ended_at is None:
+        return outcome
+    updated_at = behavioral.updated_at
+    if updated_at is None or updated_at <= interview_ended_at + _PROFILE_EDIT_SLACK:
+        return outcome
+    seed = profile_memory.seed_slots_from_profile(
+        behavioral=behavioral, interaction=None, focus_mode_prefs={}
+    )
+    update: dict[str, Any] = {}
+    span = behavioral.attention_span
+    # 설정 검증 범위(5~240분) 밖은 오염된 값이다 — 계획을 그 값으로 누르지 않는다.
+    if (
+        isinstance(span, int)
+        and 5 <= span <= 240
+        and span != (outcome.preferences.focus_duration_min or 30)
+    ):
+        update["preferences"] = outcome.preferences.model_copy(update={"focus_duration_min": span})
+        update["core_goals"] = [
+            g.model_copy(update={"session_length_min": None}) for g in outcome.core_goals
+        ]
+    peak = seed.get("time.peak_window", {}).get("values")
+    if peak and behavioral.energy_cycle != profile_memory.energy_cycle_from_peak(
+        outcome.availability.peak_window
+    ):
+        update["availability"] = outcome.availability.model_copy(update={"peak_window": list(peak)})
+    return outcome.model_copy(update=update) if update else outcome
+
+
+async def _with_settings_edits(
+    outcome: InterviewOutcome,
+    interview_ended_at: datetime | None,
+    *,
+    user: User,
+    profile_repo: ProfileRepo,
+) -> InterviewOutcome:
+    """설정에서 고친 값을 인터뷰 outcome 에 얹는다 — 활동 시간대 + 집중 길이·시간대."""
+    outcome = _apply_edited_availability(outcome, user)
+    return _apply_edited_profile(
+        outcome,
+        await profile_repo.get_behavioral(user.id),
+        interview_ended_at=interview_ended_at,
+    )
+
+
 async def _max_plan_weeks(session: AsyncSession, user_id: UUID, outcome: InterviewOutcome) -> int:
     """이 계획의 heaviest 목표가 만다라 축에서 승격됐는지에 따라 계획 지평 상한을 정한다
     (ADR-0008 §3). `first_plan_adapter`/`first_plan` 은 DB 무관을 지키므로 이 판정은
@@ -363,6 +450,7 @@ async def generate_milestones(
     body: FirstPlanGenerateRequest,
     user: CurrentUser,
     repo: RepoDep,
+    profile_repo: ProfileRepoDep,
     session: SessionDep,
 ) -> MilestoneListResponse:
     """Stage A(#milestones) — 목표를 중간 목표 3~5개로. 사용자가 확인·편집 후 generate 로 넘긴다.
@@ -376,7 +464,9 @@ async def generate_milestones(
     있다는 이유로 저장을 건너뛰므로 — DB 의 뼈대와 실제 계획이 갈라진 채 굳는다.
     부수 효과로 2주기 이후 이 endpoint 의 LLM 콜이 0 이 된다.
     """
-    outcome = _apply_edited_availability(await _resolve_outcome(body, user.id, repo), user)
+    outcome = await _with_settings_edits(
+        *await _resolve_outcome(body, user.id, repo), user=user, profile_repo=profile_repo
+    )
     goal_id = await first_plan_adapter.heaviest_goal_id(session, user_id=user.id, outcome=outcome)
     if goal_id is not None:
         saved = await first_plan_adapter.fetch_confirmed_milestones(session, goal_id=goal_id)
@@ -406,6 +496,7 @@ async def generate_plan(
     repo: RepoDep,
     goal_repo: GoalRepoDep,
     draft_repo: DraftRepoDep,
+    profile_repo: ProfileRepoDep,
     session: SessionDep,
 ) -> FirstPlanResponse:
     """첫 주간/horizon 계획 생성 — First Plan orchestrator(LangGraph) 실행 → Draft 저장.
@@ -427,7 +518,9 @@ async def generate_plan(
     동시성 lock(ADR-0005 §7.6): 다중 디바이스 동시 생성으로 인한 state race 방지.
     """
     await endpoint_rate_limit.enforce(session, user_id=user.id, module="planning")
-    outcome = _apply_edited_availability(await _resolve_outcome(body, user.id, repo), user)
+    outcome = await _with_settings_edits(
+        *await _resolve_outcome(body, user.id, repo), user=user, profile_repo=profile_repo
+    )
     if body.goal_id is not None:
         goal = await _load_plannable_goal(goal_repo, user.id, body.goal_id)
         outcome = goal_cycle.seed_outcome(base=outcome, goal=goal)
@@ -591,6 +684,7 @@ def _block_view(
     goal_id: UUID | None,
     *,
     calendar_conflict: bool = False,
+    completion_status: str | None = None,
 ) -> WeeklyBlock:
     return WeeklyBlock(
         block_id=f"{_BLOCK_PREFIX}{block.id}",
@@ -604,6 +698,7 @@ def _block_view(
         block_status=block.block_status,
         source=block.source,
         calendar_conflict=calendar_conflict,
+        completion_status=cast(BlockCompletionStatus | None, completion_status),
     )
 
 
@@ -611,6 +706,7 @@ def _block_view(
 async def get_weekly_plan(
     user: CurrentUser,
     repo: BlockRepoDep,
+    fixed_repo: FixedRepoDep,
     session: SessionDep,
     week_start: Annotated[str | None, Query(alias="weekStart")] = None,
 ) -> WeeklyPlanResponse:
@@ -631,11 +727,24 @@ async def get_weekly_plan(
         blocks=[(block.id, block.block_status, block.start_at, block.end_at) for block, *_ in rows],
         now=now_kst(),
     )
+    # 끝난 블록의 체크인 결과 — `finished` 만으로는 완료·실패가 구분되지 않는다(planA-10).
+    completion = await repo.completion_by_block(
+        user.id, [block.id for block, *_ in rows if block.block_status == "finished"]
+    )
     # 조회가 토큰을 갱신·회수했으면 확정한다 — freebusy 는 commit 하지 않는다(호출자 몫).
     await session.commit()
 
+    # 고정 일정(수업·알바)도 그날 칸에 싣는다 (planA-13) — 블록 편집이 막는 시간을 보이게.
+    fixed: list[Any] = list(await fixed_repo.list_active(user.id))
     days = [
-        WeeklyPlanDay(date=monday + timedelta(days=offset), weekday=_WEEKDAY_NAMES[offset])
+        WeeklyPlanDay(
+            date=monday + timedelta(days=offset),
+            weekday=_WEEKDAY_NAMES[offset],
+            fixed_schedules=[
+                WeeklyFixedSchedule(title=b.label, start_at=b.interval.start, end_at=b.interval.end)
+                for b in fixed_schedules_to_busy(monday + timedelta(days=offset), fixed)
+            ],
+        )
         for offset in range(7)
     ]
     by_date = {d.date: d for d in days}
@@ -649,6 +758,9 @@ async def get_weekly_plan(
                     category,
                     goal_id,
                     calendar_conflict=block.id in calendar.keys,
+                    completion_status=(
+                        completion.get(block.id) if block.block_status == "finished" else None
+                    ),
                 )
             )
 
@@ -661,6 +773,49 @@ async def get_weekly_plan(
     )
 
 
+# 정책 종류 → 사용자에게 보여 줄 말 (영문 코드를 그대로 내보내지 않는다).
+_POLICY_LABELS = {"sleep": "수면", "lunch": "점심", "late_night_block": "심야 휴식"}
+
+
+async def _ensure_clear_of_fixed_and_no_touch(
+    start: datetime,
+    end: datetime,
+    *,
+    policies: list[Any],
+    fixed_repo: FixedScheduleRepo,
+    user: User,
+) -> None:
+    """옮길 자리가 고정 일정(수업·알바)·노터치 시간과 겹치면 422 (planA-13).
+
+    예전엔 다른 블록과의 겹침과 수면·점심·심야 정책만 봤다. 주간 그리드엔 고정 일정이 안
+    보여서 사용자가 수업 시간 위로 블록을 끌어도 200 이었고, 그 블록은 `user_edit` 이라
+    재계획도 다시는 안 고쳤다. 생성·승인 때 쓰는 것과 같은 busy 전개로 본다.
+    """
+    fixed: list[Any] = list(await fixed_repo.list_active(user.id))
+    no_touch = [p for p in policies if p.policy_type == "no_touch"]
+    for day in spanned_days(start, end):
+        hit = first_busy_overlap(
+            start,
+            end,
+            [*fixed_schedules_to_busy(day, fixed), *time_policies_to_busy(day, no_touch)],
+        )
+        if hit is None:
+            continue
+        if hit.source == "fixed_schedule":
+            raise ApiError(
+                ErrorCode.PLAN_BLOCK_CONFLICT,
+                f"그 시간에는 '{hit.label}' 고정 일정이 있어요. 다른 시간으로 옮겨 주세요.",
+                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                field="startAt",
+            )
+        raise ApiError(
+            ErrorCode.POLICY_VIOLATION,
+            "이 시간대는 비워 두기로 한 시간과 겹쳐요. 다른 시간으로 옮겨 주세요.",
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="startAt",
+        )
+
+
 @router.patch("/{plan_id}/blocks/{block_id}")
 async def edit_block(
     plan_id: str,  # noqa: ARG001 — 논리 식별자(주). 편집 권한은 blockId.
@@ -670,40 +825,69 @@ async def edit_block(
     repo: BlockRepoDep,
     action_repo: ActionRepoDep,
     policy_repo: PolicyRepoDep,
+    fixed_repo: FixedRepoDep,
     session: SessionDep,
 ) -> BlockEditResponse:
     """블록 15분 snap 이동 + 목표(category)/제목 수정 (S15).
 
-    충돌 422 `PLAN_BLOCK_CONFLICT` / 정책 422 `POLICY_VIOLATION`. `category`/`title` 을 주면
+    충돌 422 `PLAN_BLOCK_CONFLICT`(다른 블록 **또는 고정 일정**) / 정책 422 `POLICY_VIOLATION`
+    (수면·점심·심야 차단 **·노터치**). `category`/`title` 을 주면
     블록이 매달린 action_item 을 갱신한다(같은 액션의 모든 세션 블록 공유). 정책 검사는
     **변경된 category** 로 수행하고, 변경 반영은 성공 commit 시에만 영속된다(422 면 롤백).
+    시각을 지금 그대로 보낸 편집(제목·목표만)은 snap·겹침·정책 검사 없이 시각을 유지한다.
     """
     block = await repo.get_block(user.id, _parse_block_id(block_id))
     if block is None:
         raise _block_not_found()
 
-    new_start = snap_to_15min(_parse_block_dt(body.start_at, "startAt"))
-    if body.end_at is not None:
-        new_end = snap_to_15min(_parse_block_dt(body.end_at, "endAt"))
+    raw_start = _parse_block_dt(body.start_at, "startAt")
+    raw_end = _parse_block_dt(body.end_at, "endAt") if body.end_at is not None else None
+    new_start = snap_to_15min(raw_start)
+    if raw_end is not None:
+        new_end = snap_to_15min(raw_end)
     else:
         new_end = new_start + (block.end_at - block.start_at)  # 길이 보존
 
-    if new_end <= new_start:
+    # 이미 시작했거나 끝낸 블록은 **시간을 못 옮긴다** (planA-9). 옮기면 수행 기록이 미래로
+    # 가고, 카드 날짜(target_date)가 따라 움직여 오늘 끝낸 카드가 오늘 화면에서 사라졌다.
+    # 제목·목표만 바꾸는 편집(시각은 그대로 보냄)은 허용한다 — 그때는 시각·출처를 건드리지 않는다.
+    locked = block.block_status in ("started", "finished")
+    same_time = raw_start == block.start_at and (raw_end is None or raw_end == block.end_at)
+    if locked:
+        if not same_time and (new_start, new_end) != (block.start_at, block.end_at):
+            raise ApiError(
+                ErrorCode.PLAN_INVALID_TIME,
+                "이미 시작했거나 끝낸 일정은 옮길 수 없어요. 제목이나 목표만 바꿀 수 있어요.",
+                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                field="startAt",
+            )
+        new_start, new_end = block.start_at, block.end_at
+    elif same_time:
+        # 시각을 그대로 보낸 제목·목표 편집 — snap 하지도, 겹침·정책을 다시 보지도 않는다(리뷰
+        # 반영, planA-13). 스케줄러 블록은 15분 격자가 아니라(10:50 시작 등) snap 하면 제목만
+        # 바꿨는데 5분 옮겨졌고, 나중에 추가한 수업 위에 이미 놓인 블록은 이름조차 못 바꿨다.
+        new_start, new_end = block.start_at, block.end_at
+    elif new_end <= new_start:
         raise ApiError(
             ErrorCode.PLAN_INVALID_TIME,
             "종료 시각이 시작 시각보다 늦어야 해요.",
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="endAt",
         )
+    # 시간을 실제로 옮기는 편집만 겹침·정책·고정 일정 검사를 거친다.
+    moving = not locked and not same_time
 
-    conflicts = await repo.list_overlapping(user.id, new_start, new_end, exclude_block_id=block.id)
-    if conflicts:
-        raise ApiError(
-            ErrorCode.PLAN_BLOCK_CONFLICT,
-            "그 시간에 이미 다른 일정이 있어요.",
-            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-            field="startAt",
+    if moving:
+        conflicts = await repo.list_overlapping(
+            user.id, new_start, new_end, exclude_block_id=block.id
         )
+        if conflicts:
+            raise ApiError(
+                ErrorCode.PLAN_BLOCK_CONFLICT,
+                "그 시간에 이미 다른 일정이 있어요.",
+                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                field="startAt",
+            )
 
     action = await action_repo.get_by_id(user.id, block.action_item_id)
     # 목표(category)/제목 변경을 action_item 에 반영 — 미지정 필드는 유지. 정책 검사·응답이
@@ -714,23 +898,28 @@ async def edit_block(
         if body.title is not None and body.title.strip():
             action.title = body.title.strip()
     category = action.category if action is not None else "other"
-    policies = await policy_repo.list_active(user.id)
-    violated = find_policy_violation(to_kst(new_start), to_kst(new_end), category, policies)
-    if violated is not None:
-        raise ApiError(
-            ErrorCode.POLICY_VIOLATION,
-            f"이 시간대는 '{violated}' 정책과 겹쳐요.",
-            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-            field="startAt",
+    if moving:
+        policies = await policy_repo.list_active(user.id)
+        violated = find_policy_violation(to_kst(new_start), to_kst(new_end), category, policies)
+        if violated is not None:
+            raise ApiError(
+                ErrorCode.POLICY_VIOLATION,
+                f"이 시간대는 {_POLICY_LABELS.get(violated, '쉬는')} 시간과 겹쳐요. "
+                "다른 시간으로 옮겨 주세요.",
+                http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                field="startAt",
+            )
+        await _ensure_clear_of_fixed_and_no_touch(
+            to_kst(new_start), to_kst(new_end), policies=policies, fixed_repo=fixed_repo, user=user
         )
-
-    block.start_at = new_start
-    block.end_at = new_end
-    block.source = "user_edit"
+    if not locked:
+        block.start_at = new_start
+        block.end_at = new_end
+        block.source = "user_edit"
     # 카드의 target_date 는 자기 블록(가장 이른 활성 블록)의 날짜를 따른다 (#222).
     # 블록을 다른 날로 옮기면 오늘 아젠다도 그 날로 따라가야 한다 — 아젠다는
     # target_date 로 조회하므로, 안 옮기면 카드가 옛 날짜에 유령으로 남는다.
-    if action is not None:
+    if action is not None and not locked:
         siblings = await repo.list_by_action_item(user.id, action.id)
         active_starts = [
             to_kst(b.start_at)
@@ -840,6 +1029,132 @@ async def _attach_goal_resources(
         await session.rollback()
 
 
+def _parse_draft_edits(body: FirstPlanApproveRequest | None) -> list[DraftBlockEdit] | None:
+    """승인 본문의 편집본 → 도메인 값. 본문이 없거나 `blocks` 가 없으면 None(초안 그대로).
+
+    시각은 naive 면 KST 로 보고 KST aware 로만 맞춘다 — **15분 snap 은 하지 않는다**.
+    초안 시각 자체가 15분 격자가 아니라(쉬는 시간 10분·수업 끝 직후 시작), 여기서 snap 하면
+    손대지 않은 블록이 초안과 달라져 "옮긴 블록"으로 잡혔다(`apply_draft_edits` 참고).
+    형식 오류는 결정적이라 lock·재시도 전에 거른다.
+    """
+    if body is None or body.blocks is None:
+        return None
+    edits: list[DraftBlockEdit] = []
+    for b in body.blocks:
+        edits.append(
+            DraftBlockEdit(
+                origin_id=b.origin_id,
+                start=to_kst(_parse_block_dt(b.start, "blocks")),
+                end=to_kst(_parse_block_dt(b.end, "blocks")),
+                title=b.title,
+            )
+        )
+    return edits
+
+
+def _apply_draft_edits_or_422(
+    blocks: list[ScheduledBlockPreview],
+    action_items: list[ActionItemDraft],
+    edits: list[DraftBlockEdit],
+) -> EditedDraft:
+    try:
+        return apply_draft_edits(blocks=blocks, action_items=action_items, edits=edits)
+    except DraftEditError as exc:
+        raise ApiError(
+            ErrorCode(exc.code),
+            exc.message,
+            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            field="blocks",
+        ) from exc
+
+
+async def _ensure_moved_blocks_fit(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    outcome: InterviewOutcome,
+    edited: EditedDraft,
+    block_repo: ScheduledBlockRepo,
+    fixed_repo: FixedScheduleRepo,
+    policy_repo: TimePolicyRepo,
+) -> None:
+    """사용자가 **옮긴** 블록만 기존 일정·고정 일정·시간 정책·캘린더와 대조한다 (planA-2).
+
+    초안 그대로인 블록은 생성 단계에서 이미 같은 busy 를 피해 놓였다. 옮긴 블록은 그 검사를
+    안 거쳤으므로 생성과 같은 소스로 다시 본다 — 활동 시간대(outcome 정책)는 영속화의
+    `policy_guarded_transaction` 이 따로 막는다.
+
+    기존 일정은 **이 승인이 교체해 비울 카드**(`superseded_card_ids`, 같은 목표의 손대지
+    않은 이전 계획)를 빼고 본다 — 재생성 계획이 그 자리를 쓰는 건 정상이다(#118 과 같은 규칙).
+    """
+    if not edited.moved:
+        return
+    goal_id = await first_plan_adapter.heaviest_goal_id(session, user_id=user_id, outcome=outcome)
+    replaced = await first_plan_adapter.superseded_card_ids(
+        session, user_id=user_id, goal_id=goal_id
+    )
+    lo = min(b.start for b in edited.moved)
+    hi = max(b.end for b in edited.moved)
+    existing = [
+        b
+        for b in await block_repo.list_busy_between(user_id, lo, hi)
+        if b.action_item_id not in replaced
+    ]
+    # ORM 행은 스케줄러 Protocol 을 런타임에 만족하지만 mypy 는 Mapped[...] 를 못 맞춘다 —
+    # generate_replan 과 같은 이유로 Any 로 넘긴다.
+    fixed: list[Any] = list(await fixed_repo.list_active(user_id))
+    db_policies: list[Any] = list(await policy_repo.list_active(user_id))
+    # 구글 캘린더 약속 — 생성 단계도 이걸 피해 놓는다(`first_plan._calendar_busy_by_day`).
+    # 안 보면 사용자가 끌어 옮긴 블록만 약속 위에 얹혀 저장된다. 조회 실패·미연결이면
+    # 그냥 넘어간다(생성과 같은 규칙) — 캘린더 장애가 승인을 막으면 안 된다.
+    # freebusy 는 commit 하지 않는다 — 이 lock 은 트랜잭션 단위라 중간 commit 이 풀어 버린다.
+    cal_by_day, cal_status = await freebusy.fetch_busy_by_day(
+        session, user_id=user_id, start_day=lo.date(), end_day=hi.date()
+    )
+    calendar_busy = cal_by_day if cal_status == "ok" else {}
+
+    def _conflict(message: str, code: ErrorCode = ErrorCode.PLAN_BLOCK_CONFLICT) -> ApiError:
+        return ApiError(code, message, http_status=HTTPStatus.UNPROCESSABLE_ENTITY, field="blocks")
+
+    for moved in edited.moved:
+        start, end = to_kst(moved.start), to_kst(moved.end)
+        label = card_title_from(moved.title) or moved.title
+        if any(b.start_at < end and b.end_at > start for b in existing):
+            raise _conflict(
+                f"'{label}' 블록을 옮긴 시간에 이미 다른 일정이 있어요. 다른 시간으로 옮겨 주세요."
+            )
+        if any(
+            other is not moved and other.start < end and other.end > start
+            for other in edited.blocks
+        ):
+            raise _conflict(
+                f"'{label}' 블록을 옮긴 시간에 이 계획의 다른 블록이 있어요. 한쪽을 옮겨 주세요."
+            )
+        for day in spanned_days(start, end):
+            hit = first_busy_overlap(
+                start,
+                end,
+                [
+                    *fixed_schedules_to_busy(day, fixed),
+                    *time_policies_to_busy(day, db_policies),
+                    *calendar_busy.get(day, []),
+                ],
+            )
+            if hit is None:
+                continue
+            if hit.source == "fixed_schedule":
+                raise _conflict(f"'{label}' 블록을 옮긴 시간이 '{hit.label}' 고정 일정과 겹쳐요.")
+            if hit.source == "calendar":
+                # 일정 제목은 싣지 않는다 — busy 조회라 서버도 모른다(label 은 '캘린더 일정').
+                raise _conflict(
+                    f"'{label}' 블록을 옮긴 시간에 캘린더 약속이 있어요. 다른 시간으로 옮겨 주세요."
+                )
+            raise _conflict(
+                f"'{label}' 블록을 옮긴 시간이 {hit.label} 시간과 겹쳐요. 다른 시간으로 옮겨 주세요.",
+                ErrorCode.PLAN_POLICY_VIOLATION,
+            )
+
+
 @router.post("/{plan_id}/approve")
 async def approve_plan(
     plan_id: str,
@@ -848,7 +1163,11 @@ async def approve_plan(
     draft_repo: DraftRepoDep,
     goal_repo: GoalRepoDep,
     inbox_repo: InboxRepoDep,
+    block_repo: BlockRepoDep,
+    fixed_repo: FixedRepoDep,
+    policy_repo: PolicyRepoDep,
     session: SessionDep,
+    body: FirstPlanApproveRequest | None = None,
 ) -> FirstPlanApproveResponse:
     """First Plan Draft 승인 → SAVING (goal 트리 단일 가드 트랜잭션 영속화, ADR-0005 §2.5.1).
 
@@ -878,12 +1197,33 @@ async def approve_plan(
     WELCOME 에 고정돼 새로고침 시 재-온보딩되던 문제가 있어 승인에서 ACTIVE 로 마감
     (api-contract §3).
     응답은 명시 승인이므로 `is_draft=false` (ADR-0005 §7.2).
+
+    **초안 편집 반영**(HITL '수정', planA-2, additive): 본문 `blocks` 가 오면 그것이 최종
+    블록 목록이다 — 옮긴 시각·지운 카드·바꾼 제목을 반영해 영속화한다(`apply_draft_edits`).
+    예전엔 본문을 아예 안 받아, 초안 화면에서 끌어 옮기고 지운 것이 승인 때 전부 버려지고
+    AI 원안이 그대로 저장됐다 — '수정' 버튼이 있는데 수정이 안 되는 HITL 이었다. 옮긴 블록은
+    생성과 같은 소스(기존 일정·고정 일정·시간 정책·캘린더)로 다시 대조하고(`_ensure_moved_blocks_fit`),
+    활동 시간대는 영속화 가드가 그대로 막는다. 본문이 없으면 종전과 같다.
     """
+    # ⚠️ 원시 값으로 먼저 잡아 둔다 (planA-3). 시도가 실패하면 가드 트랜잭션이 rollback 하는데,
+    # rollback 은 세션의 ORM 인스턴스를 **전부 만료**시킨다 — 같은 세션에서 읽은 `user` 도.
+    # 다음 시도에서 `user.id` 를 읽으면 async 세션이 지연 로드를 못 해 MissingGreenlet 으로
+    # 터졌고, 3회 재시도는 한 번도 돌지 못한 채 문서화된 PLAN_SAVE_FAILED 대신 일반 500 이
+    # 나갔다(가짜 세션 테스트는 만료를 흉내내지 않아 통과했다).
+    user_id = user.id
+    edits = _parse_draft_edits(body)
     last_exc: Exception | None = None
-    for _attempt in range(first_plan_adapter.MAX_SAVE_RETRIES):
-        async with user_agent_lock(session, user.id, _LOCK_AGENT):
+    for attempt in range(first_plan_adapter.MAX_SAVE_RETRIES):
+        if attempt > 0:
+            # `_finalize` 의 advance_onboarding 이 user 의 상태 컬럼을 읽는다 — 다시 채운다.
+            try:
+                await session.refresh(user)
+            except Exception as exc:  # noqa: BLE001 — 다시 읽지도 못하면 저장 실패로 마감
+                last_exc = exc
+                break
+        async with user_agent_lock(session, user_id, _LOCK_AGENT):
             # 검사→영속화→승인 마킹이 lock 을 쥔 한 트랜잭션 — 이중 영속화 방지.
-            draft = await _load_draft(draft_repo, user.id, plan_id)
+            draft = await _load_draft(draft_repo, user_id, plan_id)
             if draft.status == "expired" or draft.expires_at < now_kst():
                 raise ApiError(
                     ErrorCode.PLAN_DRAFT_EXPIRED,
@@ -911,8 +1251,35 @@ async def approve_plan(
             blocks = [ScheduledBlockPreview.model_validate(b) for b in payload["blocks"]]
             milestones = [MilestoneDraft.model_validate(m) for m in payload.get("milestones", [])]
             policies = first_plan_adapter.time_policies_from_outcome(outcome)
+            if edits is not None:
+                edited = _apply_draft_edits_or_422(blocks, action_items, edits)
+                await _ensure_moved_blocks_fit(
+                    session,
+                    user_id=user_id,
+                    outcome=outcome,
+                    edited=edited,
+                    block_repo=block_repo,
+                    fixed_repo=fixed_repo,
+                    policy_repo=policy_repo,
+                )
+                blocks, action_items = edited.blocks, edited.action_items
+                # 편집본으로 승인하면 초안 스냅샷도 **저장한 그대로**로 바꿔 둔다 — 재조회
+                # (`GET /plans/{id}`)와 멱등 재승인 응답이 실제로 저장된 것과 같아야 한다.
+                # AI 원안은 `ai_blocks`/`ai_action_items` 로 남긴다(무엇을 고쳤는지 추적).
+                approved_payload: dict[str, Any] | None = {
+                    **payload,
+                    "blocks": [b.model_dump(mode="json") for b in blocks],
+                    "action_items": [a.model_dump(mode="json") for a in action_items],
+                    "ai_blocks": payload["blocks"],
+                    "ai_action_items": payload["action_items"],
+                    "user_edited": True,
+                }
+            else:
+                approved_payload = None
 
-            async def _finalize(draft: PlanDraft = draft) -> None:
+            async def _finalize(
+                draft: PlanDraft = draft, approved_payload: dict[str, Any] | None = approved_payload
+            ) -> None:
                 """영속화와 같은 가드 트랜잭션(단일 commit) 안에서 실행되는 부수 기록.
 
                 첫 계획 승인 = 온보딩 완료 신호 → onboarding_state 를 ACTIVE 로 마감(멱등).
@@ -922,6 +1289,8 @@ async def approve_plan(
                 시 재-온보딩·계획 중복 누적 문제가 있었다. 승인 시점에 어느 온보딩 단계에
                 있든 ACTIVE 로 올려 이를 없앤다. 이미 ACTIVE 면 no-op.
                 """
+                if approved_payload is not None:
+                    draft.payload = approved_payload
                 await draft_repo.mark_approved(draft, approved_at=now_kst())
                 await user_repo.advance_onboarding(
                     user,
@@ -941,7 +1310,7 @@ async def approve_plan(
             try:
                 result = await first_plan_adapter.db_apply_first_plan(
                     session,
-                    user_id=user.id,
+                    user_id=user_id,
                     target_date=draft.target_date,
                     outcome=outcome,
                     goal_nodes=goal_nodes,
@@ -964,7 +1333,7 @@ async def approve_plan(
                 last_exc = exc
                 continue
 
-            await _attach_goal_resources(session, inbox_repo, goal_repo, user_id=user.id)
+            await _attach_goal_resources(session, inbox_repo, goal_repo, user_id=user_id)
 
             tier_warning = first_plan_adapter.tier_park_notice(result.tier_parked_goals)
             return FirstPlanApproveResponse(
@@ -1424,7 +1793,10 @@ async def _cycle_seed_outcome(
     latest = await repo.get_latest_finished(user.id)
     if latest is not None:
         outcome = await _project_session_outcome(latest, repo)
-        return _apply_edited_availability(outcome, user), "interview"
+        edited = await _with_settings_edits(
+            outcome, latest.ended_at, user=user, profile_repo=profile_repo
+        )
+        return edited, "interview"
 
     behavioral = await profile_repo.get_behavioral(user.id)
     if not mandala_cycle.has_usable_profile(behavioral):
@@ -1550,7 +1922,6 @@ async def open_mandala_next_cycle(
 # ─────────────────────────────────────────────────────────────────────────────
 
 ReviewRepoDep = Annotated[ReviewRepo, Depends(get_review_repo)]
-FixedRepoDep = Annotated[FixedScheduleRepo, Depends(get_fixed_schedule_repo)]
 
 # 재계획 튜닝 폴백 — 완료 인터뷰가 없어 outcome 을 못 얻을 때만 사용.
 # 정상 경로는 `_replan_tuning_for` 가 First Plan 과 동일한 개인화(세션 길이·선호 시간)를 유도한다.
@@ -1562,22 +1933,38 @@ _REPLAN_TUNING = replan.ReplanTuning(
 )
 
 
-async def _replan_tuning_for(user: User, repo: InterviewRepo) -> replan.ReplanTuning:
+async def _replan_outcome(
+    user: User, repo: InterviewRepo, profile_repo: ProfileRepo
+) -> InterviewOutcome | None:
+    """재계획이 First Plan 과 같은 개인화를 쓰도록 최근 '정상 종료' 인터뷰 outcome 을 복구한다.
+
+    설정에서 고친 값(활동 시간대·집중 길이·집중 시간대, `_with_settings_edits`)까지 얹은
+    값이다. 완료 인터뷰가 없거나 투영이 실패하면 None — 호출부가 기본값으로 폴백한다(재계획을
+    막지 않는다). 튜닝과 활동 시간대(busy)가 **같은 outcome 하나**를 봐야 해서 한 번만 구해
+    둘 다에 쓴다.
+    """
+    latest = await repo.get_latest_finished(user.id)
+    if latest is None:
+        return None
+    try:
+        outcome = await _project_session_outcome(latest, repo)
+    except Exception:  # noqa: BLE001 — 투영 실패 시 재계획을 막지 말고 기본값으로 진행
+        return None
+    return await _with_settings_edits(
+        outcome, latest.ended_at, user=user, profile_repo=profile_repo
+    )
+
+
+def _replan_tuning_for(outcome: InterviewOutcome | None) -> replan.ReplanTuning:
     """재계획 스케줄러 튜닝을 **First Plan 과 동일하게** outcome 에서 유도한다.
 
     재계획이 세션 길이(goals.session_length)·선호 시간(goals.preferred_time)을 무시하고
     60분 청크·free-time 아무데나 배치하면, First Plan 에서 넣은 개인화가 매주 리셋된다.
-    최근 '정상 종료' 인터뷰 outcome 을 복구해 `schedule_blocks` 와 같은 헬퍼로 튜닝을 조립한다.
-    outcome 을 못 얻으면(완료 인터뷰 없음·투영 실패) 기존 기본값으로 폴백한다.
+    `schedule_blocks` 와 같은 헬퍼로 튜닝을 조립한다. outcome 이 없으면 기본값으로 폴백한다.
 
     density 는 재계획 시점에 요청 본문이 없어 알 수 없으므로 daily cap 은 기본(standard)을 쓴다.
     """
-    latest = await repo.get_latest_finished(user.id)
-    if latest is None:
-        return _REPLAN_TUNING
-    try:
-        outcome = _apply_edited_availability(await _project_session_outcome(latest, repo), user)
-    except Exception:  # noqa: BLE001 — 투영 실패 시 재계획을 막지 말고 기본 튜닝으로 진행
+    if outcome is None:
         return _REPLAN_TUNING
     return replan.ReplanTuning(
         peak_windows=tuple(first_plan_adapter.peak_windows_for_plan(outcome)),
@@ -1603,9 +1990,54 @@ def _active_or_default_policies(rows: list[Any]) -> list[Any]:
     return [_RulePolicy("sleep", {"start_time": "23:00", "end_time": "08:00"})]
 
 
+def _edited_window_sleep(user: User) -> list[Any] | None:
+    """설정에서 정한 활동 시간대(`focus_mode_preferences`)의 여집합을 수면으로 — 인터뷰가 없을 때.
+
+    인터뷰 outcome 이 있으면 `time_policies_from_outcome` 이 같은 값을 이미 반영한다
+    (`_apply_edited_availability`). 인터뷰 없이 설정만 해 둔 사용자가 23~08 기본값에 묶이지
+    않게 하는 폴백이다. "24:00" 은 자정(00:00)으로 읽는다(설정 검증의 자정 계약).
+    설정이 없으면 None(→ 기본값), 하루 종일(시작=끝)이면 빈 목록 — 사용자가 정한 대로 둔다.
+    """
+    fmp = user.focus_mode_preferences or {}
+    start, end = fmp.get("activity_start"), fmp.get("activity_end")
+    if not isinstance(start, str) or not isinstance(end, str) or not start or not end:
+        return None
+    start = "00:00" if start == "24:00" else start
+    end = "00:00" if end == "24:00" else end
+    if start == end:
+        return []
+    return [_RulePolicy("sleep", {"start_time": end, "end_time": start})]
+
+
+def _replan_policies(db_rows: list[Any], outcome: InterviewOutcome | None, user: User) -> list[Any]:
+    """재계획이 피할 시간 정책 — **첫 계획과 같은 조립**(planA-5/calendar-4).
+
+    첫 계획은 `time_policies_from_outcome(outcome)`(활동 시간대의 여집합 = 수면, no_touch)에
+    DB 정책을 더한다. 재계획은 DB 정책만 보고, 없으면 23:00~08:00 기본값을 썼다 — FE 에는
+    time_policies 를 만드는 경로가 없어 실사용자는 **늘 기본값**이었다. 그래서 저녁에만 된다고
+    답한 학생도, 새벽형도 재계획만 누르면 08시부터 블록이 깔렸다. outcome 이 있으면 첫 계획과
+    똑같이 조립하고, 없으면 설정의 활동 시간대 → 그마저 없으면 기본값 순으로 폴백한다.
+    """
+    if outcome is not None:
+        return [*first_plan_adapter.time_policies_from_outcome(outcome), *db_rows]
+    edited = _edited_window_sleep(user)
+    if edited is not None:
+        return [*edited, *db_rows]
+    return _active_or_default_policies(db_rows)
+
+
+# 재계획이 카드를 다시 배치하지 않는 목표 상태 — 보관(삭제)·완료 (planA-8).
+_RETIRED_GOAL_STATUSES = frozenset({"archived", "completed"})
+
+
 def _block_minutes(block: ScheduledBlock) -> int:
     """블록 길이(분) — 재계획이 '이미 배정된 몫'을 남은 분량에서 뺄 때 쓴다."""
     return max(0, int((block.end_at - block.start_at).total_seconds() // 60))
+
+
+def _optional_dt(raw: object) -> datetime | None:
+    """초안 payload 의 선택 시각 — 없거나(옛 초안) 비면 None."""
+    return datetime.fromisoformat(raw) if isinstance(raw, str) and raw else None
 
 
 def _replan_response(draft: PlanDraft) -> ReplanResponse:
@@ -1619,6 +2051,8 @@ def _replan_response(draft: PlanDraft) -> ReplanResponse:
             start=datetime.fromisoformat(str(b["start"])),
             end=datetime.fromisoformat(str(b["end"])),
             replaces_block_id=b.get("replacesBlockId"),
+            replaces_start=_optional_dt(b.get("replacesStart")),
+            replaces_end=_optional_dt(b.get("replacesEnd")),
         )
         for b in payload.get("blocks", [])
     ]
@@ -1642,6 +2076,7 @@ async def _fill_continuation_cards(
     horizon: str | None,
     action_repo: ActionItemRepo,
     goal_repo: GoalRepo,
+    tone_mode: str | None = None,
 ) -> list[continuation_fill.FilledCard]:
     """재계획 후보 중 자리표시자를 찾아 내용을 채운다 (#454). 실패하면 빈 목록.
 
@@ -1704,6 +2139,8 @@ async def _fill_continuation_cards(
                     and a.id not in placeholder_ids
                     and a.goal_node_id not in rule_nodes
                 ],
+                # 사용자가 고른 말투 — 계획의 다른 LLM 호출과 같게 (planA-19).
+                tone_mode=tone_mode,
             )
         )
         budget -= len(placeholders)
@@ -1723,13 +2160,16 @@ async def generate_replan(
     review_repo: ReviewRepoDep,
     goal_repo: GoalRepoDep,
     repo: RepoDep,
+    profile_repo: ProfileRepoDep,
     session: SessionDep,
 ) -> ReplanResponse:
     """주간 리포트를 작성하고, 남은 작업 + 수락한 회복을 **다음 주부터 마감까지** 다시 배치.
 
     - 대상: 다음 주 이후 미착수 블록의 액션 + 활성 블록 없는 planned 백로그(수락한 회복 포함).
       과거·시작/완료·user_edit 블록은 불변. 실패 원본은 미래 블록이 없어 자동 제외.
-    - busy = 확정(시작/완료·user_edit) 블록 + DB 시간정책 + **고정일정(#112 정합)**
+    - busy = 교체하지 않고 **남는 모든 블록**(확정 + 보존 카드의 예정 회차, planA-7)
+      + **활동 시간대 밖(인터뷰·설정, 첫 계획과 같은 조립 — `_replan_policies`)**
+      + DB 시간정책 + **고정일정(#112 정합)**
       + **Google 캘린더 일정**(첫 계획과 같은 다섯 번째 소스, ADR-0009 D4).
     - 각 새 블록에 '교체할 옛 블록 id'(replacesBlockId)를 실어, 승인이 blanket-cancel 없이
       그 블록만 현재 상태로 재조정 취소하게 한다(#117). 산출물은 Draft — 자동 적용 금지.
@@ -1752,12 +2192,38 @@ async def generate_replan(
         )
         scheduled_pairs = await block_repo.list_scheduled_between(user.id, scan_start, scan_end)
         backlog = await action_repo.list_planned_without_block(user.id)
-        committed_blocks = await block_repo.list_committed_between(user.id, scan_start, scan_end)
         # **밀린 일** — 시작 시각이 이미 지났는데 한 번도 착수 안 된 블록. 위 세 조회 중
         # 어느 것에도 안 잡히고 만료 cron 도 못 쓸어내던 구멍이다(`list_stale_scheduled_before`
         # docstring 의 표 참고). "계획만 세워두고 그냥 안 한" 카드가 재계획 후보에서 통째로
         # 빠지면, 가장 도움이 필요한 순간에 재계획이 빈손으로 돈다.
         stale_pairs = await block_repo.list_stale_scheduled_before(user.id, now_kst())
+
+        # 지운(보관)·완료한 목표의 카드는 다시 배치하지 않는다 (planA-8). 위 조회들은 카드의
+        # 보관 여부만 보고 목표 상태는 안 봐서, 목표를 지워도 남아 있던 카드(예: 삭제 정리 전
+        # 데이터)를 '남은 일' 로 다음 주부터 새로 깔았다. 목표 없는 카드(인박스 등)는 그대로다.
+        # 보류(parked)는 빼지 않는다 — 한도 초과로 자동 보류된 목표도 카드는 살아 있는 게
+        # 현재 계약이다(`first_plan_adapter._park_tier_overflow_on_approval`).
+        goals_by_id = {
+            g.id: g
+            for g in await goal_repo.list_active(user.id)
+            if g.status not in _RETIRED_GOAL_STATUSES
+        }
+
+        def _goal_is_live(action: Any) -> bool:
+            return action.goal_id is None or action.goal_id in goals_by_id
+
+        scheduled_pairs = [(b, a) for b, a in scheduled_pairs if _goal_is_live(a)]
+        stale_pairs = [(b, a) for b, a in stale_pairs if _goal_is_live(a)]
+        # 블록 없이 **이번 주(오늘~다음 주 월요일 전)** 로 날짜를 잡아 둔 카드는 밀린 일이 아니라
+        # 사용자가 이번 주에 하려고 둔 일이다 (planA-17) — 인박스 메모를 '할 일로' 바꾼 오늘
+        # 카드가 대표적이다. 백로그로 집으면 승인 때 다음 주로 옮겨져 오늘 화면에서 사라졌다.
+        # 날짜가 지났거나 없는 카드만 진짜 백로그다.
+        backlog = [
+            a
+            for a in backlog
+            if _goal_is_live(a)
+            and (a.target_date is None or not today <= a.target_date < window_start)
+        ]
 
         # 후보(action_id dedup) + 각 후보가 교체할 옛 블록 **전부**.
         # #115 스케줄러가 긴 액션을 여러 세션 블록으로 쪼개므로 한 액션에 옛 블록이 여러 개일
@@ -1768,9 +2234,11 @@ async def generate_replan(
         # 밀린 블록을 미래 블록보다 **먼저** 넣는다 — 아래 `covered` 산수가 "교체 대상(old_ids)"
         # 과 "살아남는 미래 블록"을 가르는데, 밀린 블록도 교체 대상에 들어가야 그 몫이 남은
         # 분량에서 이중으로 빠지지 않는다.
+        old_block_times: dict[UUID, tuple[datetime, datetime]] = {}
         for block, action in (*stale_pairs, *scheduled_pairs):
             actions_by_id[action.id] = action
             old_blocks_by_action.setdefault(action.id, []).append(block.id)
+            old_block_times[block.id] = (block.start_at, block.end_at)
 
         # 후보 분량은 액션의 **전체 live 블록**을 보고 정한다. scheduled_pairs 는 스캔 창
         # [window_start, +365d] 안의 'scheduled' 블록만 주는데, 세션 분할(#115 _split_minutes)이
@@ -1817,6 +2285,18 @@ async def generate_replan(
             )
         candidates = list(cand.values())
 
+        # 회피할 기존 블록 = 창 안의 **이번 재계획이 교체하지 않는** 모든 블록 (planA-7).
+        # 예전엔 '확정'(시작/완료·user_edit)만 넣었는데, 위 루프가 **남겨 두기로 한** 예정
+        # 블록 — 형제 세션을 착수한 카드·사용자가 옮긴 카드의 나머지 회차, 이미 충분히 배정된
+        # 카드 — 도 그대로 살아남는다. 그걸 빼면 새 블록이 그 위에 겹쳐 잡혀, 승인 후 캘린더에
+        # 같은 시간 블록 두 개가 생겼다. 교체될 옛 블록만 비워 준다(그 자리는 새 배치가 쓴다).
+        replaced_ids = {bid for bids in old_blocks_by_action.values() for bid in bids}
+        committed_blocks = [
+            b
+            for b in await block_repo.list_busy_between(user.id, scan_start, scan_end)
+            if b.id not in replaced_ids
+        ]
+
         # 규칙이 마감까지 채워 둔 '이어가기' 자리표시자에 **지금의 진행 상황으로** 내용을
         # 넣는다 (#454). 첫 계획 때 내용을 비워 둔 건 그때 사용자가 어디까지 갈지 몰랐기
         # 때문이고, 제품은 그 사실을 고지하며 "다음 재계획 때 채워집니다" 라고 말한다.
@@ -1829,6 +2309,7 @@ async def generate_replan(
             horizon=None,
             action_repo=action_repo,
             goal_repo=goal_repo,
+            tone_mode=user.tone_mode,
         )
         if filled:
             # 채운 제목이 **드래프트 미리보기에 보여야** 한다 — 사용자가 승인하는 건
@@ -1863,7 +2344,8 @@ async def generate_replan(
         # 않도록 스캔 창(1년)으로 상한. 그보다 먼 카드는 다음 재계획이 다시 당겨온다.
         deadline = min(deadline, window_start + timedelta(days=365))
 
-        policies = _active_or_default_policies(await policy_repo.list_active(user.id))
+        outcome = await _replan_outcome(user, repo, profile_repo)
+        policies = _replan_policies(list(await policy_repo.list_active(user.id)), outcome, user)
         fixed: list[Any] = list(await fixed_repo.list_active(user.id))
         committed = replan.committed_busy_from_blocks(
             [(b.start_at, b.end_at) for b in committed_blocks]
@@ -1885,12 +2367,24 @@ async def generate_replan(
         for day_blocks in calendar_busy.values():
             committed.extend(day_blocks)
 
-        blocks, warnings = replan.build_forward_replan(
+        # 목표마다 **자기 마감 안에** 배치한다 (planA-6). 지평 하나로 균등 분산하면 금요일 시험
+        # 목표의 남은 세션이 한 달짜리 프로젝트 지평에 섞여 절반이 시험 뒤로 밀렸다.
+        goal_of = {a.id: a.goal_id for a in (*actions_by_id.values(), *backlog)}
+        goal_deadlines: dict[UUID, replan.GoalDeadline] = {}
+        for c in candidates:
+            gid = goal_of.get(c.action_id)
+            goal = goals_by_id.get(gid) if gid is not None else None
+            if goal is not None and goal.deadline is not None:
+                goal_deadlines[c.action_id] = replan.GoalDeadline(
+                    day=goal.deadline, goal_title=goal.title
+                )
+        blocks, warnings = replan.build_forward_replan_by_deadline(
             window_start=window_start,
             horizon_day=deadline,
             candidates=candidates,
             committed_busy=committed,
-            tuning=await _replan_tuning_for(user, repo),
+            tuning=_replan_tuning_for(outcome),
+            deadlines=goal_deadlines,
         )
         # 연결해 둔 사용자에게만 알린다 — 연결 안 한 사용자에게 매번 말하면 알림 피로다.
         calendar_limit = window_start + timedelta(days=freebusy.MAX_RANGE_DAYS)
@@ -1904,6 +2398,22 @@ async def generate_replan(
                 "반영했어요. 그 뒤에 잡힌 카드는 캘린더와 겹치는지 확인해 주세요.",
                 *warnings,
             ]
+
+        def _replaced_times(action_id: UUID) -> dict[str, str | None]:
+            """대표 옛 블록의 원래 시각(KST) — 미리보기의 '기존 → 새' 비교용 (planA-15).
+
+            회차별 1:1 매핑이 **아니다** — 한 카드가 여러 회차로 나뉘면 새 회차 전부가 이
+            같은 값(첫 옛 블록, 밀린 카드면 그 과거 블록)을 싣는다. '이 카드가 원래 있던
+            자리' 라는 뜻이고, 계약 문서에도 그렇게 적었다.
+            """
+            bids = old_blocks_by_action.get(action_id)
+            if not bids:
+                return {"replacesStart": None, "replacesEnd": None}
+            start, end = old_block_times[bids[0]]
+            return {
+                "replacesStart": to_kst(start).isoformat(),
+                "replacesEnd": to_kst(end).isoformat(),
+            }
 
         payload: dict[str, Any] = {
             "kind": "replan",
@@ -1921,6 +2431,7 @@ async def generate_replan(
                         if b.action_id in old_blocks_by_action
                         else None
                     ),
+                    **_replaced_times(b.action_id),
                 }
                 for b in blocks
             ],
