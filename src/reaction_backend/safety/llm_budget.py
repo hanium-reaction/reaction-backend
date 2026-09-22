@@ -217,6 +217,17 @@ async def check_grounding(
     return BudgetStatus(used=used, limit=limit, remaining=limit - used)
 
 
+def estimate_prompt_tokens(prompt_text: str) -> int:
+    """프롬프트 입력 토큰 추정치 — `check(projected_tokens=...)` 용 (llm-5).
+
+    실측: 한국어 3만 자 인박스 캡처 1건이 tokens_in 21,179(≈0.7 토큰/자). 프롬프트 템플릿도
+    한국어 위주라 **글자 수의 2/3** 으로 잡는다. 호출 전에 알 수 있는 건 이것뿐이다 — 출력
+    토큰은 모른다. 과소 추정이면 한 호출이 한도를 넘겨 버리고, 과대 추정의 대가는 한도에
+    조금 일찍 닿는 것뿐이라 반올림은 올린다.
+    """
+    return -(-len(prompt_text) * 2 // 3)
+
+
 async def check(
     session: AsyncSession,
     *,

@@ -44,7 +44,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.config import get_settings
@@ -61,6 +61,7 @@ from reaction_backend.llm.provider import (
     ProviderValidationError,
     generate_grounded_text,
     generate_structured,
+    validation_error_summary,
 )
 from reaction_backend.observability.correlation import get_trace_id
 from reaction_backend.prompts import registry as prompt_registry
@@ -73,6 +74,7 @@ from reaction_backend.safety.llm_budget import (
     LlmRunRecord,
     estimate_cost_cents,
     estimate_cost_micro_usd,
+    estimate_prompt_tokens,
 )
 from reaction_backend.safety.llm_budget import (
     check as budget_check,
@@ -84,6 +86,7 @@ from reaction_backend.safety.llm_budget import (
     record as record_run,
 )
 from reaction_backend.safety.tone_gate import check_structured as tone_gate_check
+from reaction_backend.safety.user_echo import UserText
 
 _log = logging.getLogger(__name__)
 
@@ -209,6 +212,16 @@ class LLMToolExecutor:
         started = time.monotonic()
         prompt_version = "unknown"
         resolved_prompt_id = prompt_id
+        # 이 호출에 들어간 **사용자가 직접 쓴** 입력(목표 제목·답 등). LLM·룰 폴백이 그
+        # 문구를 **그대로 옮겨 쓴 자리**만 금지어 치환·톤 게이트에서 뺀다(llm-1·llm-2,
+        # `safety/user_echo`). AI 가 스스로 쓴 말은 전과 똑같이 걸린다 — 필터를 끄는 게
+        # 아니다(AGENTS §2).
+        #
+        # 변수 **전체**가 아니라 `USER_AUTHORED_VARIABLES` 에 이름을 적어둔 것만 본다.
+        # 전체를 넘기면 `materials` 처럼 **사용자가 아닌 쪽이 쓴 텍스트**(서버가 링크를 열어
+        # 가져온 제3자 웹페이지 본문)까지 면제돼, 거기서 베낀 문장이 두 필터를 통째로
+        # 빠져나간다 — 잠금 결정 위반. 목록에 없는 변수는 보호하지 않는 게 기본값이다.
+        user_texts = UserText.from_variables(variables)
 
         # ── 1) 프롬프트 ─────────────────────────────────────────────
         try:
@@ -220,6 +233,7 @@ class LLMToolExecutor:
                 fallback,
                 module=module,
                 schema=schema,
+                protected=user_texts,
                 prompt_id=resolved_prompt_id,
                 prompt_version=prompt_version,
                 reason="no_prompt",
@@ -235,25 +249,36 @@ class LLMToolExecutor:
         prompt_text = compose_system_prompt(prompt_text, tone_mode)
 
         # ── 2) 예산 가드 ────────────────────────────────────────────
-        if session is not None:
+        # 이번 호출의 입력 토큰을 **미리 더해서** 본다(llm-5). 예전엔 0 으로 잡아 "지금까지
+        # 쓴 양" 만 봤고, 사용 0 인 사용자가 수십만 자를 보내면 그 한 번이 통과해 한도를 통째로
+        # 넘겼다. 너무 큰 프롬프트는 잔량과 상관없이 부르지 않는다(`llm_max_prompt_chars`).
+        budget_error = _oversized_prompt_error(prompt_text, settings.llm_max_prompt_chars)
+        if budget_error is None and session is not None:
             try:
-                await budget_check(session, user_id=user_id)
-            except BudgetExceeded as exc:
-                return await self._fallback(
-                    fallback,
-                    module=module,
-                    schema=schema,
-                    prompt_id=resolved_prompt_id,
-                    prompt_version=prompt_version,
-                    reason="budget",
-                    error=str(exc),
+                await budget_check(
+                    session,
                     user_id=user_id,
-                    session=session,
-                    trace_id=trace_id,
-                    latency_ms=int((time.monotonic() - started) * 1000),
-                    log_payloads=log_payloads,
-                    input_summary=prompt_text if log_payloads else None,
+                    projected_tokens=estimate_prompt_tokens(prompt_text),
                 )
+            except BudgetExceeded as exc:
+                budget_error = str(exc)
+        if budget_error is not None:
+            return await self._fallback(
+                fallback,
+                module=module,
+                schema=schema,
+                protected=user_texts,
+                prompt_id=resolved_prompt_id,
+                prompt_version=prompt_version,
+                reason="budget",
+                error=budget_error,
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                log_payloads=log_payloads,
+                input_summary=prompt_text if log_payloads else None,
+            )
 
         # ── 3) provider 호출 + retry/backoff ────────────────────────
         last_error: BaseException | None = None
@@ -298,6 +323,7 @@ class LLMToolExecutor:
                 fallback,
                 module=module,
                 schema=schema,
+                protected=user_texts,
                 prompt_id=resolved_prompt_id,
                 prompt_version=prompt_version,
                 reason=last_reason or "provider_error",
@@ -311,12 +337,15 @@ class LLMToolExecutor:
             )
 
         # ── 4) 금지어 후처리 (명사 치환 — 톤 게이트는 다음 단계) ──────
-        sanitized_payload, blocked, hits = enforce_structured(validated.model_dump())
+        sanitized_payload, blocked, hits = enforce_structured(
+            validated.model_dump(), protected=user_texts
+        )
         if blocked:
             return await self._fallback(
                 fallback,
                 module=module,
                 schema=schema,
+                protected=user_texts,
                 prompt_id=resolved_prompt_id,
                 prompt_version=prompt_version,
                 reason="banned",
@@ -333,18 +362,45 @@ class LLMToolExecutor:
                 banned_hits=hits,
             )
 
-        # 치환 결과를 schema 로 재검증 — 안전.
-        sanitized = schema.model_validate(sanitized_payload)
+        # 치환 결과를 schema 로 재검증. 치환어는 원어보다 길어서('실패'→'한 번 멈춤', +3~7자)
+        # 길이 상한에 딱 맞춘 제목이 넘칠 수 있다 — 만다라 축 ≤10자·칸 ≤16자에서 '실패노트 정리'
+        # → '한 번 멈춤노트 정리' 로 실측(llm-3). 예전엔 ValidationError 가 그대로 올라가 500
+        # 이 났고 트랜잭션 롤백으로 llm_runs 행·토큰 기록까지 사라졌다. 치환 전 값으로 돌아가면
+        # 금지어가 나가므로(AGENTS §2) 폴백으로 내린다.
+        try:
+            sanitized = schema.model_validate(sanitized_payload)
+        except ValidationError as exc:
+            return await self._fallback(
+                fallback,
+                module=module,
+                schema=schema,
+                protected=user_texts,
+                prompt_id=resolved_prompt_id,
+                prompt_version=prompt_version,
+                reason="banned",
+                error=f"banned_revalidate_failed: {validation_error_summary(exc)}",
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                tokens_in=provider_resp.tokens_in,
+                tokens_out=provider_resp.tokens_out,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                log_payloads=log_payloads,
+                input_summary=prompt_text if log_payloads else None,
+                output_summary=validated.model_dump_json() if log_payloads else None,
+                banned_hits=hits,
+            )
 
         # ── 5) 톤 게이트 (근거 대장 §4 S6) ──────────────────────────
         # banned_words 는 명사 1:1 치환이라 "당신이 게을러서" 류의 문장 구조 문제는 못
         # 고친다 — 안전한 대체 표현이 없으므로 치환하지 않고 곧장 fallback 한다.
-        tone_blocked, tone_hits = tone_gate_check(sanitized.model_dump())
+        tone_blocked, tone_hits = tone_gate_check(sanitized.model_dump(), protected=user_texts)
         if tone_blocked:
             return await self._fallback(
                 fallback,
                 module=module,
                 schema=schema,
+                protected=user_texts,
                 prompt_id=resolved_prompt_id,
                 prompt_version=prompt_version,
                 reason="tone_gate",
@@ -481,9 +537,27 @@ class LLMToolExecutor:
         # ── 2) 예산 가드 — 토큰과 그라운딩 **둘 다** ────────────────
         # 둘은 서로를 대신하지 못한다: 그라운딩 호출은 토큰을 거의 안 써서(실측 in 17)
         # 토큰 가드를 언제나 통과한다. 토큰 가드만 걸면 이 경로엔 상한이 없는 것과 같다.
+        oversized = _oversized_prompt_error(prompt_text, settings.llm_max_prompt_chars)
+        if oversized is not None:
+            return await self._grounding_discard(
+                module=module,
+                prompt_id=resolved_prompt_id,
+                prompt_version=prompt_version,
+                reason="budget",
+                error=oversized,
+                user_id=user_id,
+                session=session,
+                trace_id=trace_id,
+                latency_ms=_elapsed(),
+                model=resolved_model,
+            )
         if session is not None:
             try:
-                await budget_check(session, user_id=user_id)
+                await budget_check(
+                    session,
+                    user_id=user_id,
+                    projected_tokens=estimate_prompt_tokens(prompt_text),
+                )
             except BudgetExceeded as exc:
                 return await self._grounding_discard(
                     module=module,
@@ -768,6 +842,7 @@ class LLMToolExecutor:
         input_summary: str | None = None,
         output_summary: str | None = None,
         banned_hits: tuple[str, ...] = (),
+        protected: UserText | None = None,
     ) -> RunResult[T]:
         value = await _resolve_fallback(fallback, schema=schema)
 
@@ -777,9 +852,13 @@ class LLMToolExecutor:
         # 잠금 결정(AGENTS.md §1 금지어 필터 강제)에 구멍이 난다.
         # 여기서는 치환만 하고 blocked 는 무시한다: fallback 의 fallback 은 없고,
         # 치환된 문구가 원문보다 항상 낫기 때문(무한 재귀 방지).
-        sanitized_fallback, _, fallback_hits = enforce_structured(value.model_dump())
+        # 룰 폴백이 되돌려주는 **사용자 원문**('{목표 제목} 1회차')은 성공 경로와 같은 규칙으로
+        # 치환하지 않는다(llm-2) — 폴백이라서 사용자 목표 제목이 깨져 저장되면 안 된다.
+        sanitized_fallback, _, fallback_hits = enforce_structured(
+            value.model_dump(), protected=protected or ()
+        )
         if fallback_hits:
-            value = schema.model_validate(sanitized_fallback)
+            value = _validate_within_limits(schema, sanitized_fallback)
 
         _log.warning(
             "llm_fallback",
@@ -833,6 +912,60 @@ class LLMToolExecutor:
             latency_ms=latency_ms,
             banned_hits=banned_hits,
         )
+
+
+def _oversized_prompt_error(prompt_text: str, max_chars: int) -> str | None:
+    """프롬프트가 호출 1회 상한(`llm_max_prompt_chars`)을 넘으면 기록용 사유, 아니면 None.
+
+    내용은 싣지 않는다 — 길이만(`llm_runs.error` 는 평문 컬럼이다).
+    """
+    if max_chars > 0 and len(prompt_text) > max_chars:
+        return f"prompt_too_large: {len(prompt_text)} chars > {max_chars}"
+    return None
+
+
+def _validate_within_limits[T: BaseModel](schema: type[T], payload: Any) -> T:
+    """금지어 치환을 거친 룰 폴백 값을 schema 로 되살린다 — 길이 초과는 잘라서 맞춘다 (llm-3).
+
+    치환어가 원어보다 길어 룰 폴백의 제목도 상한을 넘을 수 있다: 축 '실패 원인 분석하기' 의
+    칸 '실패 원인 분석하기 1단계'(15자) → '한 번 멈춤 원인 분석하기 1단계'(18자 > 16).
+    폴백의 폴백은 없으므로 여기서 500 이 나면 사용자는 아무것도 못 받는다. 치환 전으로
+    되돌리면 금지어가 나가니(AGENTS §2) **상한에 맞춰 자른다** — 룰 문구가 조금 잘리는
+    쪽이 오류보다 낫다. 길이 말고 다른 이유로 틀리면 종전처럼 그대로 올린다.
+    """
+    for _ in range(3):
+        try:
+            return schema.model_validate(payload)
+        except ValidationError as exc:
+            fixed = False
+            for err in exc.errors(include_input=False, include_url=False):
+                max_length = (err.get("ctx") or {}).get("max_length")
+                if err["type"] == "string_too_long" and isinstance(max_length, int):
+                    fixed = _truncate_at(payload, err["loc"], max_length) or fixed
+            if not fixed:
+                raise
+    return schema.model_validate(payload)
+
+
+def _truncate_at(payload: Any, loc: tuple[int | str, ...], max_length: int) -> bool:
+    node = payload
+    for key in loc[:-1]:
+        try:
+            node = node[key]
+        except (KeyError, IndexError, TypeError):
+            return False
+    last = loc[-1] if loc else None
+    try:
+        current = node[last]
+    except (KeyError, IndexError, TypeError):
+        return False
+    if not isinstance(current, str) or len(current) <= max_length:
+        return False
+    try:
+        node[last] = current[:max_length].rstrip() or current[:max_length]
+    except TypeError:  # 튜플 등 불변 컨테이너 — 못 고친다(호출부가 원래 오류를 올린다).
+        return False
+    return True
 
 
 async def _resolve_fallback[T: BaseModel](fallback: Fallback[T], *, schema: type[T]) -> T:
