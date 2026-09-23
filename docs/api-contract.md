@@ -926,6 +926,8 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   acceptedAttemptId?, editedActionText?, decisionReason?, reEngagementAnchorAt? }` — accepted 시
   나머지 pending 은 rejected. DOWNSCOPE/CARRY_OVER 수락 → 새 ActionItem(source=`recovery_downscope`/
   `recovery_carryover`, `parent_action_item_id` 혈통) 생성. RESCHEDULE/PARK 는 생성 없음.
+  **같은 실행에 결정이 겹쳐 와도 하나만 적힌다**(v2.32) — 뒤 요청은 앞 결정의 커밋을 기다렸다가
+  `RECOVERY_ALREADY_DECIDED`(409)를 받는다(순차 재호출과 같은 응답).
 - **새 회복 카드의 `title` = 원본 카드 제목 + 그룹 꼬리표**(v2.30-recovery) — DOWNSCOPE
   `"<원본> · 가볍게 다시"`, CARRY_OVER `"<원본> · 이어서"`(최대 300자, 회복을 또 회복해도
   꼬리표는 한 번만, 원본을 못 읽으면 `"다시 해보기"`). ⚠️ 그전에는 `suggestedActionText` 를
@@ -1015,7 +1017,8 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
 - `POST /replan/{executionId}/approve` (Idempotency-Key 필수) — 회복 ActionItem 을
   `scheduled_blocks`(source=`recovery`) 로 배치. 멱등: 이미 배치돼 있으면 같은 block 반환
   (중복 INSERT 방지). 응답 `{ executionId, scheduledBlockId, actionItemId, startAt, endAt,
-  isDraft=false }`. 원본 `action_item.status` 불변.
+  isDraft=false }`. 원본 `action_item.status` 불변. 이 멱등은 **동시 호출에도** 성립한다(v2.32)
+  — 겹친 요청은 모두 같은 `scheduledBlockId` 를 받는다.
   멱등·`alreadyApproved` 판정은 **블록 소스와 무관**하게 그 회복 카드의 미취소 블록 유무로
   한다 — S15 이동이 `source`를 `user_edit` 로 덮거나 주간 재계획이 `ai_plan` 으로 만들어도
   '이미 배치됨'이다. 소스로 거르면 CTA 가 되살아나 블록이 중복 생성된다.

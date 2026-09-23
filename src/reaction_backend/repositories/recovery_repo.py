@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy import Select, and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -108,6 +108,27 @@ _RECOVERY_OUTCOME_BUCKET = case(
     (RecoveryAttempt.user_decision == "rejected", "rejected"),
     else_=None,
 )
+
+
+def _attempts_stmt(user_id: UUID, execution_id: UUID) -> Select[tuple[RecoveryAttempt]]:
+    """`list_attempts`·`list_attempts_for_update` 가 공유하는 조회 — 순서 규칙은 `list_attempts`."""
+    return (
+        select(RecoveryAttempt)
+        .outerjoin(
+            RecoveryStrategyCatalog,
+            RecoveryStrategyCatalog.strategy_type == RecoveryAttempt.recovery_strategy_type,
+        )
+        .where(
+            RecoveryAttempt.execution_id == execution_id,
+            RecoveryAttempt.user_id == user_id,
+        )
+        .order_by(
+            RecoveryAttempt.created_at,
+            RecoveryAttempt.trigger_tag.is_(None),
+            RecoveryStrategyCatalog.display_priority,
+            RecoveryAttempt.id,
+        )
+    )
 
 
 class RecoveryRepo:
@@ -464,22 +485,36 @@ class RecoveryRepo:
         3. `display_priority` — 카탈로그가 정한 순서. `select_strategies` 의 동점 처리와 같다.
         4. `id` — 위가 다 같아도 결과가 흔들리지 않게 하는 최종 고정핀.
         """
+        result = await self._session.execute(_attempts_stmt(user_id, execution_id))
+        return list(result.scalars().all())
+
+    async def list_attempts_for_update(
+        self, user_id: UUID, execution_id: UUID
+    ) -> list[RecoveryAttempt]:
+        """`list_attempts` + 카드 행 잠금 — 카드를 **결정하는** 경로(`/recovery/decisions`)가 쓴다.
+
+        결정은 "pending 이 남았나" 를 보고 채택·거절·스킵을 적는다. 잠금 없는 읽기면 동시
+        요청 둘이 같은 pending 을 나란히 보고 각자 적는다 — 수락 두 번이면 회복 ActionItem 이
+        두 개 생기고(`resulting_action_item_id` 는 뒤의 것만 가리켜 앞의 것은 고아 카드로 오늘
+        화면에 남는다), 수락과 「나중에」가 겹치면 **skipped 인데 회복 카드가 달린** 모순된
+        행이 커밋된다(ORM 은 바뀐 컬럼만 UPDATE 하므로 두 요청의 값이 행 안에서 섞인다).
+
+        `FOR UPDATE` 면 뒤 요청은 앞 트랜잭션이 커밋될 때까지 기다렸다가 **갱신된 행**을
+        받는다(READ COMMITTED). 그러면 pending 이 0건이라 기존 계약대로
+        `RECOVERY_ALREADY_DECIDED`(409)로 끝난다 — 새 에러 코드는 없다.
+
+        - 잠그는 건 **카드 행뿐**이다(`of=RecoveryAttempt`). 카탈로그 쪽은 외부 조인의
+          nullable 측이라 Postgres 가 잠금을 거부하고, 잠글 이유도 없다.
+        - 실행 행은 잠그지 않는다 — 그건 생성 잠금(`get_execution_for_update`, #481)이다.
+          결정이 그걸 잡으면 생성 중인 요청과 서로를 막는다.
+        - `populate_existing` — 같은 세션이 이 행들을 먼저 읽어 뒀더라도 identity map 의 옛
+          값이 아니라 잠근 뒤의 값으로 판정하게 한다. 이게 없으면 잠금은 걸려도 재확인이 무력하다.
+        - 행은 `list_attempts` 와 같은 순서로 잠긴다 — 동시 결정끼리 교착하지 않는다.
+        """
         stmt = (
-            select(RecoveryAttempt)
-            .outerjoin(
-                RecoveryStrategyCatalog,
-                RecoveryStrategyCatalog.strategy_type == RecoveryAttempt.recovery_strategy_type,
-            )
-            .where(
-                RecoveryAttempt.execution_id == execution_id,
-                RecoveryAttempt.user_id == user_id,
-            )
-            .order_by(
-                RecoveryAttempt.created_at,
-                RecoveryAttempt.trigger_tag.is_(None),
-                RecoveryStrategyCatalog.display_priority,
-                RecoveryAttempt.id,
-            )
+            _attempts_stmt(user_id, execution_id)
+            .with_for_update(of=RecoveryAttempt)
+            .execution_options(populate_existing=True)
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
