@@ -37,7 +37,7 @@ import logging
 import uuid
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Final, Literal
 
@@ -412,11 +412,16 @@ async def fetch_busy_for_screen(
 
 @dataclass(frozen=True)
 class ScreenConflicts[K]:
-    """화면에 실을 캘린더 상태 + 겹치는 블록 key."""
+    """화면에 실을 캘린더 상태 + 겹치는 블록 key + 읽은 busy 구간(`ok` 일 때만).
+
+    `intervals` 는 주간 그리드가 블록과 안 겹치는 약속까지 그리는 데 쓴다 — 겹침 판정에 이미
+    읽은 구간이라 Google 을 한 번 더 부르지 않는다.
+    """
 
     status: Status
     checked_at: datetime | None
     keys: set[K]
+    intervals: list[TimeInterval] = field(default_factory=list)
 
 
 async def screen_conflicts[K](
@@ -437,4 +442,4 @@ async def screen_conflicts[K](
     keys = calendar_conflict.conflicting_keys(
         blocks, [(iv.start, iv.end) for iv in result.intervals], now=now
     )
-    return ScreenConflicts("ok", checked_at, keys)
+    return ScreenConflicts("ok", checked_at, keys, list(result.intervals))
