@@ -7,6 +7,33 @@
 
 ---
 
+## v2.31 — 2026-09-23 (주간 캘린더에 Google 캘린더 약속이 보인다)
+
+**additive — `GET /plans/weekly`.** 기존 필드·에러 코드 무변경, 마이그레이션 없음, Google 호출 수 무변경.
+
+### 무엇이 잘못됐었나
+
+- 주간 그리드는 Google 캘린더를 열 때마다 읽으면서도 응답에는 블록별 `calendarConflict` 만 실었다.
+  블록과 겹친 약속만 "캘린더 겹침" 배지로 드러나고, **빈 시간에 있는 약속은 그리드 어디에도 없었다** —
+  캘린더를 연결한 사용자에게는 "연결했는데 캘린더가 안 나온다" 로 보였다.
+
+### 이제
+
+- `days[].calendarBusy: [{startAt, endAt}]` — 그날의 Google 캘린더 약속 구간(KST). 블록과 겹치지 않아도
+  싣는다. 자정을 넘는 약속은 날짜별 조각으로 나뉘고, 주 밖의 조각은 싣지 않는다.
+- **구간만** 온다 — 제목·장소는 없다(`calendar.freebusy` 스코프, ADR-0009 D4 그대로).
+- `calendarConflict` 와 같은 조회(5분 캐시·2초 상한)라 추가 Google 호출이 없다.
+- `calendar.status` 가 `ok` 가 아니면(`failed`·`not_connected`) 모든 날이 빈 목록이다.
+- 오늘 화면(`GET /today/agenda`)·블록 편집 규칙은 그대로다.
+
+### FE 가 할 일
+
+- `WeeklyPlanDay` 타입에 `calendarBusy?: { startAt: string; endAt: string }[]` 를 더하고, 주간 그리드에
+  "캘린더 일정" 이라는 이름 없는 칸으로 그린다(블록·고정 일정과 구분되는 색).
+- `calendar.status === 'failed'` 면 빈 목록을 "약속 없음" 으로 그리지 말고 기존 "캘린더를 확인하지 못했어요" 안내를 둔다.
+
+---
+
 ## v2.30-planB — 2026-09-22 (첫 계획 품질 — 목표 없는 계획 차단 외)
 
 **동작 변경 — `POST /plans/generate` · `POST /plans/milestones` (`/plans/mandala/next-cycle` 포함).**

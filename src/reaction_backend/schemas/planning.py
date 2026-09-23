@@ -465,6 +465,17 @@ class WeeklyFixedSchedule(CamelModel):
     end_at: KstDatetime
 
 
+class WeeklyCalendarBusy(CamelModel):
+    """그날의 Google 캘린더 일정 한 칸 — 바쁜 **구간만** (v2.31, additive).
+
+    제목·장소는 없다 — `calendar.freebusy` 스코프라 서버도 모른다(ADR-0009 D4). 블록과 겹치든
+    안 겹치든 싣는다. 자정을 넘는 일정은 그날 안의 조각으로 나뉘어 온다(`fixedSchedules` 와 같다).
+    """
+
+    start_at: KstDatetime
+    end_at: KstDatetime
+
+
 class WeeklyPlanDay(CamelModel):
     """하루치 — 그리드/네비게이터 단위."""
 
@@ -472,6 +483,8 @@ class WeeklyPlanDay(CamelModel):
     weekday: str  # monday..sunday
     blocks: list[WeeklyBlock] = Field(default_factory=list)
     fixed_schedules: list[WeeklyFixedSchedule] = Field(default_factory=list)
+    # 응답 최상단 `calendar.status` 가 `ok` 일 때만 채운다 — 아니면 빈 목록("일정 없음" 이 아니다).
+    calendar_busy: list[WeeklyCalendarBusy] = Field(default_factory=list)
 
 
 class WeeklyPlanResponse(CamelModel):

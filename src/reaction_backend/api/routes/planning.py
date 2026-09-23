@@ -144,6 +144,7 @@ from reaction_backend.schemas.planning import (
     ReplanResponse,
     ScheduledBlockPreview,
     WeeklyBlock,
+    WeeklyCalendarBusy,
     WeeklyFixedSchedule,
     WeeklyPlanDay,
     WeeklyPlanResponse,
@@ -741,6 +742,9 @@ async def get_weekly_plan(
     캘린더를 연결한 사용자는 그 주 구간의 Google 캘린더를 **열 때마다** 확인해, 아직 시작 안 한
     블록이 그 뒤 생긴 약속과 겹치면 `calendarConflict` 를 단다(5분 캐시·2초 상한). 이미 끝난
     블록은 표시하지 않는다 — 지난주 그리드에 배지가 차면 지금 볼 겹침이 묻힌다.
+
+    같은 조회로 읽은 약속 구간은 `days[].calendarBusy` 로도 싣는다(v2.31) — 예전엔 블록과 겹친
+    약속만 배지로 드러나고, 빈 시간의 약속은 그리드 어디에도 없었다.
     """
     monday = _parse_week_start(week_start)
     start_dt, end_dt = _week_bounds(monday)
@@ -762,6 +766,8 @@ async def get_weekly_plan(
 
     # 고정 일정(수업·알바)도 그날 칸에 싣는다 (planA-13) — 블록 편집이 막는 시간을 보이게.
     fixed: list[Any] = list(await fixed_repo.list_active(user.id))
+    # 캘린더 약속도 그날 칸에 — 자정을 넘는 약속은 날짜별 조각으로(`ok` 가 아니면 빈 dict).
+    calendar_by_day = freebusy.split_by_day(calendar.intervals)
     days = [
         WeeklyPlanDay(
             date=monday + timedelta(days=offset),
@@ -769,6 +775,10 @@ async def get_weekly_plan(
             fixed_schedules=[
                 WeeklyFixedSchedule(title=b.label, start_at=b.interval.start, end_at=b.interval.end)
                 for b in fixed_schedules_to_busy(monday + timedelta(days=offset), fixed)
+            ],
+            calendar_busy=[
+                WeeklyCalendarBusy(start_at=b.interval.start, end_at=b.interval.end)
+                for b in calendar_by_day.get(monday + timedelta(days=offset), [])
             ],
         )
         for offset in range(7)
