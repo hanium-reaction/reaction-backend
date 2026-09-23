@@ -19,8 +19,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from typing import Any
+from uuid import UUID
 
 from reaction_backend.db.models.behavioral_profile import BehavioralProfile
 from reaction_backend.db.models.goal_node import GoalNode
@@ -29,12 +30,22 @@ from reaction_backend.orchestrator import profile_memory
 from reaction_backend.schemas.planning import MilestoneDraft
 
 
-def cells_as_milestones(cells: Sequence[GoalNode]) -> list[MilestoneDraft]:
+def cells_as_milestones(
+    cells: Sequence[GoalNode], *, exclude_ids: Set[UUID] = frozenset()
+) -> list[MilestoneDraft]:
     """축의 칸(depth=2) → 마일스톤 뼈대. 만다라트가 계획을 실제로 이끄는 지점이다.
 
     칸 제목이 곧 마일스톤 제목이다 — AI 가 다시 지어내게 두면 사용자가 만다라트에서 확정한
-    분해를 계획이 무시하게 된다. 완료 표시된 칸은 뺀다(이미 끝낸 것을 다시 계획하지 않는다).
-    `summary` 는 비운다 — 칸에는 요약에 해당하는 필드가 없고, 없는 문장을 지어내지 않는다.
+    분해를 계획이 무시하게 된다. `summary` 는 비운다 — 칸에는 요약에 해당하는 필드가 없고,
+    없는 문장을 지어내지 않는다. 빼는 칸:
+    - 완료 표시된 칸 — 이미 끝낸 것을 다시 계획하지 않는다.
+    - 반복형 칸(`exclude_ids` — 호출자가 습관 링크로 넘긴다) — "1일 1문제" 처럼 끝이 없는 칸은
+      계획(카드)으로 내려보내지 않고 습관 횟수로만 센다(ADR-0008 §1). 예전엔 마일스톤이 됐다.
+    - 규칙이 채운 자리표시 칸(`source="rule"`, 예: "건강 1단계") — AI 가 못 채워 규칙이 넣은
+      이름이라, 계획의 뼈대로 쓰면 "만다라트에서 가져온 단계: 건강 1단계" 가 뜬다. 사용자가
+      고친 칸은 `source="user"` 라 그대로 들어간다.
+
+    다 빠져서 비면 호출자가 자동 분해로 넘어간다(`or None`).
 
     ADR-0007 §1 커서 모델이 이 목록 중 **앞쪽 일부만** 이번 2주에 담는다(나머지는 다음
     주기가 이어받는다) — 여기서 미리 자르지 않는다.
@@ -42,7 +53,7 @@ def cells_as_milestones(cells: Sequence[GoalNode]) -> list[MilestoneDraft]:
     return [
         MilestoneDraft(title=c.title, summary="")
         for c in sorted(cells, key=lambda c: c.order_index)
-        if c.completed_at is None
+        if c.completed_at is None and c.id not in exclude_ids and c.source != "rule"
     ]
 
 

@@ -14,11 +14,18 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
+from pydantic_core import PydanticCustomError
 
 from reaction_backend.schemas.common import CamelModel, DraftMixin, KstDatetime
-from reaction_backend.schemas.goals import GoalNode, GoalTier
-from reaction_backend.schemas.habits import HabitCategory, TimePreference
+from reaction_backend.schemas.goals import GoalNode, GoalTier, clean_title
+from reaction_backend.schemas.habits import (
+    HABIT_MINUTES_PER_SESSION_MAX,
+    HABIT_TITLE_MAX_LENGTH,
+    HabitCategory,
+    TimePreference,
+    habit_category_from_goal_category,
+)
 from reaction_backend.schemas.planning import FirstPlanResponse
 
 MandalaSource = Literal["llm", "rule", "user"]
@@ -58,15 +65,38 @@ class MandalaCellPlan(CamelModel):
 # 후보정 후 — 항상 고정 형태 (mandala_adapter.shape_* 의 출력)
 # ─────────────────────────────────────────────────────────────────────────────
 
+_SUBGOAL_TITLE_MAX = 10  # §7.7 — depth1(축) ≤10자
+_CELL_TITLE_MAX = 16  # §7.7 — depth2(칸) ≤16자
+
+
+def _check_ring_title(value: object, *, noun: str, max_length: int) -> object:
+    """축·칸 제목 길이를 **한국어 문구로** 막는다(`mode="before"`).
+
+    허용 범위는 예전 `Field(min_length=1, max_length=…)` 와 똑같다 — 문구만 바뀐다. 예전엔
+    pydantic 영어 문구("String should have at least 1 character")가 나가 FE 가 "입력값을
+    확인해 주세요." 로만 보여줬고, 8축 중 어느 칸이 문제인지 알 수 없었다(`field` 에
+    `subgoals.3.title` 처럼 위치는 그대로 실린다). 저장된 초안을 다시 읽을 때도 같은 모델을
+    쓰므로 공백 처리 등 규칙은 **넓히지도 좁히지도 않는다.**
+    """
+    if isinstance(value, str) and not 1 <= len(value) <= max_length:
+        raise PydanticCustomError("mandala_title", f"{noun}은 1~{max_length}자로 적어 주세요.")
+    return value
+
 
 class MandalaSubgoal(CamelModel):
     """확정된 하위목표(축) 1개 — 항상 정확히 8개(order_index 0~7)."""
 
     order_index: int = Field(ge=0, le=7)
-    title: str = Field(min_length=1, max_length=10)  # §7.7 — depth1 ≤10자, 서버가 상한 강제
+    # §7.7 — depth1 ≤10자, 서버가 상한 강제
+    title: str = Field(min_length=1, max_length=_SUBGOAL_TITLE_MAX)
     why_text: str | None = None
     source: MandalaSource = "llm"
     locked: bool = False  # 사용자가 인터뷰(pillars_hint)에서 직접 말한 축 — 재생성이 못 건드림
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title(cls, v: object) -> object:
+        return _check_ring_title(v, noun="축 이름", max_length=_SUBGOAL_TITLE_MAX)
 
 
 class MandalaCell(CamelModel):
@@ -74,8 +104,13 @@ class MandalaCell(CamelModel):
 
     subgoal_index: int = Field(ge=0, le=7)
     order_index: int = Field(ge=0, le=7)
-    title: str = Field(min_length=1, max_length=16)  # §7.7 — depth2 ≤16자
+    title: str = Field(min_length=1, max_length=_CELL_TITLE_MAX)  # §7.7 — depth2 ≤16자
     source: MandalaSource = "llm"
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title(cls, v: object) -> object:
+        return _check_ring_title(v, noun="칸 내용", max_length=_CELL_TITLE_MAX)
 
 
 class MandalaGap(CamelModel):
@@ -339,9 +374,18 @@ class MandalaNodeUpdateRequest(CamelModel):
     손댔다는 뜻이라 FE 의 점선 렌더가 실선으로 바뀐다).
     """
 
+    # 깊이별 상한(축 10·칸 16·중앙 200)은 라우트가 노드를 읽은 뒤 한국어로 막는다.
     title: str | None = Field(default=None, min_length=1)
     why_text: str | None = None
     completed: bool | None = None  # true→completed_at=now, false→completed_at=null
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title(cls, v: object) -> object:
+        # 빈 제목만 여기서 — 예전 영어 문구 대신 화면 말로(허용 범위는 그대로).
+        if v == "":
+            raise PydanticCustomError("mandala_title", "칸 내용을 적어 주세요.")
+        return v
 
 
 class MandalaPromoteRequest(CamelModel):
@@ -358,12 +402,22 @@ class MandalaHabitLinkRequest(CamelModel):
     추적한다. `title` 을 생략하면 칸 제목을 그대로 쓴다.
     """
 
-    title: str | None = Field(default=None, min_length=1, max_length=200)
+    title: str | None = Field(default=None, min_length=1, max_length=HABIT_TITLE_MAX_LENGTH)
     category: HabitCategory = "other"
     frequency_per_week: int = Field(ge=1, le=7)
-    minutes_per_session: int = Field(ge=1)
+    minutes_per_session: int = Field(ge=1, le=HABIT_MINUTES_PER_SESSION_MAX)
     time_preference: TimePreference = "anytime"
     priority_level: int = Field(ge=1, le=5, default=3)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title(cls, v: object) -> object:
+        return clean_title(v, noun="습관 이름", max_length=HABIT_TITLE_MAX_LENGTH)
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _category(cls, v: object) -> object:
+        return habit_category_from_goal_category(v)
 
 
 __all__ = [

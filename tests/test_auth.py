@@ -13,6 +13,7 @@ fixture 로 켜고 돈다. 기존 사용자 로그인(같은 email 두 번째 �
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -303,6 +304,56 @@ def test_me_with_expired_token_returns_401_expired(auth_client: TestClient) -> N
     resp = auth_client.get("/auth/me", headers={"Authorization": f"Bearer {expired}"})
     assert resp.status_code == 401
     assert resp.json()["code"] == "AUTH_TOKEN_EXPIRED"
+
+
+def test_me_and_settings_agree_on_an_unset_tone_mode(
+    auth_client: TestClient, fake_invite_code_repo: FakeInviteCodeRepo
+) -> None:
+    """톤을 아직 고르지 않은 사용자 — `/auth/me` 도 `/settings` 와 같이 null (재검증 P4).
+
+    예전엔 `/auth/me` 만 빈 문자열이라, 같은 사람의 같은 값을 두 화면이 다르게 말했다.
+    빈 문자열은 "고르지 않음"이 아니라 "고른 값이 비어 있음"처럼 읽히는 거짓말이다.
+    필드 자체는 그대로 있다(사라지지 않는다).
+    """
+    login = _login(auth_client, fake_invite_code_repo)
+    token = login["accessToken"]
+
+    assert "toneMode" in login["user"]
+    assert login["user"]["toneMode"] is None, login["user"]
+
+    me = auth_client.get("/auth/me", headers={"Authorization": f"Bearer {token}"}).json()
+    assert me["toneMode"] is None, me
+
+
+def test_invalid_token_messages_speak_the_same_korean_as_the_rest(
+    auth_client: TestClient,
+) -> None:
+    """401 `AUTH_INVALID_TOKEN` 문구도 다른 화면과 같은 해요체 + 다음 걸음 (재검증 P3).
+
+    `message` 는 화면에 그대로 띄우는 문구인데(api-contract §1) 여기만 합쇼체였다
+    ("인증 헤더가 없습니다.") — 로그인이 풀린, 가장 당황스러운 순간에 갑자기 딱딱한
+    말투가 튀어나오고 뭘 해야 하는지도 말해 주지 않았다. 'Bearer'·'토큰'·'헤더' 같은
+    내부 표기도 사용자가 고칠 수 있는 말이 아니라 뺐다. 코드·envelope 는 그대로다.
+    """
+    from uuid import uuid4
+
+    unknown_user = issue_helper_token(user_id=uuid4(), token_type="access")
+    cases = {
+        "헤더 없음": {},
+        "형식 오류": {"Authorization": "Token abc"},
+        "검증 실패": {"Authorization": "Bearer not.a.jwt"},
+        "계정 없음": {"Authorization": f"Bearer {unknown_user}"},
+    }
+    for label, headers in cases.items():
+        resp = auth_client.get("/auth/me", headers=headers)
+        assert resp.status_code == 401, (label, resp.text)
+        body = resp.json()
+        assert body["code"] == "AUTH_INVALID_TOKEN", (label, body)
+        message = body["message"]
+        assert message.endswith("다시 로그인해 주세요."), (label, message)
+        assert "니다" not in message, (label, message)  # 합쇼체
+        for jargon in ("Bearer", "토큰", "헤더", "인증"):
+            assert jargon not in message, (label, message)
 
 
 def test_me_with_refresh_token_rejected(
@@ -632,3 +683,146 @@ def test_invalid_refresh_cookie_paths_stop_the_app(
     monkeypatch.setenv("REFRESH_COOKIE_PATHS", raw)
     with pytest.raises(ValueError, match="REFRESH_COOKIE_PATHS"):
         Settings()
+
+
+# ───────────────────── 익명화 뒤 돌아온 사용자 (auth-1 / sched-3) ─────────────────────
+
+
+def test_relogin_after_anonymization_clears_flags(
+    auth_client: TestClient,
+    fake_invite_code_repo: FakeInviteCodeRepo,
+    fake_user_repo: FakeUserRepo,
+) -> None:
+    """90일 cron 으로 익명화된 사용자가 다시 로그인하면 새 활동 기간이 시작된다.
+
+    플래그가 남으면 cron sweep(습관·브리프·알림)에서 영영 빠지고, 수동 익명화는 409 로
+    막혔다. 이미 가린 과거 텍스트는 그대로 둔다(되살리지 않는다).
+    """
+    login = _login(auth_client, fake_invite_code_repo)
+    user_id = UUID(login["user"]["userId"].removeprefix("user_"))
+    stored = fake_user_repo._by_id[user_id]
+    stored.is_anonymized = True
+    stored.anonymized_at = datetime.now(UTC)
+    stored.name = "[anonymized]"
+
+    again = auth_client.post("/auth/google", json={"idToken": "stub"})
+    assert again.status_code == 200
+    assert stored.is_anonymized is False
+    assert stored.anonymized_at is None
+    assert again.json()["user"]["name"] == "김민수"
+
+    # 수동 익명화도 다시 가능하다 — 409 PRIVACY_ALREADY_ANONYMIZED 가 아니라 1단계 확인.
+    step1 = auth_client.post(
+        "/settings/anonymize",
+        json={},
+        headers={"Authorization": f"Bearer {again.json()['accessToken']}"},
+    )
+    assert step1.status_code == 200
+    assert step1.json()["status"] == "confirmation_required"
+
+
+# ───────────────────── refresh 가 활동 시각을 남긴다 (auth-6) ─────────────────────
+
+
+def test_refresh_records_activity_for_inactivity_rule(
+    auth_client: TestClient,
+    fake_invite_code_repo: FakeInviteCodeRepo,
+    fake_user_repo: FakeUserRepo,
+) -> None:
+    """90일 비활성 익명화는 '마지막 사용' 기준이어야 한다 — refresh 도 활동이다.
+
+    예전엔 `last_active_at` 을 로그인에서만 써서, refresh token(14일)으로 계속 쓰는 동안
+    값이 멈춰 있었다 → 실제 비활성 76~78일 만에 익명화될 수 있었다.
+    """
+    login = _login(auth_client, fake_invite_code_repo)
+    user_id = UUID(login["user"]["userId"].removeprefix("user_"))
+    stored = fake_user_repo._by_id[user_id]
+    stale = datetime.now(UTC) - timedelta(days=30)
+    stored.last_active_at = stale
+
+    resp = auth_client.post("/auth/refresh", json={"refreshToken": login["refreshToken"]})
+
+    assert resp.status_code == 200
+    assert stored.last_active_at > datetime.now(UTC) - timedelta(minutes=1)
+
+
+def test_rejected_refresh_does_not_record_activity(
+    auth_client: TestClient,
+    fake_invite_code_repo: FakeInviteCodeRepo,
+    fake_user_repo: FakeUserRepo,
+) -> None:
+    """로그아웃(revoke)된 refresh 는 401 이고 활동으로 치지 않는다."""
+    login = _login(auth_client, fake_invite_code_repo)
+    user_id = UUID(login["user"]["userId"].removeprefix("user_"))
+    stored = fake_user_repo._by_id[user_id]
+    auth_client.post("/auth/logout", json={"refreshToken": login["refreshToken"]})
+    stale = datetime.now(UTC) - timedelta(days=30)
+    stored.last_active_at = stale
+
+    resp = auth_client.post("/auth/refresh", json={"refreshToken": login["refreshToken"]})
+
+    assert resp.status_code == 401
+    assert stored.last_active_at == stale
+
+
+def test_google_login_verifies_off_the_event_loop(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """id_token 검증(Google 공개키 HTTPS 조회, 동기)은 이벤트 루프 밖 스레드에서 돈다 (auth-7).
+
+    루프에서 그대로 부르면 조회가 끝날 때까지 다른 모든 사용자의 요청이 멈춘다(단일 워커).
+    """
+    import asyncio
+
+    from reaction_backend.api.routes import auth as auth_routes
+    from reaction_backend.integrations.google_oauth.verifier import GoogleClaims
+
+    ran_on_loop: list[bool] = []
+
+    def _fake_verify(token: str) -> GoogleClaims:
+        try:
+            asyncio.get_running_loop()
+            ran_on_loop.append(True)
+        except RuntimeError:
+            ran_on_loop.append(False)
+        return GoogleClaims(sub="s", email="thread@example.com", name="스레드")
+
+    monkeypatch.setattr(auth_routes, "verify_google_id_token", _fake_verify)
+    resp = auth_client.post("/auth/google", json={"idToken": "x"})
+
+    assert resp.status_code == 200
+    assert ran_on_loop == [False]
+
+
+def test_existing_user_login_looks_up_email_once(
+    auth_client: TestClient,
+    fake_invite_code_repo: FakeInviteCodeRepo,
+    fake_user_repo: FakeUserRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """기존 사용자 로그인은 이미 읽은 행을 갱신한다 — 같은 email 조회를 반복하지 않는다 (auth-15).
+
+    실 `UserRepo.upsert_from_google` 은 안에서 email 로 한 번 더 조회한다 — 기존 사용자
+    경로가 그걸 부르면 로그인마다 같은 SELECT 가 두 번 나간다(fake 는 dict 조회라 안 보인다).
+    """
+    _login(auth_client, fake_invite_code_repo)
+    lookups: list[str] = []
+    upserts: list[str] = []
+    original_get = fake_user_repo.get_by_email
+    original_upsert = fake_user_repo.upsert_from_google
+
+    async def _counting_get(email: str) -> Any:
+        lookups.append(email)
+        return await original_get(email)
+
+    async def _counting_upsert(profile: Any) -> Any:
+        upserts.append(profile.email)
+        return await original_upsert(profile)
+
+    monkeypatch.setattr(fake_user_repo, "get_by_email", _counting_get)
+    monkeypatch.setattr(fake_user_repo, "upsert_from_google", _counting_upsert)
+    resp = auth_client.post("/auth/google", json={"idToken": "stub"})
+
+    assert resp.status_code == 200
+    assert lookups == ["demo@reaction.local"]
+    assert upserts == []  # 이미 읽은 행을 touch_login 으로 갱신

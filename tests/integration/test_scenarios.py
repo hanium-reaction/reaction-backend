@@ -15,7 +15,10 @@ from __future__ import annotations
 from typing import Any, cast
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
+
+from reaction_backend.repositories import habit_repo
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 시나리오 A — 신규 유저 딥 인터뷰 여정
@@ -199,12 +202,17 @@ def test_scenario_daily_execution_and_recovery_loop(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_scenario_goal_and_habit_management(client: TestClient) -> None:
+def test_scenario_goal_and_habit_management(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """inbox→목표 승격, Focus 한도(3), 습관 생성/아젠다 노출, 재분류·보류·삭제 여정.
 
     goals / habits / inbox / today 를 가로질러 잠금 제품 결정(Focus≤3, DevBaseline §1.4)이
     실제로 강제되는지 확인한다.
     """
+    # 등록한 주는 남은 날만큼 목표를 줄인다(v2.30-goals) — 월요일에 만든 것으로 고정해 빈도 그대로.
+    monday = habit_repo.current_week_start_kst()
+    monkeypatch.setattr(habit_repo, "today_kst", lambda: monday)
     # 0) 초기 목표 목록은 빈 3-티어 구조
     assert client.get("/goals").json() == {"focus": [], "maintain": [], "parked": []}
 

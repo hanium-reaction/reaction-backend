@@ -3,7 +3,8 @@
 베이스라인 §1.4: **3주 연속 미달**(`done_count < target_count * 0.5`) 시 빈도 재설계 제안
 (비난 아닌 재설계). DB/세션 비의존 — repo 가 최근 인스턴스를 넘기면 판정만 한다.
 
-`suggested_frequency` = 최근 3주 평균 달성 횟수(round, 최소 1). 현재 빈도보다 작게 보장.
+`suggested_frequency` = 최근 3주 평균 달성 횟수(round, 최소 1). 현재 빈도보다 작게 보장 —
+더 줄일 수 없으면(주 1회 습관) 제안하지 않는다.
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ class PenaltyEval:
     suggested_frequency: int
     avg_done: float
     recent: list[tuple[int, int]]  # (done, target) 오래된→최신 순
+    # 3주 합계 — 안내 문구는 "평균 0.67회" 같은 소수 대신 이 정수를 쓴다.
+    total_done: int = 0
 
 
 def _below_half(instance: HabitInstance) -> bool:
@@ -51,10 +54,22 @@ def evaluate_penalty(
     if not all(_below_half(i) for i in last3):
         return None
 
-    avg = sum(i.done_count for i in last3) / _WINDOW_WEEKS
+    total = sum(i.done_count for i in last3)
+    avg = total / _WINDOW_WEEKS
     suggested = max(1, round(avg))
     if suggested >= current_frequency:
         suggested = max(1, current_frequency - 1)
+    if suggested >= current_frequency:
+        # 주 1회 습관 — 더 줄일 빈도가 없다. 예전엔 "주 1회 → 1회" 라는 아무것도 안 바뀌는
+        # 카드가 떴고, 수락하면 "1회에서 1회로 조정했어요" 가 나왔다. 제안 자체를 안 한다
+        # (수락도 422 HABIT_PENALTY_NOT_ELIGIBLE). 쉬어 가기·시간 바꾸기 같은 다른 제안은
+        # 별도 기능이다.
+        return None
 
     recent = [(i.done_count, i.target_count) for i in reversed(last3)]
-    return PenaltyEval(suggested_frequency=suggested, avg_done=round(avg, 2), recent=recent)
+    return PenaltyEval(
+        suggested_frequency=suggested,
+        avg_done=round(avg, 2),
+        recent=recent,
+        total_done=total,
+    )

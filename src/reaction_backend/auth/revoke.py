@@ -3,8 +3,12 @@
 logout 시 refresh token 의 `jti` 를 등록한다. 동일 `jti` 가 등록되어 있으면 refresh 거부.
 
 저장소: in-memory + 만료시각 기준 자동 정리.
-- 다중 프로세스 / 재기동에 취약 (Issue #3 의 `IdempotencyStore` 와 동일 한계).
-- 후속: DB 테이블(`refresh_token_revocations`)로 교체 예정.
+- 다중 프로세스 / 재기동에 취약 (Issue #3 의 `IdempotencyStore` 와 동일 한계) — 매 배포마다
+  systemd 재시작으로 비워져, 로그아웃한 refresh token(14일)이 다시 통한다.
+- access token 은 여기서 막지 않는다(`get_current_user` 는 revoke 를 안 본다) — 로그아웃 뒤에도
+  만료(24시간)까지 유효하다.
+- 후속(마이그레이션 필요, AGENTS §8 합의 대상): DB 테이블(`refresh_token_revocations`) 또는
+  `users.tokens_valid_after` 로 교체해 재기동에도 유지하고 access 도 함께 막는다.
 """
 
 from __future__ import annotations

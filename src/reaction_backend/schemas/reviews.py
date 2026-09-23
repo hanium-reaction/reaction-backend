@@ -47,6 +47,19 @@ class MandalaWeeklySummary(CamelModel):
     habits: list[MandalaHabitWeekStat] = Field(default_factory=list)
 
 
+class HabitWeekSummary(CamelModel):
+    """만다라에 걸리지 않은 습관 1개의 그 주 체크인 현황 (v2.30).
+
+    주간 KPI 는 카드 실행만 세서, 습관만 쓰는 사용자는 체크인을 몇 번 해도 "집계할 활동이
+    없어요" 를 봤다. 만다라 반복형 칸의 습관은 `mandala.habits` 에 이미 있어 여기서 뺀다.
+    """
+
+    habit_id: str
+    title: str
+    done_count: int
+    target_count: int
+
+
 class NextCycleProposal(CamelModel):
     """다음 2주 열기 제안 1건 (ADR-0008 §8 "G") — 승인은 기존 `/plans/generate`(빈 바디)
     + `/plans/{id}/approve` 를 그대로 쓴다. 이 카드는 새 엔드포인트를 만들지 않는다.
@@ -130,6 +143,12 @@ class WeeklyReviewResponse(CamelModel):
     # 같은 주를 분으로 다시 센 요약 (ADR-0009 D5). `period_summaries` 에 저장하지 않고
     # 조회 시점에 파생한다 — mandala/proposals 와 같은 방식이라 마이그레이션이 없다.
     effort: EffortMinutes = Field(default_factory=EffortMinutes)
+    # 그 주에 잡혀 있었지만 한 번도 시작하지 않고 지나간 블록(세션) 수 (v2.30). 준수율은
+    # 시작한 카드만 세므로 이 수는 그 분모 밖이다 — 준수율 정의는 그대로 두고 옆에 싣는다.
+    # 조회 시점 파생(저장 안 함).
+    unstarted_blocks: int = 0
+    # 만다라 밖 습관의 그 주 체크인 (v2.30) — 조회 시점 파생(저장 안 함). 없으면 빈 배열.
+    habits: list[HabitWeekSummary] = Field(default_factory=list)
 
     category_success_rate: dict[str, float] = Field(default_factory=dict)
     peak_window: str | None = None
@@ -181,4 +200,12 @@ class HabitPenaltyAcceptResponse(CamelModel):
     habit_id: str
     previous_frequency: int
     new_frequency: int
+    message: str
+
+
+class HabitPenaltyRejectResponse(CamelModel):
+    """POST /reviews/habit-penalty/{habitId}/reject — '지금대로 유지' 결과 (빈도 변화 없음)."""
+
+    habit_id: str
+    frequency: int
     message: str

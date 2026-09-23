@@ -2,11 +2,26 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
+from reaction_backend.repositories import habit_repo
 from reaction_backend.repositories.habit_repo import current_week_start_kst
+
+
+@pytest.fixture(autouse=True)
+def _created_on_monday(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """이 파일의 습관은 이번 주 **월요일**에 만든 것으로 둔다.
+
+    등록한 주는 남은 날만큼 목표를 줄이므로(v2.30-goals, `week_target`) 요일마다 기대값이
+    달라진다. 첫 주 비율을 보는 테스트는 `_freeze_today` 로 다시 고정한다.
+    """
+    monday = current_week_start_kst()
+    monkeypatch.setattr(habit_repo, "today_kst", lambda: monday)
+    yield
 
 
 def _new_habit(client: TestClient, *, title: str = "운동", freq: int = 3) -> dict[str, Any]:
@@ -73,13 +88,15 @@ def test_create_rejects_bad_category(client: TestClient) -> None:
 
     이전에는 `category: str` 라 검증 없이 DB CheckConstraint 까지 내려가 raw
     IntegrityError → 500 COMMON_INTERNAL_ERROR 로 떨어졌다(goal_category 에는 있지만
-    habit_category 에는 없는 "project" 로 재현).
+    habit_category 에는 없는 "project" 로 재현). v2.30-goals 부터 그 세 값(project/schedule/
+    career)은 '기타' 로 받으므로(아래 test_create_maps_goal_only_category_to_other), 여기서는
+    어느 목록에도 없는 값으로 422 를 확인한다.
     """
     resp = client.post(
         "/habits",
         json={
             "title": "x",
-            "category": "project",
+            "category": "bogus_cat",
             "frequencyPerWeek": 3,
             "minutesPerSession": 30,
             "timePreference": "morning",
@@ -209,3 +226,21 @@ def test_check_not_found(client: TestClient) -> None:
 def test_check_bad_id_format(client: TestClient) -> None:
     resp = client.post("/habit-instances/nonexistent/check")
     assert resp.status_code == 404
+
+
+def test_create_maps_goal_only_category_to_other(client: TestClient) -> None:
+    """오늘 화면 습관 폼이 목표 분류(9종)를 띄운다 — 'career' 같은 값이 422 로 사라지지 않게."""
+    for goal_only in ("project", "schedule", "career"):
+        resp = client.post(
+            "/habits",
+            json={
+                "title": f"{goal_only} 습관",
+                "category": goal_only,
+                "frequencyPerWeek": 3,
+                "minutesPerSession": 30,
+                "timePreference": "morning",
+                "priorityLevel": 2,
+            },
+        )
+        assert resp.status_code == 201, (goal_only, resp.text)
+        assert resp.json()["category"] == "other"

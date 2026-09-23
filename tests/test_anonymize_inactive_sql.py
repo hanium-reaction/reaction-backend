@@ -17,7 +17,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.user import User
-from reaction_backend.repositories.user_repo import UserRepo
+from reaction_backend.repositories.user_repo import GoogleProfile, UserRepo
 from reaction_backend.scheduler.anonymize_inactive import (
     INACTIVE_ANONYMIZE_TTL_DAYS,
     inactive_anonymize_before,
@@ -159,3 +159,33 @@ async def test_end_to_end_run_masks_and_is_idempotent(real_db_session: AsyncSess
     second = await run_anonymize_inactive_users(real_db_session, now=now_kst())
     assert second.total == 0
     assert second.anonymized == 0
+
+
+async def test_returning_user_rejoins_sweeps_and_can_be_anonymized_again(
+    real_db_session: AsyncSession,
+) -> None:
+    """익명화 뒤 다시 로그인한 사용자 (auth-1 / sched-3).
+
+    예전엔 로그인이 이름·`last_active_at` 만 바꿔 `is_anonymized` 가 영영 True 로 남았다 —
+    `list_active()` 에서 빠져 습관·브리프·알림이 끊기고, `anonymized_at` 이 차 있어 다시
+    떠나도 새 텍스트는 절대 익명화되지 않았다.
+    """
+    user = await _seed_user(real_db_session, days_ago=INACTIVE_ANONYMIZE_TTL_DAYS + 1)
+    result = await run_anonymize_inactive_users(real_db_session, now=now_kst())
+    assert result.anonymized == 1
+    assert user.is_anonymized is True
+
+    repo = UserRepo(real_db_session)
+    back = await repo.upsert_from_google(GoogleProfile(email=user.email, name="돌아온 사용자"))
+
+    assert back.id == user.id
+    assert back.is_anonymized is False
+    assert back.anonymized_at is None
+    assert back.name == "돌아온 사용자"
+    assert user.id in {u.id for u in await repo.list_active()}
+
+    # 다시 90일 넘게 떠나면 새 기간의 텍스트도 익명화 대상이 된다.
+    back.last_active_at = now_kst() - timedelta(days=INACTIVE_ANONYMIZE_TTL_DAYS + 1)
+    await real_db_session.flush()
+    picked = await repo.list_inactive_for_anonymization(before=inactive_anonymize_before(now_kst()))
+    assert user.id in {u.id for u in picked}

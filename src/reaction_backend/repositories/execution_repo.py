@@ -13,12 +13,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import ColumnElement, func, select, update
+from sqlalchemy import ColumnElement, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -30,6 +30,30 @@ from reaction_backend.db.models.interruption_event import InterruptionEvent
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
+
+# 카드를 **끝냈다**고 말하는 체크인 값 — 남은 세션 블록을 정리하고 pre_card 알림을 멈추는 기준.
+# partial_done/failed 는 "아직 남았다" 라 남은 세션을 그대로 둔다(다음 세션에 이어서 한다).
+_CARD_DONE_STATUSES = ("done", "over_done")
+
+
+def settle_pause(
+    execution: ExecutionEvent,
+    pause: InterruptionEvent,
+    *,
+    now: datetime,
+    resumed: bool,
+) -> None:
+    """정지 1건을 마감하고 그 시간을 실행의 `pause_total_minutes` 에 더한다.
+
+    [▶ 계속](`resumed=True`)과 정지 중 체크인(`resumed=False`, today-11)이 같이 쓴다.
+    `resumed_after_interrupt` 는 **비어 있을 때만** 채운다 — 6h cron 이 이미 False('6시간 안에
+    안 돌아옴')로 적었으면 그 사실은 그대로 두고, 지연분만 채워 넣는다(sched-14).
+    """
+    minutes = max(int((now - pause.created_at).total_seconds() // 60), 0)
+    pause.resume_delay_minutes = minutes
+    if pause.resumed_after_interrupt is None:
+        pause.resumed_after_interrupt = resumed
+    execution.pause_total_minutes += minutes
 
 
 def reflectable_from() -> ColumnElement[datetime]:
@@ -157,6 +181,59 @@ class ExecutionRepo:
             for action_item_id, block_status, start_at, end_at in result
         ]
 
+    async def list_carried_over_actions(
+        self,
+        user_id: UUID,
+        *,
+        today: date,
+        day_start: datetime,
+        since: datetime,
+        now: datetime,
+    ) -> list[ActionItem]:
+        """오늘 이전 날짜의 카드 중 **아직 손에서 놓지 않은** 것 — 어젠다가 자정에 놓치던 카드.
+
+        오늘 어젠다는 `target_date == 오늘` 만 보는데, `target_date` 는 블록의 KST 시작일이고
+        `plan_scheduler` 는 블록을 자정 너머로도 놓는다(#252). 그래서 23:30 에 시작한 카드는
+        00:00 이 되는 순간 오늘 화면에서 사라졌다 — 방금 하던 일을 어디서 완료할지 모르게
+        된다(today-3). 둘 중 하나면 이어서 보여준다:
+
+        1. **진행 중 실행**이 회고 창 안에 있다 — 창 기준은 `/reflection/pending` 과 같은
+           `reflectable_from() >= since`. 같은 식이어야 "오늘 화면엔 있는데 회고엔 없는"
+           (또는 반대) 카드가 안 생기고, 창을 벗어나면 만료 cron 이 정리한다.
+        2. 자정을 넘긴 블록이 **아직 안 끝났다**(`start_at < 오늘 0시`, `end_at > now`) —
+           23:30~00:30 블록을 00:05 에 늦게라도 시작하려는 경우. 다음 날 세션 블록은
+           `start_at` 이 오늘이라 여기 안 걸린다(분할 카드를 끌어오지 않는다).
+
+        보관된 카드는 제외. 날짜 오름차순 → priority 순.
+        """
+        running = select(ExecutionEvent.action_item_id).where(
+            ExecutionEvent.user_id == user_id,
+            ExecutionEvent.completion_status == "in_progress",
+            reflectable_from() >= since,
+        )
+        crossing_midnight = select(ScheduledBlock.action_item_id).where(
+            ScheduledBlock.user_id == user_id,
+            ScheduledBlock.block_status.in_(("scheduled", "started")),
+            ScheduledBlock.start_at < day_start,
+            ScheduledBlock.end_at > now,
+        )
+        stmt = (
+            select(ActionItem)
+            .where(
+                ActionItem.user_id == user_id,
+                ActionItem.target_date < today,
+                ActionItem.archived_at.is_(None),
+                or_(ActionItem.id.in_(running), ActionItem.id.in_(crossing_midnight)),
+            )
+            .order_by(
+                ActionItem.target_date.asc(),
+                ActionItem.priority.asc(),
+                ActionItem.created_at.asc(),
+            )
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def find_open_block(self, user_id: UUID, action_item_id: UUID) -> ScheduledBlock | None:
         """이 카드의 미종결(scheduled/started) 블록 — 가장 이른 것."""
         stmt = (
@@ -215,12 +292,96 @@ class ExecutionRepo:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def close_execution(
+        self,
+        execution: ExecutionEvent,
+        *,
+        status: str,
+        ended_at: datetime,
+        retroactive: bool = False,
+    ) -> None:
+        """실행 1건 종결 — check-in 과 저녁 회고(batch)의 **단일 전이** (today-13).
+
+        예전엔 `POST /today/check-ins` 와 `POST /reflection/batch` 가 같은 쓰기를 각자 복사해
+        들고 있었다. 한쪽만 고치면 '집중 화면에서 완료한 기록' 과 '저녁 회고로 완료한 기록' 이
+        같은 결과인데 다르게 저장된다 — 취소 블록 가드가 실제로 한쪽에만 먼저 들어갔었다.
+
+        하는 일: 열린 정지 마감 + completion_status·actual_end_at·actual_duration_minutes
+        + 블록 finished + (완료면) 이 카드의 남은 세션 블록 정리.
+        `action_item.status` 전이와 회복 완료 스탬프는 **호출자 몫**이다(카드·회복 repo 를
+        라우터가 쥔다). commit 도 호출자.
+
+        `actual_duration_minutes` 는 주간 리뷰의 '실제로 쓴 시간' 재료라 **일한 시간만** 센다
+        (today-11). 예전엔 시작~종결 전체를 세서 09:20~18:00 정지한 실행이 550분, 13:00 에
+        시작하고 21:30 저녁 회고로 '완료' 한 30분짜리 카드가 510분이 됐다.
+        - 정지 중에 체크인하면 그 정지를 지금 닫는다(`resumed=False` — 재개 없이 끝냈다).
+          안 닫으면 정지 시간이 빠지지 않고, 열린 정지가 끝난 실행에 영원히 남는다.
+        - 실제 소요 = (종결 − 착수) − 정지 합계.
+        - `retroactive=True`(저녁 회고)는 **언제 끝났는지 모른다** — 회고한 시각은 끝낸 시각이
+          아니다. 지어내지 않고 None 으로 둔다(주간 리뷰는 None 을 0 으로 센다).
+        """
+        pause = await self.get_open_pause(execution.id)
+        if pause is not None:
+            settle_pause(execution, pause, now=ended_at, resumed=False)
+
+        execution.completion_status = status
+        execution.actual_end_at = ended_at
+        if retroactive:
+            execution.actual_duration_minutes = None
+        elif execution.actual_start_at is not None:
+            elapsed = int((ended_at - execution.actual_start_at).total_seconds() // 60)
+            execution.actual_duration_minutes = max(elapsed - execution.pause_total_minutes, 0)
+
+        block = await self.get_block(execution.scheduled_block_id)
+        if block is not None and block.block_status != "cancelled":
+            # 취소된 블록은 되살리지 않는다 — 회고 창을 넘겨 만료 cron(#20)이 카드와 함께
+            # 정리한 블록에 stale 한 executionId 로 체크인·회고가 들어오면, finished 로 덮어써서
+            # 주간 그리드에 유령 블록이 되살아난다(list_week 는 archived 를 안 보고 block_status 만 본다).
+            block.block_status = "finished"
+
+        if status in _CARD_DONE_STATUSES:
+            await self.cancel_remaining_sessions(execution)
+
+    async def cancel_remaining_sessions(self, execution: ExecutionEvent) -> None:
+        """카드를 끝냈으면 **아직 안 한 다른 세션 블록**을 계획에서 뺀다 (critic-2).
+
+        긴 카드는 여러 날의 세션 블록으로 쪼개진다(`plan_scheduler`). 카드 상태는 하나라,
+        첫 세션에서 '완료' 를 누르면 카드는 done 인데 둘째 날 블록은 `scheduled` 로 남았다 —
+        주간 그리드엔 할 일처럼 계속 뜨고, 5분 전 '곧 시작' 알림까지 왔다. 재계획의 밀린 일
+        수거(`list_stale_scheduled_before`)도 카드 상태를 안 봐서 끝낸 카드를 다시 배치하려 한다.
+
+        고르는 블록은 좁다(전부 데이터 보호):
+        - `scheduled` 만 — finished(수행 이력)·started(다른 실행이 잡은 블록)는 안 건드린다.
+        - `user_edit` 제외 — 사용자가 손으로 옮긴 블록은 시스템이 지우지 않는다(#113 과 같은 선).
+        - 방금 끝낸 실행의 블록 제외 — 그건 위에서 finished 가 된다.
+
+        partial_done/failed 는 부르지 않는다 — 남은 세션이 다음에 이어서 할 자리다.
+        카드 `status` 는 건드리지 않는다(호출자의 기존 체크인 전이 그대로, AGENTS §2).
+        계획 교체·만료 cron 과 같은 soft 규칙(블록 cancelled, hard delete 없음).
+        """
+        await self._session.execute(
+            update(ScheduledBlock)
+            .where(
+                ScheduledBlock.user_id == execution.user_id,
+                ScheduledBlock.action_item_id == execution.action_item_id,
+                ScheduledBlock.id != execution.scheduled_block_id,
+                ScheduledBlock.block_status == "scheduled",
+                ScheduledBlock.source != "user_edit",
+            )
+            .values(block_status="cancelled")
+            .execution_options(synchronize_session=False)
+        )
+
     # ── pause / resume (interruption_events) — #83 Focus 일시정지/재개 ──
     async def get_open_pause(self, execution_id: UUID) -> InterruptionEvent | None:
         """아직 재개되지 않은(열린) user_pause 구간 — 가장 최근 것.
 
-        열림 = resume_delay_minutes IS NULL AND resumed_after_interrupt IS NULL
-        (재개되면 True+지연분, cron 이 방치분을 False 로 마감).
+        열림 = `resume_delay_minutes IS NULL` — 지연분은 [▶ 계속]·체크인이 정지를 닫을 때만
+        적는다(`settle_pause`). `resumed_after_interrupt` 는 보지 않는다: 6h cron
+        (`interruption_resolver`)이 방치분을 False 로 표시해도 사용자가 [▶ 계속] 을 누르기
+        전까지 실행은 **여전히 정지 중**이다. 예전엔 그 행을 닫힌 것으로 봐서, 아침에 멈추고
+        저녁에 돌아온 사용자의 [계속] 이 409 `TODAY_NOT_PAUSED` 로 영영 실패했고 그 몇 시간은
+        정지 시간에 한 번도 안 들어갔다(today-5, sched-14).
         """
         stmt = (
             select(InterruptionEvent)
@@ -228,7 +389,6 @@ class ExecutionRepo:
                 InterruptionEvent.execution_id == execution_id,
                 InterruptionEvent.interruption_type == "user_pause",
                 InterruptionEvent.resume_delay_minutes.is_(None),
-                InterruptionEvent.resumed_after_interrupt.is_(None),
             )
             .order_by(InterruptionEvent.created_at.desc())
         )
@@ -256,6 +416,9 @@ class ExecutionRepo:
         - `started` 제외 — 이미 착수한 카드에 "곧 시작" 알림은 소음
         - 카드 archived 제외 — 만료 cron(`expire_unreflected`)이 보관한 카드의 블록은
           cancel 되지만, 블록 상태만 믿지 않고 카드 생사도 본다 (이중 방어)
+        - 이미 끝낸(done/over_done) 카드 제외 — 쪼갠 세션의 첫 회차에서 '완료' 하면 남은
+          세션 블록은 체크인이 정리하지만(`cancel_remaining_sessions`), 그 전에 남은 블록·
+          사용자가 옮긴 블록에 "곧 시작" 이 가지 않게 카드 상태도 본다 (critic-2)
         - 비활성 사용자 제외 — `UserRepo.list_active()` 와 같은 3조건 (soft-archived·
           익명화 사용자의 잔존 블록에 발송하지 않는다)
 
@@ -270,6 +433,7 @@ class ExecutionRepo:
                 ScheduledBlock.start_at >= start,
                 ScheduledBlock.start_at < end,
                 ActionItem.archived_at.is_(None),
+                ActionItem.status.notin_(_CARD_DONE_STATUSES),
                 User.archived_at.is_(None),
                 User.is_anonymized.is_(False),
                 User.onboarding_state == "ACTIVE",

@@ -12,6 +12,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
+import pytest
+
 from reaction_backend.db.models.fixed_schedule import FixedSchedule
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.db.models.time_policy import TimePolicy
@@ -353,6 +355,143 @@ async def test_daily_frequency_stays_daily_when_sessions_are_not_a_week_multiple
     )
 
 
+def _cadence_state(*, freq: int, sessions: int, minutes: tuple[int, ...]) -> Any:
+    """빈도를 말한 마감 없는 목표 + 길이가 **제각각인** 세션 — ADR-0009 D2 가 허용하는 모양.
+
+    세션 길이 50분(집중 용량·평균)인데 LLM 이 50/30/20 을 섞어 내면 합계 분이 평균보다
+    작아져, 분 기준 창(`placement_days_needed`)이 개수보다 좁아진다 (planB-6).
+    """
+    base = _freq_state(deadline=None, sessions=sessions)
+    heaviest = base["outcome"].core_goals[0].model_copy(update={"frequency_per_week": freq})
+    outcome = base["outcome"].model_copy(update={"core_goals": [heaviest]})
+    gp = base["goal_plan"]
+    items = [
+        a.model_copy(update={"estimated_minutes": minutes[i % len(minutes)]})
+        for i, a in enumerate(gp.action_items)
+    ]
+    return {**base, "outcome": outcome, "goal_plan": gp.model_copy(update={"action_items": items})}
+
+
+def _sessions_per_calendar_week(blocks: list[Any]) -> dict[date, int]:
+    counts: dict[date, int] = {}
+    for b in blocks:
+        day = b.start.astimezone(KST).date()
+        week = day - timedelta(days=day.weekday())  # 월요일 기준 달력 주
+        counts[week] = counts.get(week, 0) + 1
+    return counts
+
+
+async def test_daily_goal_with_short_sessions_still_gets_one_session_per_day() -> None:
+    """'매일' 28세션인데 LLM 이 세션을 짧게 섞어도 28일에 하루 하나씩 놓인다 (planB-6).
+
+    회귀(미러 실측): '매일 30분 달리기' 28세션 합계 740분 → 분 기준 창 25일 → 9/22·9/30·
+    10/8 에 18:00·18:30 두 번씩 연달아 잡히고 계획이 사흘 일찍 끝났다. 개수 기준 창(28일)이
+    분 기준보다 넓으면 그쪽을 쓴다.
+    """
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+    state = _cadence_state(freq=7, sessions=28, minutes=(50, 30, 20))
+    new_state = await first_plan.schedule_blocks(state, config)
+    blocks = new_state["scheduled_blocks"]
+    assert len(blocks) == 28
+    days = {b.start.astimezone(KST).date() for b in blocks}
+    assert len(days) == 28, f"하루 하나씩이어야 하는데 {len(days)}일에 몰렸다"
+    assert max(days) <= TUE + timedelta(days=27)
+
+
+async def test_calendar_week_never_exceeds_the_stated_cadence() -> None:
+    """'주 5회' 는 어느 달력 주(월~일)에도 5개를 넘지 않는다 (planB-6).
+
+    회귀(미러 실측): '주 5회' 20세션이 분 기준 26일 창에 흩어져 9/21 주에 6세션이 들어갔다.
+    창을 개수 기준(28일)으로 넓히면 stride 만으로 주 5회가 지켜진다 — 스케줄러에 주 단위
+    개수 상한을 따로 걸지 않는다(아래 주 중간 시작 마감 테스트 참고).
+    """
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+    state = _cadence_state(freq=5, sessions=20, minutes=(50, 30, 20))
+    new_state = await first_plan.schedule_blocks(state, config)
+    blocks = new_state["scheduled_blocks"]
+    assert len(blocks) == 20, "세션을 떨어뜨리지 않고 전부 놓는다"
+    per_week = _sessions_per_calendar_week(blocks)
+    assert max(per_week.values()) <= 5, f"달력 주별 세션 수가 주 5회를 넘었다: {per_week}"
+    assert not [w for w in new_state["schedule_warnings"] if "가용 시간을 찾지 못했" in w]
+
+
+def _deadline_cadence_state(*, freq: int, minutes: int, start: date, deadline: date) -> Any:
+    """주 중간에 시작하는 **마감 있는** 빈도 목표 — 분해 뒤 자르기·보충까지 거친 상태.
+
+    `decompose_goal` 이 LLM 결과에 하는 결정적 후처리(`shape_action_plan` →
+    `extend_action_plan_to_horizon`)를 그대로 태워, 세션 수가 실제 경로처럼
+    '주 N회 × 올림(일수/7)' 이 되게 한다 — 창이 온전한 주가 아니면 개수가 일수보다 많아진다.
+    """
+    base = _freq_state(deadline=deadline.isoformat(), sessions=60)
+    heaviest = (
+        base["outcome"]
+        .core_goals[0]
+        .model_copy(update={"frequency_per_week": freq, "session_length_min": minutes})
+    )
+    outcome = base["outcome"].model_copy(update={"core_goals": [heaviest]})
+    state = {**base, "outcome": outcome, "target_date": start.isoformat()}
+    gp = base["goal_plan"]
+    gp = gp.model_copy(
+        update={
+            "action_items": [
+                a.model_copy(update={"estimated_minutes": minutes}) for a in gp.action_items
+            ]
+        }
+    )
+    for step in (
+        first_plan_adapter.shape_action_plan,
+        first_plan_adapter.extend_action_plan_to_horizon,
+    ):
+        gp = step(
+            outcome, state["density"], gp, target_date=start, max_weeks=state["max_plan_weeks"]
+        )
+    return {**state, "goal_plan": gp}
+
+
+@pytest.mark.parametrize(
+    ("freq", "minutes", "start", "deadline", "max_per_day"),
+    [
+        # 토요일 시작 · 16일 창 · 매일 → 21세션. 주 상한을 걸었을 땐 일요일 하루에 5~6개.
+        (7, 30, date(2026, 9, 19), date(2026, 10, 4), 2),
+        # 금요일 시작 · 10일 창 · 주 5회 → 10세션. 주 상한일 땐 하루 3개.
+        (5, 30, date(2026, 9, 18), date(2026, 9, 27), 1),
+        # 토요일 시작 · 9일 창 · 주 3회 40분 → 6세션. 주 상한일 땐 하루 2개.
+        (3, 40, date(2026, 9, 19), date(2026, 9, 27), 1),
+        # 목요일 시작 · 11일 창 · 매일 → 14세션. 주 상한일 땐 하루 3개.
+        (7, 30, date(2026, 9, 17), date(2026, 9, 27), 2),
+    ],
+)
+async def test_midweek_deadline_window_does_not_stack_sessions_on_one_day(
+    monkeypatch: Any, freq: int, minutes: int, start: date, deadline: date, max_per_day: int
+) -> None:
+    """주 중간에 시작하는 마감 계획은 짧은 첫·끝 주의 하루에 세션을 쌓지 않는다 (planB-6 리뷰).
+
+    회귀: 달력 주마다 '주 N회' 상한을 걸자, 온전한 주가 상한에 막혀 넘친 몫이 짧은 첫 주
+    (토·일)나 끝 주에 하루 여러 개로 몰렸다 — '매일' 을 고쳤는데 도리어 하루 5개가 됐다.
+    기대치는 상한을 걸기 전(origin/main)과 같거나 낫다: 매일은 하루 2개 이하, 주 N회(<7)는
+    하루 1개. 세션을 떨어뜨리지도, 빈 시간이 있는데 '못 찾았다' 고 하지도 않는다.
+    """
+    monkeypatch.setattr(first_plan, "now_kst", lambda: _at(start, 7, 0))
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+    state = _deadline_cadence_state(freq=freq, minutes=minutes, start=start, deadline=deadline)
+    planned = len(state["goal_plan"].action_items)
+
+    new_state = await first_plan.schedule_blocks(state, config)
+
+    blocks = new_state["scheduled_blocks"]
+    assert len(blocks) == planned, "세션을 떨어뜨리지 않고 전부 놓는다"
+    per_day: dict[date, int] = {}
+    for b in blocks:
+        day = b.start.astimezone(KST).date()
+        assert start <= day <= deadline
+        per_day[day] = per_day.get(day, 0) + 1
+    assert max(per_day.values()) <= max_per_day, f"하루에 세션이 몰렸다: {per_day}"
+    assert not [w for w in new_state["schedule_warnings"] if "가용 시간을 찾지 못했" in w]
+
+
 # ── #231 이미 지난 마감 ───────────────────────────────────────────────────
 
 
@@ -384,10 +523,14 @@ async def test_past_deadline_is_disclosed_in_warnings() -> None:
     """지난 마감을 조용히 넘기지 않는다 — 어떻게 잡았는지 밝히고 새 마감을 묻는다 (#231)."""
     session = _RoutingSession(blocks=[], fixed=[], policies=[])
     config: Any = {"configurable": {"session": session, "tone_mode": None}}
-    past = (TUE - timedelta(days=11)).isoformat()
+    past_day = TUE - timedelta(days=11)
+    past = past_day.isoformat()
     new_state = await first_plan.schedule_blocks(_freq_state(deadline=past), config)
-    notice = next((w for w in new_state["schedule_warnings"] if past in w), None)
+    # 날짜는 ISO 가 아니라 "7월 3일" 로 말한다(planB-11).
+    label = f"{past_day.month}월 {past_day.day}일"
+    notice = next((w for w in new_state["schedule_warnings"] if label in w), None)
     assert notice is not None, "지난 마감 고지가 warnings 에 있어야 한다"
+    assert past not in notice
     assert "이미 지난 날짜" in notice
     assert "새로 정해주시면" in notice
 
@@ -488,7 +631,7 @@ def test_daily_overload_notice_does_not_invent_a_deadline() -> None:
         [_draft(day, 20, 60)], **kwargs, horizon="2026-09-30"
     )
     assert with_deadline is not None
-    assert "마감(2026-09-30)까지 담으려면" in with_deadline  # 있으면 날짜까지 밝힌다
+    assert "마감(9월 30일)까지 담으려면" in with_deadline  # 있으면 날짜까지 밝힌다(ISO 아님)
 
 
 # ── 하루 상한이 세션 길이보다 작으면 안 된다 ──────────────────────────────
@@ -1018,6 +1161,24 @@ async def test_calendar_failure_does_not_break_planning(monkeypatch: Any) -> Non
     )
 
 
+async def test_calendar_cut_by_google_asks_to_reconnect(monkeypatch: Any) -> None:
+    """Google 쪽에서 끊긴 연결 — 예전엔 '연결 안 됨' 과 같아 계획이 수업 위에 조용히 잡혔다."""
+    from reaction_backend.integrations.google_calendar import freebusy as fb
+
+    async def _cut(session: Any, *, user_id: Any, start_day: date, end_day: date) -> Any:
+        return {}, "reconnect_required"
+
+    monkeypatch.setattr(fb, "fetch_busy_by_day", _cut)
+
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+
+    new_state = await first_plan.schedule_blocks(_state(), config)
+
+    assert new_state["scheduled_blocks"], "캘린더 연결이 끊겼다고 계획이 죽으면 안 된다"
+    assert new_state["schedule_warnings"][0] == fb.CALENDAR_RECONNECT_WARNING
+
+
 async def test_no_calendar_connection_is_silent(monkeypatch: Any) -> None:
     """연결 안 한 사용자(대다수)에게는 아무 말도 하지 않는다 — 매번 권유는 알림 피로다."""
     from reaction_backend.integrations.google_calendar import freebusy as fb
@@ -1033,3 +1194,136 @@ async def test_no_calendar_connection_is_silent(monkeypatch: Any) -> None:
     new_state = await first_plan.schedule_blocks(_state(), config)
 
     assert not any("캘린더" in w for w in new_state["schedule_warnings"])
+
+
+# ── planB-13 과부하 안내는 배치와 **같은 상한**으로 판정한다 ─────────────────
+
+
+async def test_overload_notice_uses_the_same_cap_as_the_scheduler() -> None:
+    """집중 시간을 '4시간 이상'(240분)으로 답해도 이번 계획 카드가 120분이면 상한은 180분이다.
+
+    배치는 180분 상한으로 넘긴 날을 만들었는데, 안내는 따로 계산한 240분 상한으로 판정해
+    하루 4시간짜리 날을 말하지 않았다(ADR-0009 D3 가 배치만 고쳤다).
+    """
+    wed = TUE + timedelta(days=1)
+    outcome = InterviewOutcome(
+        session_id="t-cap",
+        generated_at=datetime.now(KST),
+        end_reason="completed",
+        ambiguity_final=0.1,
+        analysis_source="llm",
+        identity=IdentityContext(role="대3", season="방학"),
+        core_goals=[
+            GoalCandidate(
+                title="졸업 작품",
+                category="study",
+                is_heaviest=True,
+                tentative_tier="focus",
+                confidence=0.9,
+                session_length_min=240,
+                deadline=wed.isoformat(),
+            )
+        ],
+        availability=AvailabilityProfile(
+            activity_window=TimeRange(start="09:00", end="23:30"), peak_window=["오후"]
+        ),
+        preferences=PreferenceProfile(recovery_tone="담백", rest_ok=True, downscope_unit_min=10),
+        horizon=wed.isoformat(),
+    )
+    state = first_plan.initial_state(
+        user_id=DEMO_USER_UUID, outcome=outcome, target_date=TUE.isoformat(), scope="horizon"
+    )
+    gp = GoalDecomposition(
+        goal_nodes=[
+            GoalNodeDraft(
+                node_id="n1",
+                parent_id=None,
+                title="졸업 작품",
+                node_type="root",
+                order_index=0,
+                is_leaf=True,
+            )
+        ],
+        action_items=[
+            ActionItemDraft(
+                node_id="n1",
+                title=f"작업{i}",
+                estimated_minutes=120,
+                category="study",
+                first_step="시작",
+            )
+            for i in range(3)
+        ],
+        policy_violations=[],
+    )
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+
+    new_state = await first_plan.schedule_blocks({**state, "goal_plan": gp}, config)
+
+    blocks = new_state["scheduled_blocks"]
+    assert len(blocks) == 3
+    by_day: dict[date, int] = {}
+    for b in blocks:
+        day = b.start.astimezone(KST).date()
+        by_day[day] = by_day.get(day, 0) + round((b.end - b.start).total_seconds() / 60)
+    assert max(by_day.values()) > 180, "두 날에 세 장이면 한 날은 180분을 넘는다"
+    overload = [w for w in new_state["schedule_warnings"] if "평소 기준" in w]
+    assert overload, new_state["schedule_warnings"]
+    assert "평소 기준(3시간)" in overload[0]
+
+
+# ── planB-10 마감이 계획 첫날이면 몰아넣거나 '옮겨볼까요?' 만 되풀이하지 않는다 ─────────
+
+
+async def test_deadline_today_with_no_time_left_says_one_thing(monkeypatch: Any) -> None:
+    """마감=오늘 + 활동 시간이 이미 끝났으면 블록 0개에 경고는 원인을 말하는 한 줄뿐이다.
+
+    미러 실측: "'LC 취약 유형 집중 분석' 을(를) 배치할 가용 시간을 찾지 못했어요. 다른
+    시간으로 옮겨볼까요?" 가 세 줄 — 옮길 블록이 하나도 없는데 옮기라고 했다.
+    """
+    monkeypatch.setattr(first_plan, "now_kst", lambda: _at(TUE, 23, 40))  # 활동창 06:00~23:30 뒤
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+
+    new_state = await first_plan.schedule_blocks(
+        _freq_state(deadline=TUE.isoformat(), sessions=3), config
+    )
+
+    assert new_state["scheduled_blocks"] == []
+    warnings = new_state["schedule_warnings"]
+    assert len(warnings) == 1, warnings
+    assert "마감이 오늘이라" in warnings[0] and "새로 정해 주시면" in warnings[0]
+    assert "옮겨볼까요" not in warnings[0]
+
+
+async def test_deadline_today_crammed_into_tonight_is_disclosed(monkeypatch: Any) -> None:
+    """마감=오늘이면 고른 빈도와 달리 오늘 안에 몰아 잡은 사실을 말한다(예전엔 경고 0개)."""
+    monkeypatch.setattr(first_plan, "now_kst", lambda: _at(TUE, 17, 50))
+    session = _RoutingSession(blocks=[], fixed=[], policies=[])
+    config: Any = {"configurable": {"session": session, "tone_mode": None}}
+
+    new_state = await first_plan.schedule_blocks(
+        _freq_state(deadline=TUE.isoformat(), sessions=3), config
+    )
+
+    blocks = new_state["scheduled_blocks"]
+    assert len(blocks) == 3 and {b.start.astimezone(KST).date() for b in blocks} == {TUE}
+    notice = [w for w in new_state["schedule_warnings"] if "마감이 오늘이라" in w]
+    assert len(notice) == 1 and "3개 세션을 그날 안에" in notice[0]
+
+
+def test_same_day_deadline_notice_is_silent_otherwise() -> None:
+    """마감이 첫날이 아니거나, 한 장만 잡히고 빠진 게 없으면 말하지 않는다."""
+    kwargs: dict[str, Any] = {"start_day": TUE, "today": TUE}
+    notice = first_plan_adapter.same_day_deadline_notice
+    assert notice(None, placed=0, unplaced=3, **kwargs) is None
+    assert notice(THU.isoformat(), placed=0, unplaced=3, **kwargs) is None
+    assert notice(TUE.isoformat(), placed=1, unplaced=0, **kwargs) is None
+    partial = notice(TUE.isoformat(), placed=2, unplaced=1, **kwargs)
+    assert partial is not None and "2개만 잡았고 1개는" in partial
+    # 미래 첫날이면 '오늘' 이라고 하지 않는다.
+    future = first_plan_adapter.same_day_deadline_notice(
+        THU.isoformat(), start_day=THU, today=TUE, placed=0, unplaced=2
+    )
+    assert future is not None and "오늘" not in future and "7월 16일" in future

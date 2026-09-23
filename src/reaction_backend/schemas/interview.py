@@ -70,6 +70,8 @@ class SlotCatalogEntry(CamelModel):
     is_required: bool
     category: str
     options: list[str] = Field(default_factory=list)  # chip/select 보기 (text 등은 빈 배열)
+    # 보기를 여러 개 골라도 전부 쓰는가 — false 면 첫 값만 쓰인다(단일 선택). v2.30-interview.
+    multiple: bool = False
 
 
 class Question(CamelModel):
@@ -85,6 +87,8 @@ class Question(CamelModel):
     answer_type: str
     options: list[str]
     suggested_answers: list[str] = Field(default_factory=list)
+    # 보기를 여러 개 골라도 전부 쓰는가(`SlotCatalogEntry.multiple` 과 같다). false 면 단일 선택.
+    multiple: bool = False
 
 
 class InterviewSession(CamelModel):

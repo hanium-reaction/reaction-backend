@@ -193,3 +193,59 @@ def test_missing_claims_are_logged_without_values(
     text = caplog.text
     assert "google_id_token_rejected kind=missing_claims has_sub=True has_email=False" in text
     assert _SUB not in text
+
+
+# ── 공개키 조회 실패·지연 (auth-7) ─────────────────────────────────────────
+
+
+def test_cert_fetch_failure_is_503_not_500(
+    _real_verification: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Google 공개키를 못 가져오면 토큰 탓이 아니다 — 500 대신 503 '잠시 후 다시'.
+
+    `TransportError` 는 `ValueError` 가 아니라서 예전엔 `except ValueError` 를 빠져나가 500 이
+    됐다(네이티브에선 CORS 없는 네트워크 오류로까지 보였다).
+    """
+    from google.auth.exceptions import TransportError
+
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", _WEB_ID)
+    get_settings.cache_clear()
+
+    with (
+        patch(_VERIFY, side_effect=TransportError("certs unreachable")),
+        pytest.raises(ApiError) as exc_info,
+    ):
+        verify_google_id_token("token")
+
+    assert exc_info.value.http_status == 503
+    assert exc_info.value.code.value == "COMMON_INTERNAL_ERROR"
+    assert "잠시 후 다시" in exc_info.value.message
+
+
+def test_cert_fetch_uses_short_timeout(
+    _real_verification: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """google-auth 기본 120초 대신 짧은 상한으로 공개키를 가져온다."""
+    from reaction_backend.integrations.google_oauth import verifier
+
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", _WEB_ID)
+    get_settings.cache_clear()
+    seen: dict[str, Any] = {}
+
+    class _FakeTransport:
+        def __call__(self, url: str, **kwargs: Any) -> str:
+            seen["url"] = url
+            seen.update(kwargs)
+            return "response"
+
+    def _fake_verify(token: str, request: Any, audience: Any) -> dict[str, Any]:
+        # 라이브러리처럼 `request(certs_url, method="GET")` 로만 부른다 — timeout 을 안 준다.
+        request("https://www.googleapis.com/oauth2/v1/certs", method="GET")
+        return _fake_idinfo()
+
+    monkeypatch.setattr(verifier.g_requests, "Request", _FakeTransport)
+    with patch(_VERIFY, side_effect=_fake_verify):
+        verify_google_id_token("token")
+
+    assert seen["method"] == "GET"
+    assert 0 < seen["timeout"] <= 10

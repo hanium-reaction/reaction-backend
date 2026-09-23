@@ -13,7 +13,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.time_policy import TimePolicy
@@ -82,18 +82,6 @@ class TimePolicyRepo:
         policy.archived_at = datetime.now(UTC)
         policy.is_active = False
         await self._session.flush()
-
-    async def count_active(self, user_id: UUID) -> int:
-        stmt = (
-            select(func.count())
-            .select_from(TimePolicy)
-            .where(
-                TimePolicy.user_id == user_id,
-                TimePolicy.archived_at.is_(None),
-            )
-        )
-        result = await self._session.execute(stmt)
-        return int(result.scalar_one())
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_db)]

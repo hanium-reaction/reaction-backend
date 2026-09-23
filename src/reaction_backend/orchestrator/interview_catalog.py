@@ -13,6 +13,7 @@ import 하는 폴더 규칙 위반이 이미 있었다(별칭 재수출은 두�
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -313,6 +314,37 @@ _PLAN_DEFAULT_QUESTIONS: dict[str, str] = {
     "recovery.downscope_unit": "밀렸을 때 할 일을 몇 분짜리까지 줄이면 해볼 만해요?",
 }
 
+# 하베스팅(다른 답에 섞여 나온 값으로 미리 채우기)을 **하지 않는** 슬롯.
+#
+# 기준은 하나다 — **그 슬롯의 질문이 묻는 것과 사용자가 흘린 말이 같은 것이어야** 한다.
+# 하베스팅된 값은 '미충족' 이 아니어서, 안 물어본 답이 프로필로 새는 걸 막는 가드
+# (v2.30-interview, `profile_memory.persist_profile_from_outcome` 의 unresolved 검사)가
+# 아예 적용되지 않는다. 그래서 여기서 막지 못하면 되돌릴 자리가 없다.
+#
+# - goals.heaviest — goals.list 응답에서 파생(동적 보기)이라 별도 경로.
+# - time.activity_window — 질문이 "이 시간 밖엔 일정을 안 잡아요" 라고 **약속**하는 하루
+#   전체의 경계다. 실측: "새벽에만 집중이 돼서 밤에 작업해요" 한 마디에서 00:00~06:00 이
+#   수확돼, 한 번도 묻지 않은 활동창이 그 사용자의 **유일한 배치 가능 시간**이 됐다.
+#   프로필(내 정보)에도 그대로 저장되고, 계획은 22:00 에 일정을 잡아 놓고 "활동 가능
+#   시간(00:00~06:00)과 겹치지 않아서" 라고 스스로를 반박했다. 집중이 잘 되는 때(peak)를
+#   말한 것을 **일정을 잡아도 되는 경계**로 옮겨 적은 셈 — 두 질문은 다른 질문이다.
+# - goals.weekly_time — 길이×빈도로 **유도되면 아예 묻지 않는** 슬롯이다(`is_slot_needed`).
+#   그런데 수확은 그 유도 규칙을 보지 않아, 묻지 않기로 한 슬롯이 말없이 채워졌다. 그 값은
+#   `weekly_hours_for_plan` 에서 유도값을 이기므로, 확인 카드는 "약 주 3.5시간(한 번 30분 ×
+#   매일)" 이라 보여 주고 계획은 주 2시간으로 만들어졌다(실측). 묻지 않을 슬롯이면 채우지도
+#   않는다 — 빈도를 '몰아서' 로 답해 유도가 안 될 때는 정식으로 묻는다.
+#
+# 여기 **넣지 않은** 슬롯들(검토 결과): time.peak_window·recovery.* 는 프로필에 저장되지만
+# "오전에 집중이 잘돼"·"담백하게 해주세요" 처럼 사용자가 **그 질문의 답 그대로** 흘린 말을
+# 받는다 — 질문이 묻는 것과 같은 것이라 위 기준에 걸리지 않고, 계획 전체를 가두는 경계도
+# 아니다. identity.*·goals.*(목표 내용)는 애초에 하베스팅이 겨냥한 대상이다.
+#
+# ⚠️ 앞으로 슬롯을 더할 때: 그 값이 **계획 전체를 가두는 경계**(수면·취침 등 시간 창)이거나
+# 프로필로 영속되는데 사용자가 그 질문에 직접 답해야만 알 수 있는 것이라면 여기 넣어라.
+_PLAN_HARVEST_EXCLUDE: frozenset[str] = frozenset(
+    {"goals.heaviest", "time.activity_window", "goals.weekly_time"}
+)
+
 PLAN_CATALOG = InterviewCatalog(
     kind="plan",
     slots=PLAN_SLOTS,
@@ -320,7 +352,7 @@ PLAN_CATALOG = InterviewCatalog(
     critical_slots=frozenset({"goals.list", "goals.heaviest"}),
     harvest_enabled=True,
     # 하베스팅 대상에서 제외 — goals.heaviest 는 goals.list 응답에서 파생(동적 보기)이라 별도.
-    harvest_exclude=frozenset({"goals.heaviest"}),
+    harvest_exclude=_PLAN_HARVEST_EXCLUDE,
     # heaviest 목표의 속성을 묻는 슬롯들 — 귀속이 확정되기 전에는 하베스팅하지 않는다
     # (`_per_goal_harvest_allowed`).
     per_goal_slots=frozenset(
@@ -538,12 +570,61 @@ def canonical_chip(slot: InterviewSlot, raw: str) -> str | None:
     for option in slot.options:
         if "".join(option.split()) == squashed:
             return option
-    minutes = interview_adapter.chip_duration_min({"type": "chip", "values": [cleaned]})
+    minutes = duration_minutes_of(cleaned)
     if minutes is not None:
         for option in slot.options:
-            if interview_adapter.chip_duration_min({"type": "chip", "values": [option]}) == minutes:
+            if duration_minutes_of(option) == minutes:
                 return option
     return None
+
+
+# 우리말 수관형사로 쓴 시간 길이 — "한 시간"·"두 시간 반" 은 보기 "1시간"·"2시간 30분" 과
+# **같은 답**이지 다른 답이 아니다. 칩 슬롯에도 직접 입력이 열려 있어(FE 플레이스홀더
+# "직접 입력해도 돼요…") 이 표기가 실제로 들어온다. 숫자 파서(`chip_duration_min`)는 숫자만
+# 읽으므로, 대조 직전에 숫자 표기로 옮겨 준다 — 보기를 넓히는 게 아니라 **같은 보기의 다른
+# 표기**를 알아보는 것이다.
+_KO_DURATION_NUMERALS: dict[str, str] = {
+    "한": "1",
+    "두": "2",
+    "세": "3",
+    "네": "4",
+    "다섯": "5",
+    "여섯": "6",
+    "일곱": "7",
+    "여덟": "8",
+    "아홉": "9",
+    "열": "10",
+}
+_KO_NUMERAL_RE = re.compile(
+    "(" + "|".join(sorted(_KO_DURATION_NUMERALS, key=len, reverse=True)) + r")\s*(시간|분)"
+)
+# "1시간 반"·"한 시간 반" → 30분을 더한다. '반' 을 먼저 풀어야 수관형사 치환과 겹치지 않는다.
+_HALF_HOUR_RE = re.compile(r"시간\s*반")
+
+
+def duration_minutes_of(text: str) -> int | None:
+    """자유 입력 한 줄에서 시간 길이(분)를 읽는다. 못 읽으면 None.
+
+    `interview_adapter.chip_duration_min` 과 **같은 파서**를 쓰되(단위 오독 사고 v2.00/v2.01
+    이후 파서를 새로 만들지 않는다) 우리말 수관형사·'반' 을 먼저 숫자로 옮긴다.
+    """
+    normalized = _HALF_HOUR_RE.sub("시간 30분", text)
+    normalized = _KO_NUMERAL_RE.sub(
+        lambda m: _KO_DURATION_NUMERALS[m.group(1)] + m.group(2), normalized
+    )
+    return interview_adapter.chip_duration_min({"type": "chip", "values": [normalized]})
+
+
+def is_duration_slot(slot: InterviewSlot | None) -> bool:
+    """보기가 **전부 시간 길이**인 칩 슬롯인가 (15분 / 1시간 30분 / 4시간 이상 …).
+
+    이런 슬롯에서는 **숫자가 곧 답**이다 — "20분" 과 "30분" 은 비슷한 답이 아니라 다른 답이고,
+    그 차이가 모든 블록의 길이와 주당 분량으로 그대로 번진다. 그래서 자유 입력을 보기로
+    맞출 때 의미 추론(LLM)이 아니라 숫자 대조(룰)를 쓴다 — `interview._chip_rule_decides`.
+    """
+    return bool(slot and slot.options) and all(
+        duration_minutes_of(option) is not None for option in (slot.options if slot else ())
+    )
 
 
 def canonical_chip_values(
@@ -602,12 +683,23 @@ def is_goal_scoped(slot_key: str) -> bool:
 
 CATALOGS: dict[str, InterviewCatalog] = {"plan": PLAN_CATALOG, "ultimate": ULTIMATE_CATALOG}
 
+# 보기를 **여러 개** 담아도 전부 쓰는 칩 슬롯 — 나머지 칩·select 는 어댑터가 첫 값만 읽는다
+# (`interview_adapter._first`: 역할·학기·가장 무거운 목표·빈도·세션 길이·톤 등). FE 가 모든
+# 칩 질문에 "여러 개 골라도 돼요" 를 띄워, 두 번째로 고른 목표·빈도가 말없이 버려졌다.
+# `Question.multiple`·`SlotCatalogEntry.multiple` 로 내보내 FE 가 단일/복수 선택을 가른다.
+# ⚠️ 어댑터가 목록 전체를 읽는 슬롯(`time.peak_window` → peak_window, `ultimate.values` →
+# values)과 **같아야** 한다 — `tests/test_interview_route.py` 가 못 박는다.
+MULTI_SELECT_SLOTS: frozenset[str] = frozenset({"time.peak_window", "ultimate.values"})
+
 __all__ = [
     "CATALOGS",
+    "MULTI_SELECT_SLOTS",
     "GLOBAL_SCOPE_HINT",
     "is_goal_scoped",
     "canonical_chip",
     "canonical_chip_values",
+    "duration_minutes_of",
+    "is_duration_slot",
     "PLAN_CATALOG",
     "ULTIMATE_CATALOG",
     "ULTIMATE_DOMAIN_OPTIONS",

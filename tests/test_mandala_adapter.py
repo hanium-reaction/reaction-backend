@@ -617,6 +617,56 @@ def test_compute_weekly_stat_axis_untouched_when_nothing_happened() -> None:
     assert stat.untouched_axis_ids == [untouched_axis.id]
 
 
+def test_compute_weekly_stat_fully_completed_axis_is_not_untouched() -> None:
+    """칸을 다 끝낸 축은 "손 못 댄 축" 이 아니다 (review-2) — 3주 치 집계에서도 방치 제안이 없다."""
+    done_axis = _tree_node(depth=1, title="영어", created_at=_dt_in_week(-60))
+    done_leaves = [
+        _tree_node(depth=2, parent_id=done_axis.id, completed_at=_dt_in_week(-30), title=f"칸{i}")
+        for i in range(2)
+    ]
+    half_axis = _tree_node(depth=1, title="운동", created_at=_dt_in_week(-60))
+    half_leaves = [
+        _tree_node(depth=2, parent_id=half_axis.id, completed_at=_dt_in_week(-30), title="끝냄"),
+        _tree_node(depth=2, parent_id=half_axis.id, title="남음"),
+    ]
+    nodes = [done_axis, *done_leaves, half_axis, *half_leaves]
+
+    weeks = [
+        mandala_adapter.compute_weekly_stat(
+            nodes,
+            week_start=WEEK_START - timedelta(weeks=k),
+            habits_by_node={},
+            instances_by_habit={},
+        )
+        for k in range(3)
+    ]
+
+    assert weeks[0].untouched_axis_titles == ["운동"]  # 칸이 남은 축은 여전히 알린다
+    stale = mandala_adapter.compute_stale_axes(
+        nodes,
+        [set(w.untouched_axis_ids) for w in weeks],
+        earliest_week_start=WEEK_START - timedelta(weeks=2),
+    )
+    assert [a.title for a in stale] == ["운동"]
+
+
+def test_compute_weekly_stat_axis_with_an_idle_habit_cell_still_counts_as_untouched() -> None:
+    """반복형 칸이 있으면 '다 끝난 축' 이 아니다 — 이번 주 체크인이 없으면 손 못 댄 축."""
+    axis = _tree_node(depth=1, title="코딩")
+    done = _tree_node(depth=2, parent_id=axis.id, completed_at=_dt_in_week(-10), title="끝냄")
+    habit_leaf = _tree_node(depth=2, parent_id=axis.id, title="1일1문제")
+    habit = _habit()
+
+    stat = mandala_adapter.compute_weekly_stat(
+        [axis, done, habit_leaf],
+        week_start=WEEK_START,
+        habits_by_node={habit_leaf.id: habit},
+        instances_by_habit={},
+    )
+
+    assert stat.untouched_axis_titles == ["코딩"]
+
+
 def test_compute_weekly_stat_habit_stats_report_axis_title_and_counts() -> None:
     axis = _tree_node(depth=1, title="체력")
     leaf = _tree_node(depth=2, parent_id=axis.id, title="코테 하루마다")

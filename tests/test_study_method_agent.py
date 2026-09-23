@@ -106,3 +106,36 @@ def test_rule_plan_handles_blank_title() -> None:
     assert plan.video_query == "목표 강의"
     # 판단 근거가 없으면 좁히지 않는다 — 사용자의 최종 선택지를 줄이지 않는다.
     assert plan.material_mix == "both"
+
+
+def test_rule_plan_fits_the_schema_even_for_a_very_long_title() -> None:
+    """인터뷰 목표 제목엔 길이 제한이 없다 — 룰 폴백이 스키마(검색어 100자)를 넘기면
+    LLM 이 실패한 바로 그 순간에 폴백까지 터져 500 이 된다(inbox-4)."""
+    plan = study_method_agent._rule_plan(_goal(title="가" * 150))
+    assert len(plan.book_query) <= 100
+    assert len(plan.video_query) <= 100
+    assert len(plan.approach) <= 200
+    assert plan.book_query.startswith("가" * 80)
+    assert plan.book_query.endswith("목차 커리큘럼")
+
+
+async def test_run_falls_back_even_when_the_title_is_very_long(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def stub_run(**kwargs: Any) -> RunResult[Any]:
+        return RunResult(
+            value=kwargs["fallback"](),
+            fell_back=True,
+            reason="timeout",
+            prompt_id=kwargs["prompt_id"],
+            prompt_version="v1",
+        )
+
+    monkeypatch.setattr(aiClient, "run", stub_run)
+
+    plan, fell_back = await study_method_agent.run(
+        goal=_goal(title="토익 " + "나" * 150), session=None, user_id=uuid4()
+    )
+
+    assert fell_back is True
+    assert len(plan.book_query) <= 100

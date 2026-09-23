@@ -1,6 +1,6 @@
 """Calendar 라우터 — 스위치가 꺼진 기본 상태의 동작.
 
-연결·freebusy 는 `GOOGLE_CALENDAR_ENABLED` 가 꺼져 있으면 501 이다(배포 기본값).
+연결·freebusy 는 `GOOGLE_CALENDAR_ENABLED` 가 꺼져 있으면 501 이다(배포 기본값). 해제만 예외다.
 켜진 상태의 동작은 `test_calendar_connect.py` · `test_calendar_freebusy.py` 가 다룬다.
 sync-preview / approve-insert 는 write-back(P1)이라 아직 mock 이다.
 """
@@ -43,10 +43,13 @@ def test_connect_rejects_empty_code(client: TestClient) -> None:
     assert resp.status_code == 422
 
 
-def test_disconnect_returns_501_while_disabled(client: TestClient) -> None:
+def test_disconnect_works_while_disabled(client: TestClient) -> None:
+    """해제는 동의 철회다 — 운영이 기능을 꺼 둔 동안에도 막으면 사용자가 연결을 끊을 수 없다.
+
+    예전엔 여기도 501 이었다(스위치를 끈 동안 계획 생성은 캘린더를 계속 읽고 있었다).
+    """
     resp = client.delete("/calendar/connect")
-    assert resp.status_code == 501
-    assert resp.json()["code"] == "COMMON_NOT_IMPLEMENTED"
+    assert resp.status_code == 204
 
 
 def test_freebusy_returns_501_while_disabled(client: TestClient) -> None:

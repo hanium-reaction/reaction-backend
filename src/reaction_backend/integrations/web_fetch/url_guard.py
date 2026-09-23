@@ -13,14 +13,25 @@
 로 해석되는 DNS rebinding 류를 이름 검사로는 못 막는다. 리다이렉트도 매 홉마다 다시
 검사해야 한다 — 공개 URL 이 사설 대역으로 302 하는 게 전형적인 우회다(호출자 책임,
 `fetcher._fetch_sync` 참고).
+
+**검사한 IP 가 곧 접속할 IP 여야 한다** (inbox-1). 예전엔 여기서 IP 를 본 뒤 URL 문자열만
+돌려줬고, `requests` 가 그 이름을 **다시** 해석해 접속했다. 두 조회 사이에 답이 바뀌면
+(TTL 0 rebinding) 검사는 공인 IP 를, 접속은 사설 IP 를 본다. 게다가 유니코드 호스트는
+두 쪽이 **다른 이름**을 해석했다 — `socket.getaddrinfo` 는 옛 IDNA2003 으로 `ß` 를 `ss` 로
+바꾸고, `requests` 는 UTS46 으로 `xn--zca` 로 바꾼다. 그래서 `pin` 은 `requests` 와 같은
+방식으로 URL 을 정규화해 **그 ASCII 이름**을 해석하고, 통과한 IP 목록을 함께 돌려준다.
+접속은 `pinned_http` 가 그 IP 로만 한다 — 두 번째 DNS 조회는 없다.
 """
 
 from __future__ import annotations
 
 import ipaddress
 import socket
+from dataclasses import dataclass
 from typing import Final
 from urllib.parse import urlsplit
+
+import requests
 
 # 이 사유들은 사용자에게 보이는 문구로 번역된다 (`orchestrator/materials_resolver.py`).
 REASON_SCHEME: Final = "unsupported_scheme"
@@ -58,13 +69,39 @@ def _is_public(ip: str) -> bool:
 
 
 def resolved_addresses(host: str) -> list[str]:
-    """호스트가 해석되는 모든 IP. 하나라도 사설이면 통째로 거절할 것(아래 validate)."""
+    """호스트가 해석되는 모든 IP. 하나라도 사설이면 통째로 거절할 것(아래 `pin`)."""
     infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     return [str(info[4][0]) for info in infos]
 
 
-def validate_url(raw: str) -> str:
-    """열어도 되면 URL 을 그대로 돌려주고, 아니면 `UnsafeUrl` 을 던진다.
+@dataclass(frozen=True)
+class PinnedUrl:
+    """검사를 통과한 URL 과, 접속해도 되는 IP 들."""
+
+    url: str
+    """`requests` 가 그대로 쓸 정규형 — 호스트는 ASCII(punycode)로 바뀌어 있다."""
+    addresses: tuple[str, ...]
+    """이 이름을 해석해 **전부 공인**임을 확인한 IP. 접속은 이 IP 로만 한다."""
+
+
+def _canonical(raw: str) -> str:
+    """`requests` 가 실제로 쓸 URL — 유니코드 호스트는 UTS46 punycode 로 바뀐다.
+
+    `requests` 의 정규화를 그대로 빌린다. 규칙을 따로 흉내 내면 둘이 어긋나는 순간이 곧
+    우회로다(위 모듈 설명의 `ß` 사례).
+    """
+    prepared = requests.PreparedRequest()
+    try:
+        prepared.prepare_url(raw, None)
+    except (requests.RequestException, ValueError, UnicodeError) as e:
+        raise UnsafeUrl(REASON_MALFORMED) from e
+    if not prepared.url:
+        raise UnsafeUrl(REASON_MALFORMED)
+    return prepared.url
+
+
+def pin(raw: str) -> PinnedUrl:
+    """열어도 되면 정규화된 URL 과 접속할 IP 를 돌려주고, 아니면 `UnsafeUrl` 을 던진다.
 
     A 레코드가 여러 개면 **전부** 공인이어야 한다 — 하나라도 사설이면 요청이 어느 쪽으로
     갈지 우리가 고를 수 없다.
@@ -75,6 +112,12 @@ def validate_url(raw: str) -> str:
     # `@` 가 있으면 `https://real.com@127.0.0.1/` 처럼 사람 눈과 파서가 다르게 읽는다.
     if "@" in parts.netloc or not parts.hostname:
         raise UnsafeUrl(REASON_MALFORMED)
+
+    url = _canonical(raw)
+    parts = urlsplit(url)
+    host = parts.hostname
+    if "@" in parts.netloc or not host:
+        raise UnsafeUrl(REASON_MALFORMED)
     try:
         port = parts.port
     except ValueError as e:  # 포트가 숫자가 아님
@@ -83,11 +126,17 @@ def validate_url(raw: str) -> str:
         raise UnsafeUrl(REASON_PORT)
 
     try:
-        addresses = resolved_addresses(parts.hostname)
-    except OSError as e:
+        addresses = resolved_addresses(host)
+    except (OSError, UnicodeError) as e:
         raise UnsafeUrl(REASON_DNS) from e
     if not addresses:
         raise UnsafeUrl(REASON_DNS)
     if not all(_is_public(ip) for ip in addresses):
         raise UnsafeUrl(REASON_PRIVATE)
-    return raw
+    # 순서를 지킨 채 중복만 걷는다 — getaddrinfo 는 같은 IP 를 소켓 종류별로 여러 번 준다.
+    return PinnedUrl(url, tuple(dict.fromkeys(addresses)))
+
+
+def validate_url(raw: str) -> str:
+    """`pin` 의 URL 만 — 판정만 필요한 호출자용. 실제 접속은 반드시 `pin` 의 IP 로 한다."""
+    return pin(raw).url

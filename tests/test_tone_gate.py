@@ -83,6 +83,56 @@ class TestCheckStructured:
         assert hits == ()
 
 
+# ── 사용자 원문 보호 (llm-1) — 두 방향을 같이 고정한다 ───────────────────
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "UX 디자이너가 되기 위한 포트폴리오 3개 완성",
+        "스터디 플래너가 되어 친구들 돕기",
+        "헬스 트레이너가 되기",
+        "자격증 네가지 따기",
+        "똑똑하게 돈 관리하기",
+        "능력있는 개발자 되기",
+    ],
+)
+def test_users_goal_title_echoed_by_the_model_is_not_blocked(goal: str) -> None:
+    """미러 실측: 이 제목들이 LLM 출력에 옮겨지면 매번 reject → 'N회차' 자리표시자 계획."""
+    blocked, hits = check_structured({"title": f"{goal} 1주차"}, protected=[goal])
+
+    assert blocked is False
+    assert hits == ()
+
+
+@pytest.mark.parametrize(
+    ("text", "marker"),
+    [
+        ("네가 안 해서 이렇게 됐잖아요", "네가"),
+        ("당신이 게을러서 그래요", "당신이"),
+        ("역시 잘하시네요", "역시 잘하"),
+        ("똑똑하시네요", "똑똑하"),
+        ("똑똑하게 복습해요", "똑똑하"),  # 사용자 제목과 첫 어절만 겹치는 AI 문장
+    ],
+)
+def test_ai_authored_markers_are_still_blocked_next_to_user_text(text: str, marker: str) -> None:
+    blocked, hits = check_structured(
+        {"then_clause": text}, protected=["자격증 네가지 따기", "똑똑하게 돈 관리하기"]
+    )
+
+    assert blocked is True
+    assert marker in hits
+
+
+def test_marker_matching_is_unchanged_without_user_text() -> None:
+    """게이트 자체(부분문자열 매칭)는 그대로다 — 사용자 원문이 아니면 전처럼 걸린다."""
+    assert scan("UX 디자이너가 되기") == ("너가",)
+    assert check_structured({"t": "UX 디자이너가 되기"}, protected=["토익 900"]) == (
+        True,
+        ("너가",),
+    )
+
+
 # ── 실 경로 통합: aiClient.run() 이 실제로 이 게이트를 거친다 ──────────────
 
 

@@ -28,7 +28,7 @@ from reaction_backend.content.registry import ContentNotFound
 from reaction_backend.db.models.inbox_item import InboxItem as InboxItemModel
 from reaction_backend.db.session import get_db
 from reaction_backend.llm import aiClient
-from reaction_backend.orchestrator import inbox_resources
+from reaction_backend.orchestrator import goal_policy, inbox_resources
 from reaction_backend.orchestrator.inbox_coaching import build_coaching_advice
 from reaction_backend.repositories.action_item_repo import (
     ActionItemRepo,
@@ -49,13 +49,14 @@ from reaction_backend.schemas.inbox import (
     InboxCreateRequest,
     InboxItem,
     InboxResourceDetail,
+    InboxStatus,
     InboxUpdateRequest,
 )
 
 router = APIRouter(prefix="/inbox", tags=["inbox"])
 
 _ID_PREFIX = "inbox_"
-_MAINTAIN_LIMIT = 5  # convert-to-goal 기본 tier=maintain 한도 (DevBaseline §1.4)
+_CONVERT_GOAL_TIER = "maintain"  # convert-to-goal 기본 tier — 한도는 goal_policy 가 잰다
 
 # 룰 fallback 키워드 매칭 — LLM 실패 시 사용 (Tool Executor 가 자동 분기).
 _KEYWORD_MAP: tuple[tuple[str, InboxCategory], ...] = (
@@ -100,9 +101,7 @@ def _rule_fallback_classify(raw_text: str) -> InboxClassification:
 
 def _to_schema(item: InboxItemModel) -> InboxItem:
     # 승격 대상 파생 — promoted 인데 goal_id 있으면 goal, 없으면 action(convert-to-action 경로).
-    promoted_to: Literal["goal", "action"] | None = None
-    if item.status == "promoted":
-        promoted_to = "goal" if item.promoted_goal_id is not None else "action"
+    promoted_to = _promoted_to(item)
     return InboxItem(
         inbox_id=f"{_ID_PREFIX}{item.id}",
         raw_text=decrypt_inbox_text(item.raw_text_encrypted),
@@ -161,6 +160,38 @@ def _reject_system_item(item: InboxItemModel) -> None:
         )
 
 
+def _already_promoted() -> ApiError:
+    return ApiError(
+        ErrorCode.INBOX_ALREADY_PROMOTED,
+        "이미 목표나 할 일로 옮긴 항목이에요.",
+        http_status=HTTPStatus.CONFLICT,
+        field="inboxId",
+    )
+
+
+def _promoted_to(item: InboxItemModel) -> Literal["goal", "action"] | None:
+    if item.status != "promoted":
+        return None
+    return "goal" if item.promoted_goal_id is not None else "action"
+
+
+def _check_not_promoted_elsewhere(item: InboxItemModel, want: Literal["goal", "action"]) -> bool:
+    """이미 옮긴 항목인가 — 같은 쪽으로 옮긴 거면 True(멱등 200), 다른 쪽이면 409.
+
+    두 번 탭·재시도로 같은 메모에서 카드·목표가 하나씩 더 생기던 경로다(목표는 유지 한도까지
+    먹었다). **같은 버튼을 다시 누른 것**은 이미 끝난 일이라 지금 상태를 그대로 돌려준다 —
+    FE 는 첫 응답과 같은 결과를 받고 에러 토스트도 없다. **다른 쪽으로 옮기려는 것**(할 일로
+    옮긴 메모를 목표로)은 조용히 넘기면 사용자가 원한 일이 안 됐는데 성공처럼 보이므로
+    `INBOX_ALREADY_PROMOTED`(FE 가 이미 문구를 매핑해 둔 코드)로 알린다.
+    """
+    promoted = _promoted_to(item)
+    if promoted is None:
+        return False
+    if promoted != want:
+        raise _already_promoted()
+    return True
+
+
 def _today_kst() -> datetime:
     return datetime.now(KST)
 
@@ -176,7 +207,8 @@ SessionDep = Annotated[AsyncSession, Depends(get_db)]
 async def list_inbox(
     user: CurrentUser,
     repo: RepoDep,
-    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    # enum 으로 받는다 — 문자열이면 없는 값이 DB enum 비교까지 가서 500 이 났다(이젠 422).
+    status_filter: Annotated[InboxStatus | None, Query(alias="status")] = None,
 ) -> list[InboxItem]:
     """내 inbox 항목. `?status=captured|classified|promoted|archived` 필터.
 
@@ -274,15 +306,25 @@ async def update_inbox(
     repo: RepoDep,
     session: SessionDep,
 ) -> InboxItem:
-    """userCategory override 또는 status 변경."""
+    """userCategory override 또는 status 변경.
+
+    - 옮긴(`promoted`) 항목을 `captured`/`classified` 로 되돌리면 옮기기 버튼이 다시 살아나
+      같은 메모로 목표·카드가 또 생긴다 → 409 `INBOX_ALREADY_PROMOTED`.
+    - `status="archived"` 는 `POST /inbox/{id}/archive` 와 같은 보관이다 — 예전엔 status 만
+      바꾸고 `archived_at` 이 비어 활성 목록과 보관함에 동시에 떴다.
+    """
     item = await repo.get_by_id(user.id, _parse_inbox_id(inbox_id))
     if item is None:
         raise _not_found()
+    if item.status == "promoted" and body.status in ("captured", "classified"):
+        raise _already_promoted()
     updated = await repo.update(
         item,
         user_category=body.user_category,
-        status=body.status,
+        status=body.status if body.status != "archived" else None,
     )
+    if body.status == "archived":
+        await repo.soft_delete(updated)
     await session.commit()
     await session.refresh(updated)
     return _to_schema(updated)
@@ -296,29 +338,35 @@ async def convert_to_goal(
     goal_repo: GoalRepoDep,
     session: SessionDep,
 ) -> InboxItem:
-    """Inbox → Goal 변환 (tier=maintain default, 한도 enforce). inbox.status=promoted."""
-    item = await repo.get_by_id(user.id, _parse_inbox_id(inbox_id))
+    """Inbox → Goal 변환 (tier=maintain default, 한도 enforce). inbox.status=promoted.
+
+    **멱등** — 이미 목표로 옮긴 항목이면 새로 만들지 않고 지금 상태를 200 으로 돌려준다.
+    할 일로 옮긴 항목이면 409 `INBOX_ALREADY_PROMOTED`.
+
+    순서가 핵심이다: tier lock → 항목 잠금 읽기 → 승격 여부 → 한도 → 생성 → commit.
+    항목을 lock **전에** 읽으면 앞 요청이 commit 하기 전 값("아직 승격 전")이 세션에 남아
+    두 요청이 모두 목표를 만든다.
+    """
+    inbox_uuid = _parse_inbox_id(inbox_id)
+    await goal_policy.hold_tier_lock(session, user.id)
+    item = await repo.get_by_id_for_update(user.id, inbox_uuid)
     if item is None:
         raise _not_found()
     _reject_system_item(item)
+    if _check_not_promoted_elsewhere(item, "goal"):
+        return _to_schema(item)
 
-    # Maintain ≤ 5 enforce (Parked 였다면 별도 — 기본 maintain 으로 진입)
-    current = await goal_repo.count_by_tier(user.id, "maintain")
-    if current + 1 > _MAINTAIN_LIMIT:
-        raise ApiError(
-            ErrorCode.GOAL_TIER_LIMIT_EXCEEDED,
-            f"Maintain 목표는 최대 {_MAINTAIN_LIMIT}개까지 가질 수 있어요.",
-            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-            field="goalTier",
-        )
+    await goal_policy.enforce_tier_limit(session, goal_repo, user.id, _CONVERT_GOAL_TIER)
 
     raw_text = decrypt_inbox_text(item.raw_text_encrypted)
     category = item.user_category or item.ai_category_guess or "other"
     goal = await goal_repo.create(
         user_id=user.id,
-        title=raw_text,
+        # 메모는 길이 제한이 없는데 `goals.title` 은 200자다 — 안 자르면 500 이 나고 다시
+        # 눌러도 영영 안 된다. 원문은 인박스 항목에 그대로 남는다.
+        title=goal_policy.clip_goal_title(raw_text) or "인박스 메모",
         category=category,
-        goal_tier="maintain",
+        goal_tier=_CONVERT_GOAL_TIER,
         priority_level=3,
     )
     await repo.mark_promoted_to_goal(item, goal.id)
@@ -339,11 +387,18 @@ async def convert_to_action(
     action_repo: ActionRepoDep,
     session: SessionDep,
 ) -> InboxItem:
-    """Inbox → ActionItem(source=inbox) 변환. inbox.status=promoted."""
-    item = await repo.get_by_id(user.id, _parse_inbox_id(inbox_id))
+    """Inbox → ActionItem(source=inbox) 변환. inbox.status=promoted.
+
+    **멱등** — 이미 할 일로 옮긴 항목이면 카드를 또 만들지 않고 지금 상태를 200 으로.
+    목표로 옮긴 항목이면 409 `INBOX_ALREADY_PROMOTED`. 항목을 잠금 읽기로 가져와 두 번 탭이
+    직렬화된다(뒤 요청은 앞 요청이 commit 한 `promoted` 를 본다).
+    """
+    item = await repo.get_by_id_for_update(user.id, _parse_inbox_id(inbox_id))
     if item is None:
         raise _not_found()
     _reject_system_item(item)
+    if _check_not_promoted_elsewhere(item, "action"):
+        return _to_schema(item)
     raw_text = decrypt_inbox_text(item.raw_text_encrypted)
     category = item.user_category or item.ai_category_guess or "other"
     await action_repo.create_from_inbox(

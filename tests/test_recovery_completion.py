@@ -236,6 +236,12 @@ async def test_abandon_stale_pins_where_and_set() -> None:
         "AND scheduled_blocks.start_at >= '2026-07-22 00:00:00+09:00')"
     ) in sql, f"살아있는 블록 가드(부정·상태·경계)가 풀렸다: {sql}"
 
+    # 가드 6 — 목표 완료·계획 교체로 치워진 카드(만료 아님)는 포기가 아니다(data-7).
+    # 부정이 빠지면 정확히 그 카드들'만' 포기로 적어 거짓 L1 을 만든다.
+    assert (
+        "NOT (action_items.archived_at IS NOT NULL AND action_items.system_failure_reason IS NULL)"
+    ) in sql, f"치워진 카드 가드가 풀렸다: {sql}"
+
     assert "UPDATE action_items" not in sql, "원본 카드 status 를 갱신한다 (AGENTS §2 위반)"
 
 

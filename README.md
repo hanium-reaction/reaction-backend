@@ -82,11 +82,11 @@ reaction-backend/
 │   ├── main.py                      # FastAPI 앱 + 16 라우터 include
 │   ├── config.py                    # 환경설정 (pydantic-settings)
 │   │
-│   ├── api/routes/                  # 16 도메인 라우터 (health만 구현, 나머지 placeholder 501)
-│   │   ├── health.py                # ✅ 구현됨
+│   ├── api/routes/                  # 19 도메인 라우터 (전부 실 DB·LLM 경로)
+│   │   ├── health.py
 │   │   ├── auth.py / onboarding.py / interview.py
-│   │   ├── time_policies.py / goals.py / habits.py
-│   │   ├── planning.py / calendar.py / today.py
+│   │   ├── time_policies.py / fixed_schedules.py / goals.py / habits.py
+│   │   ├── planning.py / materials.py / calendar.py / today.py / inbox.py
 │   │   ├── reflection.py / recovery.py / review.py
 │   │   ├── policy.py / notifications.py / settings.py
 │   │

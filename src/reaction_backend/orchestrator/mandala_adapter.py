@@ -711,10 +711,19 @@ def compute_weekly_stat(
                 completed_this_week += 1
                 touched_leaf_ids.add(leaf.id)
 
+    def _finished(axis_id: uuid.UUID) -> bool:
+        # 칸이 다 끝난 축 — 반복형 칸 없이 모든 칸이 완료 표시. 할 게 남지 않은 축을 "손 못 댄
+        # 축" 으로 세면, 다 해낸 축에 "3주간 손 못 댄 축" 변경 제안까지 붙었다.
+        children = [leaf for leaf in leaves if leaf.parent_node_id == axis_id]
+        return bool(children) and all(
+            leaf.id not in habits_by_node and leaf.completed_at is not None for leaf in children
+        )
+
     untouched_axes = [
         sg
         for sg in subgoals_by_id.values()
-        if all(leaf.id not in touched_leaf_ids for leaf in leaves if leaf.parent_node_id == sg.id)
+        if not _finished(sg.id)
+        and all(leaf.id not in touched_leaf_ids for leaf in leaves if leaf.parent_node_id == sg.id)
     ]
 
     return MandalaWeeklyStat(

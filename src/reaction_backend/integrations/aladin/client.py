@@ -41,6 +41,31 @@ REASON_EMPTY: Final = "empty"
 REASON_NOT_FOUND: Final = "not_found"
 
 
+def _describe(e: requests.RequestException) -> str:
+    """로그에 남길 실패 요약 — 예외 **유형과 상태 코드만**.
+
+    `requests` 예외 문자열엔 요청 URL 전체가 들어 있고, 그 쿼리에 `ttbkey` 가 평문으로
+    실린다("... for url: ...ItemSearch.aspx?ttbkey=ttb...&Query=..."). `exc_info=True` 나
+    `str(e)` 로 남기면 서버 로그에 API 키가 그대로 쌓인다(inbox-7).
+    """
+    status = e.response.status_code if e.response is not None else None
+    return f"{type(e).__name__} status={status}"
+
+
+def _is_api_error(body: dict[str, Any]) -> bool:
+    """알라딘은 키 차단·한도 초과 같은 오류도 **HTTP 200** 에 `errorCode` 로 준다.
+
+    실측(라이브 호출): 막힌 키 → `{"errorCode": 4, "errorMessage": "API출력이 금지된
+    회원입니다."}`, `item` 키 없음. 예전엔 이걸 "결과 없음" 으로 읽어 사용자에게 "검색어를
+    바꿔 보세요" 라고 안내했다 — 멀쩡한 검색어를 계속 고치게 만든다(inbox-6). 오류면
+    `unavailable`("지금은 … 잘 되지 않네요") 로 정직하게 알린다.
+    """
+    if body.get("errorCode") is None:
+        return False
+    logger.warning("aladin api error code=%s", body.get("errorCode"))
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class BookResult:
     """검색 후보 1건 — 목차·페이지 없음(이 단계에서는 조회하지 않는다)."""
@@ -85,8 +110,8 @@ def _search_sync(query: str, key: str, limit: int) -> SearchResult:
         response.raise_for_status()
     except requests.Timeout:
         return SearchResult(reason=REASON_TIMEOUT)
-    except requests.RequestException:
-        logger.warning("aladin search failed", exc_info=True)
+    except requests.RequestException as e:
+        logger.warning("aladin search failed: %s", _describe(e))
         return SearchResult(reason=REASON_UNAVAILABLE)
 
     try:
@@ -95,6 +120,8 @@ def _search_sync(query: str, key: str, limit: int) -> SearchResult:
         body: dict[str, Any] = json.loads(response.text.strip().rstrip(";"))
     except json.JSONDecodeError:
         logger.warning("aladin search returned non-JSON body")
+        return SearchResult(reason=REASON_UNAVAILABLE)
+    if _is_api_error(body):
         return SearchResult(reason=REASON_UNAVAILABLE)
 
     items = body.get("item") or []
@@ -167,14 +194,16 @@ def _lookup_sync(isbn13: str, key: str) -> LookupResult:
         response.raise_for_status()
     except requests.Timeout:
         return LookupResult(reason=REASON_TIMEOUT)
-    except requests.RequestException:
-        logger.warning("aladin lookup failed", exc_info=True)
+    except requests.RequestException as e:
+        logger.warning("aladin lookup failed: %s", _describe(e))
         return LookupResult(reason=REASON_UNAVAILABLE)
 
     try:
         body: dict[str, Any] = json.loads(response.text.strip().rstrip(";"))
     except json.JSONDecodeError:
         logger.warning("aladin lookup returned non-JSON body")
+        return LookupResult(reason=REASON_UNAVAILABLE)
+    if _is_api_error(body):
         return LookupResult(reason=REASON_UNAVAILABLE)
 
     items = body.get("item") or []

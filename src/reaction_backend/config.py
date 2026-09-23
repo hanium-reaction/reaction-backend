@@ -187,6 +187,15 @@ class Settings(BaseSettings):
     # 단가(출력 $2.50/1M)로 최악(전부 출력) 잡아도 하루 $5 수준 — 베타 규모 회로차단기로
     # 적당하다. 이 값은 팀이 실사용을 보고 조정할 정책 숫자이지 실측으로 고정된 게 아니다.
     llm_global_daily_token_budget: int = 2_000_000
+    # LLM 호출 1회에 보낼 수 있는 **프롬프트 최대 글자 수** (llm-5). 0 이면 무제한. 넘으면
+    # provider 를 부르지 않고 `reason="budget"` 룰 폴백으로 내린다.
+    #
+    # 예산 가드만으로는 부족한 이유: 가드는 호출 **전** 잔량만 보므로, 사용 0 인 사용자가
+    # 수십만 자를 보내면 한 번에 사용자별 한도를 통째로 넘긴다(실측: 인박스 3만 자 1건 =
+    # tokens_in 21,179, 보통 ~185). 재시도(최대 3회)는 그걸 세 번 쓴다. 60,000 인 이유: 가장 큰
+    # 정상 프롬프트(분해 템플릿 ~15k자 + 자료 2k자 + 변수)와 붙여넣은 자료 답(최대 2만 자)을
+    # 싣는 인터뷰 채점(템플릿 ~9k자)의 두 배 넘는 여유를 둔 폭주 차단선이다.
+    llm_max_prompt_chars: int = 60_000
     # 비싼 엔드포인트(interview turn/plans generate/mandala generate/recovery proposals)의
     # **사용자별 일일 호출 횟수** 상한 (#325). 0 이면 무제한. 위 토큰 예산과 다른 축이다 —
     # 이건 "AI 비용"이 아니라 "이 엔드포인트 자체(오케스트레이션·DB 왕복)를 오늘 몇 번
@@ -277,7 +286,10 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     # 웹 새로고침 뒤에도 하루 동안 로그인 상태가 유지되도록 access token 자체를 24시간 유지한다.
-    # refresh token은 기존 14일을 유지하며, 명시적 로그아웃/계정 삭제 시에는 즉시 차단된다.
+    # refresh token은 기존 14일. 계정 삭제는 access·refresh 모두 즉시 막힌다(사용자 조회 필터).
+    # ⚠️ 로그아웃은 refresh 의 jti 만 **프로세스 메모리**(`auth/revoke.py`)에 등록한다 — 이미
+    # 발급된 access token 은 만료(24시간)까지 살아 있고, 재배포·재기동하면 로그아웃한 refresh
+    # 도 다시 통한다. 영구 차단은 DB 저장소(마이그레이션 필요)가 들어와야 성립한다.
     jwt_access_token_ttl_minutes: int = 24 * 60
     jwt_refresh_token_ttl_days: int = 14
     # refresh 쿠키(`reaction_refresh`, #323)를 심을 경로들. 웹은 Vercel rewrite

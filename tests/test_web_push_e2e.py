@@ -85,21 +85,30 @@ class _Browser:
         return dict(json.loads(raw.decode("utf-8")))
 
 
+def _local_push_service(url: str) -> bool:
+    """이 테스트의 로컬 push 서버만 허용 — 운영 허용 목록(`endpoint.py`)은 https 공개 호스트뿐."""
+    return url.startswith("http://127.0.0.1:")
+
+
 class _Handler(BaseHTTPRequestHandler):
     """push 서비스 역할 — 요청을 붙잡아 두고 지정한 상태코드를 돌려준다."""
 
     received: list[dict[str, Any]] = []
     status_to_return = 201
+    location: str | None = None
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", 0))
         type(self).received.append(
             {
+                "path": self.path,
                 "headers": {k.lower(): v for k, v in self.headers.items()},
                 "body": self.rfile.read(length),
             }
         )
         self.send_response(type(self).status_to_return)
+        if type(self).location:
+            self.send_header("Location", str(type(self).location))
         self.end_headers()
 
     def log_message(self, *args: Any) -> None:
@@ -110,6 +119,7 @@ class _Handler(BaseHTTPRequestHandler):
 def push_service() -> Any:
     _Handler.received = []
     _Handler.status_to_return = 201
+    _Handler.location = None
     server = HTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_address[1]}/push/abc123"
@@ -134,13 +144,18 @@ async def test_provision_workflow_keys_are_usable_by_pywebpush(push_service: str
     browser = _Browser(push_service)
 
     outcome = await WebPushSender(
-        private_key=private_key, subject="mailto:dev@reaction.local"
+        private_key=private_key,
+        subject="mailto:dev@reaction.local",
+        allow_endpoint=_local_push_service,
     ).send(browser.subscription(), PAYLOAD)
 
     assert outcome == "ok"
     assert len(_Handler.received) == 1
     auth = _Handler.received[0]["headers"].get("authorization", "")
     assert public_key in auth, f"VAPID 헤더에 우리 public key 가 없다: {auth[:60]}"
+    # TTL 0 이면 push 서비스가 절전·오프라인 기기 몫을 즉시 버린다 (sched-2)
+    assert _Handler.received[0]["headers"].get("ttl") not in (None, "0")
+    assert _Handler.received[0]["headers"].get("urgency") == "normal"
 
 
 async def test_payload_is_encrypted_and_decryptable_by_the_browser(push_service: str) -> None:
@@ -151,9 +166,11 @@ async def test_payload_is_encrypted_and_decryptable_by_the_browser(push_service:
     private_key, _ = _vapid_keys_like_provision_workflow()
     browser = _Browser(push_service)
 
-    await WebPushSender(private_key=private_key, subject="mailto:dev@reaction.local").send(
-        browser.subscription(), PAYLOAD
-    )
+    await WebPushSender(
+        private_key=private_key,
+        subject="mailto:dev@reaction.local",
+        allow_endpoint=_local_push_service,
+    ).send(browser.subscription(), PAYLOAD)
 
     req = _Handler.received[0]
     assert req["headers"].get("content-encoding") == "aes128gcm"
@@ -173,9 +190,9 @@ async def test_response_status_classification_over_real_http(
     _Handler.status_to_return = status_code
     private_key, _ = _vapid_keys_like_provision_workflow()
 
-    outcome = await WebPushSender(private_key=private_key, subject="mailto:dev@x.local").send(
-        _Browser(push_service).subscription(), PAYLOAD
-    )
+    outcome = await WebPushSender(
+        private_key=private_key, subject="mailto:dev@x.local", allow_endpoint=_local_push_service
+    ).send(_Browser(push_service).subscription(), PAYLOAD)
 
     assert outcome == expected
 
@@ -183,7 +200,9 @@ async def test_response_status_classification_over_real_http(
 async def test_gate_and_real_transport_together(push_service: str) -> None:
     """게이트(잠금 규칙) + 실전송이 함께 도는 통합 경로 — 차단은 전송 시도조차 없어야 한다."""
     private_key, _ = _vapid_keys_like_provision_workflow()
-    sender = WebPushSender(private_key=private_key, subject="mailto:dev@x.local")
+    sender = WebPushSender(
+        private_key=private_key, subject="mailto:dev@x.local", allow_endpoint=_local_push_service
+    )
     browser = _Browser(push_service)
     setting = _setting(browser.subscription())
     send_repo = FakeNotificationSendRepo()
@@ -239,8 +258,31 @@ async def test_gone_clears_subscription_over_real_http(push_service: str) -> Non
         payload=PAYLOAD,
         now=NOW,
         send_repo=FakeNotificationSendRepo(),  # type: ignore[arg-type]
-        sender=WebPushSender(private_key=private_key, subject="mailto:dev@x.local"),
+        sender=WebPushSender(
+            private_key=private_key,
+            subject="mailto:dev@x.local",
+            allow_endpoint=_local_push_service,
+        ),
     )
 
     assert result.reason == "send_gone"
     assert setting.push_subscription is None
+
+
+async def test_redirect_from_push_endpoint_is_not_followed(push_service: str) -> None:
+    """push endpoint 가 30x 로 다른 곳을 가리켜도 따라가지 않는다 (sched-5 / abuse-10).
+
+    requests 는 POST 의 리다이렉트도 기본으로 따라간다 — 허용 목록을 통과한 호스트의 응답이
+    내부 주소로 보내면 서버가 그대로 도달했다(blind SSRF). 이제 30x 는 전송 오류다.
+    """
+    redirect_target = push_service.replace("/push/abc123", "/internal/admin")
+    _Handler.status_to_return = 302
+    _Handler.location = redirect_target
+    private_key, _ = _vapid_keys_like_provision_workflow()
+
+    outcome = await WebPushSender(
+        private_key=private_key, subject="mailto:dev@x.local", allow_endpoint=_local_push_service
+    ).send(_Browser(push_service).subscription(), PAYLOAD)
+
+    assert outcome == "error"
+    assert [r["path"] for r in _Handler.received] == ["/push/abc123"]  # 리다이렉트 대상 미도달

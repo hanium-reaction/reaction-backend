@@ -133,6 +133,82 @@ def test_hard_block_set_is_empty_so_blocked_is_effectively_unreachable() -> None
     assert enforce(everything).blocked is False
 
 
+# ── 사용자 원문 보호 (llm-2) — 두 방향을 같이 고정한다 ───────────────────
+#
+# 사용자가 쓴 문구를 LLM 이 그대로 옮겨 쓴 자리는 치환하지 않는다(api-contract: "사용자 문구는
+# 금지어 필터를 거치지 않는다"). 그러나 AI 가 **스스로 쓴** 금지어는 사용자 입력이 옆에
+# 있어도 전과 똑같이 치환돼야 한다(AGENTS §2) — 아래 두 묶음이 그 경계다.
+
+_MIRROR_ANSWER = "두 번의 창업 실패를 딛고 포기하지 않는 창업가가 되기"
+
+
+def test_protected_user_answer_is_not_rewritten() -> None:
+    """미러 실측: 이 답이 '두 번의 창업 한 번 멈춤를 딛고 잠깐 쉬어가는하지 않는…' 로 저장됐다."""
+    sanitized, blocked, hits = enforce_structured({"v": _MIRROR_ANSWER}, protected=[_MIRROR_ANSWER])
+
+    assert sanitized == {"v": _MIRROR_ANSWER}
+    assert blocked is False
+    assert hits == ()
+
+
+@pytest.mark.parametrize(
+    ("text", "user_text"),
+    [
+        ("포기하지 않는 창업가 되기", _MIRROR_ANSWER),  # 일부만 옮겨 써도 두 어절 이상이면 원문
+        ("'포기하지 않는 창업가'라는 목표를 위해", _MIRROR_ANSWER),  # 따옴표 인용
+        ("포기하지 않고 영어 회화 끝내기 1회차", "포기하지 않고 영어 회화 끝내기"),  # 룰 폴백 모양
+        ("실패 원인 분석하기 1단계", "실패 원인 분석하기"),  # 만다라 축 → 칸
+        ("실패노트 정리", "실패노트"),  # 한 어절짜리 축 제목 전체
+        ("어제는 못했어요", "어제는 못했어요. 그래서 오늘은 30분만"),
+    ],
+)
+def test_user_phrases_copied_by_the_model_are_kept(text: str, user_text: str) -> None:
+    result = enforce(text, protected=[user_text])
+
+    assert result.text == text
+    assert result.changed is False
+    assert result.blocked is False
+
+
+@pytest.mark.parametrize(
+    ("text", "user_text", "expected"),
+    [
+        # 사용자 문구와 한 어절만 우연히 겹치는 AI 문장 — 여전히 치환.
+        ("포기하지 마세요", _MIRROR_ANSWER, "잠깐 쉬어가는하지 마세요"),
+        ("포기할 수 있어요", "포기할 수 없는 꿈", "잠깐 쉬어가는할 수 있어요"),
+        ("실패해도 괜찮아요", "실패해도 다시 하는 사람", "한 번 멈춤해도 괜찮아요"),
+        # 금지어만 달랑 있는 입력은 원문 보호 근거가 못 된다.
+        ("실패 괜찮아요", "실패", "한 번 멈춤 괜찮아요"),
+        # 관계없는 입력.
+        ("실패해도 괜찮아요", "토익 900", "한 번 멈춤해도 괜찮아요"),
+    ],
+)
+def test_ai_authored_banned_words_are_still_replaced(
+    text: str, user_text: str, expected: str
+) -> None:
+    result = enforce(text, protected=[user_text])
+
+    assert result.text == expected
+    assert result.changed is True
+
+
+def test_only_the_ai_part_of_a_mixed_string_is_replaced() -> None:
+    goal = "포기하지 않고 영어 회화 끝내기"
+    result = enforce(f"{goal} 1회차 — 포기하지 마세요", protected=[goal])
+
+    assert result.text == f"{goal} 1회차 — 잠깐 쉬어가는하지 마세요"
+    assert result.hits == ("포기",)
+    assert result.blocked is False
+
+
+@pytest.mark.parametrize("banned", list(BANNED_REPLACEMENTS))
+def test_unrelated_protected_text_changes_nothing(banned: str) -> None:
+    """관계없는 사용자 입력이 있어도 결과는 기존(`protected` 없음)과 한 글자도 다르지 않다."""
+    text = f"어제는 {banned} 상태였어요"
+
+    assert enforce(text, protected=["토익 900 넘기기", "매일 30분 걷기"]) == enforce(text)
+
+
 # ── 실 경로 통합: fallback 도 필터를 거친다 ────────────────────────────
 
 
@@ -149,6 +225,10 @@ async def test_fallback_value_is_also_sanitized() -> None:
     그때 필터가 없으면 같은 구멍이 조용히 열린다. 그래서 여기서는 그 모양을 **모사**한다.
 
     실제 `aiClient.run` 을 태운다(provider 미가용 → fallback 경로). 스텁이 아니다.
+
+    변수(`raw_text="x"`)에 이 문구가 없으니 사용자 원문 보호(llm-2)도 걸리지 않는다 — 폴백이
+    스스로 만든 문구는 여기서처럼 치환된다. 입력을 그대로 되돌려주는 경우는
+    `test_llm_user_text_filters.test_rule_fallback_keeps_the_users_goal_title` 가 본다.
     """
     from pydantic import BaseModel
 

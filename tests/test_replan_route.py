@@ -482,6 +482,24 @@ def test_generate_warns_when_the_calendar_could_not_be_read(
     assert body["warnings"][0] == first_plan.CALENDAR_FAILED_WARNING
 
 
+def test_generate_asks_to_reconnect_when_google_cut_the_calendar(
+    monkeypatch: Any,
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """Google 쪽에서 끊긴 연결 — 첫 계획과 같은 재연결 안내를 맨 앞에 싣는다."""
+    _freeze_now(monkeypatch)
+    _seed_action(fake_action_item_repo, title="백로그", target=date(2026, 7, 16))
+    _stub_calendar(monkeypatch, "reconnect_required")
+
+    resp = client.post("/plans/replan")
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+
+    assert body["blocks"], "캘린더 연결이 끊겼다고 재계획이 죽으면 안 된다"
+    assert body["warnings"][0] == freebusy.CALENDAR_RECONNECT_WARNING
+
+
 def test_generate_is_silent_about_the_calendar_when_not_connected(
     monkeypatch: Any,
     client: TestClient,

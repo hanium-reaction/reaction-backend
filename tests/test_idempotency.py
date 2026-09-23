@@ -4,7 +4,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from reaction_backend.api.exception_handlers import register_exception_handlers
-from reaction_backend.api.middleware.idempotency import IdempotencyMiddleware
+from reaction_backend.api.middleware.idempotency import (
+    IdempotencyMiddleware,
+    InMemoryIdempotencyStore,
+    StoredResponse,
+)
 
 
 def _build_app() -> tuple[FastAPI, dict[str, int]]:
@@ -161,3 +165,31 @@ def test_same_caller_same_key_still_replays() -> None:
     assert first.json() == second.json()
     assert second.headers.get("idempotent-replay") == "true"
     assert calls["n"] == 1
+
+
+# ── 메모리 상한 (auth-12) ──
+#
+# 예전엔 만료 항목을 같은 키로 다시 get 할 때만 지워, 한 번 쓰고 끝나는 키의 응답 본문이
+# 재기동 전까지 계속 쌓였다.
+
+
+def _stored() -> StoredResponse:
+    return StoredResponse(status=200, headers=[], body=b"{}", body_hash="h")
+
+
+def test_expired_entries_are_dropped_on_put() -> None:
+    store = InMemoryIdempotencyStore(ttl_seconds=0, max_entries=100)
+    for i in range(1_000):
+        store.put(f"key-{i}", _stored())
+
+    assert len(store._data) <= 100
+
+
+def test_live_entries_are_capped_oldest_first() -> None:
+    store = InMemoryIdempotencyStore(ttl_seconds=3600, max_entries=10)
+    for i in range(25):
+        store.put(f"key-{i}", _stored())
+
+    assert len(store._data) <= 10
+    assert store.get("key-24") is not None  # 최근 것은 재생된다
+    assert store.get("key-0") is None  # 가장 오래된 것부터 버린다

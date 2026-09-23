@@ -43,6 +43,34 @@ class ProviderValidationError(ProviderError):
     """Structured Output 이 schema 검증을 통과하지 못함."""
 
 
+def _loc_part(part: object) -> str:
+    """`loc` 한 조각 — 스키마가 선언한 이름·인덱스만 그대로 남긴다.
+
+    보통 `loc` 는 필드 이름과 리스트 인덱스뿐이라 값이 새지 않는다. 다만 `dict` 로 선언된
+    필드는 **키를 LLM 이 고른다** — 그 키에 사용자의 자유서술이 실리면 그대로
+    `llm_runs.error`(평문)로 나간다. 우리 스키마의 필드 이름은 전부 ASCII 식별자라,
+    그 모양이 아닌 조각은 값으로 보고 가린다.
+    """
+    if isinstance(part, int):
+        return str(part)
+    text = str(part)
+    return text if text.isascii() and text.isidentifier() else "<key>"
+
+
+def validation_error_summary(exc: ValidationError) -> str:
+    """검증 실패를 **내용 없이** 요약한다 — `필드경로:오류종류` 목록.
+
+    pydantic 의 기본 메시지(`str(exc)`)는 `input_value=…` 로 입력 값을 그대로 싣는다. 그 값은
+    LLM 출력이고, LLM 출력은 사용자의 자유서술 답(건강·개인사)을 옮겨 쓰곤 한다. 이 요약은
+    `llm_runs.error`(평문 컬럼)·로그로 가므로 값은 빼고 어디가 왜 틀렸는지만 남긴다.
+    """
+    parts = [
+        f"{'.'.join(_loc_part(p) for p in err['loc']) or '<root>'}:{err['type']}"
+        for err in exc.errors(include_input=False, include_url=False, include_context=False)
+    ]
+    return f"{exc.title}: " + "; ".join(parts)
+
+
 class ProviderRecitationBlocked(ProviderError):
     """Google 이 **저작권 낭송**(`finish_reason=RECITATION`)으로 응답을 통째로 막았다.
 
@@ -183,15 +211,21 @@ async def generate_structured[T: BaseModel](
     raw_text = _extract_text(response)
     usage = _extract_usage(response, model_name)
 
+    # ⚠️ 두 에러 메시지에 **응답 내용을 싣지 않는다** (llm-8). 이 문자열은 `llm_runs.error`
+    # (평문 컬럼 — input/output 요약과 달리 암호화되지 않는다)와 로그로 간다. 인터뷰 질문·
+    # 추출은 학생의 자유서술 답(건강·개인사)을 그대로 옮겨 쓰곤 해서, 예전처럼 응답 앞 200자나
+    # pydantic 기본 메시지(`input_value=…`)를 실으면 그 내용이 평문으로 남았다.
     try:
         parsed = json.loads(raw_text)
     except json.JSONDecodeError as exc:
-        raise ProviderValidationError(f"non-JSON response: {raw_text[:200]}") from exc
+        raise ProviderValidationError(
+            f"non-JSON response (len={len(raw_text)}, {exc.msg} at {exc.pos})"
+        ) from exc
 
     try:
         validated = schema.model_validate(parsed)
     except ValidationError as exc:
-        raise ProviderValidationError(str(exc)) from exc
+        raise ProviderValidationError(validation_error_summary(exc)) from exc
 
     return validated, usage
 

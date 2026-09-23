@@ -22,7 +22,7 @@ AGENTS.md 준수:
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
@@ -35,10 +35,12 @@ from reaction_backend.orchestrator.plan_scheduler import (
 from reaction_backend.schemas.common import KST
 
 __all__ = [
+    "GoalDeadline",
     "ReplanCandidate",
     "ReplanTuning",
     "ReplannedBlock",
     "build_forward_replan",
+    "build_forward_replan_by_deadline",
     "committed_busy_from_blocks",
     "day_bounds_kst",
     "next_week_start",
@@ -79,6 +81,14 @@ class ReplannedBlock:
     category: str
     start: datetime
     end: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class GoalDeadline:
+    """후보 카드가 속한 목표의 마감 — 그 카드는 이 날까지(포함)만 배치한다 (planA-6)."""
+
+    day: date
+    goal_title: str
 
 
 def next_week_start(today: date) -> date:
@@ -190,6 +200,76 @@ def build_forward_replan(
                 end=pb.interval.end,
             )
         )
+    return blocks, warnings
+
+
+def build_forward_replan_by_deadline(
+    *,
+    window_start: date,
+    horizon_day: date,
+    candidates: Sequence[ReplanCandidate],
+    committed_busy: Sequence[BusyBlock],
+    tuning: ReplanTuning,
+    deadlines: Mapping[uuid.UUID, GoalDeadline],
+) -> tuple[list[ReplannedBlock], list[str]]:
+    """목표 마감이 지평보다 이른 카드는 **자기 마감 안에** 배치한다 (planA-6).
+
+    `build_forward_replan` 하나로 돌리면 모든 후보가 지평 하나([window_start, horizon_day])에
+    균등 분산된다 — 금요일 시험 목표의 남은 세션이 4주짜리 프로젝트 지평에 섞여 절반이 시험
+    뒤로 밀렸고, 아무 경고도 없었다. 그래서 마감이 이른 목표부터 자기 마감까지를 지평으로
+    배치하고, 놓인 블록을 확정 블록으로 회피 대상에 더한 뒤 다음 묶음으로 넘어간다(하루 상한·
+    휴식 여백도 이어서 센다). 마감이 없거나 지평 이후인 카드는 마지막에 전체 지평으로 배치한다.
+
+    마감 전에 다 못 넣은 세션은 **마감 뒤로 밀지 않는다** — 시험 뒤의 공부는 쓸모가 없다.
+    대신 목표 이름과 마감을 짚은 경고 한 줄로 알린다(초안이라 사용자가 보고 고른다).
+
+    마감이 **이미 지난**(재배치 시작일 전) 목표의 카드는 넣을 자리가 마감 안에 없다. 버리면
+    사용자가 계속하려던 일이 말없이 사라지므로 전체 지평에 배치하되, 마감 뒤에 잡았다는 걸
+    목표 단위 한 줄로 알린다(리뷰 반영) — 예전엔 아무 말 없이 마감 뒤로 흩어졌다.
+    """
+    # (마감일, 목표 제목) → 후보. 마감 없는 묶음은 (지평, "") — 마감 묶음은 지평보다 **엄격히**
+    # 이르므로 정렬하면 항상 맨 뒤에 온다.
+    groups: dict[tuple[date, str], list[ReplanCandidate]] = {}
+    overdue: dict[uuid.UUID, GoalDeadline] = {}
+    for c in candidates:
+        d = deadlines.get(c.action_id)
+        if d is not None and window_start <= d.day < horizon_day:
+            key = (d.day, d.goal_title)
+        else:
+            key = (horizon_day, "")
+            if d is not None and d.day < window_start:
+                overdue[c.action_id] = d
+        groups.setdefault(key, []).append(c)
+
+    busy = list(committed_busy)
+    blocks: list[ReplannedBlock] = []
+    warnings: list[str] = []
+    for (day, goal_title), group in sorted(groups.items(), key=lambda kv: kv[0]):
+        placed, group_warnings = build_forward_replan(
+            window_start=window_start,
+            horizon_day=day,
+            candidates=group,
+            committed_busy=busy,
+            tuning=tuning,
+        )
+        blocks.extend(placed)
+        busy.extend(committed_busy_from_blocks([(b.start, b.end) for b in placed]))
+        if goal_title and group_warnings:
+            warnings.append(
+                f"'{goal_title}' 마감({day.month}월 {day.day}일) 전에 빈 시간이 모자라 "
+                f"{len(group_warnings)}개 일정은 넣지 못했어요. 마감 전 일정을 조금 비우거나 "
+                "할 일을 줄여 볼까요?"
+            )
+        else:
+            warnings.extend(group_warnings)
+    # 마감이 지난 목표 — 실제로 마감 뒤에 놓인 카드가 있는 목표만, 목표마다 한 줄.
+    late_goals = {overdue[b.action_id] for b in blocks if b.action_id in overdue}
+    for d in sorted(late_goals, key=lambda g: (g.day, g.goal_title)):
+        warnings.append(
+            f"'{d.goal_title}' 마감({d.day.month}월 {d.day.day}일)이 이미 지나서, 남은 일정은 "
+            "그 뒤로 잡아 뒀어요. 계속할 목표라면 마감을 새로 정해 주세요."
+        )
+    blocks.sort(key=lambda b: b.start)
     return blocks, warnings
 
 
