@@ -31,6 +31,15 @@ LLM 을 몇 번 부르든 상한이 조여지지 않는다. 노드를 하나 더
 trace_id 가 NULL 인 행(요청 밖 — cron·스크립트, 그리고 이 수정 이전에 쌓인 과거 행)은
 `COALESCE` 로 **각각 1회로** 센다. NULL 을 그냥 무시하면 `COUNT(DISTINCT)` 가 그 경로를
 전부 0 으로 세어 **가드가 조용히 꺼진다** — 틀리더라도 과거처럼 빡빡한 쪽으로 틀린다.
+
+⚠️ **module 만으로 세면 상한과 무관한 호출까지 센다 (llm-4).** `planning` module 에는 상한을
+거는 엔드포인트(`/plans/generate`·`/mandala/subgoals`·`/mandala/generate`·`/mandala/next-cycle`·
+`/replan`) 말고도 상한을 **안 거는** 호출이 같이 기록된다 — 자료 검색(`materials_search`,
+그라운딩 예산이 따로 있고 그 예산에 걸려 **호출 없이 거절된 것까지** 행이 남는다),
+마일스톤 초안·학습 방식 추천·만다라 링 재생성. 실측: 계획을 한 번도 안 만든 사용자가 자료
+검색을 20번 눌렀다는 이유로 `/plans/generate` 가 429 로 막혔다. 그래서 그 호출들의 prompt 는
+`_UNGATED_PROMPTS` 로 빼고 센다. 상한을 거는 엔드포인트의 요청은 그대로 1회로 잡힌다 —
+분해·검토·만다라 prompt 가 같은 trace 에 남기 때문이다.
 """
 
 from __future__ import annotations
@@ -38,8 +47,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta
 from http import HTTPStatus
+from typing import Any
 
-from sqlalchemy import String, cast, distinct, func, select
+from sqlalchemy import String, cast, distinct, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.config import get_settings
@@ -72,11 +82,37 @@ def seconds_until_kst_midnight(now: datetime | None = None) -> int:
     return max(int((tomorrow_midnight - current).total_seconds()), 0)
 
 
+# 상한을 걸지 않는 엔드포인트가 같은 module 로 남기는 prompt (llm-4, 모듈 독스트링).
+# `llm_runs.prompt_id` 는 보통 버전 없는 id 지만 프롬프트 렌더 실패 행은 호출부가 넘긴
+# `...@v2` 모양 그대로라 둘 다 뺀다.
+_UNGATED_PROMPTS: dict[str, tuple[str, ...]] = {
+    "planning": (
+        "planning/materials_search",  # POST /plans/materials/search — 그라운딩 예산이 따로 있다
+        "planning/plan_milestones",  # POST /plans/milestones
+        "planning/study_method",  # POST /plans/materials/study-method
+        "planning/mandala_cells_branch",  # POST /plans/mandala/{id}/regenerate-branch
+    ),
+}
+
+
+def _counted_prompt_filter(module: str) -> list[Any]:
+    ungated = _UNGATED_PROMPTS.get(module, ())
+    if not ungated:
+        return []
+    excluded = or_(
+        LlmRun.prompt_id.in_(ungated),
+        *(LlmRun.prompt_id.like(f"{p}@%") for p in ungated),
+    )
+    # prompt_id 가 NULL 인 행은 어디서 왔는지 모른다 — 빡빡한 쪽으로(센다).
+    return [or_(LlmRun.prompt_id.is_(None), not_(excluded))]
+
+
 async def _used_calls_today(session: AsyncSession, *, user_id: uuid.UUID, module: str) -> int:
     """KST 기준 오늘 0시부터 이 user_id × module 이 이 엔드포인트를 **실행한 횟수**.
 
     행 수가 아니라 `DISTINCT trace_id` 다 — 이유는 모듈 독스트링 참조 (#370).
     trace_id 가 NULL 인 행은 `id` 로 대체해 각각 1회로 센다(요청 밖 호출·과거 행).
+    상한을 걸지 않는 엔드포인트의 prompt 는 뺀다(`_UNGATED_PROMPTS`, llm-4).
     """
     start_of_day_kst = now_kst().replace(hour=0, minute=0, second=0, microsecond=0)
     invocation_key = func.coalesce(LlmRun.trace_id, cast(LlmRun.id, String))
@@ -87,6 +123,7 @@ async def _used_calls_today(session: AsyncSession, *, user_id: uuid.UUID, module
             LlmRun.created_at >= start_of_day_kst,
             LlmRun.user_id == user_id,
             LlmRun.module == module,
+            *_counted_prompt_filter(module),
         )
     )
     result = await session.execute(stmt)
@@ -132,7 +169,8 @@ async def enforce(session: AsyncSession, *, user_id: uuid.UUID, module: str) -> 
         label = _MODULE_LABEL_KO.get(module, module)
         raise ApiError(
             ErrorCode.RATE_LIMIT_DAILY_CALLS_EXCEEDED,
-            f"오늘 {label} 요청을 너무 많이 하셨어요. 내일 다시 시도해 주세요.",
+            # 사용자를 탓하지 않는다('너무 많이 하셨어요' → 준비된 횟수를 다 썼다, llm-4).
+            f"오늘 준비된 {label} 횟수를 다 썼어요. 내일 다시 열려요.",
             http_status=HTTPStatus.TOO_MANY_REQUESTS,
             headers={"Retry-After": str(retry_after)},
         ) from exc

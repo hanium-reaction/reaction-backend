@@ -13,16 +13,28 @@
 
 from __future__ import annotations
 
+from datetime import datetime, time, timedelta
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.action_item import ActionItem
 from reaction_backend.db.models.execution_event import ExecutionEvent
+from reaction_backend.db.models.scheduled_block import ScheduledBlock
+from reaction_backend.db.models.user import User
 from reaction_backend.domain import action_cancel
-from reaction_backend.schemas.common import now_kst
-from tests.conftest import DEMO_USER_UUID, FakeActionItemRepo, FakeExecutionRepo
+from reaction_backend.repositories.action_item_repo import ActionItemRepo
+from reaction_backend.schemas.common import KST, now_kst
+from tests.conftest import (
+    DB_AVAILABLE,
+    DEMO_USER_UUID,
+    FakeActionItemRepo,
+    FakeExecutionRepo,
+    FakeScheduledBlockRepo,
+)
 
 
 def _make_card(*, source: str = "inbox", status: str = "planned") -> ActionItem:
@@ -243,3 +255,108 @@ def test_agenda_flag_is_present_on_every_card(
     card = client.get("/today/agenda").json()["cards"][0]
     assert "cancellable" in card
     assert isinstance(card["cancellable"], bool)
+
+
+# ── 블록도 함께 정리된다 (data-2) ─────────────────────────────────────────
+#
+# 카드만 보관하면 블록이 `scheduled` 로 영원히 남았다 — 주간 그리드에 취소한 카드
+# 제목으로 뜨고(눌러 보면 404), 그 시간대는 계속 '바쁨' 이라 다른 블록을 옮겨 오면
+# PLAN_BLOCK_CONFLICT 로 막혔다. 정리해 주는 cron 도 없다.
+
+
+def _block_for(card: ActionItem, start: datetime, *, status: str = "scheduled") -> ScheduledBlock:
+    b = ScheduledBlock()
+    b.id = uuid4()
+    b.user_id = card.user_id
+    b.action_item_id = card.id
+    b.start_at = start
+    b.end_at = start + timedelta(minutes=30)
+    b.block_status = status
+    b.source = "ai_plan"
+    b.external_calendar_event_id = None
+    return b
+
+
+def test_cancel_takes_the_block_off_the_weekly_grid(
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+) -> None:
+    card = _make_card()
+    other = _make_card()
+    fake_action_item_repo.seed(card)
+    fake_action_item_repo.seed(other)
+    week_start = now_kst().date() - timedelta(days=now_kst().weekday())
+    at = datetime.combine(week_start + timedelta(days=1), time(8, 0), tzinfo=KST)
+    ghost = _block_for(card, at)
+    kept = _block_for(other, at + timedelta(hours=2))
+    fake_scheduled_block_repo.seed(ghost, title=card.title, category=card.category)
+    fake_scheduled_block_repo.seed(kept, title=other.title, category=other.category)
+
+    assert client.post(f"/today/actions/action_{card.id}/cancel").status_code == 204
+
+    assert ghost.block_status == "cancelled"
+    assert kept.block_status == "scheduled", "다른 카드의 블록까지 건드렸다"
+    weekly = client.get("/plans/weekly", params={"weekStart": week_start.isoformat()}).json()
+    listed = {b["blockId"] for d in weekly["days"] for b in d["blocks"]}
+    assert f"block_{ghost.id}" not in listed, "취소한 카드의 블록이 주간 그리드에 남았다"
+    assert f"block_{kept.id}" in listed
+
+    # 다시 취소해도 204 — 멱등은 그대로
+    assert client.post(f"/today/actions/action_{card.id}/cancel").status_code == 204
+
+
+pytestmark_db = pytest.mark.skipif(not DB_AVAILABLE, reason="DATABASE_URL not set")
+
+
+@pytestmark_db
+async def test_cancel_sql_cancels_only_this_cards_unfinished_blocks(
+    real_db_session: AsyncSession,
+) -> None:
+    """실 Postgres — UPDATE 의 WHERE 가 이 카드·미종결 블록만 고르는가."""
+    s = real_db_session
+    user_id = uuid4()
+    s.add(User(id=user_id, email=f"cancel+{user_id}@test.local", name="cancel"))
+    await s.flush()
+
+    def _card_row(title: str) -> ActionItem:
+        return ActionItem(
+            id=uuid4(),
+            user_id=user_id,
+            title=title,
+            target_date=now_kst().date(),
+            category="study",
+            source="inbox",
+            status="planned",
+            estimated_minutes=30,
+        )
+
+    card, other = _card_row("취소할 카드"), _card_row("남길 카드")
+    s.add_all([card, other])
+    await s.flush()
+    at = now_kst() + timedelta(days=1)
+    rows = {
+        "scheduled": _block_for(card, at, status="scheduled"),
+        "finished": _block_for(card, at + timedelta(hours=1), status="finished"),
+        "other": _block_for(other, at, status="scheduled"),
+    }
+    s.add_all(rows.values())
+    await s.flush()
+
+    await ActionItemRepo(s).cancel(card)
+    await s.flush()
+
+    statuses = dict(
+        (
+            await s.execute(
+                select(ScheduledBlock.id, ScheduledBlock.block_status).where(
+                    ScheduledBlock.id.in_([b.id for b in rows.values()])
+                )
+            )
+        ).all()
+    )
+    assert statuses[rows["scheduled"].id] == "cancelled"
+    assert statuses[rows["finished"].id] == "finished", "수행 이력 블록을 지웠다"
+    assert statuses[rows["other"].id] == "scheduled", "다른 카드의 블록까지 건드렸다"
+    assert card.archived_at is not None
+    assert card.status == "planned", "취소가 status 를 바꿨다 (AGENTS §2)"

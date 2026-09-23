@@ -53,6 +53,43 @@ def test_today_itself_counts_as_upcoming() -> None:
     assert parse_date("12월 10일", today=_DEC) == "2026-12-10"
 
 
+# 9월 중순 — "내년"·"지난 마감" 이 실제로 물린 시점(배포 미러 실측, 2026-09-18).
+_SEP = date(2026, 9, 18)
+
+
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        ("내년 10월 1일", "2027-10-01"),
+        ("내년 10월 1일까지요", "2027-10-01"),
+        ("올해 12월 1일", "2026-12-01"),
+        ("내후년 3월 1일", "2028-03-01"),
+        ("27년 10월 1일", "2027-10-01"),
+        ("2028/03/01", "2028-03-01"),
+        ("2028.03.01", "2028-03-01"),
+        ("2025/12/25", "2025-12-25"),  # 적힌 연도 그대로 — 지났으면 #231 이 되묻는다
+    ],
+)
+def test_an_explicit_year_is_not_dropped(text: str, want: str) -> None:
+    """⚠️ 연도를 말했으면 그 연도다 — 룰이 LLM 값을 덮으므로(#432) 여기서 버리면 끝이다.
+
+    고치기 전: "내년 10월 1일" → 2026-10-01(2주 뒤), "27년 10월 1일" → 2026-10-01,
+    "2028/03/01" → 2027-03-01. 1년짜리 마감이 2주로 압축돼 계획이 통째로 찌그러졌다.
+    """
+    assert parse_date(text, today=_SEP) == want
+
+
+def test_a_recently_passed_date_stays_in_the_past() -> None:
+    """사흘 전 날짜는 1년 뒤가 아니다 — 지난 날짜로 둬야 지난 마감 되묻기(#231)가 돈다.
+
+    고치기 전: 9/18 에 "9월 15일까지" → 2027-09-15. 계획이 1년짜리로 늘어나고,
+    사용자에게 "이미 지났는데 언제까지로 할까요" 를 물을 기회가 조용히 사라졌다.
+    """
+    assert parse_date("9월 15일까지", today=_SEP) == "2026-09-15"
+    # 한참 지난 날은 여전히 다가오는 해다(12월의 "3월 2일" 과 같은 규칙).
+    assert parse_date("8월 1일", today=_SEP) == "2027-08-01"
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -108,6 +145,45 @@ def test_noon_and_midnight_meridiem_are_not_off_by_twelve() -> None:
     """ "오전 12시" 는 0시, "오후 12시" 는 12시다 — 기계적으로 12를 더하면 24시가 된다."""
     assert parse_time_range("오전 12시부터 오전 6시까지") == {"start": "00:00", "end": "06:00"}
     assert parse_time_range("오후 12시부터 오후 6시까지") == {"start": "12:00", "end": "18:00"}
+
+
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        ("22:00-02:00", {"start": "22:00", "end": "02:00"}),
+        ("23:00~01:00", {"start": "23:00", "end": "01:00"}),
+        ("13:00~02:00", {"start": "13:00", "end": "02:00"}),
+        ("22시-2시", {"start": "22:00", "end": "02:00"}),
+        ("저녁 7시부터 1시까지", {"start": "19:00", "end": "01:00"}),
+    ],
+)
+def test_overnight_windows_are_kept_overnight(text: str, want: dict[str, str]) -> None:
+    """⚠️ 자정을 넘는 구간은 **넘는 구간 그대로**다 — 끝이 시작보다 앞서도 된다.
+
+    FE 시간 다이얼은 자정을 넘는 범위를 못 만들고 '직접 입력' 으로 "22:00-02:00" 처럼
+    적으라고 안내한다. 고치기 전엔 그 02:00 에 12 를 더해 22:00~14:00 이 됐고(실측),
+    계획이 새벽 3시~낮 2시(수업 시간)에 잡혔다. `_activity_awake_min` 은 넘김을 이미 안다.
+    """
+    assert parse_time_range(text) == want
+
+
+def test_single_digit_clock_end_still_reads_as_afternoon() -> None:
+    """ "9:00-6:00" 은 9시~6시(18:00)다 — 두 자리로 쓴 "06:00" 만 24시간제로 본다.
+
+    `:` 표기를 전부 24시간제로 읽으면 흔한 '9시~6시' 적기가 21시간짜리 밤샘 구간이 된다.
+    """
+    assert parse_time_range("9:00-6:00") == {"start": "09:00", "end": "18:00"}
+    assert parse_time_range("9:00-06:00") == {"start": "09:00", "end": "06:00"}
+    assert parse_time_range("22:00-2:00") == {"start": "22:00", "end": "02:00"}
+
+
+def test_night_twelve_oclock_is_midnight_not_noon() -> None:
+    """ "밤 12시" 는 자정이다 — 낮 12시로 읽으면 "아침 9시부터 밤 12시까지" 가 3시간이 된다."""
+    assert parse_time_range("아침 9시부터 밤 12시까지") == {"start": "09:00", "end": "24:00"}
+    assert parse_time_range("저녁 6시부터 밤 12시까지") == {"start": "18:00", "end": "24:00"}
+    assert parse_time_range("밤 12시부터 오전 6시까지") == {"start": "00:00", "end": "06:00"}
+    # "오후 12시" · "낮 12시" 는 여전히 정오다.
+    assert parse_time_range("낮 12시부터 오후 3시까지") == {"start": "12:00", "end": "15:00"}
 
 
 @pytest.mark.parametrize("text", ["아침에", "저녁쯤", "", "시간 되는 대로"])

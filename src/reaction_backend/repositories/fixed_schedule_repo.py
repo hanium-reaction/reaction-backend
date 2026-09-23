@@ -13,7 +13,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.db.models.fixed_schedule import FixedSchedule
@@ -90,18 +90,6 @@ class FixedScheduleRepo:
     async def soft_delete(self, schedule: FixedSchedule) -> None:
         schedule.archived_at = datetime.now(UTC)
         await self._session.flush()
-
-    async def count_active(self, user_id: UUID) -> int:
-        stmt = (
-            select(func.count())
-            .select_from(FixedSchedule)
-            .where(
-                FixedSchedule.user_id == user_id,
-                FixedSchedule.archived_at.is_(None),
-            )
-        )
-        result = await self._session.execute(stmt)
-        return int(result.scalar_one())
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_db)]

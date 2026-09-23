@@ -15,11 +15,21 @@
 `banned_words.enforce()` 와 달리 **치환하지 않고 reject 만 한다** — "당신이 게을러서"
 에서 "당신이"만 지워도 문장이 안 살아난다. 안전하게 고칠 수 없는 문제는 통과시키지
 않는 게 낫다(Tool Executor 가 fallback 으로 분기).
+
+**사용자가 쓴 말은 걸지 않는다 (llm-1).** 마커가 부분문자열이라 사용자 목표 제목
+'UX 디자이너가 되기'(디자이**너가**)·'똑똑하게 돈 관리하기'·'자격증 네가지 따기' 가 LLM
+출력에 그대로 옮겨지면 매번 reject 됐다 — 트리거가 사용자 자신의 제목이라 몇 번을 다시
+만들어도 'N회차' 자리표시자 계획만 나왔다(미러 실측). 그래서 `protected`(이 호출의 프롬프트
+변수)를 옮겨 쓴 자리의 마커는 세지 않는다. 판정 규칙은 금지어 필터와 같은
+`safety/user_echo` 이고, **AI 가 스스로 쓴 마커는 전과 똑같이 걸린다**('똑똑하게 복습해요').
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
+
+from reaction_backend.safety.user_echo import UserText
 
 # 근거 A2 — 회복 카드 문구(if_clause/then_clause/rationale 등)는 전부 "~해볼까요" 청유형
 # 이라 2인칭 대명사가 문법적으로 불필요하다. 등장하면 대부분 "당신이 ~해서" 류의 비난이다.
@@ -39,27 +49,50 @@ SELF_ESTEEM_BOOST_MARKERS: tuple[str, ...] = (
 _ALL_MARKERS: tuple[str, ...] = PERSON_ATTRIBUTION_MARKERS + SELF_ESTEEM_BOOST_MARKERS
 
 
-def scan(text: str) -> tuple[str, ...]:
-    """치환 없이 매칭만 — `banned_words.scan` 과 같은 계약(순서 보존, 중복 제거)."""
+def scan(text: str, *, protected: Iterable[str] | UserText = ()) -> tuple[str, ...]:
+    """치환 없이 매칭만 — `banned_words.scan` 과 같은 계약(순서 보존, 중복 제거).
+
+    `protected` 가 있으면 사용자 원문을 옮겨 쓴 자리의 마커는 빼고, 나머지 자리에 한 번이라도
+    나오면 잡는다. 비우면 기존 동작(부분문자열 매칭) 그대로.
+    """
+    echo = protected if isinstance(protected, UserText) else UserText.of(protected)
     seen: list[str] = []
     for marker in _ALL_MARKERS:
-        if marker in text and marker not in seen:
+        if marker in seen or marker not in text:
+            continue
+        if not echo or any(
+            not echo.covers(text, i, i + len(marker)) for i in _find_all(text, marker)
+        ):
             seen.append(marker)
     return tuple(seen)
 
 
-def check_structured(payload: Any) -> tuple[bool, tuple[str, ...]]:
+def _find_all(text: str, marker: str) -> list[int]:
+    positions: list[int] = []
+    i = text.find(marker)
+    while i != -1:
+        positions.append(i)
+        i = text.find(marker, i + 1)
+    return positions
+
+
+def check_structured(
+    payload: Any, *, protected: Iterable[str] | UserText = ()
+) -> tuple[bool, tuple[str, ...]]:
     """dict/list/scalar 트리를 재귀적으로 스캔. `banned_words.enforce_structured` 와
     달리 치환된 트리는 반환하지 않는다 — 애초에 안전하게 고칠 방법이 없어서 reject 만
     한다.
 
+    `protected` 는 `scan()` 과 같다 — 사용자 원문을 옮겨 쓴 자리만 세지 않는다.
+
     반환: (blocked, 누적 hits — 중복 제거, 최초 발견 순서).
     """
+    echo = protected if isinstance(protected, UserText) else UserText.of(protected)
     hits: list[str] = []
 
     def _walk(node: Any) -> None:
         if isinstance(node, str):
-            for h in scan(node):
+            for h in scan(node, protected=echo):
                 if h not in hits:
                     hits.append(h)
         elif isinstance(node, list | tuple):

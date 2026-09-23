@@ -54,7 +54,7 @@ from reaction_backend.orchestrator.weekly_review import ExecutionStat, RecoveryS
 from reaction_backend.repositories.action_item_repo import get_action_item_repo
 from reaction_backend.repositories.consent_repo import get_consent_repo
 from reaction_backend.repositories.daily_brief_repo import get_daily_brief_repo
-from reaction_backend.repositories.execution_repo import get_execution_repo
+from reaction_backend.repositories.execution_repo import ExecutionRepo, get_execution_repo
 from reaction_backend.repositories.fixed_schedule_repo import get_fixed_schedule_repo
 from reaction_backend.repositories.goal_repo import get_goal_repo
 from reaction_backend.repositories.habit_instance_repo import get_habit_instance_repo
@@ -122,10 +122,13 @@ def _ensure_test_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("GEMINI_API_KEY", "")
 
     from reaction_backend.config import get_settings
+    from reaction_backend.integrations.google_calendar import freebusy
     from reaction_backend.safety.encryption import get_cipher
 
     get_settings.cache_clear()
     get_cipher.cache_clear()
+    # 화면용 캘린더 조회 캐시는 프로세스 전역이다 — 테스트 사이에 결과가 새지 않게.
+    freebusy.clear_screen_cache()
     yield
     get_settings.cache_clear()
     get_cipher.cache_clear()
@@ -256,9 +259,6 @@ class FakeTimePolicyRepo:
         policy.archived_at = datetime.now(UTC)
         policy.is_active = False
 
-    async def count_active(self, user_id: UUID) -> int:
-        return len(await self.list_active(user_id))
-
 
 class FakeFixedScheduleRepo:
     def __init__(self) -> None:
@@ -315,9 +315,6 @@ class FakeFixedScheduleRepo:
     async def soft_delete(self, schedule: FixedSchedule) -> None:
         schedule.archived_at = datetime.now(UTC)
 
-    async def count_active(self, user_id: UUID) -> int:
-        return len(await self.list_active(user_id))
-
 
 class FakeNotificationRepo:
     def __init__(self) -> None:
@@ -359,6 +356,15 @@ class FakeNotificationRepo:
     async def set_push_subscription(
         self, setting: NotificationSetting, subscription: dict[str, Any]
     ) -> NotificationSetting:
+        # 실 repo 와 같은 규칙 — 같은 endpoint 를 가진 다른 사용자의 구독은 지운다 (sched-4).
+        endpoint = subscription.get("endpoint")
+        for other in self._items.values():
+            if (
+                other.user_id != setting.user_id
+                and other.push_subscription is not None
+                and other.push_subscription.get("endpoint") == endpoint
+            ):
+                other.push_subscription = None
         setting.push_subscription = subscription
         return setting
 
@@ -438,13 +444,23 @@ class FakeWebPushSender:
     def __init__(self, outcome: str = "ok") -> None:
         self.outcome = outcome
         self.calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        # 호출별 전달 옵션(ttl·urgency) — 게이트가 클래스별 값을 싣는지 검증용 (sched-2)
+        self.options: list[dict[str, Any]] = []
 
     @property
     def is_configured(self) -> bool:
         return self.outcome != "unconfigured"
 
-    async def send(self, subscription: dict[str, Any], payload: dict[str, Any]) -> str:
+    async def send(
+        self,
+        subscription: dict[str, Any],
+        payload: dict[str, Any],
+        *,
+        ttl: int | None = None,
+        urgency: str | None = None,
+    ) -> str:
         self.calls.append((subscription, payload))
+        self.options.append({"ttl": ttl, "urgency": urgency})
         return self.outcome
 
 
@@ -521,10 +537,10 @@ class FakeGoalRepo:
         return None
 
     async def get_mandala_node(self, user_id: UUID, node_id: UUID) -> Any | None:
-        """실 repo 와 동일 — goal 소유권 + `tree_kind='mandala'` + 미보관만 통과."""
+        """실 repo 와 동일 — goal 소유권(보관된 목표 제외) + `tree_kind='mandala'` + 미보관만."""
         for goal_id, nodes in self._nodes.items():
             goal = self._items.get(goal_id)
-            if goal is None or goal.user_id != user_id:
+            if goal is None or goal.user_id != user_id or goal.archived_at is not None:
                 continue
             for n in nodes:
                 if (
@@ -605,6 +621,7 @@ class FakeGoalRepo:
         deadline: date | None = None,
         priority_level: int | None = None,
         goal_tier: str | None = None,
+        clear_deadline: bool = False,
     ) -> Goal:
         if title is not None:
             goal.title = title
@@ -612,6 +629,9 @@ class FakeGoalRepo:
             goal.category = category
         if deadline is not None:
             goal.deadline = deadline
+        elif clear_deadline:
+            # `None` 은 "안 바꿈" 이라 명시적 해제는 따로 받는다(PATCH `deadline: null`).
+            goal.deadline = None
         if priority_level is not None:
             goal.priority_level = priority_level
         if goal_tier is not None:
@@ -626,16 +646,43 @@ class FakeGoalRepo:
         goal.archived_at = datetime.now(UTC)
         goal.status = "archived"
 
+    async def archive_nodes(self, nodes: Any) -> None:
+        now = datetime.now(UTC)
+        for n in nodes:
+            if n.archived_at is None:
+                n.archived_at = now
+
     async def expire_stale_proposed(self, *, before: datetime, archived_at: datetime) -> int:
         # 실 GoalRepo.expire_stale_proposed 의 WHERE 를 손으로 그대로 옮긴다 (#178) —
         # status=='proposed' + archived_at IS NULL + created_at < before, 셋 다 있어야 한다.
+        # 살아 있는 만다라 축이 승격한 목표는 빼다(goals-7) — 실 repo 의 NOT EXISTS 와 같은 판정.
+        promoted = {
+            getattr(nd, "promoted_goal_id", None)
+            for nodes in self._nodes.values()
+            for nd in nodes
+            if getattr(nd, "tree_kind", "plan") == "mandala" and nd.archived_at is None
+        }
         n = 0
         for g in self._items.values():
-            if g.status == "proposed" and g.archived_at is None and g.created_at < before:
+            if (
+                g.status == "proposed"
+                and g.archived_at is None
+                and g.created_at < before
+                and g.id not in promoted
+            ):
                 g.status = "archived"
                 g.archived_at = archived_at
                 n += 1
         return n
+
+    async def live_goal_ids(self, user_id: UUID, goal_ids: Any) -> set[UUID]:
+        return {
+            gid
+            for gid in goal_ids
+            if (g := self._items.get(gid)) is not None
+            and g.user_id == user_id
+            and g.archived_at is None
+        }
 
 
 class FakeHabitRepo:
@@ -712,15 +759,26 @@ class FakeHabitRepo:
         habit.consecutive_miss_weeks = 0
         return habit
 
+    async def reject_penalty(self, habit: Habit, *, decided_at: datetime) -> Habit:
+        habit.last_penalty_decision = "rejected"
+        habit.last_penalty_evaluated_at = decided_at
+        return habit
+
     async def soft_delete(self, habit: Habit) -> None:
         habit.archived_at = datetime.now(UTC)
+
+    async def archive_linked_to_nodes(self, user_id: UUID, node_ids: Any) -> int:
+        wanted = set(node_ids)
+        n = 0
+        for h in self._items.values():
+            if h.user_id == user_id and h.goal_node_id in wanted and h.archived_at is None:
+                h.archived_at = datetime.now(UTC)
+                n += 1
+        return n
 
     def seed(self, habit: Habit) -> None:
         """테스트 보조 — habit 직접 주입."""
         self._items[habit.id] = habit
-
-    async def count_active(self, user_id: UUID) -> int:
-        return len(await self.list_active(user_id))
 
 
 class FakeHabitInstanceRepo:
@@ -744,7 +802,29 @@ class FakeHabitInstanceRepo:
         return items
 
     async def get_for_user(self, user_id: UUID, instance_id: UUID) -> HabitInstance | None:
-        return self._items.get(instance_id)
+        instance = self._items.get(instance_id)
+        if instance is not None and self._habits is not None:
+            # 실 repo 는 habits 조인으로 소유자·보관을 본다 — 습관을 아는 경우에만 흉내 낸다.
+            habit = self._habits._items.get(instance.habit_id)
+            if habit is not None and (habit.user_id != user_id or habit.archived_at is not None):
+                return None
+        return instance
+
+    async def ensure_for_week(self, user_id: UUID, week_start: date) -> None:
+        if self._habits is None:
+            return
+        for habit in await self._habits.list_active(user_id):
+            await self.create_or_get_for_week(habit.id, week_start, habit.target_count)
+
+    async def decrement_done(self, instance: HabitInstance) -> HabitInstance:
+        instance.done_count = max(instance.done_count - 1, 0)
+        return instance
+
+    async def sync_week_target(self, habit_id: UUID, week_start: date, target_count: int) -> None:
+        instance = await self.get_for_week(habit_id, week_start)
+        if instance is not None:
+            instance.target_count = target_count
+            instance.done_count = min(instance.done_count, target_count)
 
     async def list_recent_for_habit(
         self, habit_id: UUID, before_week: date, limit: int = 3
@@ -801,6 +881,9 @@ class FakeInboxRepo:
 
     def __init__(self) -> None:
         self._items: dict[UUID, InboxItem] = {}
+        # 실 repo 는 "이 항목에서 만든 카드가 있는가" 를 action_items 로 확인한다(restore).
+        # fake 는 action repo 를 모르므로 convert-to-action 으로 옮긴 id 를 따로 기억한다.
+        self._promoted_to_action: set[UUID] = set()
 
     async def list_by_status(self, user_id: UUID, status: str | None = None) -> list[InboxItem]:
         mine = [i for i in self._items.values() if i.user_id == user_id]
@@ -818,6 +901,10 @@ class FakeInboxRepo:
             return None
         return i
 
+    async def get_by_id_for_update(self, user_id: UUID, inbox_id: UUID) -> InboxItem | None:
+        # 행 잠금은 fake 에서 의미가 없다 — 실 SQL 의 FOR UPDATE 는 test_inbox_repo_sql 이 고정.
+        return await self.get_by_id(user_id, inbox_id)
+
     async def get_by_id_any(self, user_id: UUID, inbox_id: UUID) -> InboxItem | None:
         i = self._items.get(inbox_id)
         if i is None or i.user_id != user_id:
@@ -828,7 +915,10 @@ class FakeInboxRepo:
         if item.archived_at is None:
             return item
         item.archived_at = None
-        item.status = "classified" if item.ai_category_guess is not None else "captured"
+        if item.promoted_goal_id is not None or item.id in self._promoted_to_action:
+            item.status = "promoted"
+        else:
+            item.status = "classified" if item.ai_category_guess is not None else "captured"
         return item
 
     async def create(
@@ -885,6 +975,7 @@ class FakeInboxRepo:
 
     async def mark_promoted_to_action(self, item: InboxItem) -> InboxItem:
         item.status = "promoted"
+        self._promoted_to_action.add(item.id)
         return item
 
     async def soft_delete(self, item: InboxItem) -> None:
@@ -938,10 +1029,23 @@ class FakeActionItemRepo:
         return sorted(items, key=lambda a: a.priority)
 
     async def list_by_date(self, user_id: UUID, target_date: date) -> list[ActionItem]:
+        """target_date 가 그날이거나 그날(KST) 시작하는 비-cancelled 블록이 있는 카드 (실 repo
+        규칙 미러 — critic-2). 블록은 `link_blocks` 로 연결된 block repo 에서 본다."""
+        session_today: set[UUID] = set()
+        if self._block_repo is not None:
+            for b in self._block_repo._blocks.values():
+                if (
+                    b.user_id == user_id
+                    and b.block_status != "cancelled"
+                    and b.start_at.astimezone(KST).date() == target_date
+                ):
+                    session_today.add(b.action_item_id)
         items = [
             a
             for a in self._items.values()
-            if a.user_id == user_id and a.target_date == target_date and a.archived_at is None
+            if a.user_id == user_id
+            and (a.target_date == target_date or a.id in session_today)
+            and a.archived_at is None
         ]
         return sorted(items, key=lambda a: a.priority)
 
@@ -970,9 +1074,17 @@ class FakeActionItemRepo:
         return a
 
     async def cancel(self, action: ActionItem) -> None:
-        """`archived_at` 만 세팅 — status 는 건드리지 않는다 (실 repo 규칙 미러)."""
+        """`archived_at` + 미종결 블록 cancel — status 는 건드리지 않는다 (실 repo 규칙 미러)."""
         if action.archived_at is None:
             action.archived_at = datetime.now(UTC)
+        if self._block_repo is not None:
+            for b in self._block_repo._blocks.values():
+                if (
+                    b.user_id == action.user_id
+                    and b.action_item_id == action.id
+                    and b.block_status in ("scheduled", "started")
+                ):
+                    b.block_status = "cancelled"
 
     async def find_adopted_step(
         self,
@@ -1574,6 +1686,45 @@ class FakeExecutionRepo:
         )
         return {e.action_item_id: e.id for e in rows}
 
+    async def list_carried_over_actions(
+        self,
+        user_id: UUID,
+        *,
+        today: date,
+        day_start: datetime,
+        since: datetime,
+        now: datetime,
+    ) -> list[ActionItem]:
+        """자정을 넘겨 이어 보여줄 카드 (실 repo 규칙 미러 — today-3).
+
+        진행 중 실행이 회고 창 안(`reflectable_from() >= since`)이거나, 어제 시작한 미종결
+        블록이 아직 안 끝났거나(`start_at < day_start`, `end_at > now`). 보관 제외.
+        """
+        running = {
+            e.action_item_id
+            for e in self._executions.values()
+            if e.user_id == user_id
+            and e.completion_status == "in_progress"
+            and max(e.plan_start_at, e.actual_start_at or e.plan_start_at) >= since
+        }
+        crossing = {
+            b.action_item_id
+            for b in self._blocks.values()
+            if b.user_id == user_id
+            and b.block_status in ("scheduled", "started")
+            and b.start_at < day_start
+            and b.end_at > now
+        }
+        found = [
+            a
+            for a in self._actions.values()
+            if a.user_id == user_id
+            and a.target_date < today
+            and a.archived_at is None
+            and (a.id in running or a.id in crossing)
+        ]
+        return sorted(found, key=lambda a: (a.target_date, a.priority))
+
     async def find_open_block(self, user_id: UUID, action_item_id: UUID) -> ScheduledBlock | None:
         candidates = [
             b
@@ -1641,6 +1792,22 @@ class FakeExecutionRepo:
     async def get_block(self, block_id: UUID) -> ScheduledBlock | None:
         return self._blocks.get(block_id)
 
+    # 종결 전이는 **실 구현을 그대로** 쓴다(today-13) — 이 fake 의 조회 메서드만 불러서
+    # 동작하므로, 복제본을 두면 라우트 테스트가 실 로직이 아닌 사본을 검증하게 된다.
+    close_execution = ExecutionRepo.close_execution
+
+    async def cancel_remaining_sessions(self, execution: ExecutionEvent) -> None:
+        """완료 체크인 → 이 카드의 남은 scheduled 세션 블록 cancel (실 repo 규칙 미러 — critic-2)."""
+        for b in self._blocks.values():
+            if (
+                b.user_id == execution.user_id
+                and b.action_item_id == execution.action_item_id
+                and b.id != execution.scheduled_block_id
+                and b.block_status == "scheduled"
+                and b.source != "user_edit"
+            ):
+                b.block_status = "cancelled"
+
     async def list_blocks_starting_between(
         self, *, start: datetime, end: datetime
     ) -> list[ScheduledBlock]:
@@ -1652,6 +1819,8 @@ class FakeExecutionRepo:
                 continue
             action = self._actions.get(b.action_item_id)
             if action is None or action.archived_at is not None:
+                continue
+            if action.status in ("done", "over_done"):  # 끝낸 카드엔 '곧 시작' 없음 (critic-2)
                 continue
             b.action_item = action  # 실 repo 는 joinedload — payload(제목)용
             found.append(b)
@@ -1680,8 +1849,7 @@ class FakeExecutionRepo:
             for p in self._interruptions.values()
             if p.execution_id == execution_id
             and p.interruption_type == "user_pause"
-            and p.resume_delay_minutes is None
-            and p.resumed_after_interrupt is None
+            and p.resume_delay_minutes is None  # 6h cron 의 False 표시와 무관 (실 repo 미러)
         ]
         return max(opens, key=lambda p: p.created_at) if opens else None
 
@@ -1798,10 +1966,15 @@ class FakeReviewRepo:
         self._exec_stats: list[ExecutionStat] = []
         self._recovery_stats: list[RecoveryStat] = []
         self._top_failure_contexts: list[TopFailureContext] = []
+        # 시작 안 하고 지나간 블록 수 — 실 SQL 은 `test_review_repo_sql.py` 가 검증한다.
+        self._unstarted_blocks = 0
 
     # ── 테스트 보조 seed ──
     def seed_execution(self, stat: ExecutionStat) -> None:
         self._exec_stats.append(stat)
+
+    def seed_unstarted_blocks(self, count: int) -> None:
+        self._unstarted_blocks = count
 
     def seed_recovery(self, stat: RecoveryStat) -> None:
         self._recovery_stats.append(stat)
@@ -1836,6 +2009,11 @@ class FakeReviewRepo:
         self, user_id: UUID, d0: date, d1: date
     ) -> list[TopFailureContext]:
         return list(self._top_failure_contexts)
+
+    async def count_unstarted_blocks(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime, *, now: datetime
+    ) -> int:
+        return self._unstarted_blocks
 
     async def upsert_weekly(
         self,
@@ -1878,6 +2056,8 @@ class FakeScheduledBlockRepo:
         self._blocks: dict[UUID, ScheduledBlock] = {}
         self._meta: dict[UUID, tuple[str, str, UUID | None]] = {}
         self._action_repo: FakeActionItemRepo | None = None
+        # 블록 → 마지막 체크인 결과 (실 repo 는 execution_events 를 읽는다).
+        self._completion: dict[UUID, str] = {}
 
     def link_actions(self, action_repo: FakeActionItemRepo) -> None:
         """재계획 조회(list_scheduled_between)가 ActionItem 을 되찾도록 action repo 를 연결."""
@@ -1906,6 +2086,15 @@ class FakeScheduledBlockRepo:
             and start_dt <= b.start_at < end_dt
         ]
         return sorted(rows, key=lambda r: r[0].start_at)
+
+    async def completion_by_block(self, user_id: UUID, block_ids: Any) -> dict[UUID, str]:
+        """블록별 마지막 체크인 결과 — `_completion` 에 시드한 값(진행 중은 실 repo 처럼 제외)."""
+        wanted = set(block_ids)
+        return {
+            bid: status
+            for bid, status in self._completion.items()
+            if bid in wanted and status != "in_progress" and self._blocks[bid].user_id == user_id
+        }
 
     async def get_block(self, user_id: UUID, block_id: UUID) -> ScheduledBlock | None:
         b = self._blocks.get(block_id)
@@ -1960,6 +2149,19 @@ class FakeScheduledBlockRepo:
             for b in self._blocks.values()
             if b.user_id == user_id
             and b.id != exclude_block_id
+            and b.block_status != "cancelled"
+            and b.start_at < end_dt
+            and b.end_at > start_dt
+        ]
+
+    async def list_busy_between(
+        self, user_id: UUID, start_dt: datetime, end_dt: datetime
+    ) -> list[ScheduledBlock]:
+        """[start_dt, end_dt) 와 겹치는 모든 비-cancelled 블록 (실 repo 규칙 미러)."""
+        return [
+            b
+            for b in self._blocks.values()
+            if b.user_id == user_id
             and b.block_status != "cancelled"
             and b.start_at < end_dt
             and b.end_at > start_dt
@@ -2221,10 +2423,16 @@ class FakePrivacyRepo:
 
     def __init__(self) -> None:
         self.anonymized_user: UUID | None = None
+        self.purged_user: UUID | None = None
 
     async def anonymize_user(self, user_id: UUID) -> int:
         self.anonymized_user = user_id
         return 3
+
+    async def purge_account_text(self, user_id: UUID) -> int:
+        """계정 삭제 전용 추가 마스킹 (auth-9) — 호출 기록만."""
+        self.purged_user = user_id
+        return 5
 
 
 class FakeUserRepo:
@@ -2271,15 +2479,27 @@ class FakeUserRepo:
             and getattr(u, "anonymized_at", None) is None
         ]
 
+    async def touch_login(self, user: User, profile: GoogleProfile) -> User:
+        """실 repo 와 같은 규칙 — 이름·활동 시각 갱신 + 익명화 플래그 해제 (auth-1)."""
+        user.name = profile.name
+        user.last_active_at = datetime.now(UTC)
+        if getattr(user, "is_anonymized", False) or getattr(user, "anonymized_at", None):
+            user.is_anonymized = False
+            user.anonymized_at = None
+        return user
+
+    async def touch_last_active(self, user: User) -> None:
+        user.last_active_at = datetime.now(UTC)
+
     async def upsert_from_google(self, profile: GoogleProfile) -> User:
         existing = self._by_email.get(profile.email)
         if existing is not None:
-            existing.name = profile.name
-            return existing
+            return await self.touch_login(existing, profile)
         u = User()
         u.id = uuid4()
         u.email = profile.email
         u.name = profile.name
+        u.last_active_at = datetime.now(UTC)
         u.timezone = "Asia/Seoul"
         u.onboarding_state = "WELCOME"
         u.tone_mode = None

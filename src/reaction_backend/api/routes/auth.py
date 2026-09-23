@@ -8,7 +8,9 @@ Issue #16 실구현:
 
 Issue #323 — refresh token httpOnly 쿠키 (웹 새로고침 시 재로그인 문제):
 - `/auth/google` 이 `refreshToken` 을 응답 본문(그대로 유지, 네이티브·이행기간용)과
-  `reaction_refresh` httpOnly 쿠키(`Path=/auth`, `SameSite=Lax`) 로 **둘 다** 내려준다.
+  `reaction_refresh` httpOnly 쿠키(`SameSite=Lax`) 로 **둘 다** 내려준다. 쿠키는
+  `settings.refresh_cookie_paths`(기본 `/auth`·`/api/auth`) **각각**에 심는다 — 웹은 Vercel
+  rewrite 로 `/api/auth/...` 를 부르기 때문이다.
 - `/auth/refresh`·`/auth/logout` 은 본문에 토큰이 없으면 쿠키로 폴백 — 어느 쪽이든
   하나만 있으면 동작한다.
 - 네이티브(capacitor://localhost)는 크로스오리진이라 쿠키를 안 쓰고 지금처럼 본문만
@@ -16,15 +18,17 @@ Issue #323 — refresh token httpOnly 쿠키 (웹 새로고침 시 재로그인 
 
 Issue #324 — 신규 가입 게이트 (기존 사용자 로그인은 완전히 영향받지 않는다):
 - `SIGNUPS_ENABLED=false` — 긴급 차단, 재배포 없이 끌 수 있다(`toggle-signups.yml`).
-- 가입 인원 상한(`SIGNUP_CAPACITY`, 기본 30) 도달 시 차단.
-- 유효·미사용 초대코드 필수(`scripts/manage_invite_codes.py` 로 발급).
+- 가입 인원 상한(`SIGNUP_CAPACITY`) 도달 시 차단 — 미설정이면 상한 없음(v2.29 기본값).
+- `SIGNUP_INVITE_REQUIRED=true` 일 때만 유효·미사용 초대코드 필수(`scripts/manage_invite_codes.py`
+  로 발급). 기본은 꺼져 있다(v2.29) — Google 계정이면 누구나 가입한다.
 - 세 검사 + user 생성 + 코드 소진을 **전역 advisory lock** 으로 감싸 동시 가입 경합을
-  막는다(`_signup_lock`) — 30명 상한과 "코드 1회용"을 둘 다 지키려면 "카운트 확인 →
+  막는다(`_signup_lock`) — 인원 상한과 "코드 1회용"을 둘 다 지키려면 "카운트 확인 →
   insert" 사이에 다른 요청이 끼어들지 못해야 한다.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -71,15 +75,15 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # `_common.user_agent_lock` 의 "5s 대기 후 409" 복잡도가 필요 없다 — 그냥 블로킹 대기.
 _SIGNUP_LOCK_KEY = -(2**62)
 
-# refresh token httpOnly 쿠키 (#323, FE #246 후속) — `Path=/auth` 로 스코프해
-# `/auth/refresh`·`/auth/logout` 호출에만 실린다. 네이티브 앱(capacitor://localhost)은
+# refresh token httpOnly 쿠키 (#323, FE #246 후속) — 인증 경로로 스코프해
+# `/auth/refresh`·`/auth/logout` 호출에만 실린다. 경로는 설정(`refresh_cookie_paths`)이다 —
+# 직접 접속은 `/auth`, 웹은 Vercel rewrite 를 거쳐 `/api/auth` 라서 둘 다에 심는다. 네이티브 앱(capacitor://localhost)은
 # 크로스오리진이라 쿠키를 안 쓰고 지금처럼 본문으로만 받는다 — 이미 Keystore 로
 # 안전해서 굳이 SameSite=None 의 CSRF 노출을 감수할 이유가 없다(이슈가 명시한 "단순한
 # 쪽" 선택). 그래서 로그인 응답은 본문 `refreshToken` 도 그대로 유지한다(이행 기간 겸
 # 네이티브용) — 웹은 앞으로 쿠키만 읽어도 되고, `/auth/refresh`·`/auth/logout` 은 본문이
 # 없으면 쿠키로 폴백한다.
 _REFRESH_COOKIE_NAME = "reaction_refresh"
-_REFRESH_COOKIE_PATH = "/auth"
 
 
 @asynccontextmanager
@@ -96,7 +100,9 @@ async def _signup_lock(session: AsyncSession) -> AsyncIterator[None]:
 def _to_profile(user: User) -> UserProfile:
     """User ORM → API UserProfile (ADR-0001 §3.1: API 식별자에 `user_` prefix).
 
-    tone_mode 는 신규 user 에서 None 가능 — 빈 문자열로 fallback (FE 는 기본 톤).
+    tone_mode 는 신규 user(인터뷰 전)에서 None — **그대로 null 로 내린다**. 예전엔 여기서만
+    빈 문자열로 덮어 `GET /settings` 의 같은 값(null)과 갈렸다(재검증 P4). FE 는 두 경로
+    모두 "고른 톤이 있으면 그 칸을 켠다"로만 읽어 동작은 같고, 값의 뜻이 정직해진다.
     """
     return UserProfile(
         user_id=f"user_{user.id}",
@@ -104,7 +110,7 @@ def _to_profile(user: User) -> UserProfile:
         name=user.name,
         timezone=user.timezone,
         onboarding_state=user.onboarding_state,
-        tone_mode=user.tone_mode or "",
+        tone_mode=user.tone_mode,  # type: ignore[arg-type]
     )
 
 
@@ -113,13 +119,14 @@ async def _validate_new_signup(
     *,
     user_repo: UserRepo,
     invite_repo: InviteCodeRepo,
-) -> InviteCode:
+) -> InviteCode | None:
     """신규 가입 전 3중 검사 — 순수 검증, 부수효과 없음(코드를 아직 소비하지 않는다).
 
     순서: 긴급 스위치 → 인원 상한 → 초대코드. "지금 가입을 받고 있는가"가 코드 유효성
-    보다 근본적인 조건이라 앞에 둔다. 통과 시 미소진 상태의 코드 행을 반환한다 — 호출자가
-    `_signup_lock` 을 쥔 채 user 를 만든 뒤 그 id 로 `mark_used` 를 마저 부른다(코드
-    소비는 user 존재가 전제라 여기서 끝낼 수 없다).
+    보다 근본적인 조건이라 앞에 둔다. 인원 상한·초대코드는 설정이 켜졌을 때만 본다.
+    초대코드가 필요하면 미소진 상태의 코드 행을 반환한다 — 호출자가 `_signup_lock` 을
+    쥔 채 user 를 만든 뒤 그 id 로 `mark_used` 를 마저 부른다(코드 소비는 user 존재가
+    전제라 여기서 끝낼 수 없다). 필요 없으면 `None` — 보낸 코드도 소비하지 않는다.
     """
     settings = get_settings()
     if not settings.signups_enabled:
@@ -129,14 +136,17 @@ async def _validate_new_signup(
             http_status=HTTPStatus.FORBIDDEN,
         )
 
-    signed_up = await user_repo.count_signed_up()
-    if signed_up >= settings.signup_capacity:
-        raise ApiError(
-            ErrorCode.AUTH_SIGNUP_CAPACITY_REACHED,
-            "지금은 자리가 다 찼어요.",
-            http_status=HTTPStatus.FORBIDDEN,
-        )
+    if settings.signup_capacity is not None:
+        signed_up = await user_repo.count_signed_up()
+        if signed_up >= settings.signup_capacity:
+            raise ApiError(
+                ErrorCode.AUTH_SIGNUP_CAPACITY_REACHED,
+                "지금은 자리가 다 찼어요.",
+                http_status=HTTPStatus.FORBIDDEN,
+            )
 
+    if not settings.signup_invite_required:
+        return None
     if not body.invite_code:
         raise ApiError(
             ErrorCode.AUTH_INVALID_INVITE_CODE,
@@ -163,16 +173,18 @@ async def _validate_new_signup(
 
 
 def _set_refresh_cookie(response: Response, token: str, expires_at: datetime) -> None:
+    cfg = get_settings()
     max_age = max(int((expires_at - datetime.now(UTC)).total_seconds()), 0)
-    response.set_cookie(
-        key=_REFRESH_COOKIE_NAME,
-        value=token,
-        max_age=max_age,
-        path=_REFRESH_COOKIE_PATH,
-        httponly=True,
-        secure=get_settings().app_env != "local",
-        samesite="lax",
-    )
+    for path in cfg.refresh_cookie_paths:
+        response.set_cookie(
+            key=_REFRESH_COOKIE_NAME,
+            value=token,
+            max_age=max_age,
+            path=path,
+            httponly=True,
+            secure=cfg.app_env != "local",
+            samesite="lax",
+        )
 
 
 @router.post("/google")
@@ -186,9 +198,12 @@ async def login_with_google(
     """Google id_token 검증 → user upsert → JWT 발급.
 
     기존 사용자(email 이미 존재)는 게이트를 전혀 거치지 않는다 — lock 도 신규 가입
-    판정 이후에만 잡는다(로그인은 이미 30명 안에 있던 사람이라 경합 대상이 아니다).
+    판정 이후에만 잡는다(로그인은 이미 가입한 사람이라 경합 대상이 아니다).
     """
-    claims = verify_google_id_token(body.id_token)
+    # 검증은 Google 공개키를 HTTPS 로 가져오는 **동기** 호출이다 — 이벤트 루프에서 그대로
+    # 부르면 그동안 다른 모든 사용자의 요청이 멈춘다(단일 워커). 스레드로 내린다.
+    claims = await asyncio.to_thread(verify_google_id_token, body.id_token)
+    profile = GoogleProfile(email=claims.email, name=claims.name)
     existing = await user_repo.get_by_email(claims.email)
 
     if existing is None:
@@ -200,17 +215,15 @@ async def login_with_google(
                 code_row = await _validate_new_signup(
                     body, user_repo=user_repo, invite_repo=invite_repo
                 )
-                user = await user_repo.upsert_from_google(
-                    GoogleProfile(email=claims.email, name=claims.name),
-                )
-                await invite_repo.mark_used(code_row, used_by_user_id=user.id)
-                await session.commit()
+                user = await user_repo.upsert_from_google(profile)
+                if code_row is not None:
+                    await invite_repo.mark_used(code_row, used_by_user_id=user.id)
             else:
-                user = existing
+                user = await user_repo.touch_login(existing, profile)
+            await session.commit()
     else:
-        user = await user_repo.upsert_from_google(
-            GoogleProfile(email=claims.email, name=claims.name),
-        )
+        # 이미 읽은 행을 그대로 갱신한다 — upsert_from_google 은 email 로 한 번 더 조회한다.
+        user = await user_repo.touch_login(existing, profile)
         await session.commit()
 
     access = issue_access_token(user.id)
@@ -228,6 +241,7 @@ async def refresh_access_token(
     body: RefreshRequest,
     revoke_store: Annotated[RevokeStore, Depends(get_revoke_store)],
     user_repo: Annotated[UserRepo, Depends(get_user_repo)],
+    session: Annotated[AsyncSession, Depends(get_db)],
     reaction_refresh: Annotated[str | None, Cookie()] = None,
 ) -> AccessToken:
     """refresh → 새 access. refresh 회전 X (refresh 자체 재발급 안 함).
@@ -242,6 +256,9 @@ async def refresh_access_token(
     대신 `UserRepo.get_by_id` 의 `archived_at IS NULL` 필터로 막는다. `get_current_user`
     가 이미 같은 필터로 access token 을 막고 있으니, 여기도 같은 기준을 적용해야
     "삭제된 계정은 refresh 로도 못 살아난다"가 성립한다.
+
+    통과하면 `last_active_at` 을 갱신한다 — 90일 비활성 판정이 "마지막 로그인"이 아니라
+    "마지막 사용"을 기준으로 하게(auth-6).
     """
     token = body.refresh_token or reaction_refresh
     if token is None:
@@ -273,12 +290,19 @@ async def refresh_access_token(
             http_status=HTTPStatus.UNAUTHORIZED,
         )
 
-    if await user_repo.get_by_id(decoded.user_id) is None:
+    user = await user_repo.get_by_id(decoded.user_id)
+    if user is None:
         raise ApiError(
             ErrorCode.AUTH_INVALID_TOKEN,
             "사용자를 찾을 수 없습니다.",
             http_status=HTTPStatus.UNAUTHORIZED,
         )
+
+    # 활동 기록 — 90일 비활성 익명화(잠금 §1.4)의 기준값. 로그인에서만 쓰면 refresh token
+    # 14일 동안 앱을 써도 값이 안 움직여, 실제 비활성 76~78일 만에 익명화될 수 있었다.
+    # access token 이 24시간이라 쓰는 동안은 하루 한 번 이상 여기를 지난다.
+    await user_repo.touch_last_active(user)
+    await session.commit()
 
     new_access = issue_access_token(decoded.user_id)
     return AccessToken(access_token=new_access.token)
@@ -296,7 +320,9 @@ async def logout(
     쿠키는 토큰 유효성과 무관하게 항상 지운다(#323) — 브라우저에 남은 쿠키를 정리하는
     게 목적이라, revoke 대상 jti 를 못 찾는 경우(토큰 없음/깨짐)에도 해야 할 일이다.
     """
-    response.delete_cookie(key=_REFRESH_COOKIE_NAME, path=_REFRESH_COOKIE_PATH)
+    # 쿠키는 (이름, 경로) 쌍으로 따로 저장된다 — 심은 경로마다 지워야 남지 않는다.
+    for path in get_settings().refresh_cookie_paths:
+        response.delete_cookie(key=_REFRESH_COOKIE_NAME, path=path)
 
     token = body.refresh_token or reaction_refresh
     if token is None:

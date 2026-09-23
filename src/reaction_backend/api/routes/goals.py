@@ -14,19 +14,20 @@ from __future__ import annotations
 from datetime import date
 from http import HTTPStatus
 from typing import Annotated, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
+from reaction_backend.api.routes.habits import HABIT_ID_PREFIX, to_habit_schema
 from reaction_backend.db.models.goal import GOAL_CATEGORY_VALUES
 from reaction_backend.db.models.goal import Goal as GoalModel
 from reaction_backend.db.models.goal_node import GoalNode as GoalNodeModel
-from reaction_backend.db.models.habit import Habit as HabitModel
 from reaction_backend.db.session import get_db
 from reaction_backend.orchestrator import (
     first_plan_adapter,
+    goal_policy,
     inbox_resources,
     mandala_adapter,
     ultimate_adapter,
@@ -40,6 +41,7 @@ from reaction_backend.repositories.habit_instance_repo import (
 from reaction_backend.repositories.habit_repo import (
     HabitRepo,
     current_week_start_kst,
+    first_week_target,
     get_habit_repo,
 )
 from reaction_backend.repositories.inbox_repo import InboxRepo, get_inbox_repo
@@ -75,16 +77,17 @@ from reaction_backend.schemas.ultimate_goal import UltimateGoalRequest
 router = APIRouter(prefix="/goals", tags=["goals"])
 
 _ID_PREFIX = "goal_"
-_TIER_LIMITS: dict[str, int] = {"focus": 3, "maintain": 5}  # parked 자유 (DevBaseline §1.4)
 _CATEGORIES = frozenset(GOAL_CATEGORY_VALUES)
 
 
-def _to_schema(
-    goal: GoalModel, *, promoted_from_axis: str | None = None, has_plan: bool = True
-) -> Goal:
-    """`has_plan` 기본값이 `True` 인 이유: 단건 응답(create/update/park)은 계획 트리를
-    조회하지 않는다. 기본값을 `False` 로 두면 방금 만든 목표가 **미계획으로 잘못 칠해진다** —
-    목록 새로고침 전까지. 모르는 것을 "없다" 로 단정하지 않는다."""
+def _to_schema(goal: GoalModel, *, has_plan: bool, promoted_from_axis: str | None = None) -> Goal:
+    """`has_plan` 은 **모든 호출부가 직접** 정한다(기본값 없음).
+
+    예전엔 기본값 `True` 로 단건 응답(create/update/park)이 계획 트리를 안 묻고 "있음" 이라고
+    답했다 — 방금 만든 목표(정의상 계획이 없다)도, 계획 없는 목표를 고친 직후도 '미계획' 배지와
+    '이 목표 계획 세우기' 버튼이 사라졌다. 이제 새로 만든 목표는 `False`, 기존 목표는
+    `_has_plan` 으로 한 번 묻는다(목록과 같은 판정).
+    """
     return Goal(
         goal_id=f"{_ID_PREFIX}{goal.id}",
         title=goal.title,
@@ -98,6 +101,25 @@ def _to_schema(
         is_ultimate=goal.is_ultimate,
         promoted_from_axis=promoted_from_axis,
     )
+
+
+async def _has_plan(repo: GoalRepo, goal: GoalModel) -> bool:
+    """이 목표에 살아 있는 계획 트리가 있나 — `GET /goals` 와 같은 판정(인덱스 한 번)."""
+    return goal.id in await repo.goal_ids_with_plan([goal.id])
+
+
+async def _sync_mandala_center(repo: GoalRepo, goal: GoalModel) -> None:
+    """궁극목표 문장이 바뀌면 만다라 **중앙 칸**(core) 제목도 같은 문장으로.
+
+    중앙 칸 제목은 만다라 승인 때 한 번 복사되고 끝이라(`mandala_adapter.persist_mandala`),
+    목표 화면에서 문장을 고치면 만다라 머리(`statement`)와 가운데 칸이 서로 다른 글을
+    보여줬다. 일반 목표·만다라가 없는 궁극목표는 할 일이 없다.
+    """
+    if not goal.is_ultimate:
+        return
+    for n in await repo.list_nodes(goal.id, tree_kind="mandala"):
+        if n.parent_node_id is None:
+            n.title = goal.title
 
 
 def _parse_goal_id(goal_id: str) -> UUID:
@@ -118,41 +140,31 @@ def _not_found() -> ApiError:
 
 
 def _parse_deadline(value: str | None) -> date | None:
-    if value is None:
+    """`YYYY-MM-DD` → date. 비었으면(`null`·공백) 마감 없음.
+
+    문구에 필드 이름(`deadline`)을 싣지 않는다 — FE 가 message 를 그대로 띄운다.
+    """
+    if value is None or not value.strip():
         return None
     try:
-        return date.fromisoformat(value)
+        return date.fromisoformat(value.strip())
     except ValueError as e:
         raise ApiError(
             ErrorCode.COMMON_VALIDATION_ERROR,
-            "deadline 형식이 올바르지 않아요 (YYYY-MM-DD).",
+            "마감일은 2026-12-31 처럼 연-월-일로 적어 주세요.",
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="deadline",
         ) from e
 
 
 def _validate_category(category: str) -> None:
+    # 허용값 목록(영문 enum)을 문구에 싣지 않는다 — FE 가 message 를 그대로 띄운다.
     if category not in _CATEGORIES:
         raise ApiError(
             ErrorCode.COMMON_VALIDATION_ERROR,
-            f"category 값이 올바르지 않아요 ({sorted(_CATEGORIES)} 중에서).",
+            "목표 분류 값이 올바르지 않아요.",
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="category",
-        )
-
-
-async def _enforce_tier_limit(repo: GoalRepo, user_id: UUID, tier: str) -> None:
-    """Focus ≤ 3 / Maintain ≤ 5 한도. Parked 는 자유 (한도 X)."""
-    limit = _TIER_LIMITS.get(tier)
-    if limit is None:
-        return
-    current = await repo.count_by_tier(user_id, tier)
-    if current + 1 > limit:
-        raise ApiError(
-            ErrorCode.GOAL_TIER_LIMIT_EXCEEDED,
-            f"{tier.capitalize()} 목표는 최대 {limit}개까지 가질 수 있어요.",
-            http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
-            field="goalTier",
         )
 
 
@@ -209,8 +221,9 @@ async def create_goal(
     안에서 돌기 때문에 자료 삽입이 실패해도 목표 생성은 그대로 성공한다.
     """
     _validate_category(body.category)
-    await _enforce_tier_limit(repo, user.id, body.goal_tier)
     deadline = _parse_deadline(body.deadline)
+    # 세기 전에 사용자 단위 lock — '추가' 두 번 탭이 둘 다 통과하던 경로(goal_policy 참고).
+    await goal_policy.enforce_tier_limit(session, repo, user.id, body.goal_tier)
 
     goal = await repo.create(
         user_id=user.id,
@@ -226,13 +239,14 @@ async def create_goal(
     )
     await session.commit()
     await session.refresh(goal)
-    return _to_schema(goal)
+    return _to_schema(goal, has_plan=False)  # 방금 만든 목표 — 계획 트리가 있을 수 없다
 
 
 @router.post("/ultimate", status_code=status.HTTP_201_CREATED)
 async def upsert_ultimate_goal(
     body: UltimateGoalRequest,
     user: CurrentUser,
+    repo: RepoDep,
     interview_repo: InterviewRepoDep,
     session: SessionDep,
 ) -> Goal:
@@ -253,9 +267,10 @@ async def upsert_ultimate_goal(
         goal = await ultimate_adapter.materialize_ultimate_goal(
             session, user_id=user.id, outcome=outcome
         )
+        await _sync_mandala_center(repo, goal)  # 재인터뷰로 다듬은 문장 → 중앙 칸도
         await session.commit()
         await session.refresh(goal)
-    return _to_schema(goal)
+    return _to_schema(goal, has_plan=await _has_plan(repo, goal))
 
 
 @router.patch("/{goal_id}")
@@ -266,17 +281,23 @@ async def update_goal(
     repo: RepoDep,
     session: SessionDep,
 ) -> Goal:
-    """목표 부분 수정. tier 변경 시 한도 재검사, category 변경 시 값 검증(#326)."""
+    """목표 부분 수정. tier 변경 시 한도 재검사, category 변경 시 값 검증(#326).
+
+    `deadline` 은 **보냈는지**로 가른다 — 빼면 그대로, `null`(또는 빈 문자열)을 보내면 마감
+    해제. 예전엔 `null` 을 "안 바꿈" 으로 읽어 마감을 지울 방법이 없었다(FE 는 칸을 비우면
+    `null` 을 보낸다).
+    """
     goal = await repo.get_by_id(user.id, _parse_goal_id(goal_id))
     if goal is None:
         raise _not_found()
 
     if body.goal_tier is not None and body.goal_tier != goal.goal_tier:
-        await _enforce_tier_limit(repo, user.id, body.goal_tier)
+        await goal_policy.enforce_tier_limit(session, repo, user.id, body.goal_tier)
     if body.category is not None:
         _validate_category(body.category)
 
-    deadline = _parse_deadline(body.deadline) if body.deadline is not None else None
+    deadline_sent = "deadline" in body.model_fields_set
+    deadline = _parse_deadline(body.deadline) if deadline_sent else None
     updated = await repo.update(
         goal,
         title=body.title,
@@ -284,10 +305,13 @@ async def update_goal(
         deadline=deadline,
         priority_level=body.priority_level,
         goal_tier=body.goal_tier,
+        clear_deadline=deadline_sent and deadline is None,
     )
+    if body.title is not None:
+        await _sync_mandala_center(repo, updated)
     await session.commit()
     await session.refresh(updated)
-    return _to_schema(updated)
+    return _to_schema(updated, has_plan=await _has_plan(repo, updated))
 
 
 @router.get("/{goal_id}/nodes")
@@ -333,7 +357,7 @@ async def list_goal_nodes(goal_id: str, user: CurrentUser, repo: RepoDep) -> Goa
 # ─────────────────────────────────────────────────────────────────────────────
 
 _NODE_PREFIX = "node_"
-_HABIT_PREFIX = "habit_"  # api/routes/habits.py 의 _HABIT_PREFIX 와 반드시 같은 값
+_HABIT_PREFIX = HABIT_ID_PREFIX  # api/routes/habits.py 가 원본 — 두 곳에서 따로 정의하지 않는다
 
 
 def _milestone_not_found() -> ApiError:
@@ -408,19 +432,6 @@ def _to_mandala_node(
     )
 
 
-def _to_habit_schema(h: HabitModel) -> HabitSchema:
-    return HabitSchema(
-        habit_id=f"{_HABIT_PREFIX}{h.id}",
-        title=h.title,
-        category=h.category,
-        frequency_per_week=h.frequency_per_week,
-        minutes_per_session=h.minutes_per_session,
-        time_preference=h.time_preference,
-        priority_level=h.priority_level,
-        goal_node_id=f"{_NODE_PREFIX}{h.goal_node_id}" if h.goal_node_id is not None else None,
-    )
-
-
 @router.get("/{goal_id}/mandala")
 async def get_mandala_tree(
     goal_id: str, user: CurrentUser, repo: RepoDep, session: SessionDep
@@ -442,18 +453,29 @@ async def get_mandala_tree(
     )
 
     root = next((n for n in rows if n.parent_node_id is None), None)
+    # 승격한 목표를 지웠으면(보관) 축의 "이미 학기 목표로 올린 축" 배지도 내린다 — FK 의
+    # SET NULL 은 hard delete 에만 걸려 soft 보관 뒤에도 id 가 남아 있다. 다시 승격하면
+    # `promote` 가 새 목표를 만든다(그쪽도 살아 있는 목표만 멱등으로 본다).
+    live_promoted = await repo.live_goal_ids(
+        user.id, [n.promoted_goal_id for n in rows if n.promoted_goal_id is not None]
+    )
     nodes = []
     for n in rows:
         node_progress, node_coverage = progress_map.get(n.id, (None, None))
         linked_habit = habits_by_node.get(n.id)
-        nodes.append(
-            _to_mandala_node(
-                n,
-                progress=node_progress,
-                coverage=node_coverage,
-                habit_id=linked_habit.id if linked_habit is not None else None,
-            )
+        node = _to_mandala_node(
+            n,
+            progress=node_progress,
+            coverage=node_coverage,
+            habit_id=linked_habit.id if linked_habit is not None else None,
         )
+        if n.promoted_goal_id is not None and n.promoted_goal_id not in live_promoted:
+            node = node.model_copy(update={"promoted_goal_id": None})
+        if n.parent_node_id is None:
+            # 중앙 칸은 **목표 문장 그대로** — 이 수정 전에 문장을 고쳐 둘이 어긋난 트리도
+            # 머리(`statement`)와 같은 글을 보여준다(쓰기 없음).
+            node = node.model_copy(update={"title": goal.title})
+        nodes.append(node)
     root_progress, root_coverage = progress_map.get(root.id, (0.0, 0.0)) if root else (0.0, 0.0)
     return MandalaTreeResponse(
         goal_id=goal_id,
@@ -565,6 +587,11 @@ async def update_mandala_node(
             )
         node.title = body.title
         touched = True
+        if node.depth == 0:
+            # 중앙 칸 = 궁극목표 문장 — 한쪽만 바꾸면 머리와 가운데가 다시 어긋난다.
+            goal = await repo.get_by_id(user.id, node.goal_id)
+            if goal is not None:
+                goal.title = body.title
     if body.why_text is not None:
         node.why_text = body.why_text
         touched = True
@@ -645,6 +672,10 @@ async def promote_mandala_node(
     이미 승격된 축을 다시 누르면(그 Goal 이 아직 살아있으면) **새로 만들지 않고 그 행을
     그대로 반환**(멱등) — U1 이 "사용자당 1개" 를 지키는 것과 같은 이유로, 같은 축을 두
     번 승격해 중복 목표가 쌓이면 안 된다.
+
+    멱등 판정(`promoted_goal_id`)은 tier lock **뒤에서** 읽는다 — 먼저 읽으면 두 번 탭한 두
+    요청이 모두 "아직 승격 전" 을 보고 같은 축으로 목표를 두 개 만든다. 목표 만들기 규칙은
+    `/plans/mandala/next-cycle` 과 한 벌이다(`goal_policy.promote_axis`).
     """
     node = await _load_mandala_node(repo, user.id, node_id)
     if node.depth != 1:
@@ -654,31 +685,13 @@ async def promote_mandala_node(
             http_status=HTTPStatus.UNPROCESSABLE_ENTITY,
             field="nodeId",
         )
-    if node.promoted_goal_id is not None:
-        existing = await repo.get_by_id(user.id, node.promoted_goal_id)
-        if existing is not None:
-            return _to_schema(existing, promoted_from_axis=node.title)
-
-    await _enforce_tier_limit(repo, user.id, body.goal_tier)
-    goal = GoalModel()
-    # id 는 flush 로 받지 않고 여기서 채운다(PR5 `persist_mandala` 와 같은 이유) — 곧바로
-    # `node.promoted_goal_id = goal.id` 로 써야 하고, DB 왕복(flush) 없이도 항상 값이 있어야
-    # 한다(테스트의 fake session 포함).
-    goal.id = uuid4()
-    goal.user_id = user.id
-    goal.title = node.title
-    goal.category = "other"  # 만다라 축엔 category 개념이 없다 — 승격 후 PATCH 로 사용자가 조정
-    goal.goal_tier = body.goal_tier
-    goal.status = "proposed"
-    goal.priority_level = 3
-    goal.is_ultimate = False  # 승격된 goal 은 축의 파생물이지 궁극목표 자체가 아니다
-    goal.why_now = node.why_text
-    session.add(goal)
-    await session.flush()
-    node.promoted_goal_id = goal.id
+    goal, created = await goal_policy.promote_axis(
+        session, repo, node=node, user_id=user.id, goal_tier=body.goal_tier
+    )
+    has_plan = False if created else await _has_plan(repo, goal)  # 방금 만든 잠정 목표는 계획 없음
     await session.commit()
     await session.refresh(goal)
-    return _to_schema(goal, promoted_from_axis=node.title)
+    return _to_schema(goal, promoted_from_axis=node.title, has_plan=has_plan)
 
 
 @router.post("/mandala/nodes/{node_id}/habit", status_code=status.HTTP_201_CREATED)
@@ -711,7 +724,10 @@ async def link_mandala_habit(
         )
     existing = await habit_repo.get_active_by_goal_node(user.id, node.id)
     if existing is not None:
-        return _to_habit_schema(existing)
+        current = await instance_repo.get_for_week(existing.id, current_week_start_kst())
+        return to_habit_schema(
+            existing, current_instance_id=current.id if current is not None else None
+        )
 
     habit = await habit_repo.create(
         user_id=user.id,
@@ -724,15 +740,15 @@ async def link_mandala_habit(
         goal_node_id=node.id,
     )
     # 등록 시점에 이번 주 instance 도 함께 — POST /habits 와 같은 이유(주 중간 등록이 다음
-    # 월요일까지 오늘 화면에 안 보이면 안 된다).
-    await instance_repo.create_or_get_for_week(
+    # 월요일까지 오늘 화면에 안 보이면 안 된다). 목표는 남은 날만큼(`first_week_target`).
+    instance = await instance_repo.create_or_get_for_week(
         habit_id=habit.id,
         week_start=current_week_start_kst(),
-        target_count=body.frequency_per_week,
+        target_count=first_week_target(body.frequency_per_week),
     )
     await session.commit()
     await session.refresh(habit)
-    return _to_habit_schema(habit)
+    return to_habit_schema(habit, current_instance_id=instance.id)
 
 
 @router.delete("/mandala/nodes/{node_id}/habit", status_code=status.HTTP_204_NO_CONTENT)
@@ -765,7 +781,7 @@ async def park_goal(goal_id: str, user: CurrentUser, repo: RepoDep, session: Ses
     parked = await repo.park(goal)
     await session.commit()
     await session.refresh(parked)
-    return _to_schema(parked)
+    return _to_schema(parked, has_plan=await _has_plan(repo, parked))
 
 
 @router.post("/{goal_id}/complete")
@@ -821,7 +837,12 @@ async def complete_goal(
     elif goal.status == "completed":
         # 되돌리면 다시 한도 집계 대상이 된다 — 여기서 안 재면 "완료 → 새 목표 생성 →
         # 완료 해제" 세 번으로 Focus≤3 을 넘길 수 있다(AGENTS §1 잠금 결정).
-        await _enforce_tier_limit(repo, user.id, goal.goal_tier)
+        await goal_policy.enforce_tier_limit(session, repo, user.id, goal.goal_tier)
+    else:
+        # 되돌리기는 **완료한 목표만**. 그 외(`active`·`proposed`)에 `completed=false` 는 아무것도
+        # 바꾸지 않는 멱등 no-op 다 — 예전엔 `proposed` 가 여기서 `active` 로 나와, 계획 승인
+        # (HITL)과 tier 한도를 둘 다 건너뛰고 승격됐다.
+        return _to_schema(goal, has_plan=await _has_plan(repo, goal))
     updated = await repo.set_completed(goal, completed=body.completed)
     if body.completed:
         # 끝냈다고 확인했는데 남은 카드가 계속 뜨면 "이제 그만 알려줘" 가 안 지켜진다.
@@ -844,15 +865,48 @@ async def complete_goal(
         )
     await session.commit()
     await session.refresh(updated)
-    return _to_schema(updated)
+    return _to_schema(updated, has_plan=await _has_plan(repo, updated))
 
 
 @router.delete("/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_goal(goal_id: str, user: CurrentUser, repo: RepoDep, session: SessionDep) -> None:
-    """목표 soft delete (`archived_at` + `status=archived`)."""
+async def delete_goal(
+    goal_id: str,
+    user: CurrentUser,
+    repo: RepoDep,
+    habit_repo: HabitRepoDep,
+    session: SessionDep,
+) -> None:
+    """목표 soft delete (`archived_at` + `status=archived`) — 그 목표가 남긴 것도 함께 멈춘다.
+
+    예전엔 목표 행만 보관했다. 오늘 화면·주간 캘린더·아침 브리프·`pre_card` 알림은 전부
+    `action_items` 를 목표 상태와 무관하게 읽으므로, "정말 삭제" 를 누른 목표의 카드가 다음
+    날에도 그대로 떴고(취소도 "계획에 묶여 있어" 거절됐다) 재계획이 다음 주로 다시 옮겼다.
+
+    정리는 **완료 경로와 같은 함수·같은 두 축**이다(`complete_goal` 참고) — 손대지 않은 예정
+    카드는 `archived_at`, 그 블록은 `cancelled`. 시작·완료·실패한 카드와 사용자가 시간을
+    옮긴(`user_edit`) 카드는 보존된다(규칙을 두 벌로 가르지 않으려고 그대로 따른다).
+
+    궁극목표면 만다라도 닫는다 — 트리를 보관하고, 그 칸에서 만든 반복형 습관도 보관한다.
+    안 그러면 볼 화면이 없는 습관이 매주 오늘 화면에 뜨고 빈도 조정 제안까지 온다.
+    축에서 승격한 목표는 독립 목표라 그대로 남는다(다시 세우기의 승계 규칙과 같다).
+    전부 soft 이고(AGENTS §2) 한 트랜잭션이다.
+    """
     goal = await repo.get_by_id(user.id, _parse_goal_id(goal_id))
     if goal is None:
         raise _not_found()
+    await first_plan_adapter.supersede_previous_plan(
+        session,
+        user_id=user.id,
+        goal_id=goal.id,
+        include_mandala=True,
+        include_recovery=True,
+    )
+    if goal.is_ultimate:
+        mandala_nodes = await repo.list_nodes(goal.id, tree_kind="mandala")
+        await habit_repo.archive_linked_to_nodes(
+            user.id, [n.id for n in mandala_nodes if n.depth == 2]
+        )
+        await repo.archive_nodes(mandala_nodes)
     await repo.soft_delete(goal)
     await session.commit()
     return None

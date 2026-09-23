@@ -7,6 +7,8 @@
 - 재연결은 새 행이 아니라 기존 행 갱신 — `user_id` 유니크 + soft delete 라 INSERT 는 깨진다.
 - 갱신 응답에 refresh_token 이 없어도 **기존 값을 잃지 않는다** (Google 은 최초 동의 때만 준다).
 - 해제는 멱등 — 연결이 없어도 204. 우리 DB 를 먼저 확정하고 원격 회수는 그 뒤에.
+- 해제는 기능 스위치와 무관하다 — 동의 철회를 501 로 막지 않는다.
+- Google 쪽에서 끊긴 연결은 앱에서 해제한 것과 구분돼 `needsReconnect` 로 드러난다.
 - 스코프는 freebusy 하나 (제목·장소를 읽지 않는다).
 
 실 Google 왕복은 하지 않는다 — `oauth.exchange_code`/`revoke` 를 stub 한다.
@@ -189,6 +191,22 @@ def test_connect_is_501_when_credentials_are_missing(
     assert response.status_code == 501
 
 
+def test_connection_is_501_when_the_token_encryption_key_is_missing(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """키 없이 켜 두면 사용자가 Google 동의를 다 마친 뒤 저장에서 500 이 난다.
+
+    500 은 CORS 헤더도 못 달아 FE 에는 원인 모를 네트워크 오류로만 보인다(로컬에서 실제로
+    겪음). 저장할 수 없으면 상태 조회부터 501 로 닫아 동의 화면을 열지 않게 한다.
+    """
+    _enable(monkeypatch)
+    monkeypatch.setattr(get_settings(), "column_encryption_key", "", raising=False)
+    monkeypatch.delenv("COLUMN_ENCRYPTION_KEY", raising=False)
+
+    assert client.get("/calendar/connect").status_code == 501
+    assert client.post("/calendar/connect", json={"code": "x"}).status_code == 501
+
+
 def test_connect_maps_oauth_failure_to_422(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """만료·재사용된 code — Google 의 error 문자열을 사용자에게 노출하지 않는다."""
     _enable(monkeypatch)
@@ -231,7 +249,7 @@ class _FakeResponse:
         return self._payload
 
 
-def test_5xx_is_retryable_but_4xx_is_not() -> None:
+def test_5xx_is_retryable_but_invalid_grant_is_not() -> None:
     """일시적 장애로 사용자에게 재연결을 요구하면 안 된다 — 그 구분이 `retryable` 이다."""
     with pytest.raises(oauth.OAuthError) as server_error:
         oauth._raise_for_error(_FakeResponse(503, {}))
@@ -336,7 +354,12 @@ def test_status_without_a_connection_is_not_connected(
     response = client.get("/calendar/connect")
 
     assert response.status_code == 200
-    assert response.json() == {"provider": "google", "connected": False, "scopes": []}
+    assert response.json() == {
+        "provider": "google",
+        "connected": False,
+        "scopes": [],
+        "needsReconnect": False,
+    }
 
 
 def test_status_reports_a_live_connection(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -496,6 +519,7 @@ def test_connect_stores_the_connection_and_commits(
         "provider": "google",
         "connected": True,
         "scopes": [oauth.CALENDAR_SCOPE],
+        "needsReconnect": False,
     }
     assert sum(s.commit_count for s in fake_sessions) == 1
 
@@ -549,3 +573,194 @@ def test_disconnect_revokes_remotely_after_committing_locally(
 
     assert response.status_code == 204
     assert calls == ["mark_revoked", "revoke:refresh-live"], calls
+
+
+def test_connect_and_disconnect_clear_the_screen_calendar_cache(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """화면 조회는 5분 캐시다 — 연결 직후에도 '연결 안 됨' 을 5분간 그리면 안 된다."""
+    from reaction_backend.integrations.google_calendar import freebusy
+    from tests.conftest import DEMO_USER_UUID
+
+    _enable(monkeypatch)
+    now = datetime.now(UTC)
+
+    def _prefill() -> None:
+        freebusy._screen_cache[(DEMO_USER_UUID, now, now + timedelta(days=1))] = (
+            freebusy._ScreenCacheEntry(freebusy.FreeBusyResult("not_connected", []), now)
+        )
+
+    async def _exchange(code: str, *, redirect_uri: str | None = None) -> oauth.TokenBundle:
+        return _bundle()
+
+    async def _save(session: Any, *, user_id: uuid.UUID, bundle: oauth.TokenBundle) -> Any:
+        return _LiveConn()
+
+    async def _active(session: Any, *, user_id: uuid.UUID) -> Any:
+        return _LiveConn()
+
+    async def _noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(oauth, "exchange_code", _exchange)
+    monkeypatch.setattr(token_store, "save", _save)
+
+    _prefill()
+    assert client.post("/calendar/connect", json={"code": "fresh"}).status_code == 200
+    assert not freebusy._screen_cache, "연결 뒤에도 옛 '연결 안 됨' 이 캐시에 남았다"
+
+    monkeypatch.setattr(token_store, "get_active", _active)
+    monkeypatch.setattr(token_store, "refresh_token_of", lambda c: "r")
+    monkeypatch.setattr(token_store, "mark_revoked", _noop)
+    monkeypatch.setattr(oauth, "revoke", _noop)
+    _prefill()
+    assert client.delete("/calendar/connect").status_code == 204
+    assert not freebusy._screen_cache, "해제 뒤에도 옛 결과가 캐시에 남았다"
+
+
+# ── Google 쪽에서 끊긴 연결 (calendar-1) ────────────────────────────────────
+
+
+async def test_revoked_by_google_is_told_apart_from_a_user_disconnect(
+    real_db_session: AsyncSession,
+) -> None:
+    """갱신이 `invalid_grant` 로 떨어져 회수된 연결만 재연결 안내 대상이다.
+
+    앱에서 직접 해제한 사용자에게 "다시 연결해 주세요" 를 반복하면 잔소리가 된다.
+    """
+    cut_by_google = await _seed_user(real_db_session)
+    user_disconnected = await _seed_user(real_db_session)
+    first = await token_store.save(real_db_session, user_id=cut_by_google, bundle=_bundle())
+    second = await token_store.save(real_db_session, user_id=user_disconnected, bundle=_bundle())
+
+    await token_store.mark_revoked(real_db_session, first, by_google=True)
+    await token_store.mark_revoked(real_db_session, second)
+    await real_db_session.flush()
+    real_db_session.expire_all()  # 표식이 DB 왕복 뒤에도 살아 있는지 — 메모리 값이 아니라
+
+    assert await token_store.needs_reconnect(real_db_session, user_id=cut_by_google) is True
+    assert await token_store.needs_reconnect(real_db_session, user_id=user_disconnected) is False
+    assert await token_store.needs_reconnect(real_db_session, user_id=uuid.uuid4()) is False
+
+
+async def test_reconnecting_clears_the_reconnect_notice(real_db_session: AsyncSession) -> None:
+    user_id = await _seed_user(real_db_session)
+    connection = await token_store.save(real_db_session, user_id=user_id, bundle=_bundle())
+    await token_store.mark_revoked(real_db_session, connection, by_google=True)
+
+    await token_store.save(real_db_session, user_id=user_id, bundle=_bundle(access="again"))
+
+    assert await token_store.needs_reconnect(real_db_session, user_id=user_id) is False
+    assert await token_store.get_active(real_db_session, user_id=user_id) is not None
+
+
+async def test_dismissing_keeps_the_row_revoked(real_db_session: AsyncSession) -> None:
+    """'해제' 로 안내만 거둔다 — 연결이 되살아나거나 회수 시각이 바뀌면 안 된다."""
+    user_id = await _seed_user(real_db_session)
+    connection = await token_store.save(real_db_session, user_id=user_id, bundle=_bundle())
+    await token_store.mark_revoked(real_db_session, connection, by_google=True)
+    revoked_at = connection.revoked_at
+
+    await token_store.dismiss_reconnect(real_db_session, user_id=user_id)
+
+    assert await token_store.needs_reconnect(real_db_session, user_id=user_id) is False
+    assert await token_store.get_active(real_db_session, user_id=user_id) is None
+    assert connection.revoked_at == revoked_at
+
+
+def test_status_says_when_google_cut_the_connection(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """예전엔 앱에서 해제한 것과 똑같이 `connected: false` 뿐이라 설정 카드가 조용히 '연결' 로
+    돌아갔다 — 사용자는 수업 위에 계획이 잡히는 걸 보고서야 알 수 있었다.
+    """
+    _enable(monkeypatch)
+
+    async def _needs(session: Any, *, user_id: uuid.UUID) -> bool:
+        return True
+
+    monkeypatch.setattr(token_store, "needs_reconnect", _needs)
+
+    response = client.get("/calendar/connect")
+
+    assert response.status_code == 200
+    assert response.json()["connected"] is False
+    assert response.json()["needsReconnect"] is True
+
+
+# ── 해제는 기능 스위치·암호화 키와 무관 (calendar-11) ─────────────────────────
+
+
+def _stub_live_connection(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
+    class _Conn:
+        provider = "google"
+        revoked_at = None
+        scopes = oauth.CALENDAR_SCOPE
+
+    async def _active(session: Any, *, user_id: uuid.UUID) -> Any:
+        return _Conn()
+
+    async def _mark(session: Any, connection: Any, **_: Any) -> None:
+        calls.append("mark_revoked")
+
+    async def _revoke(token: str) -> None:
+        calls.append(f"revoke:{token}")
+
+    monkeypatch.setattr(token_store, "get_active", _active)
+    monkeypatch.setattr(token_store, "refresh_token_of", lambda c: "refresh-live")
+    monkeypatch.setattr(token_store, "mark_revoked", _mark)
+    monkeypatch.setattr(oauth, "revoke", _revoke)
+
+
+def test_disconnect_while_the_switch_is_off_still_revokes(
+    client: Any, monkeypatch: pytest.MonkeyPatch, fake_sessions: list[Any]
+) -> None:
+    """운영이 기능을 꺼 둔 동안에도 사용자는 동의를 철회할 수 있어야 한다(예전엔 501)."""
+    monkeypatch.setattr(get_settings(), "google_calendar_enabled", False, raising=False)
+    calls: list[str] = []
+    _stub_live_connection(monkeypatch, calls)
+
+    response = client.delete("/calendar/connect")
+
+    assert response.status_code == 204
+    assert calls == ["mark_revoked", "revoke:refresh-live"]
+    assert sum(s.commit_count for s in fake_sessions) == 1
+
+
+def test_disconnect_without_a_readable_token_still_revokes_locally(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """암호화 키가 빠졌거나 바뀐 서버 — 원격 회수만 건너뛰고 우리 쪽 연결은 끊는다(500 이 아니라)."""
+    from reaction_backend.safety.encryption import EncryptionError
+
+    calls: list[str] = []
+    _stub_live_connection(monkeypatch, calls)
+
+    def _unreadable(connection: Any) -> str:
+        raise EncryptionError("COLUMN_ENCRYPTION_KEY is not set.")
+
+    monkeypatch.setattr(token_store, "refresh_token_of", _unreadable)
+
+    response = client.delete("/calendar/connect")
+
+    assert response.status_code == 204
+    assert calls == ["mark_revoked"]
+
+
+def test_disconnect_after_google_cut_the_connection_dismisses_the_notice(
+    client: Any, monkeypatch: pytest.MonkeyPatch, fake_sessions: list[Any]
+) -> None:
+    """끊긴 걸 알고 다시 연결하지 않기로 했다 — 계획마다 같은 안내를 반복하지 않게 거둔다."""
+    _enable(monkeypatch)
+    dismissed: list[uuid.UUID] = []
+
+    async def _dismiss(session: Any, *, user_id: uuid.UUID) -> None:
+        dismissed.append(user_id)
+
+    monkeypatch.setattr(token_store, "dismiss_reconnect", _dismiss)
+
+    response = client.delete("/calendar/connect")
+
+    assert response.status_code == 204
+    assert len(dismissed) == 1
+    assert sum(s.commit_count for s in fake_sessions) == 1

@@ -63,7 +63,10 @@ _TEXT = {"type": "text", "raw": "x"}  # 대표 자유서술 raw (내용은 norma
             1,
             (_SKIP_MARKER, True),
         ),
-        # 제약 슬롯(chip) LLM 매핑 실패·비스킵·비핵심 → 스킵으로 진행(무루프)
+        # 제약 슬롯(chip) LLM 매핑 실패·비스킵·비핵심 → 스킵으로 진행(무루프).
+        # ⚠️ 이건 `has_chip_options=False` 일 때의 표다 — 카탈로그에 고정 보기가 있는 칩 슬롯은
+        # 라우터가 그 플래그를 켜서 보내고, 그때는 스킵 대신 보기를 들고 다시 묻는다
+        # (`tests/test_interview_harvest_and_chips.py`).
         (
             "recovery.tone",
             "chip",
@@ -157,6 +160,26 @@ _TEXT = {"type": "text", "raw": "x"}  # 대표 자유서술 raw (내용은 norma
             0.1,
             3,
             ({"type": "text", "raw": "그냥 뭐라도"}, True),
+        ),
+        # ── interview-11: 상한에서 '모르겠어요' 류는 목표로 채택하지 않는다 ──
+        # 고치기 전엔 '음 잘 모르겠어요' 가 Focus 목표 제목으로 영속됐다.
+        (
+            "goals.list",
+            "text",
+            {"type": "text", "raw": "음 잘 모르겠어요"},
+            "",
+            0.1,
+            3,
+            (_SKIP_MARKER, True),
+        ),
+        (
+            "goals.heaviest",
+            "select",
+            {"type": "text", "raw": "모르겠어요"},
+            None,
+            0.1,
+            3,
+            (_SKIP_MARKER, True),
         ),
     ],
 )

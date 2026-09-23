@@ -128,7 +128,8 @@ class VideoSpecDetail(CamelModel):
     playlist_id: str
     playlist_url: str
     video_count: int
-    """재생목록의 **실제** 총 영상 수 — `curriculum` 이 상한에 잘려도 이 값은 정확하다."""
+    """재생목록에서 **볼 수 있는** 영상 수 — 비공개·삭제 영상은 뺀다(`curriculum` 에도 없다).
+    `curriculum` 이 상한에 잘려도 재생목록 전체 기준이다."""
     total_minutes: int
     curriculum: list[VideoSpecItem] = Field(default_factory=list, max_length=MAX_CURRICULUM_ITEMS)
     truncated: bool = False

@@ -1,13 +1,21 @@
 """Weekly Review precompute cron job — S21 period_summaries (Issue #21-A).
 
-매주 일요일 03:00 (사용자 timezone) 1회 실행. 해당 주(월~일) 실행/회복을 룰로 집계해
-`period_summaries`(period_type='weekly') 1행 upsert. **idempotent** — 같은 (user, 주)
-이미 있으면 `force=False` 에서 skip (scheduler/README.md 규약).
+해당 주(월~일) 실행/회복을 룰로 집계해 `period_summaries`(period_type='weekly') 1행 upsert.
+같은 (user, 주) 행이 이미 있으면 `force=False` 는 그대로 두고, `force=True` 는 다시 집계해
+덮어쓴다 — 결정적 upsert 라 몇 번 돌아도 결과가 같다(scheduler/README.md 의 idempotent 규약).
 
-⚠️ 본 모듈은 **job 로직**이다. 실제 시각 트리거(일요일 03:00 등록)와 전체 user 순회
-wrapper 는 Issue #24 운영준비에서 APScheduler/Arq 로 연결한다 (morning_brief 와 동일).
+**한 주의 숫자는 그 주가 끝나도 바로 확정되지 않는다.** 일요일 카드는 월·화까지 회고할 수
+있고(`expire_reflections.PENDING_WINDOW_DAYS`), 늦게 [완료]/[못 함] 을 누르면 그 주의
+실행 상태가 바뀐다. 그래서 두 시각을 나눈다:
 
-라우터(GET /reviews/weekly · POST generate)도 이 함수를 재사용한다 — 집계/영속화 단일 소스.
+- 일요일 저녁 폴(`sweeps.run_weekly_review_sweep`) — 진행 중인 주를 `force=True` 로 매번 다시
+  집계한다. 예전엔 `force=False` 라 18:00 첫 폴의 스냅샷이 그 주 내내 잠겨, 21:00 회고 알림을
+  받고 체크인한 결과가 리포트에 영영 안 들어갔다.
+- 회고 창이 닫힌 뒤(`week_final_at`) 한 번 더(`sweeps.run_weekly_review_finalize_sweep`) —
+  이 행이 그 주의 **확정본**이다. `GET /reviews/weekly` 는 확정본만 저장값으로 믿고, 그 전에는
+  매번 즉석 계산한다(`is_final_summary`).
+
+라우터(GET /reviews/weekly · POST generate)도 이 모듈을 재사용한다 — 집계/영속화 단일 소스.
 LLM 미사용 (MVP 룰 기반, 한 줄 평 P2 — 이슈 #21).
 """
 
@@ -18,6 +26,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from reaction_backend.orchestrator.weekly_review import WeeklyKpi, compute_weekly_kpis
+from reaction_backend.scheduler.expire_reflections import PENDING_WINDOW_DAYS
 from reaction_backend.schemas.common import KST
 
 if TYPE_CHECKING:
@@ -36,6 +45,37 @@ def week_window(week_start: date) -> tuple[datetime, datetime]:
     """주(월~일)의 KST 경계 [월 00:00, 다음 월 00:00)."""
     start_dt = datetime.combine(week_start, time.min, tzinfo=KST)
     return start_dt, start_dt + timedelta(days=7)
+
+
+def week_final_at(week_start: date) -> datetime:
+    """이 주의 숫자가 더 이상 바뀌지 않는 시각 — 다음 주 목요일 00:00 KST.
+
+    일요일 카드는 일·월·화 저녁에 회고할 수 있고 수요일 04:00 에 만료된다
+    (`expire_reflections`, 창 `PENDING_WINDOW_DAYS`=3일). 창을 다음 주 월요일부터 3일
+    **통째로** 세어 목요일 00:00 으로 둔다 — 하루 넉넉하게 잡아 만료 배치(04:00)와 겹치는
+    경계 시각을 피한다.
+    """
+    start_dt = datetime.combine(week_start, time.min, tzinfo=KST)
+    return start_dt + timedelta(days=7 + PENDING_WINDOW_DAYS)
+
+
+def latest_final_week_start(now_kst_dt: datetime) -> date:
+    """`now` 시점에 확정(`week_final_at` 경과)된 가장 최근 주의 월요일.
+
+    목~일에는 지난주, 월~수에는(지난주 창이 아직 열려 있으니) 2주 전이다.
+    """
+    week_start = week_start_of(now_kst_dt.date()) - timedelta(days=7)
+    while week_final_at(week_start) > now_kst_dt:
+        week_start -= timedelta(days=7)
+    return week_start
+
+
+def is_final_summary(summary: PeriodSummary, week_start: date) -> bool:
+    """이 저장본이 그 주의 확정본인가 — 회고 창이 닫힌 **뒤에** 집계됐는가.
+
+    창이 닫히기 전에 만든 행(일요일 저녁 폴, 수동 generate)은 그 뒤의 늦은 회고를 모른다.
+    """
+    return summary.generated_at >= week_final_at(week_start)
 
 
 async def compute_weekly_review(user_id: UUID, week_start: date, *, repo: ReviewRepo) -> WeeklyKpi:
@@ -65,6 +105,23 @@ async def run_weekly_review_for_user(
             return existing  # idempotent skip
 
     kpi = await compute_weekly_review(user_id, week_start, repo=repo)
+    return await persist_weekly_review(user_id, week_start, kpi, now_kst_dt, repo=repo)
+
+
+async def persist_weekly_review(
+    user_id: UUID,
+    week_start: date,
+    kpi: WeeklyKpi,
+    now_kst_dt: datetime,
+    *,
+    repo: ReviewRepo,
+) -> PeriodSummary:
+    """이미 계산한 KPI 를 그 주 행으로 upsert — 라우터가 모은 실행 표본을 다시 읽지 않게.
+
+    `POST /reviews/weekly/generate` 는 응답의 다른 절(`effort` 등)을 위해 이미 실행 표본을
+    모았다 — `run_weekly_review_for_user` 를 부르면 같은 표본을 한 번 더 읽는다.
+    commit 은 호출자 책임.
+    """
     return await repo.upsert_weekly(
         user_id=user_id,
         week_start=week_start,

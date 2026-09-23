@@ -6,6 +6,7 @@ LLM 미사용(룰 기반)이라 외부 의존 없음.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, time, timedelta
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from reaction_backend.db.models.goal import Goal
 from reaction_backend.db.models.goal_node import GoalNode
+from reaction_backend.db.models.habit import Habit
 from reaction_backend.orchestrator.weekly_review import (
     ExecutionStat,
     RecoveryStat,
@@ -22,11 +24,20 @@ from reaction_backend.orchestrator.weekly_review import (
 )
 from reaction_backend.repositories.review_repo import TopFailureContext
 from reaction_backend.scheduler.weekly_review_precompute import (
+    is_final_summary,
+    latest_final_week_start,
     run_weekly_review_for_user,
+    week_final_at,
     week_start_of,
 )
 from reaction_backend.schemas.common import KST
-from tests.conftest import DEMO_USER_UUID, FakeGoalRepo, FakeReviewRepo
+from tests.conftest import (
+    DEMO_USER_UUID,
+    FakeGoalRepo,
+    FakeHabitInstanceRepo,
+    FakeHabitRepo,
+    FakeReviewRepo,
+)
 
 # 어떤 날을 넣어도 그 주 월요일 — day_offset 0~6 = 월~일.
 WEEK = week_start_of(datetime(2026, 6, 17, tzinfo=KST).date())
@@ -55,6 +66,19 @@ def _exec(
         planned_minutes=planned_minutes,
         actual_minutes=actual_minutes,
     )
+
+
+def _standalone_habit(title: str, *, target: int) -> Habit:
+    h = Habit()
+    h.id = uuid4()
+    h.user_id = DEMO_USER_UUID
+    h.title = title
+    h.category = "health"
+    h.frequency_per_week = target
+    h.target_count = target
+    h.goal_node_id = None
+    h.archived_at = None
+    return h
 
 
 # ───────────────────────── 순수 함수 ─────────────────────────
@@ -127,6 +151,53 @@ def test_peak_and_drain_window() -> None:
     assert "화요일 오전" in (kpi.one_liner or "")
 
 
+def test_after_midnight_counts_as_the_previous_days_night() -> None:
+    """월요일 밤 자정을 넘긴 공부(화 01:00)는 '월요일 밤' 이다 — '화요일 저녁' 이 아니다.
+
+    회귀: 0~4시를 달력 날짜 그대로 '저녁' 에 넣어 "화요일 저녁에 가장 잘 풀렸어요" 라고
+    17시간 엇나간 한 줄 평이 나왔다.
+    """
+    kpi = compute_weekly_kpis(
+        [_exec("done", "study", 1, 1), _exec("failed", "study", 2, 14)], [], WEEK
+    )
+    assert kpi.peak_point_window == "monday_night"
+    assert kpi.one_liner is not None and "월요일 밤" in kpi.one_liner
+    # 연속 일수는 달력 날짜 그대로 — 윈도우 이름만 사람의 하루 경계를 따른다.
+    assert kpi.consistency_days == 1
+
+
+def test_early_morning_is_still_that_days_morning() -> None:
+    kpi = compute_weekly_kpis([_exec("done", "study", 1, 6)], [], WEEK)
+    assert kpi.peak_point_window == "tuesday_morning"
+
+
+def _started(minutes_from_plan: int, *, stored: bool) -> ExecutionStat:
+    plan = datetime.combine(WEEK, time(15, 0), tzinfo=KST)
+    return ExecutionStat(
+        completion_status="done",
+        category="study",
+        plan_start_at=plan,
+        actual_start_at=plan + timedelta(minutes=minutes_from_plan),
+        delay_minutes=minutes_from_plan if stored else None,
+    )
+
+
+@pytest.mark.parametrize("stored", [True, False])
+def test_starting_early_is_zero_delay_not_negative(stored: bool) -> None:
+    """15:00 블록을 13:00 에 시작 — 평균 지연 0, "-2시간" 이 아니다.
+
+    회귀: 음수 지연을 그대로 평균해 리뷰에 "평균 지연 -3시간 20분" 이 떴고, 일찍 시작한 날이
+    늦은 날을 상쇄해 '여유 두기' 정책 제안의 근거도 가렸다.
+    """
+    kpi = compute_weekly_kpis([_started(-120, stored=stored)], [], WEEK)
+    assert kpi.avg_delay_minutes == 0.0
+
+    mixed = compute_weekly_kpis(
+        [_started(-120, stored=stored), _started(30, stored=stored)], [], WEEK
+    )
+    assert mixed.avg_delay_minutes == 15.0  # (0 + 30) / 2
+
+
 def test_average_recovery_minutes() -> None:
     kpi = compute_weekly_kpis(
         [_exec("done", "study", 0, 9)],
@@ -195,6 +266,89 @@ def test_get_weekly_carries_effort_on_both_response_paths(
     assert precomputed["effort"] == body["effort"]
 
 
+def test_get_weekly_reports_unstarted_blocks_next_to_an_unchanged_adherence(
+    client: TestClient, fake_review_repo: FakeReviewRepo
+) -> None:
+    """1장 끝내고 9장을 손도 안 댄 주 — 준수율은 100% 그대로, `unstartedBlocks` 가 9.
+
+    준수율 정의(시작한 카드만 셈)는 과거 주와의 비교 때문에 바꾸지 않는다(api-contract).
+    대신 FE 가 "이번 주, 잘 했어요" 를 띄우기 전에 볼 수 있게 옆에 싣는다. 확정 저장본
+    경로에서도 조회 시점에 파생되므로 같은 값이 나간다.
+    """
+    fake_review_repo.seed_execution(_exec("done", "study", 0, 9))
+    fake_review_repo.seed_unstarted_blocks(9)
+
+    live = _get(client, WEEK.isoformat()).json()
+    assert live["adherenceRate"] == 1.0
+    assert live["unstartedBlocks"] == 9
+
+    async def _finalize() -> None:
+        await run_weekly_review_for_user(
+            DEMO_USER_UUID, WEEK, week_final_at(WEEK), repo=fake_review_repo, force=True
+        )
+
+    asyncio.run(_finalize())
+    stored = _get(client, WEEK.isoformat()).json()
+    assert stored["unstartedBlocks"] == 9
+    generated = client.post("/reviews/weekly/generate", json={"weekStart": WEEK.isoformat()})
+    assert generated.json()["unstartedBlocks"] == 9
+
+
+def test_get_weekly_unstarted_blocks_defaults_to_zero(client: TestClient) -> None:
+    assert _get(client, WEEK.isoformat()).json()["unstartedBlocks"] == 0
+
+
+def test_get_weekly_lists_standalone_habit_check_ins(
+    client: TestClient,
+    fake_habit_repo: FakeHabitRepo,
+    fake_habit_instance_repo: FakeHabitInstanceRepo,
+) -> None:
+    """습관만 쓴 주도 기록이 보인다 — 카드 실행이 없어 준수율은 여전히 null.
+
+    회귀: KPI 가 카드 실행만 세서, 러닝을 두 번 체크인한 주에 "집계할 활동이 없어요" 가 떴다.
+    """
+    habit = _standalone_habit("러닝", target=3)
+    fake_habit_repo.seed(habit)
+    fake_habit_instance_repo.seed_instance(habit.id, WEEK, done=2, target=3)
+    fake_habit_instance_repo.seed_instance(habit.id, WEEK - timedelta(days=7), done=3, target=3)
+
+    body = _get(client, WEEK.isoformat()).json()
+
+    assert body["adherenceRate"] is None
+    assert body["habits"] == [
+        {"habitId": f"habit_{habit.id}", "title": "러닝", "doneCount": 2, "targetCount": 3}
+    ]
+    generated = client.post("/reviews/weekly/generate", json={"weekStart": WEEK.isoformat()})
+    assert generated.json()["habits"] == body["habits"]
+
+
+def test_standalone_habit_summaries_skip_habits_already_in_the_mandala_section() -> None:
+    """만다라 반복형 칸의 습관은 `mandala.habits` 에 이미 있다 — 두 번 나열하지 않는다."""
+    from reaction_backend.api.routes.review import _standalone_habit_summaries
+    from reaction_backend.db.models.habit_instance import HabitInstance
+
+    mandala_habit = _standalone_habit("만다라 칸 습관", target=5)
+    loose_habit = _standalone_habit("물 마시기", target=7)
+    instances = []
+    for habit, done in ((mandala_habit, 4), (loose_habit, 6)):
+        inst = HabitInstance()
+        inst.id = uuid4()
+        inst.habit_id = habit.id
+        inst.habit = habit
+        inst.week_start = WEEK
+        inst.done_count = done
+        inst.target_count = habit.target_count
+        instances.append(inst)
+
+    rows = _standalone_habit_summaries(instances, mandala_habit_ids={mandala_habit.id})
+
+    assert [(r.title, r.done_count, r.target_count) for r in rows] == [("물 마시기", 6, 7)]
+
+
+def test_get_weekly_habits_empty_without_check_ins(client: TestClient) -> None:
+    assert _get(client, WEEK.isoformat()).json()["habits"] == []
+
+
 def test_get_weekly_invalid_week(client: TestClient) -> None:
     resp = _get(client, "2026-06")
     assert resp.status_code == 422
@@ -219,6 +373,74 @@ def test_generate_persists_then_get_returns(
     assert (DEMO_USER_UUID, WEEK) in fake_review_repo._summaries
     got = _get(client, WEEK.isoformat())
     assert got.json()["adherenceRate"] == 1.0
+
+
+# ──────────── 확정 전 저장본은 믿지 않는다 (일요일 18:00 스냅샷 잠김 회귀) ────────────
+
+
+def test_week_final_at_is_thursday_after_the_reflection_window() -> None:
+    """일요일 카드는 월·화까지 회고할 수 있다 — 확정은 다음 주 목요일 00:00 KST."""
+    final = week_final_at(WEEK)
+    assert final == datetime.combine(WEEK + timedelta(days=10), time.min, tzinfo=KST)
+    assert final.weekday() == 3  # 목요일
+
+
+def test_latest_final_week_start_skips_the_week_still_open_for_reflection() -> None:
+    next_monday = WEEK + timedelta(days=7)
+    # 다음 주 수요일 23:59 — WEEK 의 창이 아직 열려 있으니 그 전주가 최근 확정 주.
+    wed = datetime.combine(next_monday + timedelta(days=2), time(23, 59), tzinfo=KST)
+    assert latest_final_week_start(wed) == WEEK - timedelta(days=7)
+    # 목요일 04:30 — WEEK 가 처음 확정된다.
+    thu = datetime.combine(next_monday + timedelta(days=3), time(4, 30), tzinfo=KST)
+    assert latest_final_week_start(thu) == WEEK
+
+
+def test_get_weekly_recomputes_while_the_stored_snapshot_is_not_final(
+    client: TestClient, fake_review_repo: FakeReviewRepo
+) -> None:
+    """일요일 18:00 에 저장된 행이 있어도, 그 뒤의 체크인이 점수에 들어간다.
+
+    회귀: GET 이 저장된 행이면 무조건 반환해서 18:00 스냅샷이 그 주 내내 잠겼다 — 21:00 회고
+    알림을 받고 [못 함] 을 눌러도 준수율은 100% 그대로였고, 같은 응답의 `effort` 만 바뀌었다.
+    """
+    sunday_18 = datetime.combine(WEEK + timedelta(days=6), time(18, 0), tzinfo=KST)
+    fake_review_repo.seed_execution(_exec("done", "study", 0, 9, planned_minutes=30))
+
+    async def _snapshot() -> None:
+        await run_weekly_review_for_user(DEMO_USER_UUID, WEEK, sunday_18, repo=fake_review_repo)
+
+    asyncio.run(_snapshot())
+    stored = fake_review_repo._summaries[(DEMO_USER_UUID, WEEK)]
+    assert float(stored.adherence_rate) == 1.0
+    assert not is_final_summary(stored, WEEK)
+
+    # 21:00 이후 회고 — 일요일 카드 하나를 [못 함] 으로 체크인.
+    fake_review_repo.seed_execution(_exec("failed", "study", 6, 14, planned_minutes=30))
+
+    body = _get(client, WEEK.isoformat()).json()
+    assert body["adherenceRate"] == 0.5
+    # 한 화면 안의 두 준수율이 같은 시점을 본다.
+    assert body["effort"]["adherenceRate"] == 0.5
+
+
+def test_get_weekly_trusts_the_final_snapshot(
+    client: TestClient, fake_review_repo: FakeReviewRepo
+) -> None:
+    """회고 창이 닫힌 뒤 집계한 확정본은 그대로 쓴다 — 지난 주 기록이 흔들리지 않는다."""
+    fake_review_repo.seed_execution(_exec("done", "study", 0, 9))
+    after_final = week_final_at(WEEK) + timedelta(hours=4, minutes=30)
+
+    async def _finalize() -> None:
+        await run_weekly_review_for_user(
+            DEMO_USER_UUID, WEEK, after_final, repo=fake_review_repo, force=True
+        )
+
+    asyncio.run(_finalize())
+    assert is_final_summary(fake_review_repo._summaries[(DEMO_USER_UUID, WEEK)], WEEK)
+    # 확정 뒤에 생긴 데이터(있어서는 안 되지만)가 있어도 확정본이 이긴다 — 저장값 경로임을 증명.
+    fake_review_repo.seed_execution(_exec("failed", "study", 1, 9))
+
+    assert _get(client, WEEK.isoformat()).json()["adherenceRate"] == 1.0
 
 
 # ──────────── GET /reviews/weekly — 만다라 절 (ADR-0008 §8 "E") ────────────
@@ -530,45 +752,13 @@ def test_proposal_lists_actually_reach_the_response_body() -> None:
     라우트 테스트는 `_FakeSession` 이라 판정이 항상 빈 결과다 — 둘 사이에 낀 이 조립
     단계가 어느 쪽에도 안 걸린다("쓰기만 하고 읽지 않는" 것과 같은 종류의 구멍이다).
 
-    `_from_kpi` 는 순수 조립이라 DB 없이 직접 부를 수 있다.
+    응답 조립은 저장본·즉석 계산 경로가 **같은 함수**(`_to_response`)라 한 번만 단언하면 된다.
+    예전엔 조립 함수가 두 벌이라 한쪽 배선을 끊어도 초록이었다(뮤테이션 확인).
     """
     from uuid import uuid4
 
-    from reaction_backend.api.routes.review import _from_kpi
+    from reaction_backend.api.routes.review import _ReadTimeSections, _to_response
     from reaction_backend.orchestrator.weekly_review import WeeklyKpi
-    from reaction_backend.schemas.reviews import (
-        EffortMinutes,
-        GoalCompletionProposal,
-        NextCycleProposal,
-    )
-
-    resp = _from_kpi(
-        WEEK,
-        WeeklyKpi(),
-        effort=EffortMinutes(),
-        mandala=None,
-        next_cycle_proposals=[NextCycleProposal(goal_id=uuid4(), goal_title="진행 중")],
-        goal_completion_proposals=[GoalCompletionProposal(goal_id=uuid4(), goal_title="끝낸 것")],
-        stale_axis_proposals=[],
-        top_failure_contexts=[],
-    )
-
-    body = resp.model_dump(by_alias=True, mode="json")
-    assert [p["goalTitle"] for p in body["goalCompletionProposals"]] == ["끝낸 것"]
-    assert [p["goalTitle"] for p in body["nextCycleProposals"]] == ["진행 중"]
-
-
-def test_precomputed_path_also_carries_the_proposal_lists() -> None:
-    """precomputed(`period_summaries` 적중) 경로도 같은 배선을 탄다.
-
-    응답 조립이 **두 벌**이라(`_from_kpi` / `_from_summary`) 한쪽만 단언하면 다른 쪽 배선을
-    끊어도 초록이다 — 실제로 그랬다(뮤테이션 확인). 주간 리뷰는 일요일 03:00 cron 이
-    선계산해 두므로 **평소에 사용자가 타는 건 이쪽**이다.
-    """
-    from uuid import uuid4
-
-    from reaction_backend.api.routes.review import _from_summary
-    from reaction_backend.db.models.period_summary import PeriodSummary
     from reaction_backend.schemas.common import now_kst
     from reaction_backend.schemas.reviews import (
         EffortMinutes,
@@ -576,26 +766,84 @@ def test_precomputed_path_also_carries_the_proposal_lists() -> None:
         NextCycleProposal,
     )
 
-    summary = PeriodSummary()
-    summary.start_date = WEEK
-    summary.end_date = WEEK + timedelta(days=6)
-    summary.category_success_rate = {}
-    summary.policy_update_candidates = []
-    summary.generated_at = now_kst()
-
-    resp = _from_summary(
-        summary,
-        effort=EffortMinutes(),
-        mandala=None,
-        next_cycle_proposals=[NextCycleProposal(goal_id=uuid4(), goal_title="진행 중")],
-        goal_completion_proposals=[GoalCompletionProposal(goal_id=uuid4(), goal_title="끝낸 것")],
-        stale_axis_proposals=[],
-        top_failure_contexts=[],
+    resp = _to_response(
+        WEEK,
+        WeeklyKpi(),
+        generated_at=now_kst(),
+        sections=_ReadTimeSections(
+            effort=EffortMinutes(),
+            mandala=None,
+            next_cycle_proposals=[NextCycleProposal(goal_id=uuid4(), goal_title="진행 중")],
+            goal_completion_proposals=[
+                GoalCompletionProposal(goal_id=uuid4(), goal_title="끝낸 것")
+            ],
+            stale_axis_proposals=[],
+            top_failure_contexts=[],
+        ),
     )
 
     body = resp.model_dump(by_alias=True, mode="json")
     assert [p["goalTitle"] for p in body["goalCompletionProposals"]] == ["끝낸 것"]
     assert [p["goalTitle"] for p in body["nextCycleProposals"]] == ["진행 중"]
+
+
+def test_stored_and_live_paths_return_the_same_body(
+    client: TestClient, fake_review_repo: FakeReviewRepo
+) -> None:
+    """같은 데이터면 확정 저장본 경로와 즉석 계산 경로의 응답이 (생성 시각 빼고) 같다.
+
+    저장본 → KPI 변환(`_kpi_from_summary`)에서 필드 하나를 빠뜨리면 여기서 갈라진다 — 평소
+    사용자가 지난주를 볼 때 타는 건 저장본 쪽이다.
+    """
+    for e in (
+        _exec("done", "study", 0, 9, planned_minutes=30, actual_minutes=25),
+        _exec("failed", "health", 1, 14, recovered=True, planned_minutes=60),
+        _exec("partial_done", "study", 2, 20, delay=15, planned_minutes=45),
+    ):
+        fake_review_repo.seed_execution(e)
+    fake_review_repo.seed_recovery(RecoveryStat(recovery_duration_minutes=20))
+
+    live = _get(client, WEEK.isoformat()).json()
+
+    async def _finalize() -> None:
+        await run_weekly_review_for_user(
+            DEMO_USER_UUID, WEEK, week_final_at(WEEK), repo=fake_review_repo, force=True
+        )
+
+    asyncio.run(_finalize())
+    stored = _get(client, WEEK.isoformat()).json()
+
+    assert stored["generatedAt"] != live["generatedAt"]  # 정말 저장본 경로를 탔다
+    live.pop("generatedAt")
+    stored.pop("generatedAt")
+    assert stored == live
+
+
+def test_get_weekly_reads_the_weeks_executions_once(
+    client: TestClient, fake_review_repo: FakeReviewRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """리뷰 탭 한 번 열 때 그 주 실행 표본은 한 번만 읽는다 — `effort` 와 KPI 가 같이 쓴다.
+
+    예전엔 `effort` 용으로 한 번, KPI 용으로 한 번 같은 창을 두 번 읽었다(두 표본 사이에
+    체크인이 끼면 한 응답 안의 두 준수율이 다른 시점을 보게 된다).
+    """
+    calls = 0
+    original = fake_review_repo.collect_execution_stats
+
+    async def _counting(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return await original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fake_review_repo, "collect_execution_stats", _counting)
+    fake_review_repo.seed_execution(_exec("done", "study", 0, 9))
+
+    assert _get(client, WEEK.isoformat()).status_code == 200
+    assert calls == 1
+
+    calls = 0
+    assert client.post("/reviews/weekly/generate", json={"weekStart": WEEK.isoformat()}).is_success
+    assert calls == 1
 
 
 # ─────────── 분 가중 요약 (ADR-0009 D5) ───────────

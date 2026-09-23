@@ -4,6 +4,7 @@ Issue #16 이후 placeholder 라우터들도 `Depends(get_current_user)` 가 적
 `client` fixture 는 인증 override 적용 상태 → placeholder 응답이 401 가려지지 않음.
 """
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -53,3 +54,27 @@ def test_reflection_batch_is_implemented(client: TestClient) -> None:
         f"POST /reflection/batch should be implemented, got {resp.status_code}"
     )
     assert resp.json()["processedCount"] == 0
+
+
+def test_health_does_not_leak_db_error_details(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """공개 /health 가 DB 예외 원문(내부 주소·DB 사용자명)을 싣지 않는다 (critic-11)."""
+    from reaction_backend.api.routes import health
+    from reaction_backend.config import get_settings
+
+    def _boom() -> None:
+        raise ConnectionRefusedError("Connect call failed ('10.0.0.5', 5432) role reaction_db")
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@10.0.0.5:5432/db")
+    get_settings.cache_clear()
+    monkeypatch.setattr(health, "get_engine", _boom)
+
+    body = client.get("/health").json()
+
+    assert body["status"] == "degraded"
+    assert body["db"]["ok"] is False
+    assert body["db"]["error"] == "db_unavailable"
+    assert "10.0.0.5" not in str(body)
+    assert "Connect call" not in str(body)
+    assert "reaction_db" not in str(body)

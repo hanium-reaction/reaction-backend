@@ -144,3 +144,71 @@ async def test_lookup_timeout_is_reported_without_raising(monkeypatch: pytest.Mo
     result = await client.lookup_book("9788965424765", key="ttbtest")
     assert not result.ok
     assert result.reason == client.REASON_TIMEOUT
+
+
+# ───────────────── 로그에 API 키가 남지 않는다 (inbox-7) ─────────────────
+
+_SECRET = "ttbSECRET123"
+
+
+def _leaky_failures() -> list[Any]:
+    """`requests` 예외는 문자열에 요청 URL 전체(키 포함)를 담는다 — 실제 형식 그대로."""
+
+    def _connection_error(*a: Any, **k: Any) -> Any:
+        raise requests.ConnectionError(
+            f"HTTPSConnectionPool: Max retries exceeded with url: /ttb/api/ItemSearch.aspx?ttbkey={_SECRET}&Query=a"
+        )
+
+    class _HttpErrorResponse(_FakeResponse):
+        def raise_for_status(self) -> None:
+            raise requests.HTTPError(
+                f"503 Server Error for url: https://www.aladin.co.kr/ttb/api/ItemLookUp.aspx?ttbkey={_SECRET}",
+                response=self,
+            )
+
+    return [_connection_error, lambda *a, **k: _HttpErrorResponse(status=503)]
+
+
+@pytest.mark.parametrize("failure", _leaky_failures())
+async def test_search_failure_log_does_not_leak_the_api_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure: Any
+) -> None:
+    monkeypatch.setattr(client.requests, "get", failure)
+    with caplog.at_level("DEBUG"):
+        result = await client.search_books("토익", key=_SECRET, limit=3)
+    assert result.reason == client.REASON_UNAVAILABLE
+    assert "aladin search failed" in caplog.text, "실패 사실 자체는 남아야 한다"
+    assert _SECRET not in caplog.text
+
+
+@pytest.mark.parametrize("failure", _leaky_failures())
+async def test_lookup_failure_log_does_not_leak_the_api_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure: Any
+) -> None:
+    monkeypatch.setattr(client.requests, "get", failure)
+    with caplog.at_level("DEBUG"):
+        result = await client.lookup_book("9788965422389", key=_SECRET)
+    assert result.reason == client.REASON_UNAVAILABLE
+    assert "aladin lookup failed" in caplog.text
+    assert _SECRET not in caplog.text
+
+
+_API_ERROR_BODY = '{ "errorCode":4, "errorMessage":"API출력이 금지된 회원입니다." }'
+
+
+async def test_api_error_in_a_200_body_is_unavailable_not_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """알라딘은 키 차단·한도 초과도 HTTP 200 + `errorCode` 로 준다(라이브 실측) — 이걸
+    '결과 없음' 으로 읽으면 사용자에게 멀쩡한 검색어를 바꾸라고 안내하게 된다(inbox-6)."""
+    monkeypatch.setattr(client.requests, "get", lambda *a, **k: _FakeResponse(body=_API_ERROR_BODY))
+    result = await client.search_books("토익", key="ttbblocked", limit=3)
+    assert result.reason == client.REASON_UNAVAILABLE
+
+
+async def test_lookup_api_error_in_a_200_body_is_unavailable_not_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client.requests, "get", lambda *a, **k: _FakeResponse(body=_API_ERROR_BODY))
+    result = await client.lookup_book("9788965422389", key="ttbblocked")
+    assert result.reason == client.REASON_UNAVAILABLE

@@ -10,6 +10,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from reaction_backend.schemas.calendar import CalendarCheck
 from reaction_backend.schemas.common import CamelModel, KstDatetime
 
 # Quick Check-in 4칩 (S13) — execution_events.completion_status 의 종결값 4종
@@ -54,6 +55,15 @@ class AgendaCard(CamelModel):
     # **새 실행을 만들어** 곧바로 failed 로 체크인했다 — 회복 화면에 들어갈 때마다
     # 가짜 실패가 하나씩 늘고, 그 숫자가 주간 리뷰 준수율과 에스컬레이션을 밀어 올렸다.
     execution_id: str | None = None
+    # 이 카드의 아직 시작 안 한 블록이 **지금** Google 캘린더 일정과 겹치는가.
+    # **파생 필드** — 계획은 만들 때 캘린더를 피하지만, 그 뒤 생긴 약속은 모른다.
+    # 판정은 `domain/calendar_conflict.py`. 옮기지는 않는다(자동 적용 금지) — 배지만.
+    calendar_conflict: bool = False
+    # 오늘 날짜 카드가 아닌데 **이어서 보여주는** 카드인가 (v2.30-today). 어젠다는 오늘
+    # target_date 만 모으므로, 자정 전에 시작해 아직 진행 중인 카드나 자정을 넘긴 블록이
+    # 00:00 에 화면에서 사라졌다. 그런 카드를 오늘 카드 뒤에 붙이고 이 값을 켠다 —
+    # FE 는 '어제 이어서' 같은 표시만 얹으면 된다. 판정은 `ExecutionRepo.list_carried_over_actions`.
+    carried_over: bool = False
 
 
 class AgendaHabit(CamelModel):
@@ -83,6 +93,8 @@ class TodayAgenda(CamelModel):
     cards: list[AgendaCard]
     habits: list[AgendaHabit]
     fixed_schedules: list[AgendaFixedSchedule]
+    # 오늘 구간 캘린더 확인 결과 — `calendarConflict` 를 어떻게 읽을지 정한다.
+    calendar: CalendarCheck = Field(default_factory=CalendarCheck)
 
 
 class MorningBriefDraft(CamelModel):
@@ -136,6 +148,7 @@ class ExecutionEventResponse(CamelModel):
 
     pause 는 interruption_events(user_pause) 를 열고, resume 은 그 구간을 닫아
     execution.pause_total_minutes 에 누적한다. execution 자체는 in_progress 유지.
+    둘 다 멱등 — 이미 정지 중인 pause·정지 중이 아닌 resume 도 200 으로 현재 상태를 돌려준다.
     """
 
     execution_id: str

@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Literal, cast
 
 from reaction_backend.db.models.goal import Goal
+from reaction_backend.orchestrator.first_plan_adapter import GOAL_TITLE_MAX_CHARS, fit_title
 from reaction_backend.schemas.interview import GoalCandidate, InterviewOutcome
 
 # 목표에 category 가 없을 때의 기본값 (`promote_mandala_node` 와 동일) — 만다라 축엔
@@ -74,7 +75,16 @@ def seed_outcome(*, base: InterviewOutcome, goal: Goal) -> InterviewOutcome:
     §8) 다른 목표를 남겨 두면 세션도 안 생기면서 승인 시 `materialize_goals` 만 흔들고
     tier 게이트에 잡힐 수 있다. 다른 목표의 기존 Goal 행은 이미 영속돼 있어 사라지지 않는다.
     """
-    template = next((g for g in base.core_goals if g.title.strip() == goal.title.strip()), None)
+    # 저장된 제목은 컬럼 길이로 잘려 있을 수 있다(`fit_title`, interview-10) — 인터뷰 원문도
+    # 같은 규칙으로 잘라 대조해야 긴 제목 목표가 이미 답한 슬롯을 잃지 않는다.
+    template = next(
+        (
+            g
+            for g in base.core_goals
+            if fit_title(g.title, GOAL_TITLE_MAX_CHARS).strip() == goal.title.strip()
+        ),
+        None,
+    )
     candidate = goal_candidate(goal=goal, template=template)
     return base.model_copy(update={"core_goals": [candidate], "horizon": candidate.deadline})
 

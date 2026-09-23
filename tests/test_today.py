@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from reaction_backend.db.models.action_item import ActionItem
@@ -16,6 +17,7 @@ from reaction_backend.db.models.daily_brief import DailyBrief
 from reaction_backend.db.models.execution_event import ExecutionEvent
 from reaction_backend.db.models.scheduled_block import ScheduledBlock
 from reaction_backend.domain.missed_check_in import MISSED_CHECK_IN_DELAY
+from reaction_backend.repositories import habit_repo
 from reaction_backend.schemas.common import now_kst
 from tests.conftest import (
     DEMO_USER_UUID,
@@ -256,7 +258,10 @@ def test_agenda_with_brief(
     assert brief["fallbackUsed"] is False
 
 
-def test_agenda_with_habit(client: TestClient) -> None:
+def test_agenda_with_habit(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 등록한 주는 남은 날만큼 목표를 줄인다(v2.30-goals) — 월요일에 만든 것으로 고정해 빈도 그대로.
+    monday = habit_repo.current_week_start_kst()
+    monkeypatch.setattr(habit_repo, "today_kst", lambda: monday)
     client.post(
         "/habits",
         json={
@@ -404,3 +409,87 @@ def test_agenda_card_without_execution_has_none(
     body = client.get("/today/agenda").json()
 
     assert body["cards"][0]["executionId"] is None
+
+
+# ── calendarConflict (계획 뒤에 생긴 캘린더 약속) ─────────────────────────
+
+
+def _stub_calendar(monkeypatch, status: str, busy: list[tuple[datetime, datetime]]) -> list[str]:  # noqa: ANN001
+    """화면용 조회를 대신한다 — 연결·조회 결과를 고정하고 호출을 기록한다."""
+    from reaction_backend.integrations.google_calendar import freebusy, oauth
+    from reaction_backend.orchestrator.goal_structuring import TimeInterval
+
+    calls: list[str] = []
+    monkeypatch.setattr(oauth, "is_enabled", lambda: True)
+
+    async def _fetch(session, *, user_id, start, end):  # noqa: ANN001, ANN202
+        calls.append("fetch")
+        return (
+            freebusy.FreeBusyResult(status, [TimeInterval(s, e) for s, e in busy]),
+            datetime.now(UTC),
+        )
+
+    monkeypatch.setattr(freebusy, "fetch_busy_for_screen", _fetch)
+    return calls
+
+
+def test_agenda_flags_a_card_whose_block_now_overlaps_the_calendar(
+    monkeypatch,  # noqa: ANN001
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+    fake_sessions: list,
+) -> None:
+    """계획 뒤에 캘린더에 약속이 생기면 그 카드에 표시한다 — 옮기지는 않는다."""
+    clash = _make_action(title="겹친 카드", priority=1)
+    calm = _make_action(title="안 겹친 카드", priority=2)
+    fake_action_item_repo.seed(clash)
+    fake_action_item_repo.seed(calm)
+    start = now_kst() + timedelta(minutes=10)
+    _seed_block(fake_execution_repo, clash.id, start_at=start, minutes=30)
+    _seed_block(fake_execution_repo, calm.id, start_at=start + timedelta(hours=2), minutes=30)
+    calls = _stub_calendar(
+        monkeypatch, "ok", [(start + timedelta(minutes=15), start + timedelta(minutes=45))]
+    )
+
+    body = client.get("/today/agenda").json()
+
+    flags = {c["title"]: c["calendarConflict"] for c in body["cards"]}
+    assert flags == {"겹친 카드": True, "안 겹친 카드": False}
+    assert body["calendar"]["status"] == "ok"
+    assert body["calendar"]["checkedAt"] is not None
+    assert calls == ["fetch"]
+    # 조회가 토큰을 갱신했을 수 있다 — freebusy 는 commit 하지 않으니 라우터가 한다.
+    assert sum(s.commit_count for s in fake_sessions) == 1
+
+
+def test_agenda_says_failed_instead_of_pretending_there_is_no_conflict(
+    monkeypatch,  # noqa: ANN001
+    client: TestClient,
+    fake_action_item_repo: FakeActionItemRepo,
+    fake_execution_repo: FakeExecutionRepo,
+) -> None:
+    """못 읽었을 때 `calendarConflict=false` 만 주면 '겹침 없음' 과 구분되지 않는다."""
+    card = _make_action()
+    fake_action_item_repo.seed(card)
+    _seed_block(fake_execution_repo, card.id, start_at=now_kst() + timedelta(minutes=10))
+    _stub_calendar(monkeypatch, "failed", [])
+
+    resp = client.get("/today/agenda")
+
+    assert resp.status_code == 200  # 캘린더 때문에 어젠다가 죽으면 안 된다
+    body = resp.json()
+    assert body["calendar"] == {"status": "failed", "checkedAt": None}
+    assert body["cards"][0]["calendarConflict"] is False
+
+
+def test_agenda_does_not_touch_the_calendar_when_the_feature_is_off(
+    client: TestClient, fake_action_item_repo: FakeActionItemRepo
+) -> None:
+    """기본(스위치 OFF) — Google 을 부르지 않고 '연결 안 됨' 으로 둔다."""
+    fake_action_item_repo.seed(_make_action())
+
+    body = client.get("/today/agenda").json()
+
+    assert body["calendar"] == {"status": "not_connected", "checkedAt": None}
+    assert body["cards"][0]["calendarConflict"] is False

@@ -1,13 +1,11 @@
 """FastAPI 앱 진입점.
 
-re:action backend는 18개 도메인 라우터로 구성된다 (docs/api-contract.md):
+re:action backend는 19개 도메인 라우터로 구성된다 (docs/api-contract.md):
   health · auth · onboarding · interview · time_policies · fixed_schedules
-  · calendar · notifications · goals · habits · inbox · planning · today
-  · reflection · recovery · review · policy · settings
+  · calendar · notifications · goals · habits · inbox · planning · materials
+  · today · reflection · recovery · review · policy · settings
 
-도메인 라우터는 Issue #3 에서 도메인별 mock/stub 으로 채워지는 중이다.
-auth·onboarding·interview(#3-B), time_policies·calendar·fixed_schedules·notifications(#3-C),
-goals·habits·inbox(#3-D) 구현 완료. 나머지는 placeholder 501.
+모든 라우터가 실 DB·LLM 경로로 동작한다 (Issue #3 의 mock/stub 단계는 끝났다).
 """
 
 import logging
@@ -20,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from reaction_backend.api.deps import get_current_user
 from reaction_backend.api.exception_handlers import register_exception_handlers
 from reaction_backend.api.middleware.idempotency import IdempotencyMiddleware
+from reaction_backend.api.middleware.unhandled_error import UnhandledErrorMiddleware
 from reaction_backend.api.routes import (
     auth,
     calendar,
@@ -107,6 +106,12 @@ def create_app() -> FastAPI:
     # Idempotency-Key 미들웨어 (ADR-0002 §2.3) — CORS 안쪽에 두어
     # 캐시/에러 응답에도 CORS 헤더가 적용되도록 한다.
     app.add_middleware(IdempotencyMiddleware)
+
+    # 처리 안 된 예외 → 500 envelope 을 **CORS·Correlation 안쪽에서** 만든다. 전역 Exception
+    # 핸들러는 Starlette 가 CORS 바깥에서 돌려 500 에 CORS·x-request-id 가 빠졌고, 네이티브
+    # 앱은 그걸 네트워크 오류로 봤다(middleware/unhandled_error.py). 최종 순서(바깥→안):
+    # CORS > Correlation > UnhandledError > Idempotency > 라우트.
+    app.add_middleware(UnhandledErrorMiddleware)
 
     # trace_id 주입 (#370). `add_middleware` 는 **역순으로 감싸므로 나중에 등록한 것이
     # 바깥**이다 — Idempotency 뒤에 등록해 그보다 바깥에 두어야, 캐시된 응답까지 포함해

@@ -10,7 +10,8 @@ Issue #17 (Alpha MVP)은 캘린더 OAuth 자체를 P1 로 미뤘었다. **그 �
 
 `GOOGLE_CALENDAR_ENABLED=false`(기본)면 연결 엔드포인트는 501 로 남는다 — Cloud 콘솔
 셋업(client_secret·리디렉션 URI)은 사람 손이 필요해서, 준비 전에 배포돼도 사용자가
-깨진 동의 화면을 만나지 않게 하는 안전핀이다.
+깨진 동의 화면을 만나지 않게 하는 안전핀이다. 해제(`DELETE /connect`)만은 예외다 —
+동의 철회는 기능이 꺼져 있어도 돼야 한다.
 """
 
 import logging
@@ -22,9 +23,12 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from reaction_backend.api.deps import CurrentUser
-from reaction_backend.config import get_settings
+from reaction_backend.db.models.calendar_connection import (
+    CalendarConnection as CalendarConnectionModel,
+)
 from reaction_backend.db.session import get_db
 from reaction_backend.integrations.google_calendar import freebusy, oauth, token_store
+from reaction_backend.safety.encryption import EncryptionError
 from reaction_backend.schemas.calendar import (
     ApproveInsertResult,
     BusyInterval,
@@ -45,13 +49,13 @@ SessionDep = Annotated[AsyncSession, Depends(get_db)]
 
 
 def _require_enabled() -> None:
-    """기능 스위치 + 자격증명 확인. 어느 하나라도 없으면 예전처럼 501."""
-    cfg = get_settings()
-    if (
-        cfg.google_calendar_enabled
-        and cfg.google_oauth_client_id
-        and cfg.google_oauth_client_secret
-    ):
+    """기능 스위치 + 자격증명 + 토큰 암호화 키 확인. 어느 하나라도 없으면 예전처럼 501.
+
+    암호화 키까지 보는 이유: 키가 없으면 사용자가 Google 동의를 **다 마친 뒤** 토큰 저장
+    단계에서 500 이 난다(로컬에서 실제로 겪었다). 500 은 CORS 헤더도 못 달아 FE 에는
+    원인 모를 네트워크 오류로만 보인다. 저장할 수 없으면 동의 화면을 열기 전에 닫는다.
+    """
+    if oauth.is_enabled():
         return
     raise ApiError(
         ErrorCode.COMMON_NOT_IMPLEMENTED,
@@ -74,8 +78,28 @@ def _connect_failed(reason: str) -> ApiError:
     )
 
 
-def _connection_response(connected: bool, scopes: str = "") -> CalendarConnection:
-    return CalendarConnection(provider="google", connected=connected, scopes=scopes.split())
+def _connection_response(
+    connected: bool, scopes: str = "", *, needs_reconnect: bool = False
+) -> CalendarConnection:
+    return CalendarConnection(
+        provider="google",
+        connected=connected,
+        scopes=scopes.split(),
+        needs_reconnect=needs_reconnect,
+    )
+
+
+def _refresh_token_for_remote_revoke(connection: CalendarConnectionModel) -> str | None:
+    """원격 회수에 쓸 refresh token — 복호화할 수 없으면 None(원격 회수만 건너뛴다).
+
+    해제는 기능 스위치·암호화 키와 무관하게 돼야 한다(동의 철회). 키가 빠졌거나 바뀐 서버에서
+    여기서 500 이 나면 사용자는 연결을 끊을 방법이 없다 — 우리 DB 의 회수가 먼저다.
+    """
+    try:
+        return token_store.refresh_token_of(connection)
+    except EncryptionError as exc:
+        logger.warning("calendar_revoke_skipped reason=%s", type(exc).__name__)
+        return None
 
 
 def _parse_range(from_: str, to: str) -> tuple[date, date]:
@@ -115,11 +139,17 @@ async def get_calendar_connection(user: CurrentUser, session: SessionDep) -> Cal
     연결이 없으면 404 가 아니라 `connected: false` 다. "아직 연결 안 함" 은 오류가 아니라
     이 화면의 기본 상태다. 기능이 꺼져 있으면 connect 와 똑같이 501 — FE 는 그걸 보고
     '준비 중' 을 그린다.
+
+    연결이 Google 쪽에서 끊겼으면(권한 철회·refresh token 만료) `needsReconnect: true` 다 —
+    예전엔 앱에서 해제한 것과 똑같이 `connected: false` 만 내려가, 설정 카드가 조용히 기본
+    '연결' 문구로 돌아갔고 사용자는 끊긴 줄 몰랐다.
     """
     _require_enabled()
     connection = await token_store.get_active(session, user_id=user.id)
     if connection is None:
-        return _connection_response(False)
+        return _connection_response(
+            False, needs_reconnect=await token_store.needs_reconnect(session, user_id=user.id)
+        )
     return _connection_response(True, connection.scopes)
 
 
@@ -139,14 +169,14 @@ async def connect_calendar(
         # Google 이 동의를 이미 갖고 있어 refresh token 을 다시 주지 않았다 — 아래에서 판단.
         bundle = exc.bundle
     except oauth.OAuthError as exc:
-        logger.info("calendar_connect_failed", extra={"reason": exc.reason})
+        logger.info("calendar_connect_failed reason=%s", exc.reason)
         raise _connect_failed(exc.reason) from exc
 
     # 스코프를 먼저 본다 — 체크만 풀었던 사용자의 동의를 아래에서 회수하면 안 된다.
     if not oauth.has_calendar_scope(bundle.scopes):
         # 동의 화면에서 캘린더 체크를 풀었다. 저장하지 않는다 — 회수도 하지 않는다
         # (사용자가 준 다른 권한까지 걷어낼 이유가 없다).
-        logger.info("calendar_connect_failed", extra={"reason": "scope_not_granted"})
+        logger.info("calendar_connect_failed reason=scope_not_granted")
         raise ApiError(
             ErrorCode.COMMON_VALIDATION_ERROR,
             "캘린더 권한이 허용되지 않았어요. 연결할 때 캘린더 항목을 체크해 주세요.",
@@ -160,12 +190,14 @@ async def connect_calendar(
         # 방금 받은 토큰으로 동의를 회수해 두면 **다음 시도**는 최초 동의가 되어
         # refresh token 이 온다. 회수는 best-effort 라 여기서 던지지 않는다.
         # (살아 있는 연결이 있으면 그 refresh token 을 쓴다 — `token_store.save` 가 유지한다.)
-        logger.info("calendar_connect_failed", extra={"reason": "no_refresh_token"})
+        logger.info("calendar_connect_failed reason=no_refresh_token")
         await oauth.revoke(bundle.access_token)
         raise _connect_failed("no_refresh_token")
 
     connection = await token_store.save(session, user_id=user.id, bundle=bundle)
     await session.commit()
+    # 화면 캐시에 남은 "연결 안 됨" 을 지운다 — 안 지우면 5분간 겹침 표시가 안 뜬다.
+    freebusy.clear_screen_cache(user.id)
     return _connection_response(True, connection.scopes)
 
 
@@ -178,16 +210,26 @@ async def disconnect_calendar(user: CurrentUser, session: SessionDep) -> None:
 
     우리 DB 를 먼저 확정하고 원격 회수는 그 뒤에 한다. 순서를 뒤집으면 Google 은
     끊겼는데 우리는 연결됐다고 믿는 상태가 생긴다.
+
+    **기능 스위치와 무관하다(501 없음).** 해제는 동의 철회다 — 예전엔 운영이 기능을 꺼 둔
+    동안 해제도 501 이라, 사용자가 연결을 끊을 방법이 없었다. 원격 회수는 client secret 이
+    필요 없고, 토큰을 복호화할 수 없으면 그것만 건너뛴다.
+
+    Google 쪽에서 이미 끊긴 연결(`needsReconnect`)에 부르면 재연결 안내를 거둔다 — 다시
+    연결하지 않기로 한 사용자에게 계획마다 같은 안내를 반복하지 않게.
     """
-    _require_enabled()
     connection = await token_store.get_active(session, user_id=user.id)
     if connection is None:
+        await token_store.dismiss_reconnect(session, user_id=user.id)
+        await session.commit()
         return None
 
-    refresh_token = token_store.refresh_token_of(connection)
+    refresh_token = _refresh_token_for_remote_revoke(connection)
     await token_store.mark_revoked(session, connection)
     await session.commit()
-    await oauth.revoke(refresh_token)
+    freebusy.clear_screen_cache(user.id)  # 해제 직후 화면에 옛 겹침 표시가 남지 않게
+    if refresh_token is not None:
+        await oauth.revoke(refresh_token)
     return None
 
 
@@ -215,6 +257,8 @@ async def get_freebusy(
         start=datetime.combine(start_day, time(0, 0), tzinfo=KST),
         end=datetime.combine(end_day + timedelta(days=1), time(0, 0), tzinfo=KST),
     )
+    # 갱신한 토큰·회수 표시를 확정한다 — freebusy 는 commit 하지 않는다(호출자 몫).
+    await session.commit()
     if result.status == "not_connected":
         raise ApiError(
             ErrorCode.CALENDAR_NOT_CONNECTED,

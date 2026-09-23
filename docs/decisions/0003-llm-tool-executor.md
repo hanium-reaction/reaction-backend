@@ -80,3 +80,15 @@ override 할 수 있고, 현재 유일한 override 는 recovery personalize 다:
   없이 2~4s 로 내려오고, 12s 는 그 위의 여유다.
 - 다른 도메인(inbox/brief 등)은 기본 8s 유지. 새 override 를 추가하면 이 절에 사유와 함께
   기록할 것 — 문서에 없는 override 는 리뷰에서 "8s 위반"으로 오독된다(실제로 그랬다).
+
+## Addendum — 호출별 `max_attempts` (2026-09-18, recovery-13)
+
+`run(..., max_attempts=None)` — keyword-only, 기본값이면 종전대로 `settings.llm_max_retries`
+(운영 3). 재시도는 시도마다 `timeout` 을 새로 주므로 최악 대기가 `timeout × 시도 수 + backoff`
+다. recovery personalize 는 `timeout=12.0` × 3 + backoff ≈ **37초**까지 사용자를 로딩 화면에
+세워 뒀고(미러 실측 26.6초 — 재시도 끝에 성공), 그동안 룰 카드는 이미 준비돼 있었다.
+
+- `api/routes/recovery.py` — `max_attempts=1`. 최악 대기 = 12초 1회. thinking 0 이면 정상
+  응답은 2~4초라(위 #128) 한 번이면 충분하고, 실패하면 곧바로 카탈로그 템플릿 카드가 나간다.
+- 다른 호출처는 기본값(재시도 유지). 사용자가 화면 앞에서 기다리고 결정적 fallback 이 있는
+  호출에만 쓴다 — 새로 쓰면 이 절에 사유와 함께 기록할 것.

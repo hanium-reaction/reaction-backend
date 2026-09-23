@@ -387,3 +387,85 @@ def test_edit_block_bad_id(client: TestClient) -> None:
     resp = _patch(client, "not-a-block", {"startAt": _dt(1, 11, 0).isoformat()})
     assert resp.status_code == 404
     assert resp.json()["code"] == "PLAN_BLOCK_NOT_FOUND"
+
+
+# ── calendarConflict ─────────────────────────────────────────────────────
+
+
+def _stub_calendar(monkeypatch, busy: list[tuple[datetime, datetime]]) -> None:  # noqa: ANN001
+    from reaction_backend.integrations.google_calendar import freebusy, oauth
+    from reaction_backend.orchestrator.goal_structuring import TimeInterval
+
+    monkeypatch.setattr(oauth, "is_enabled", lambda: True)
+
+    async def _fetch(session, *, user_id, start, end):  # noqa: ANN001, ANN202
+        return (
+            freebusy.FreeBusyResult("ok", [TimeInterval(s, e) for s, e in busy]),
+            datetime.now(KST),
+        )
+
+    monkeypatch.setattr(freebusy, "fetch_busy_for_screen", _fetch)
+
+
+def test_get_weekly_flags_blocks_that_now_overlap_the_calendar(
+    monkeypatch,  # noqa: ANN001
+    client: TestClient,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+) -> None:
+    from reaction_backend.schemas.common import now_kst
+
+    today = now_kst().date()
+    next_mon = today - timedelta(days=today.weekday()) + timedelta(days=7)
+
+    def at(offset: int, hour: int) -> datetime:
+        return datetime.combine(next_mon + timedelta(days=offset), time(hour), tzinfo=KST)
+
+    fake_scheduled_block_repo.seed(_block(at(0, 10), at(0, 11)), title="월 겹침", category="study")
+    fake_scheduled_block_repo.seed(_block(at(1, 10), at(1, 11)), title="화 무사", category="study")
+    _stub_calendar(monkeypatch, [(at(0, 10) + timedelta(minutes=30), at(0, 12))])
+
+    body = client.get("/plans/weekly", params={"weekStart": next_mon.isoformat()}).json()
+
+    assert body["calendar"]["status"] == "ok"
+    assert body["days"][0]["blocks"][0]["calendarConflict"] is True
+    assert body["days"][1]["blocks"][0]["calendarConflict"] is False
+
+
+def test_get_weekly_does_not_flag_blocks_that_already_ended(
+    monkeypatch,  # noqa: ANN001
+    client: TestClient,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+) -> None:
+    """지난주 그리드에 배지가 차면 지금 봐야 할 겹침이 묻힌다."""
+    fake_scheduled_block_repo.seed(
+        _block(_dt(0, 9), _dt(0, 10)), title="지난 블록", category="study"
+    )
+    _stub_calendar(monkeypatch, [(_dt(0, 9), _dt(0, 10))])
+
+    body = client.get("/plans/weekly", params={"weekStart": MON.isoformat()}).json()
+
+    assert body["days"][0]["blocks"][0]["calendarConflict"] is False
+
+
+def test_get_weekly_reports_not_connected_by_default(client: TestClient) -> None:
+    body = client.get("/plans/weekly", params={"weekStart": MON.isoformat()}).json()
+
+    assert body["calendar"] == {"status": "not_connected", "checkedAt": None}
+
+
+def test_block_edit_response_does_not_claim_a_calendar_state(
+    client: TestClient,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+    fake_action_item_repo: FakeActionItemRepo,
+) -> None:
+    """편집 응답은 캘린더를 확인하지 않는다 — 확인 안 한 값을 `false` 로 주면 "겹침 없음" 이 된다."""
+    block = _block(_dt(1, 9, 0), _dt(1, 10, 0))
+    fake_scheduled_block_repo.seed(block, title="옮길 카드", category="study")
+
+    resp = client.patch(
+        f"/plans/plan_{MON.isoformat()}/blocks/block_{block.id}",
+        json={"startAt": _dt(1, 14, 0).isoformat()},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert "calendarConflict" not in resp.json()

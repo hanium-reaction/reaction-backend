@@ -15,12 +15,29 @@ MVP 스코프: **read-only freebusy**. write-back(`events.insert`)은 P1.
   · `web_push/sender.py` 와 같은 관례이고 **새 의존성이 0** 이다.
 - `token_store.py` — `calendar_connections` 읽기/쓰기. 평문 토큰이 이 모듈 밖으로 나가지
   않게 저장은 전부 `encrypt_oauth_token` 경유.
-- `freebusy.py` — `freeBusy.query` + 날짜별 분해. `first_plan.busy_for_day` 의 다섯 번째
-  소스로 배선돼 있다 (ADR-0009 D4).
+- `freebusy.py` — `freeBusy.query` + 날짜별 분해. 첫 계획(`first_plan.busy_for_day`)과
+  주간 재계획(`POST /plans/replan` 의 `committed_busy`)의 다섯 번째 소스로 배선돼 있다
+  (ADR-0009 D4).
 
-⚠️ **60s TTL 캐시는 두지 않았다.** 계획 생성이 지평 전체를 `fetch_busy_by_day` 로 **한 번에**
-조회하므로 generate 한 번이 API 를 한 번만 친다 — 캐시가 막을 반복 호출이 구조적으로 없다.
-날짜마다 부르는 구조로 바꾸면 그때 다시 판단할 것.
+## 캘린더를 언제 읽나
+
+일정을 DB 에 복사하지 않는다 — **필요한 순간에 읽는다.** webhook 은 없다(`events.watch` 는 일정
+제목까지 읽는 스코프가 필요해 ADR-0009 D4 범위 밖).
+
+| 시점 | 범위 | 하는 일 |
+| --- | --- | --- |
+| `POST /plans/generate` · `POST /plans/mandala/next-cycle` | 계획 지평 전체를 한 번 | 캘린더를 피해 배치 |
+| `POST /plans/replan` | 재배치 창 전체를 한 번 (60일 상한 — 넘으면 `warnings`) | 캘린더를 피해 재배치 |
+| `GET /today/agenda` · `GET /plans/weekly` | 오늘 / 그 주 — **5분 캐시 · 2초 상한** | 이미 승인한 블록의 겹침 표시(`calendarConflict`) |
+| 06:00 모닝 브리프 cron | 오늘 | 겹치는 카드를 `adjustment_hints` 맨 앞에 |
+| `GET /calendar/freebusy` | 요청 구간 | 그대로 반환 |
+
+겹쳐도 **옮기지 않는다**(자동 적용 금지) — 판정은 `domain/calendar_conflict.py` 하나.
+access token(약 1시간)은 조회 시점에 만료 60초 전이면 그때 갱신한다(별도 갱신 cron 없음).
+
+캐시는 화면 조회(`fetch_busy_for_screen`)에만 있다 — 계획 생성은 지평 전체를 한 번 읽어 반복 호출이
+없다. 프로세스 메모리라 워커마다 따로이고(단일 인스턴스 전제), **실패는 캐시하지 않으며**,
+연결·해제 직후 `clear_screen_cache(user_id)` 로 비운다.
 
 ## 후속
 
@@ -39,7 +56,10 @@ MVP 스코프: **read-only freebusy**. write-back(`events.insert`)은 P1.
 
 켜려면(사람 손): Cloud 콘솔에서 **Calendar API 사용 설정** + 동의 화면에 `calendar.freebusy`
 스코프 추가 + 웹 client 의 **승인된 JavaScript 원본**에 FE 도메인. 서버 `.env` 에
-`GOOGLE_CALENDAR_ENABLED=true` · `GOOGLE_OAUTH_CLIENT_SECRET`. 동의 화면이 **테스트** 상태면
+`GOOGLE_CALENDAR_ENABLED=true` · `GOOGLE_OAUTH_CLIENT_SECRET` — 손으로 넣지 말고
+`calendar-oauth.yml` 을 쓴다: `mode=check` 가 GitHub secret(`STAGING_GOOGLE_OAUTH_CLIENT_SECRET`)
+을 값 노출 없이 라이브 client_id 와 대조하고(`invalid_grant`=짝 맞음 · `invalid_client`=틀림),
+`mode=enable` 이 통과 시에만 `.env` 에 기록·재기동, `mode=disable` 이 롤백. 동의 화면이 **테스트** 상태면
 테스트 사용자만 연결할 수 있고 refresh token 이 7일 뒤 만료된다(그 뒤 재연결 안내로 떨어진다).
 
 ## 규약
@@ -49,8 +69,22 @@ MVP 스코프: **read-only freebusy**. write-back(`events.insert`)은 P1.
   에서 안 오면: 살아 있는 연결이 있으면 그 값을 쓰고, 없으면 동의를 회수해 다음 시도가
   refresh token 을 받게 한다.
 - 동의 화면에서 캘린더 체크를 풀면 교환은 성공하지만 스코프에서 빠진다 — 저장하지 않는다.
-- 권한 박탈 / refresh 실패 → `revoked_at` set + 다음 진입 시 재연결 안내
-  (`CALENDAR_NOT_CONNECTED`).
+- 연결 회수는 토큰 엔드포인트가 **`invalid_grant`** 라고 할 때만이다(`oauth.REVOKED_GRANT`).
+  `invalid_client`·429·JSON 아닌 응답은 서버 쪽 문제라 연결을 두고 이번 조회만 `failed` —
+  secret 오타 하나로 모든 사용자의 연결이 끊기던 문제.
+- `invalid_grant` → `revoked_at` set + **"Google 쪽에서 끊김" 표식**(`expires_at`=1970-01-01,
+  `token_store` 독스트링). 그 뒤로 `GET /calendar/connect` 의 `needsReconnect: true`, 계획·재계획
+  `warnings` 의 `CALENDAR_RECONNECT_WARNING`, `GET /calendar/freebusy` 404 `CALENDAR_NOT_CONNECTED`.
+  재연결(`save`)이나 해제(`DELETE` → `dismiss_reconnect`)가 표식을 지운다. 앱에서 해제한 연결은
+  표식이 없어 조용하다.
+- 기능 스위치(`oauth.is_enabled`)가 꺼져 있으면 `fetch_busy` 가 **어느 경로에서도** 읽지 않는다.
+  해제(`DELETE /calendar/connect`)만은 스위치와 무관하다 — 동의 철회를 막지 않는다.
+- 화면 조회는 토큰 행이 잠겨 있으면(계획 생성이 갱신한 채 LLM 을 기다리는 중) 1초만 기다리고
+  저장을 건너뛴다(`_write_connection`) — 새 토큰은 이번 요청에 그대로 쓴다.
+- **`freebusy` 는 commit 하지 않는다(flush 까지).** 계획 생성·재계획이 트랜잭션 단위
+  advisory lock(`user_agent_lock`) 안에서 부르기 때문에, 여기서 commit 하면 lock 이 도중에
+  풀린다. 갱신 토큰·회수 표시는 호출자의 commit 에 실린다 — lock 없는 조회 라우트는 스스로
+  commit 한다.
 - 연결 해제는 **우리 DB 를 먼저 확정**하고 원격 회수는 그 뒤에 best-effort. 순서를 뒤집으면
   Google 은 끊겼는데 우리는 연결됐다고 믿는 상태가 생긴다.
 - hard delete 금지 — 해제는 `revoked_at` (AGENTS §2).

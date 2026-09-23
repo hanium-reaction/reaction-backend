@@ -1,0 +1,177 @@
+name: CORS origins (EC2)
+
+# 라이브 EC2 `.env` 의 `CORS_ALLOW_ORIGINS` 를 조회·추가·제거하고 앱을 재기동한다.
+#
+# 왜 필요한가: deploy.yml 은 `.env` 를 rsync 에서 제외하므로 이 값은 레포로 못 바꾼다.
+# 안드로이드 앱(Capacitor)의 출처 `https://localhost` 가 빠져 있어 앱의 API 호출이 preflight
+# 에서 400 으로 막혀 있었다(2026-09-17 FE–BE 연동 점검, reaction-frontend#237 §CORS).
+# 손으로 SSH 하는 대신 감사 로그가 남는 워크플로로 바꾼다 — toggle-signups.yml 과 같은 이유.
+#
+# mode
+# - show   : 읽기만. 현재 목록 출력.
+# - add    : origin 을 목록에 추가(이미 있으면 no-op) → 재기동 → preflight 로 허용 확인.
+# - remove : origin 을 목록에서 제거(없으면 no-op) → 재기동 → preflight 로 거부 확인. add 의 롤백.
+#
+# 안전:
+# - workflow_dispatch 전용
+# - origin 입력은 **환경변수로만** 넘기고 파이썬이 형식을 검증한다 — `scheme://host[:port]`,
+#   scheme 은 http/https/capacitor, 경로·와일드카드·공백 금지. 검증 전에는 셸에 풀지 않는다.
+# - `.env` 는 임시 파일 + os.replace 로 원자 교체(provision-vapid.yml 과 같은 이유 — `.env` 는
+#   DATABASE_URL·COLUMN_ENCRYPTION_KEY 의 유일본이다). 다른 줄과 파일 권한은 그대로 둔다.
+# - `.env` 전체를 출력하지 않는다 — CORS_ALLOW_ORIGINS 한 줄만(비밀값 아님).
+# - 적용 후 127.0.0.1 로 실제 preflight 를 보내 결과를 확인한다 — 기대와 다르면 job 실패.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "show(조회) · add(추가) · remove(제거)"
+        type: choice
+        options:
+          - show
+          - add
+          - remove
+        default: show
+      origin:
+        description: "추가·제거할 origin (예: https://localhost). show 면 비워 둔다."
+        type: string
+        default: ""
+
+concurrency:
+  # deploy / toggle-* / calendar-oauth 와 같은 `.env`·서비스를 건드리므로 직렬화.
+  group: deploy-ec2
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  cors:
+    name: "cors origins (${{ inputs.mode }})"
+    runs-on: [self-hosted, ec2, reaction-backend]
+    timeout-minutes: 10
+
+    env:
+      APP_DIR: /home/ubuntu/reaction-backend
+      MODE: ${{ inputs.mode || 'show' }}
+      ORIGIN: ${{ inputs.origin }}
+
+    steps:
+      - name: Read / update CORS_ALLOW_ORIGINS
+        id: update
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import shutil
+          import sys
+          from pathlib import Path
+
+          KEY = "CORS_ALLOW_ORIGINS"
+          ORIGIN_RE = re.compile(r"(https?|capacitor)://[A-Za-z0-9.-]+(:[0-9]{1,5})?")
+
+          mode = os.environ["MODE"]
+          origin = os.environ.get("ORIGIN", "").strip()
+          env_path = Path(".env")
+          lines = env_path.read_text(encoding="utf-8").splitlines()
+          positions = [i for i, line in enumerate(lines) if line.startswith(f"{KEY}=")]
+
+          current: list[str] = []
+          if positions:
+              raw = lines[positions[-1]].split("=", 1)[1].strip()  # dotenv: 마지막 줄이 유효
+              if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "'\"":
+                  raw = raw[1:-1]
+              try:
+                  current = json.loads(raw) if raw else []
+              except json.JSONDecodeError:
+                  print(f"::error::{KEY} 가 JSON 배열이 아니다 — 손으로 확인할 것")
+                  sys.exit(1)
+              if not isinstance(current, list) or not all(isinstance(x, str) for x in current):
+                  print(f"::error::{KEY} 가 문자열 배열이 아니다 — 손으로 확인할 것")
+                  sys.exit(1)
+
+          print("before:", json.dumps(current))
+          changed = False
+
+          if mode != "show":
+              if not ORIGIN_RE.fullmatch(origin):
+                  print("::error::origin 형식이 아니다 — scheme://host[:port] (http/https/capacitor), 경로 없이")
+                  sys.exit(1)
+              if mode == "add" and origin not in current:
+                  current.append(origin)
+                  changed = True
+              elif mode == "remove" and origin in current:
+                  current = [o for o in current if o != origin]
+                  changed = True
+              elif mode not in ("add", "remove"):
+                  print(f"::error::알 수 없는 mode: {mode}")
+                  sys.exit(1)
+
+          if changed:
+              new_line = f"{KEY}=" + json.dumps(current, separators=(",", ":"))
+              if positions:
+                  keep = [line for i, line in enumerate(lines) if i not in positions[:-1]]
+                  keep[positions[-1] - len(positions[:-1])] = new_line
+                  lines = keep
+              else:
+                  lines.append(new_line)
+              tmp = env_path.with_name(".env.cors-tmp")
+              tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+              shutil.copymode(env_path, tmp)
+              os.replace(tmp, env_path)
+
+          print("after: ", json.dumps(current), "(변경 없음)" if not changed else "(변경됨)")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"changed={'true' if changed else 'false'}\n")
+          PY
+
+      - name: Restart app
+        if: steps.update.outputs.changed == 'true'
+        run: sudo systemctl restart reaction-backend
+
+      - name: Health check
+        if: steps.update.outputs.changed == 'true'
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://127.0.0.1:8000/health -o /tmp/health.json; then
+              if grep -q '"status":"ok"' /tmp/health.json; then
+                echo "healthy:"; cat /tmp/health.json; exit 0
+              fi
+            fi
+            sleep 2
+          done
+          echo "::error::health check failed after restart"
+          exit 1
+
+      - name: Verify preflight
+        if: env.MODE != 'show'
+        run: |
+          set -euo pipefail
+          # ORIGIN 은 앞 step 에서 형식 검증을 통과한 값이다(실패했으면 여기까지 오지 않는다).
+          ACAO=$(curl -s -o /dev/null -D - -X OPTIONS http://127.0.0.1:8000/auth/me \
+            -H "Origin: ${ORIGIN}" \
+            -H "Access-Control-Request-Method: GET" \
+            -H "Access-Control-Request-Headers: authorization,content-type" \
+            | tr -d '\r' | awk 'tolower($1)=="access-control-allow-origin:"{print $2}')
+          echo "preflight Access-Control-Allow-Origin: ${ACAO:-(없음)}"
+          if [ "${MODE}" = "add" ] && [ "${ACAO}" != "${ORIGIN}" ]; then
+            echo "::error::추가했는데 preflight 가 ${ORIGIN} 을 허용하지 않는다"
+            exit 1
+          fi
+          if [ "${MODE}" = "remove" ] && [ -n "${ACAO}" ]; then
+            echo "::error::제거했는데 preflight 가 여전히 허용한다 (CORS_ALLOW_ORIGIN_REGEX 확인)"
+            exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          {
+            echo "### CORS origins — ${MODE} ${ORIGIN}"
+            echo '```'
+            grep '^CORS_ALLOW_ORIGINS=' .env || echo '(설정 없음 → config.py 기본값)'
+            echo '```'
+            echo "롤백: 같은 워크플로를 mode=remove(또는 add) 로 재실행."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -17,7 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from reaction_backend.config import get_settings
 from reaction_backend.llm import aiClient
 from reaction_backend.orchestrator import materials_resolver
-from reaction_backend.orchestrator.first_plan_adapter import context_from_outcome
+from reaction_backend.orchestrator.first_plan_adapter import (
+    context_from_outcome,
+    heaviest_goal,
+    heaviest_goal_or_none,
+    restore_user_phrases_in_milestones,
+)
 from reaction_backend.schemas.common import now_kst
 from reaction_backend.schemas.interview import InterviewOutcome
 from reaction_backend.schemas.planning import MilestoneDraft, MilestonePlan
@@ -25,8 +30,7 @@ from reaction_backend.schemas.planning import MilestoneDraft, MilestonePlan
 
 def _rule_milestones(outcome: InterviewOutcome) -> MilestonePlan:
     """LLM 실패 시 룰 폴백 — heaviest 목표를 준비→진행→마무리 3단계로 환원(빈 응답 방지)."""
-    goals = outcome.core_goals
-    heaviest = next((g for g in goals if g.is_heaviest), goals[0])
+    heaviest = heaviest_goal(outcome)
     title = heaviest.title
     return MilestonePlan(
         milestones=[
@@ -72,10 +76,7 @@ async def generate_milestones(
     않는다 — 별도 사용자 액션이고, 공유하려면 저장소가 필요하다(#226 step 2).
     """
     settings = get_settings()
-    heaviest = next(
-        (g for g in outcome.core_goals if g.is_heaviest),
-        outcome.core_goals[0] if outcome.core_goals else None,
-    )
+    heaviest = heaviest_goal_or_none(outcome)
     materials = await materials_resolver.resolve(heaviest.materials_note if heaviest else None)
     # `target_date` 를 넘기지 않으면 마감까지 남은 기간을 계산할 기준이 없어
     # `total_capacity`(ADR-0007 §11)가 "마감 없음" 으로 읽힌다 — 마일스톤 크기를 재는
@@ -97,4 +98,12 @@ async def generate_milestones(
         tone_mode=tone_mode,
         thinking_budget=settings.llm_planning_thinking_budget,
     )
-    return list(result.value.milestones), result.fell_back
+    milestones = list(result.value.milestones)
+    if heaviest is not None:
+        # 금지어 치환이 사용자 목표 제목·완료 기준을 옮겨 쓴 자리까지 바꿔 놓았으면 되돌린다
+        # (planB-3) — 룰 폴백은 '{제목} 준비·기초' 와 완료 기준을 그대로 싣는다. 여기서 확정된
+        # 제목은 승인 때 목표의 뼈대로 영속되므로 깨진 문장이 오래 남는다.
+        milestones = restore_user_phrases_in_milestones(
+            milestones, [heaviest.title, heaviest.success_image]
+        )
+    return milestones, result.fell_back

@@ -499,3 +499,131 @@ async def test_list_recovery_outcome_contexts_respects_the_28_day_window(
         user_id, date(2026, 8, 1), date(2026, 8, 1)
     )
     assert rows == []
+
+
+# ═══════ 시작도 안 하고 지나간 블록 — 준수율 분모 밖 (critic-1, 실 Postgres) ═══════
+
+
+async def _seed_card_with_block(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    start: datetime,
+    block_status: str = "scheduled",
+    card_status: str = "planned",
+    archived: bool = False,
+) -> tuple[UUID, UUID]:
+    item_id = uuid4()
+    session.add(
+        ActionItem(
+            id=item_id,
+            user_id=user_id,
+            title="시작 안 한 블록 테스트 카드",
+            target_date=start.date(),
+            status=card_status,
+            archived_at=start if archived else None,
+        )
+    )
+    await session.flush()
+    block_id = uuid4()
+    session.add(
+        ScheduledBlock(
+            id=block_id,
+            user_id=user_id,
+            action_item_id=item_id,
+            start_at=start,
+            end_at=start + timedelta(minutes=30),
+            block_status=block_status,
+        )
+    )
+    await session.flush()
+    return item_id, block_id
+
+
+@pytest.mark.skipif(not DB_AVAILABLE, reason="DATABASE_URL not set")
+async def test_count_unstarted_blocks_counts_only_passed_never_started_live_cards(
+    real_db_session: AsyncSession,
+) -> None:
+    """1장 하고 2장을 그냥 넘긴 주 — 준수율은 그대로 100% 지만 '시작 못 한 블록 2' 가 나온다.
+
+    세지 않는 것: 아직 안 끝난 블록(놓친 게 아니다), 취소된 블록(옮기거나 지운 것), 보관된
+    카드의 블록, 다른 세션에서 이미 결론이 난 카드의 남은 블록(같은 카드를 두 번 벌점).
+    """
+    from reaction_backend.orchestrator.weekly_review import compute_weekly_kpis
+    from reaction_backend.repositories.review_repo import ReviewRepo
+
+    session = real_db_session
+    user_id = await _seed_user_real(session)
+    now = START + timedelta(days=3, hours=12)  # 목요일 12:00
+
+    # 한 장은 시작해서 완료.
+    done_item, done_block = await _seed_card_with_block(
+        session,
+        user_id=user_id,
+        start=START + timedelta(hours=9),
+        block_status="finished",
+        card_status="done",
+    )
+    session.add(
+        ExecutionEvent(
+            id=uuid4(),
+            action_item_id=done_item,
+            scheduled_block_id=done_block,
+            user_id=user_id,
+            plan_start_at=START + timedelta(hours=9),
+            plan_end_at=START + timedelta(hours=9, minutes=30),
+            completion_status="done",
+        )
+    )
+    await session.flush()
+    # 세는 것 2: 지나갔는데 손도 안 댄 블록 (planned 카드, in_progress 카드).
+    await _seed_card_with_block(session, user_id=user_id, start=START + timedelta(days=1, hours=9))
+    await _seed_card_with_block(
+        session,
+        user_id=user_id,
+        start=START + timedelta(days=2, hours=9),
+        card_status="in_progress",
+    )
+    # 세지 않는 것.
+    await _seed_card_with_block(session, user_id=user_id, start=now + timedelta(hours=2))
+    await _seed_card_with_block(session, user_id=user_id, start=now - timedelta(minutes=10))
+    await _seed_card_with_block(
+        session, user_id=user_id, start=START + timedelta(hours=14), block_status="cancelled"
+    )
+    await _seed_card_with_block(
+        session, user_id=user_id, start=START + timedelta(hours=15), archived=True
+    )
+    await _seed_card_with_block(
+        session, user_id=user_id, start=START + timedelta(hours=16), card_status="failed"
+    )
+    await _seed_card_with_block(session, user_id=user_id, start=START - timedelta(days=1))  # 지난주
+
+    repo = ReviewRepo(session)
+    assert await repo.count_unstarted_blocks(user_id, START, END, now=now) == 2
+
+    # 준수율 정의는 그대로 — 시작한 카드만 센다(api-contract: 과거 주와 비교가 깨지지 않게).
+    executions = await repo.collect_execution_stats(user_id, START, END)
+    assert compute_weekly_kpis(executions, [], START.date()).adherence_rate == 1.0
+
+
+async def test_count_unstarted_blocks_sql_is_scoped_to_the_user() -> None:
+    """남의 블록이 내 리뷰에 섞이지 않는다 — WHERE 절을 문자열로 고정."""
+    from reaction_backend.repositories.review_repo import ReviewRepo
+
+    class _CountResult(_RecordingResult):
+        def scalar_one(self) -> int:
+            return 0
+
+    class _CountSession(_RecordingSession):
+        async def execute(self, stmt: object) -> _CountResult:
+            self.statements.append(stmt)
+            return _CountResult()
+
+    session = _CountSession()
+    user_id = UUID("11111111-1111-1111-1111-111111111111")
+    await ReviewRepo(session).count_unstarted_blocks(  # type: ignore[arg-type]
+        user_id, START, END, now=END
+    )
+    sql = _sql(session.statements[0])
+    assert "scheduled_blocks.user_id = '11111111-1111-1111-1111-111111111111'" in sql
+    assert "scheduled_blocks.block_status = 'scheduled'" in sql

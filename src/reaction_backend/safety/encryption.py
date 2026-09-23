@@ -66,6 +66,19 @@ def _load_key() -> bytes:
     return key
 
 
+def is_configured() -> bool:
+    """키가 있고 형식이 맞는가 — 예외 없이. 암호화가 필요한 기능의 **사전 점검**용.
+
+    `encrypt` 까지 가서야 `EncryptionError` 가 나면, 외부 동의(OAuth 등)를 이미 받아 놓고
+    저장 단계에서 500 이 된다. 그 앞에서 기능을 닫아 두려고 둔다.
+    """
+    try:
+        _load_key()
+    except EncryptionError:
+        return False
+    return True
+
+
 def _pad_b64(value: str) -> str:
     """urlsafe base64 패딩 보정. 입력이 padding 생략 형태여도 받는다."""
     padding = (-len(value)) % 4

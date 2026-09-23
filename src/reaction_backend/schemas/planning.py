@@ -16,10 +16,30 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pydantic_core import PydanticCustomError
 
+from reaction_backend.schemas.calendar import CalendarCheck
 from reaction_backend.schemas.common import CamelModel, DraftMixin, KstDatetime
 from reaction_backend.schemas.interview import InterviewOutcome
+
+# 사용자가 직접 쓰는 제목의 길이 상한 — 저장 컬럼 길이와 같다(action_items.title String(300),
+# goal_nodes.title String(200)). 검증이 없으면 넘친 제목이 INSERT/UPDATE 에서 터져 사용자는
+# 무엇을 고칠지 모른 채 '서버 내부 오류'만 본다(마일스톤은 그 초안이 영영 승인되지 않았다).
+# 메시지는 pydantic 기본(영문) 대신 한국어로 준다 — 422 `message` 가 그대로 화면에 뜬다.
+_BLOCK_TITLE_MAX = 300
+_BLOCK_TITLE_TOO_LONG = "제목은 300자까지 쓸 수 있어요. 조금 줄여 주세요."
+_MILESTONE_TITLE_MAX = 200
+_MILESTONE_SUMMARY_MAX = 500
+_MILESTONES_MAX = 10
+
+
+def _block_title_fits(v: object) -> object:
+    """블록(카드) 제목 길이 검사 — `mode="before"` 검증기 공용. 넘치면 한국어 422."""
+    if isinstance(v, str) and len(v) > _BLOCK_TITLE_MAX:
+        raise PydanticCustomError("string_too_long", _BLOCK_TITLE_TOO_LONG)
+    return v
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM Structured Output (LLM ②③) — goal_decompose.v1.md 출력 형식과 1:1 대응.
@@ -222,6 +242,34 @@ class FirstPlanGenerateRequest(CamelModel):
     # 전달돼 생성되는 action_item 수의 하한 가이드가 된다. light≈3 / standard≈5 / intense≈8 세션/주.
     density: Literal["light", "standard", "intense"] = "standard"
 
+    @field_validator("milestones")
+    @classmethod
+    def _milestones_fit(cls, v: list[MilestoneDraft] | None) -> list[MilestoneDraft] | None:
+        """사용자가 확인·편집한 중간 목표를 **요청 단계에서** 잰다 (planA-4).
+
+        `MilestoneDraft` 자체에 길이 제한을 두지 않는 건 그게 LLM 출력 스키마(`MilestonePlan`)
+        이기도 해서다 — 거기 걸면 긴 제목 하나로 LLM 결과 전체가 폴백으로 떨어진다. 검사가
+        없으면 200자 넘는 이름이 생성은 통과하고 승인(goal_nodes.title String(200))에서만
+        터져, 그 초안은 몇 번을 눌러도 '잠시 후 다시' 로 끝났다.
+        """
+        if v is None:
+            return v
+        if len(v) > _MILESTONES_MAX:
+            raise PydanticCustomError(
+                "too_long",
+                "중간 목표는 10개까지 정할 수 있어요. 비슷한 것끼리 합치거나 몇 개를 지워 주세요.",
+            )
+        for m in v:
+            if len(m.title) > _MILESTONE_TITLE_MAX:
+                raise PydanticCustomError(
+                    "string_too_long", "중간 목표 이름은 200자까지 쓸 수 있어요. 조금 줄여 주세요."
+                )
+            if len(m.summary) > _MILESTONE_SUMMARY_MAX:
+                raise PydanticCustomError(
+                    "string_too_long", "중간 목표 설명은 500자까지 쓸 수 있어요. 조금 줄여 주세요."
+                )
+        return v
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 응답 — Draft Layer 미리보기 (DraftMixin: is_draft / ai_source 강제).
@@ -237,6 +285,39 @@ class ScheduledBlockPreview(CamelModel):
     category: str
     origin: Literal["habit", "goal"]
     origin_id: str | None = None
+
+
+class FirstPlanApproveBlock(CamelModel):
+    """승인 요청에 싣는 **편집된** 초안 블록 한 칸 (HITL '수정', additive).
+
+    `originId` 는 초안 블록의 `originId` 를 그대로 되돌려 보낸다(같은 카드의 나뉜 회차는
+    같은 값). 시각은 KST ISO 8601 — 손대지 않은 블록은 받은 `start`/`end` 를 **그대로** 돌려
+    보낸다(초안과 같으면 초안 시각으로 저장). 옮긴 블록은 보낸 시각 그대로(분 단위) 저장하고
+    15분 경계로 맞추지 않는다 — 초안 시각이 15분 격자가 아니어서(쉬는 시간 10분 등) 맞추면
+    승인한 화면과 다른 시각이 저장된다.
+    `title` 을 바꾸면 그 카드 이름이 바뀐다(회차 꼬리표 "(1/2)" 는 떼고 저장).
+    """
+
+    origin_id: str = Field(min_length=1, max_length=64)
+    start: str
+    end: str
+    title: str | None = Field(default=None, max_length=300)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title_fits(cls, v: object) -> object:
+        return _block_title_fits(v)
+
+
+class FirstPlanApproveRequest(CamelModel):
+    """POST /plans/{planId}/approve 본문 — **선택**. 본문이 없거나 `blocks` 가 없으면 초안 그대로.
+
+    `blocks` 를 보내면 그것이 **최종 블록 목록 전체**다: 옮긴 블록은 새 시각으로, 목록에서
+    빠진 카드는 만들지 않고, 바꾼 제목은 카드 이름으로 저장한다. 초안에 없던 `originId` 는
+    받지 않는다(422) — 승인은 초안을 고치는 자리지 새 카드를 만드는 자리가 아니다.
+    """
+
+    blocks: list[FirstPlanApproveBlock] | None = Field(default=None, max_length=500)
 
 
 class FirstPlanApproveResponse(CamelModel):
@@ -298,6 +379,10 @@ class ReplanBlockPreview(CamelModel):
     start: KstDatetime
     end: KstDatetime
     replaces_block_id: str | None = None  # block_<uuid> 대표 1개 | null (백로그)
+    # 그 대표 옛 블록의 원래 시각 (planA-15, additive) — 미리보기가 "월 12:00 → 화 19:00" 처럼
+    # 무엇이 어디로 옮겨지는지 보여 주게. 백로그이거나 이 필드 이전에 만든 초안이면 null.
+    replaces_start: KstDatetime | None = None
+    replaces_end: KstDatetime | None = None
 
 
 class ReplanResponse(DraftMixin):
@@ -338,8 +423,8 @@ class WeeklyReplanApproveResponse(CamelModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class WeeklyBlock(CamelModel):
-    """주간 그리드의 스케줄 블록 한 칸."""
+class _BlockFields(CamelModel):
+    """주간 블록의 공통 필드 — `WeeklyBlock`(조회)과 `BlockEditResponse`(편집 결과)가 공유."""
 
     block_id: str  # block_<uuid>
     action_id: str  # action_<uuid>
@@ -354,12 +439,39 @@ class WeeklyBlock(CamelModel):
     source: str
 
 
+# 체크인 결과 중 '끝남' 값 — `execution_events.completion_status` 에서 진행 중(in_progress)을 뺀 것.
+BlockCompletionStatus = Literal["done", "partial_done", "failed", "over_done"]
+
+
+class WeeklyBlock(_BlockFields):
+    """주간 그리드의 스케줄 블록 한 칸."""
+
+    # 아직 시작 안 한 이 블록이 **지금** Google 캘린더 일정과 겹치는가 (`domain/calendar_conflict`).
+    calendar_conflict: bool = False
+    # 끝난 블록(`blockStatus='finished'`)의 체크인 결과 (planA-10, additive). `finished` 는
+    # 완료·실패 모두에 쓰여 그것만으로는 구분이 안 된다. 아직 안 끝났거나 기록이 없으면 null.
+    completion_status: BlockCompletionStatus | None = None
+
+
+class WeeklyFixedSchedule(CamelModel):
+    """그날의 고정 일정(수업·알바) 한 칸 — 옮길 수 없는 시간 (planA-13, additive).
+
+    블록 편집은 이 시간과 겹치면 422 로 막는다. 그리드에 안 보이면 사용자는 막히는 이유를 모른다.
+    자정을 넘는 일정은 그날 안의 조각으로 나뉘어 온다(예: 22:00~02:00 → 00:00~02:00, 22:00~24:00).
+    """
+
+    title: str
+    start_at: KstDatetime
+    end_at: KstDatetime
+
+
 class WeeklyPlanDay(CamelModel):
     """하루치 — 그리드/네비게이터 단위."""
 
     date: date
     weekday: str  # monday..sunday
     blocks: list[WeeklyBlock] = Field(default_factory=list)
+    fixed_schedules: list[WeeklyFixedSchedule] = Field(default_factory=list)
 
 
 class WeeklyPlanResponse(CamelModel):
@@ -369,6 +481,8 @@ class WeeklyPlanResponse(CamelModel):
     week_start: date
     week_end: date
     days: list[WeeklyPlanDay]
+    # 이 주 구간 캘린더 확인 결과 — `calendarConflict` 를 어떻게 읽을지 정한다.
+    calendar: CalendarCheck = Field(default_factory=CalendarCheck)
 
 
 class BlockEditRequest(CamelModel):
@@ -382,8 +496,19 @@ class BlockEditRequest(CamelModel):
     start_at: str  # ISO 8601 (KST)
     end_at: str | None = None
     category: str | None = None  # 목표 카테고리 변경 (블록 색/분류) — 없으면 유지
-    title: str | None = None  # 카드 제목 변경 — 없으면 유지
+    title: str | None = None  # 카드 제목 변경 — 없으면 유지. 300자까지(action_items.title)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title_fits(cls, v: object) -> object:
+        # 넘친 제목은 UPDATE 에서 터져 일반 500 이 됐다 (planA-4).
+        return _block_title_fits(v)
 
 
-class BlockEditResponse(WeeklyBlock):
-    """편집 결과 — 스냅 적용된 최종 블록."""
+class BlockEditResponse(_BlockFields):
+    """편집 결과 — 스냅 적용된 최종 블록.
+
+    `WeeklyBlock` 을 상속하지 않는다 — 상속하면 `calendarConflict` 가 **계산 없이 항상 false**
+    로 딸려 나가, 캘린더 일정 위로 옮긴 블록도 "겹침 없음" 이라고 말하게 된다(v2.27 에서
+    그렇게 나갔다). 겹침은 `GET /plans/weekly` 를 다시 읽어 확인한다.
+    """

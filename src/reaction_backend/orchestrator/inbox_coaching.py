@@ -34,7 +34,8 @@ def build_coaching_advice(
                 advice_id=f"recovery-{today.isoformat()}-{first.id}",
                 category="recovery",
                 title="어제 남은 일부터 가볍게 확인해 볼까요?",
-                body=f"‘{first.title}’을 포함해 마치지 못한 일이 있어요. 오늘 계획과 함께 다시 살펴보세요.",
+                # 조사를 제목 받침에 기대지 않는다('을/를' 을 고정하면 절반은 틀린다).
+                body=f"‘{first.title}’ 등 마치지 못한 일이 있어요. 오늘 계획과 함께 다시 살펴보세요.",
                 rationale="미완료 기록을 먼저 확인하면 오늘 계획을 현실적으로 조정하기 쉬워요.",
                 evidence=[f"어제 미완료 {len(unfinished)}건"],
                 action=InboxAdviceAction(type="OPEN_TODAY", label="오늘 계획 보기"),
@@ -111,13 +112,19 @@ def build_coaching_advice(
             )
         )
 
-    if not advice and goals:
-        goal = sorted(goals, key=lambda g: g.priority_level)[0]
+    # 마지막 안내는 **사용자가 지금 하기로 한 목표**에서만 고른다 — 진행 중(`active`)이고,
+    # 보류(parked)로 옮기지 않았고, 궁극목표(만다라의 큰 문장)가 아닌 것. 예전엔 보관 안 된 목표
+    # 전부에서 골라 보류·완료한 목표를 "지금 집중할 목표" 라고 불렀다. 고를 게 없으면 말하지 않는다.
+    candidates = [
+        g for g in goals if g.status == "active" and g.goal_tier != "parked" and not g.is_ultimate
+    ]
+    if not advice and candidates:
+        goal = sorted(candidates, key=lambda g: g.priority_level)[0]
         advice.append(
             InboxCoachingAdvice(
                 advice_id=f"goal-focus-{today.isoformat()}-{goal.id}",
                 category="goal",
-                title=f"지금 집중할 목표는 ‘{goal.title}’이에요",
+                title=f"지금은 ‘{goal.title}’에 집중해 볼까요?",
                 body="이번 주에 이어갈 가장 작은 행동을 계획에서 확인해 보세요.",
                 rationale="현재 활성 목표 중 우선순위가 가장 높은 목표를 기준으로 안내했어요.",
                 evidence=[f"우선순위 {goal.priority_level}"],

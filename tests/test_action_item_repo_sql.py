@@ -134,15 +134,23 @@ def test_cancel_sets_archived_at_and_leaves_status_alone() -> None:
     from reaction_backend.db.models.action_item import ActionItem
 
     card = ActionItem()
+    card.id = USER_ID
+    card.user_id = USER_ID
     card.status = "planned"
     card.archived_at = None
 
     import asyncio
 
-    asyncio.run(ActionItemRepo(None).cancel(card))  # type: ignore[arg-type]
+    session = _RecordingSession()
+    asyncio.run(ActionItemRepo(session).cancel(card))  # type: ignore[arg-type]
 
     assert card.archived_at is not None, "archived_at 을 세팅하지 않았다"
     assert card.status == "planned", "cancel 이 status 를 바꿨다"
+    # 카드에 남은 미종결 블록만 cancel 한다(data-2) — action_items 는 UPDATE 문으로 안 건드린다.
+    (stmt,) = session.statements
+    sql = _sql(stmt)
+    assert sql.startswith("UPDATE scheduled_blocks"), sql
+    assert "block_status IN ('scheduled', 'started')" in sql, sql
 
 
 def test_cancel_is_idempotent_on_an_already_archived_card() -> None:
@@ -152,12 +160,14 @@ def test_cancel_is_idempotent_on_an_already_archived_card() -> None:
     from reaction_backend.db.models.action_item import ActionItem
 
     card = ActionItem()
+    card.id = USER_ID
+    card.user_id = USER_ID
     card.status = "planned"
     first = datetime(2026, 8, 1, tzinfo=UTC)
     card.archived_at = first
 
     import asyncio
 
-    asyncio.run(ActionItemRepo(None).cancel(card))  # type: ignore[arg-type]
+    asyncio.run(ActionItemRepo(_RecordingSession()).cancel(card))  # type: ignore[arg-type]
 
     assert card.archived_at == first

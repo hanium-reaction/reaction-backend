@@ -30,6 +30,7 @@ from typing import Any, Final
 import requests
 
 from reaction_backend.config import get_settings
+from reaction_backend.safety import encryption
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,26 @@ _HARD_TIMEOUT: Final = 10.0
 #: 만료 판정 여유 — 네트워크 왕복 중에 만료되는 경계를 피한다.
 REFRESH_SKEW: Final = timedelta(seconds=60)
 
+#: 토큰 엔드포인트가 **사용자 쪽 권한이 사라졌다**고 말하는 유일한 사유 — refresh token 이
+#: 철회·만료됐다(사용자가 Google 계정에서 앱 권한을 뺐거나, 테스트 모드 7일 만료·장기 미사용).
+#: 이것만 연결 회수(`retryable=False`)로 본다.
+REVOKED_GRANT: Final = "invalid_grant"
+
+
+def is_enabled() -> bool:
+    """캘린더 기능이 이 서버에서 켜져 있는가 — 스위치 + client id/secret + 토큰 암호화 키.
+
+    하나라도 없으면 연결 엔드포인트는 501 이고, 화면·브리프는 캘린더를 **조회하지 않는다**.
+    암호화 키까지 보는 이유: 없으면 사용자가 Google 동의를 다 마친 뒤 저장에서 500 이 난다.
+    """
+    cfg = get_settings()
+    return bool(
+        cfg.google_calendar_enabled
+        and cfg.google_oauth_client_id
+        and cfg.google_oauth_client_secret
+        and encryption.is_configured()
+    )
+
 
 class OAuthError(RuntimeError):
     """토큰 교환·갱신 실패. 호출자가 401/404 로 변환한다."""
@@ -60,7 +81,8 @@ class OAuthError(RuntimeError):
     def __init__(self, reason: str, *, retryable: bool) -> None:
         super().__init__(reason)
         self.reason = reason
-        #: True 면 일시적(네트워크·5xx) — 사용자에게 재연결을 요구하지 않는다.
+        #: True 면 사용자 권한과 무관(네트워크·5xx·서버 설정) — 재연결을 요구하지 않는다.
+        #: False 는 Google 이 권한이 사라졌다고 말한 경우(`REVOKED_GRANT`)뿐이다.
         self.retryable = retryable
 
 
@@ -112,7 +134,8 @@ async def _post_async(url: str, data: dict[str, str]) -> requests.Response:
 def _bundle_from(payload: dict[str, Any], *, fallback_scopes: str) -> TokenBundle:
     access = payload.get("access_token")
     if not isinstance(access, str) or not access:
-        raise OAuthError("no_access_token", retryable=False)
+        # 200 인데 토큰이 없다 — Google 쪽 이상이지 사용자가 권한을 뺀 증거가 아니다.
+        raise OAuthError("no_access_token", retryable=True)
     # expires_in 이 없으면 보수적으로 짧게 잡는다 — 길게 잡아 만료된 토큰을 쓰는 것보다
     # 한 번 더 갱신하는 편이 안전하다.
     expires_in = payload.get("expires_in")
@@ -128,16 +151,30 @@ def _bundle_from(payload: dict[str, Any], *, fallback_scopes: str) -> TokenBundl
 
 
 def _raise_for_error(response: requests.Response) -> dict[str, Any]:
+    """토큰 엔드포인트 응답 → payload. 실패면 `OAuthError` — `retryable` 이 곧 "연결을 끊을까".
+
+    **`invalid_grant` 만 회수(retryable=False)다.** 예전엔 4xx 전부를 회수로 봤다 — 그러면
+    client secret 을 바꾸다 오타 하나(`401 invalid_client`)만 나도 그 사이에 캘린더를 읽은
+    **모든 사용자의 연결이 조용히 끊기고**, 설정을 고쳐도 되살아나지 않는다(사용자마다 다시
+    연결해야 한다). `invalid_client`·`unauthorized_client`·429·JSON 아닌 본문은 서버 설정·
+    한도·앞단 문제라 사용자 권한과 무관하다 — `not_configured` 와 같은 원칙이다.
+    """
     if response.status_code >= 500:
         raise OAuthError(f"google_5xx_{response.status_code}", retryable=True)
     try:
-        payload: dict[str, Any] = response.json()
+        payload = response.json()
     except ValueError as exc:
-        raise OAuthError("bad_json", retryable=False) from exc
+        raise OAuthError("bad_json", retryable=True) from exc
+    if not isinstance(payload, dict):
+        raise OAuthError("bad_json", retryable=True)
     if response.status_code >= 400:
         # Google 은 실패 사유를 error 필드에 담는다(invalid_grant = 만료·철회된 코드/토큰).
         reason = str(payload.get("error", f"http_{response.status_code}"))
-        raise OAuthError(reason, retryable=False)
+        if reason == REVOKED_GRANT:
+            raise OAuthError(reason, retryable=False)
+        # 사용자 탓이 아닌 거절 — 운영이 알아채야 한다(설정 오류면 모든 사용자에게 같이 난다).
+        logger.warning("calendar_oauth_rejected reason=%s status=%s", reason, response.status_code)
+        raise OAuthError(reason, retryable=True)
     return payload
 
 
@@ -152,7 +189,9 @@ async def exchange_code(code: str, *, redirect_uri: str | None = None) -> TokenB
     """
     cfg = get_settings()
     if not cfg.google_oauth_client_id or not cfg.google_oauth_client_secret:
-        raise OAuthError("not_configured", retryable=False)
+        # 서버 설정 문제지 사용자가 권한을 뺀 게 아니다 — retryable 로 둬야 갱신 실패가
+        # 사용자 연결을 회수하지 않는다(설정만 되돌리면 연결이 그대로 살아나야 한다).
+        raise OAuthError("not_configured", retryable=True)
 
     response = await _post_async(
         _TOKEN_URL,
@@ -188,7 +227,9 @@ async def refresh_access_token(refresh_token: str, *, known_scopes: str) -> Toke
     """
     cfg = get_settings()
     if not cfg.google_oauth_client_id or not cfg.google_oauth_client_secret:
-        raise OAuthError("not_configured", retryable=False)
+        # 서버 설정 문제지 사용자가 권한을 뺀 게 아니다 — retryable 로 둬야 갱신 실패가
+        # 사용자 연결을 회수하지 않는다(설정만 되돌리면 연결이 그대로 살아나야 한다).
+        raise OAuthError("not_configured", retryable=True)
 
     response = await _post_async(
         _TOKEN_URL,
@@ -212,4 +253,4 @@ async def revoke(token: str) -> None:
     try:
         await _post_async(_REVOKE_URL, {"token": token})
     except OAuthError as exc:
-        logger.info("calendar_revoke_failed", extra={"reason": exc.reason})
+        logger.info("calendar_revoke_failed reason=%s", exc.reason)

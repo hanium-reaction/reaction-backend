@@ -104,14 +104,24 @@ class IdempotencyStore(Protocol):
     def put(self, key: str, value: StoredResponse) -> None: ...
 
 
+# 메모리 상한 — 응답 본문을 통째로 들고 있으므로 무한히 쌓이면 안 된다.
+_MAX_ENTRIES = 5_000
+
+
 class InMemoryIdempotencyStore:
     """프로세스 메모리 + TTL 저장소 (Issue #3 mock 한정).
 
-    다중 워커·재기동에 취약하므로 도메인 실구현 시 DB 백엔드로 교체한다.
+    다중 워커·재기동에 취약하므로 도메인 실구현 시 DB 백엔드로 교체한다(재기동하면 재생
+    캐시가 비어 같은 키 재시도가 한 번 더 실행된다 — `idempotency_keys` 테이블은 아직 안 쓴다).
+
+    만료 항목은 `put` 에서도 정리한다. 예전엔 같은 키로 다시 `get` 할 때만 지워서, 한 번 쓰고
+    끝나는 키(대부분)의 응답 본문이 재기동 전까지 계속 쌓였다. 만료를 치워도 `max_entries` 를
+    넘으면 가장 오래된 것부터 버린다 — 재생을 못 하게 될 뿐 요청은 다시 정상 처리된다.
     """
 
-    def __init__(self, ttl_seconds: int = _TTL_SECONDS) -> None:
+    def __init__(self, ttl_seconds: int = _TTL_SECONDS, max_entries: int = _MAX_ENTRIES) -> None:
         self._ttl = ttl_seconds
+        self._max_entries = max_entries
         self._data: dict[str, tuple[StoredResponse, float]] = {}
 
     def get(self, key: str) -> StoredResponse | None:
@@ -125,7 +135,14 @@ class InMemoryIdempotencyStore:
         return value
 
     def put(self, key: str, value: StoredResponse) -> None:
-        self._data[key] = (value, time.monotonic() + self._ttl)
+        now = time.monotonic()
+        if len(self._data) >= self._max_entries:
+            self._data = {k: v for k, v in self._data.items() if v[1] > now}
+            # 전부 살아 있으면 가장 먼저 넣은 것부터(TTL 이 같아 곧 가장 먼저 만료될 것) 버린다.
+            while len(self._data) >= self._max_entries:
+                del self._data[next(iter(self._data))]
+        self._data.pop(key, None)  # 다시 넣은 키는 뒤로 — 삽입 순서 = 만료 순서 유지
+        self._data[key] = (value, now + self._ttl)
 
 
 def _header(scope: Scope, name: str) -> str | None:

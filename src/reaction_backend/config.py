@@ -1,3 +1,4 @@
+import re
 from functools import lru_cache
 from typing import Literal, Self
 
@@ -186,6 +187,15 @@ class Settings(BaseSettings):
     # 단가(출력 $2.50/1M)로 최악(전부 출력) 잡아도 하루 $5 수준 — 베타 규모 회로차단기로
     # 적당하다. 이 값은 팀이 실사용을 보고 조정할 정책 숫자이지 실측으로 고정된 게 아니다.
     llm_global_daily_token_budget: int = 2_000_000
+    # LLM 호출 1회에 보낼 수 있는 **프롬프트 최대 글자 수** (llm-5). 0 이면 무제한. 넘으면
+    # provider 를 부르지 않고 `reason="budget"` 룰 폴백으로 내린다.
+    #
+    # 예산 가드만으로는 부족한 이유: 가드는 호출 **전** 잔량만 보므로, 사용 0 인 사용자가
+    # 수십만 자를 보내면 한 번에 사용자별 한도를 통째로 넘긴다(실측: 인박스 3만 자 1건 =
+    # tokens_in 21,179, 보통 ~185). 재시도(최대 3회)는 그걸 세 번 쓴다. 60,000 인 이유: 가장 큰
+    # 정상 프롬프트(분해 템플릿 ~15k자 + 자료 2k자 + 변수)와 붙여넣은 자료 답(최대 2만 자)을
+    # 싣는 인터뷰 채점(템플릿 ~9k자)의 두 배 넘는 여유를 둔 폭주 차단선이다.
+    llm_max_prompt_chars: int = 60_000
     # 비싼 엔드포인트(interview turn/plans generate/mandala generate/recovery proposals)의
     # **사용자별 일일 호출 횟수** 상한 (#325). 0 이면 무제한. 위 토큰 예산과 다른 축이다 —
     # 이건 "AI 비용"이 아니라 "이 엔드포인트 자체(오케스트레이션·DB 왕복)를 오늘 몇 번
@@ -276,9 +286,19 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     # 웹 새로고침 뒤에도 하루 동안 로그인 상태가 유지되도록 access token 자체를 24시간 유지한다.
-    # refresh token은 기존 14일을 유지하며, 명시적 로그아웃/계정 삭제 시에는 즉시 차단된다.
+    # refresh token은 기존 14일. 계정 삭제는 access·refresh 모두 즉시 막힌다(사용자 조회 필터).
+    # ⚠️ 로그아웃은 refresh 의 jti 만 **프로세스 메모리**(`auth/revoke.py`)에 등록한다 — 이미
+    # 발급된 access token 은 만료(24시간)까지 살아 있고, 재배포·재기동하면 로그아웃한 refresh
+    # 도 다시 통한다. 영구 차단은 DB 저장소(마이그레이션 필요)가 들어와야 성립한다.
     jwt_access_token_ttl_minutes: int = 24 * 60
     jwt_refresh_token_ttl_days: int = 14
+    # refresh 쿠키(`reaction_refresh`, #323)를 심을 경로들. 웹은 Vercel rewrite
+    # (`/api/:path*` → 백엔드 `/:path*`)를 거쳐 **브라우저 주소가 `/api/auth/...`** 인데
+    # 백엔드는 그 프리픽스를 모른다. `Path=/auth` 하나만 두면 브라우저가 `/api/auth/refresh`
+    # 에 쿠키를 싣지 않아 쿠키 폴백이 한 번도 동작하지 못했다(2026-09-17 발견).
+    # 직접 접속(`/auth`)과 프록시 경유(`/api/auth`) 두 경로에 같은 쿠키를 심는다 — 프록시
+    # 프리픽스가 바뀌면 이 목록만 바꾼다. JSON 배열(예: `["/auth","/api/auth"]`).
+    refresh_cookie_paths: list[str] = Field(default_factory=lambda: ["/auth", "/api/auth"])
 
     # Local 개발에서 Google id_token 검증을 우회하고 고정 demo user 를 발급한다.
     # staging/prod 는 반드시 False. True 일 때 GOOGLE_OAUTH_CLIENT_ID 가 비어도 부팅 가능.
@@ -295,9 +315,15 @@ class Settings(BaseSettings):
     # 폭주 시 재배포 없이 끄는 긴급 스위치(toggle-signups.yml, SCHEDULER_ENABLED 와 같은 관례).
     # 기존 사용자 로그인은 이 값과 무관하게 항상 통과한다.
     signups_enabled: bool = True
-    # 신규 가입 인원 상한(누적, 초대코드 유효와 별개 조건). Play 첫 공개 30명 원칙(#237).
+    # 신규 가입 인원 상한(누적, 초대코드 유효와 별개 조건). 미설정(None)이면 상한 없음 —
+    # Play 첫 공개 30명 원칙(#237)은 2026-09-17 해제했다(가입 76명 중 67명이 stub 데모
+    # 계정이라 실제 가입자 9명에서 이미 막혀 있었다). 다시 걸려면 `.env` 에 숫자를 넣는다.
     # soft-delete(archived_at) 된 사용자는 세지 않는다 — 나간 자리는 다시 채울 수 있어야 한다.
-    signup_capacity: int = 30
+    signup_capacity: int | None = None
+    # True 면 신규 가입에 유효·미사용 초대코드가 필요하다. 기본 False — Google 계정이면
+    # 누구나 가입한다(위와 같은 날 해제). False 일 때 `inviteCode` 는 보내도 무시된다
+    # (검증도 소비도 안 한다 — 예전 화면이 남은 코드를 보내도 가입이 막히지 않게).
+    signup_invite_required: bool = False
 
     # ── Web Push VAPID (#16/#20) ──
     # 비어있으면 발송이 unconfigured 로 조용히 skip (GEMINI_API_KEY 부재와 같은 degrade).
@@ -341,6 +367,20 @@ class Settings(BaseSettings):
             return 0
         override = {"interview": self.llm_endpoint_daily_call_limit_interview}.get(module, 0)
         return override if override > 0 else self.llm_endpoint_daily_call_limit
+
+    @model_validator(mode="after")
+    def _validate_refresh_cookie_paths(self) -> Self:
+        """쿠키 Path 는 `/` 로 시작하는 단순 경로여야 한다 — 틀리면 기동을 멈춘다.
+
+        `;`·공백이 섞이면 Set-Cookie 헤더에 다른 속성을 끼워 넣을 수 있고, 빈 목록이면
+        로그인해도 쿠키가 안 나가 웹 세션 유지가 조용히 꺼진다.
+        """
+        if not self.refresh_cookie_paths:
+            raise ValueError("REFRESH_COOKIE_PATHS must not be empty")
+        for path in self.refresh_cookie_paths:
+            if not re.fullmatch(r"/[A-Za-z0-9/_\-.]*", path):
+                raise ValueError(f"REFRESH_COOKIE_PATHS has an invalid path: {path!r}")
+        return self
 
     @model_validator(mode="after")
     def _forbid_auth_stub_in_deployed_envs(self) -> Self:
