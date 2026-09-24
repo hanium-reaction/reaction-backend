@@ -1348,6 +1348,9 @@ class FakeRecoveryRepo:
         # FakeActionItemRepo 와 스토어 공유(fixture 주입) — list_goal_outcomes(L3) 가
         # action_item_id → goal_id 를 알아야 한다.
         self._actions: dict[UUID, ActionItem] = actions if actions is not None else {}
+        # 라우터가 **잠금 읽기**로 실행을 읽었는가 (#481) — fake 는 잠글 게 없으니 호출만 남긴다.
+        # 실 직렬화는 `tests/test_recovery_generate_concurrency.py`(실 Postgres)가 본다.
+        self.locking_reads: list[UUID] = []
 
     # ── 테스트 보조 seed ──
     def register_execution(
@@ -1379,6 +1382,12 @@ class FakeRecoveryRepo:
         if e is None or e.user_id != user_id:
             return None
         return e
+
+    async def get_execution_for_update(
+        self, user_id: UUID, execution_id: UUID
+    ) -> ExecutionEvent | None:
+        self.locking_reads.append(execution_id)
+        return await self.get_execution(user_id, execution_id)
 
     async def list_failure_tag_codes(self, execution_id: UUID) -> list[str]:
         return list(self._failure_tags.get(execution_id, []))
