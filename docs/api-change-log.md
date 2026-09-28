@@ -7,6 +7,25 @@
 
 ---
 
+## v2.33 — 2026-09-28 (DB 장애면 `/health` 가 503)
+
+**상태 코드 변경(본문 스키마는 그대로) — `GET /health`.** 마이그레이션 없음. 새 에러 코드 없음.
+
+- ⚠️ `status: "degraded"`(DB 에 닿지 못함) 일 때 HTTP **200 → 503**. `"ok"` 는 그대로 200.
+  본문은 둘 다 `HealthResponse` 모양이다.
+- 왜: degraded 도 200 이라 상태 코드만 보는 외부 업타임 감시·Docker HEALTHCHECK 가 DB 장애를
+  정상으로 읽었다. 이 앱은 DB 없이 할 수 있는 일이 사실상 없어 DB 장애가 곧 서비스 장애다.
+- 영향:
+  - FE: `/health` 를 쓰지 않는다(코드 검색 기준) — 영향 없음.
+  - 운영 워크플로(`deploy`·`toggle-*`·`cors-origins`·`calendar-oauth`·`provision-vapid`): 전부
+    본문의 `"status":"ok"` 로 성공을 판정하므로 성공·실패는 전과 같다. `deploy.yml` 만 실패
+    로그에 마지막 응답을 찍으므로, 503 본문도 남도록 `curl -sf` → `curl -s` 로 바꾸고 러너에
+    남은 옛 응답 파일을 먼저 지운다.
+  - Docker `runtime` 이미지의 HEALTHCHECK 는 DB 장애 중 unhealthy 가 된다(의도). 운영 EC2 는
+    rsync + systemd 라 이 이미지를 쓰지 않는다.
+
+---
+
 ## v2.32 — 2026-09-23 (겹친 회복 결정·재배치 승인이 카드·블록을 두 벌 만들지 않는다)
 
 **동작 보정(스키마·응답 형태는 그대로) — `POST /recovery/decisions` ·
