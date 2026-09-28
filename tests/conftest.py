@@ -1351,6 +1351,10 @@ class FakeRecoveryRepo:
         # 라우터가 **잠금 읽기**로 실행을 읽었는가 (#481) — fake 는 잠글 게 없으니 호출만 남긴다.
         # 실 직렬화는 `tests/test_recovery_generate_concurrency.py`(실 Postgres)가 본다.
         self.locking_reads: list[UUID] = []
+        # 결정 경로가 **카드 행**을 잠금 읽기로 읽었는가 — 생성 잠금(`locking_reads`)과 따로
+        # 센다. 결정이 생성 잠금을 안 잡는다는 핀(#481)이 이 기록에 섞이면 안 된다.
+        # 실 직렬화는 `tests/test_recovery_decide_replan_concurrency.py` 가 본다.
+        self.attempt_locking_reads: list[UUID] = []
 
     # ── 테스트 보조 seed ──
     def register_execution(
@@ -1490,6 +1494,12 @@ class FakeRecoveryRepo:
             for a in self._attempts.values()
             if a.user_id == user_id and a.execution_id == execution_id
         ]
+
+    async def list_attempts_for_update(
+        self, user_id: UUID, execution_id: UUID
+    ) -> list[RecoveryAttempt]:
+        self.attempt_locking_reads.append(execution_id)
+        return await self.list_attempts(user_id, execution_id)
 
     async def list_due_re_engagement(
         self, user_id: UUID, target_date: date
