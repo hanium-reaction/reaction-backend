@@ -392,7 +392,12 @@ def test_edit_block_bad_id(client: TestClient) -> None:
 # ── calendarConflict ─────────────────────────────────────────────────────
 
 
-def _stub_calendar(monkeypatch, busy: list[tuple[datetime, datetime]]) -> None:  # noqa: ANN001
+def _stub_calendar(
+    monkeypatch,  # noqa: ANN001
+    busy: list[tuple[datetime, datetime]],
+    *,
+    status: str = "ok",
+) -> None:
     from reaction_backend.integrations.google_calendar import freebusy, oauth
     from reaction_backend.orchestrator.goal_structuring import TimeInterval
 
@@ -400,7 +405,7 @@ def _stub_calendar(monkeypatch, busy: list[tuple[datetime, datetime]]) -> None: 
 
     async def _fetch(session, *, user_id, start, end):  # noqa: ANN001, ANN202
         return (
-            freebusy.FreeBusyResult("ok", [TimeInterval(s, e) for s, e in busy]),
+            freebusy.FreeBusyResult(status, [TimeInterval(s, e) for s, e in busy]),  # type: ignore[arg-type]
             datetime.now(KST),
         )
 
@@ -451,6 +456,69 @@ def test_get_weekly_reports_not_connected_by_default(client: TestClient) -> None
     body = client.get("/plans/weekly", params={"weekStart": MON.isoformat()}).json()
 
     assert body["calendar"] == {"status": "not_connected", "checkedAt": None}
+    assert all(d["calendarBusy"] == [] for d in body["days"])
+
+
+def _busy_of(day: dict[str, object]) -> list[tuple[datetime, datetime]]:
+    return [
+        (datetime.fromisoformat(b["startAt"]), datetime.fromisoformat(b["endAt"]))
+        for b in day["calendarBusy"]  # type: ignore[attr-defined]
+    ]
+
+
+def test_get_weekly_shows_calendar_busy_that_no_block_overlaps(
+    monkeypatch,  # noqa: ANN001
+    client: TestClient,
+    fake_scheduled_block_repo: FakeScheduledBlockRepo,
+) -> None:
+    """블록과 안 겹치는 약속도 그리드에 온다 — 예전엔 겹친 블록의 배지로만 드러났다."""
+    fake_scheduled_block_repo.seed(
+        _block(_dt(1, 9), _dt(1, 10)), title="화 오전 카드", category="study"
+    )
+    _stub_calendar(monkeypatch, [(_dt(1, 14), _dt(1, 15, 30))])
+
+    body = client.get("/plans/weekly", params={"weekStart": MON.isoformat()}).json()
+
+    assert body["calendar"]["status"] == "ok"
+    assert _busy_of(body["days"][1]) == [(_dt(1, 14), _dt(1, 15, 30))]
+    assert body["days"][1]["calendarBusy"][0]["startAt"].endswith("+09:00")
+    # 구간만 싣는다 — 제목·장소는 freebusy 스코프라 서버도 모른다.
+    assert set(body["days"][1]["calendarBusy"][0]) == {"startAt", "endAt"}
+    assert body["days"][1]["blocks"][0]["calendarConflict"] is False
+    assert all(d["calendarBusy"] == [] for i, d in enumerate(body["days"]) if i != 1)
+
+
+def test_get_weekly_splits_calendar_busy_at_midnight(
+    monkeypatch,  # noqa: ANN001
+    client: TestClient,
+) -> None:
+    """자정을 넘는 약속은 날짜별 조각으로 — 주 밖(전 주 일요일) 조각은 싣지 않는다."""
+    _stub_calendar(
+        monkeypatch,
+        [
+            (_dt(-1, 23), _dt(0, 1)),  # 전 주 일요일 밤 → 월요일 새벽
+            (_dt(2, 22), _dt(3, 2)),  # 수요일 밤 → 목요일 새벽
+        ],
+    )
+
+    body = client.get("/plans/weekly", params={"weekStart": MON.isoformat()}).json()
+
+    assert _busy_of(body["days"][0]) == [(_dt(0, 0), _dt(0, 1))]
+    assert _busy_of(body["days"][2]) == [(_dt(2, 22), _dt(3, 0))]
+    assert _busy_of(body["days"][3]) == [(_dt(3, 0), _dt(3, 2))]
+
+
+def test_get_weekly_omits_calendar_busy_when_calendar_failed(
+    monkeypatch,  # noqa: ANN001
+    client: TestClient,
+) -> None:
+    """못 읽었으면 빈 목록 + `failed` — 빈 목록만 보고 "일정 없음" 으로 읽지 않게."""
+    _stub_calendar(monkeypatch, [(_dt(1, 14), _dt(1, 15))], status="failed")
+
+    body = client.get("/plans/weekly", params={"weekStart": MON.isoformat()}).json()
+
+    assert body["calendar"] == {"status": "failed", "checkedAt": None}
+    assert all(d["calendarBusy"] == [] for d in body["days"])
 
 
 def test_block_edit_response_does_not_claim_a_calendar_state(
