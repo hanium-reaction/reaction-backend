@@ -485,7 +485,9 @@ def is_skipped_answer(value: Mapping[str, Any] | None) -> bool:
     묻지 않는다 — 스킵 마커가 생긴 이유 자체가 그 무한 루프다). 하지만 "물을 필요가 없다"
     와 "사용자가 답했다" 는 다른 말이라, 값을 쓰는 쪽은 이 둘을 갈라 봐야 한다.
     """
-    return bool(value) and value.get("type") == "text" and not str(value.get("raw") or "").strip()
+    if not value or value.get("type") != "text":
+        return False
+    return not str(value.get("raw") or "").strip()
 
 
 def defaulted_required_keys(

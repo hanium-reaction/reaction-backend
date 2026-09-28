@@ -27,8 +27,8 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 
-from reaction_backend.orchestrator import interview, interview_adapter, profile_memory as pm
-from reaction_backend.orchestrator import ultimate_adapter
+from reaction_backend.orchestrator import interview, interview_adapter, ultimate_adapter
+from reaction_backend.orchestrator import profile_memory as pm
 from reaction_backend.orchestrator.interview_catalog import PLAN_CATALOG
 
 # 사용자가 실제로 답한 슬롯 — 대조군. 이 값들은 종전대로 프로필에 남아야 한다.
