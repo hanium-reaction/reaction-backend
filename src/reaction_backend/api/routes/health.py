@@ -1,7 +1,9 @@
 """Health check — 유일한 walking skeleton 구현 엔드포인트.
 
-DB 연결 가능 여부와 latency 를 함께 노출. DB 실패해도 HTTP 200 유지하고
-`status="degraded"` 로 표시. (k8s readiness 분리는 추후 도입.)
+DB 연결 가능 여부와 latency 를 함께 노출. DB 에 닿지 못하면 `status="degraded"` 와 함께
+**HTTP 503** 을 준다. 예전엔 degraded 도 200 이라, 상태 코드만 보는 외부 업타임 감시·로드
+밸런서·Docker HEALTHCHECK 가 DB 장애를 정상으로 읽었다 — 이 앱은 DB 없이 할 수 있는 일이
+사실상 없으므로 DB 장애는 곧 서비스 장애다. 본문은 200 일 때와 같은 모양이다.
 
 ⚠️ 이 경로는 **인증 없이 공개**다(Caddy 가 그대로 프록시). DB 예외 원문을 응답에 싣지 않는다 —
 asyncpg 메시지에는 DB 사용자 이름(`password authentication failed for user "…"`)과 내부 주소
@@ -14,7 +16,7 @@ import logging
 import time
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import text
 
 from reaction_backend.config import Settings, get_settings
@@ -52,9 +54,15 @@ async def _check_db(database_url: str) -> DbStatus:
         return DbStatus(ok=False, error=DB_UNAVAILABLE)
 
 
-@router.get("/health", response_model=HealthResponse)
-async def health(settings: SettingsDep) -> HealthResponse:
+@router.get(
+    "/health",
+    response_model=HealthResponse,
+    responses={503: {"model": HealthResponse, "description": "DB 에 닿지 못함 (degraded)"}},
+)
+async def health(settings: SettingsDep, response: Response) -> HealthResponse:
     db = await _check_db(settings.database_url)
+    if not db.ok:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return HealthResponse(
         status="ok" if db.ok else "degraded",
         app=settings.app_name,

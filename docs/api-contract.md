@@ -1421,6 +1421,9 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 | --- | --- | --- |
 | GET | `/health` | `{ status, app, version, env, server_time }` — 인증 불필요 |
 
+- **HTTP 상태 코드(v2.33)**: `status: "ok"` 면 **200**, `status: "degraded"` 면 **503**. 본문 모양은
+  둘 다 같다(`ErrorResponse` 가 아니다). 상태 코드만 보는 외부 업타임 감시·Docker HEALTHCHECK 가
+  DB 장애를 잡게 하려는 것이다 — ⚠️ 그전에는 degraded 도 200 이었다.
 - `db` = `{ ok, latency_ms, error }`. DB 에 닿지 못하면 `status: "degraded"`, `db.error:
   "db_unavailable"` — **고정 값**이다(v2.30-auth). 공개 경로라 DB 예외 원문(내부 주소·DB 사용자
   이름)은 싣지 않고 서버 로그에만 남긴다. DB 미설정이면 종전대로 `"DATABASE_URL not configured"`.
