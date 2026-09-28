@@ -269,7 +269,7 @@ def build_outcome(
     빈 필수 슬롯은 default 로 채우고 `unresolved_slots` 에 키를 남긴다 (First Plan 이
     VALIDATING 에서 보완 질문/재입력 분기를 띄울 수 있도록).
     """
-    unresolved = open_required_keys(REQUIRED_SLOT_KEYS, slot_answers)
+    unresolved = defaulted_required_keys(REQUIRED_SLOT_KEYS, slot_answers)
 
     identity = IdentityContext(
         role=_first(_chip_values(slot_answers.get("identity.role"))) or "미상",
@@ -456,11 +456,14 @@ def open_required_keys(required_keys: Sequence[str], slot_answers: Mapping[str, 
     """아직 **열려 있는** 필수 슬롯 키 — 순서 보존. "미해결 필수 슬롯" 의 단일 정의.
 
     열려 있다 = 물어야 하고(`is_slot_needed`) 아직 안 채워졌다(`is_filled_answer`).
-    이 술어를 쓰는 곳이 셋인데, 셋이 같은 값을 봐야 한다:
+    이 술어를 쓰는 곳이 둘인데, 둘이 같은 값을 봐야 한다:
 
     - `interview._next_required_slot` — 다음에 물을 슬롯 (없으면 FSM 완료)
-    - `build_outcome`/`build_ultimate_outcome` 의 `unresolved_slots` — First Plan 보완 분기
     - `api/routes/interview._remaining_required` — FE 명료성 지표(`ambiguityScore`)
+
+    ⚠️ `unresolved_slots`(outcome)는 **이 함수가 아니라** `defaulted_required_keys` 를 쓴다
+    (#499) — 스킵으로 닫힌 슬롯은 여기서 '채워짐' 이지만 사용자가 답한 값은 아니다. 두
+    질문이 다르다는 걸 함수로 갈라 뒀으니, 새 소비자는 자기가 어느 쪽을 묻는지 먼저 정할 것.
 
     셋이 손으로 각자 조립하다 실제로 갈렸다: FE 지표만 `is_slot_needed` 를 빠뜨려,
     `goals.weekly_time` 이 길이×빈도로 **유도돼 묻지 않은** 세션에서 영원히 1로 남았다.
@@ -472,6 +475,46 @@ def open_required_keys(required_keys: Sequence[str], slot_answers: Mapping[str, 
         k
         for k in required_keys
         if is_slot_needed(k, slot_answers) and not is_filled_answer(slot_answers.get(k))
+    ]
+
+
+def is_skipped_answer(value: Mapping[str, Any] | None) -> bool:
+    """사용자가 '없음/모름/건너뛰기' 로 닫은 슬롯인가 — `interview._SKIP_MARKER`(빈 text).
+
+    `is_filled_answer` 는 이걸 **충족**으로 읽는다(그래야 FSM 이 같은 슬롯을 영원히 다시
+    묻지 않는다 — 스킵 마커가 생긴 이유 자체가 그 무한 루프다). 하지만 "물을 필요가 없다"
+    와 "사용자가 답했다" 는 다른 말이라, 값을 쓰는 쪽은 이 둘을 갈라 봐야 한다.
+    """
+    return bool(value) and value.get("type") == "text" and not str(value.get("raw") or "").strip()
+
+
+def defaulted_required_keys(
+    required_keys: Sequence[str], slot_answers: Mapping[str, Any]
+) -> list[str]:
+    """`unresolved_slots` 의 단일 정의 — **기본값으로 채워진** 필수 슬롯 키 (#499).
+
+    스키마가 이 필드를 그렇게 정의한다(`schemas/interview.py` — "default 처리된 필수 슬롯
+    키"). 두 부류가 여기 들어간다:
+
+    1. 아직 안 물은 슬롯 — `open_required_keys` 와 같다.
+    2. **사용자가 스킵한 슬롯** — `build_outcome` 이 안전 기본값(활동창 09~23시·톤 '담백'·
+       최소 단위 10분·휴식 수용 '네')으로 채운다. 값이 있다는 점만 1번과 다르고, **사용자가
+       말한 값이 아니라는 점은 같다.**
+
+    ⚠️ `open_required_keys` 와 갈라 둔 이유: 그쪽은 "지금 물어야 할 슬롯이 남았는가" 라
+    FSM(`interview._next_required_slot`)과 FE 명료성 지표(`_remaining_required`)가 쓴다.
+    거기에 스킵 슬롯을 넣으면 인터뷰가 끝나지 않고 진행바가 100% 에서 되돌아간다. 반대로
+    이 함수는 "이 값을 사용자의 답으로 믿어도 되는가" 를 묻는다 — `profile_memory` 의
+    가드와 First Plan 의 보완 분기가 그 답을 쓴다.
+
+    예전엔 둘이 같은 함수였고, 스킵 슬롯이 `unresolved_slots` 에서 구조적으로 빠져 **서버가
+    지어낸 기본값이 프로필에 영속되고 재인터뷰가 그 칸을 묻지 않았다**(#499).
+    """
+    return [
+        k
+        for k in required_keys
+        if is_slot_needed(k, slot_answers)
+        and (not is_filled_answer(slot_answers.get(k)) or is_skipped_answer(slot_answers.get(k)))
     ]
 
 
