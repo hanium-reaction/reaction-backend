@@ -113,8 +113,8 @@ class HealthResponse(BaseModel):
     `status`:
       - `"ok"`     — 앱 + DB 모두 정상
       - `"degraded"` — 앱은 살아있으나 의존성(DB) 비정상
-    HTTP status는 항상 200 (앱 자체는 응답 가능). 503 분기는 readiness 엔드포인트로
-    분리할 때 도입.
+    HTTP status 는 `"ok"` 면 200, `"degraded"` 면 503 — 상태 코드만 보는 업타임 감시가
+    DB 장애를 잡게 한다. 본문 모양은 둘 다 이 스키마다.
     """
 
     status: str = Field(description="ok or degraded")

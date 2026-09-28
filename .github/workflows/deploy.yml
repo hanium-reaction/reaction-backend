@@ -74,8 +74,12 @@ jobs:
 
       - name: Health check
         run: |
+          # /health 는 DB 장애면 503 이다. `-f` 는 4xx/5xx 본문을 파일에 안 쓰므로 빼고,
+          # 판정은 본문의 status 로 한다(연결 실패는 curl 이 0 이 아니라 여전히 재시도).
+          # 앞선 실행이 러너에 남긴 파일이 실패 로그에 '최근 응답'으로 찍히지 않게 먼저 지운다.
+          rm -f /tmp/health.json
           for i in $(seq 1 15); do
-            if curl -sf http://127.0.0.1:8000/health -o /tmp/health.json; then
+            if curl -s http://127.0.0.1:8000/health -o /tmp/health.json; then
               if grep -q '"status":"ok"' /tmp/health.json; then
                 echo "healthy:"; cat /tmp/health.json; exit 0
               fi

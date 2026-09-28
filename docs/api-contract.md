@@ -574,7 +574,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 | PATCH | `/plans/{planId}/blocks/{blockId}` | 15분 snap 직접 편집 (S15) — `startAt`(필수)/`endAt` 이동 + 선택 `category`/`title` 로 목표(색·분류)·제목 수정(블록의 action_item 갱신, 같은 액션 세션 공유; 미지원 category→`other`; 정책 검사는 새 category 로). 시작/끝낸 블록은 시간 이동 불가(422 `PLAN_INVALID_TIME`, v2.30-planA — 제목·목표만 편집 가능). 시각을 지금 블록 시각 그대로 보내면(제목·목표만 편집) snap·겹침·정책·고정 일정 검사를 하지 않는다(v2.30-planA — 격자 밖 블록이 5분 밀리거나, 나중에 추가한 수업 위 블록의 이름을 못 바꾸던 문제). `title` 은 300자까지(넘으면 422 `COMMON_VALIDATION_ERROR` "제목은 300자까지…", v2.30-planA — 예전엔 일반 500). ✅ #21-B |
 | POST | `/plans/{planId}/ai-edit` | 자연어 수정 (S16, P1) — diff 반환만, apply는 별도 |
 | POST | `/plans/{planId}/ai-edit/apply` | diff 적용 (사용자 승인 후) |
-| GET | `/plans/weekly?weekStart=YYYY-MM-DD` | 주간 그리드 (S14) — cancelled 블록(계획 교체로 취소 등)은 제외 ✅ #21-B. **v2.30-planA**: 블록마다 `completionStatus`(끝난 블록의 체크인 결과 done/partial_done/failed/over_done, 아니면 null). **v2.27**: 블록마다 `calendarConflict`(아직 시작 안 한 블록이 **지금** Google 캘린더 일정과 겹치는가) + 응답 최상단 `calendar: {status, checkedAt}` — §10 "캘린더 겹침" 과 같은 규칙. **v2.31**: 날마다 `calendarBusy`(그날의 Google 캘린더 약속 구간 `[{startAt, endAt}]` — 블록과 안 겹쳐도 싣는다, `calendar.status=ok` 일 때만) |
+| GET | `/plans/weekly?weekStart=YYYY-MM-DD` | 주간 그리드 (S14) — cancelled 블록(계획 교체로 취소 등)은 제외 ✅ #21-B. **v2.30-planA**: 블록마다 `completionStatus`(끝난 블록의 체크인 결과 done/partial_done/failed/over_done, 아니면 null). **v2.27**: 블록마다 `calendarConflict`(아직 시작 안 한 블록이 **지금** Google 캘린더 일정과 겹치는가) + 응답 최상단 `calendar: {status, checkedAt}` — §10 "캘린더 겹침" 과 같은 규칙. **v2.34**: 날마다 `calendarBusy`(그날의 Google 캘린더 약속 구간 `[{startAt, endAt}]` — 블록과 안 겹쳐도 싣는다, `calendar.status=ok` 일 때만) |
 
 > ⚠️ **블록은 날짜를 넘을 수 있다** (#252) — 활동 시간대가 자정을 넘는 사용자(예: 22:00~02:00)는
 > `22:00` 시작 → 다음 날 `01:00` 종료 같은 블록을 받는다. 주간 그리드에서는 `startAt` 기준 날짜에
@@ -702,7 +702,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 - `GET /plans/weekly` 의 `days[].fixedSchedules`(v2.30-planA, additive): 그날의 고정 일정
   `[{title, startAt, endAt}]`(KST, 자정을 넘는 일정은 그날 안의 조각으로). 편집이 막는 시간을
   그리드에 보이게 하려는 것 — FE 는 옮길 수 없는 칸으로 그린다.
-- `GET /plans/weekly` 의 `days[].calendarBusy`(v2.31, additive): 그날의 Google 캘린더 약속
+- `GET /plans/weekly` 의 `days[].calendarBusy`(v2.34, additive): 그날의 Google 캘린더 약속
   `[{startAt, endAt}]`(KST, 자정을 넘는 약속은 그날 안의 조각으로 — 주 밖의 조각은 싣지 않는다).
   **구간만** 온다 — 제목·장소는 `calendar.freebusy` 스코프라 서버도 모른다(§9). FE 는 "캘린더 일정"
   같은 이름 없는 칸으로 그린다. 블록과 **겹치지 않아도** 싣는다(겹친 블록은 종전대로 `calendarConflict`).
@@ -722,7 +722,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
 >
 > `events.insert`(write-back)는 **P1 유지** — `sync-preview`/`approve-insert` 는 아직 stub 이다.
 >
-> ✅ **이미 세운 계획에도 반영된다(v2.27).** `GET /today/agenda` · `GET /plans/weekly` 가 화면을 열 때마다 캘린더를 읽어 겹치는 블록에 `calendarConflict` 를 달고(주간 그리드는 약속 구간 자체도 `days[].calendarBusy` 로 싣는다, v2.31), 06:00 모닝 브리프가 오늘 겹침을 알린다(§10 "캘린더 겹침"). 주기 동기화·webhook 은 없다 — webhook(`events.watch`)은 일정 제목까지 읽는 스코프가 필요해 ADR-0009 D4 범위 밖이다.
+> ✅ **이미 세운 계획에도 반영된다(v2.27).** `GET /today/agenda` · `GET /plans/weekly` 가 화면을 열 때마다 캘린더를 읽어 겹치는 블록에 `calendarConflict` 를 달고(주간 그리드는 약속 구간 자체도 `days[].calendarBusy` 로 싣는다, v2.34), 06:00 모닝 브리프가 오늘 겹침을 알린다(§10 "캘린더 겹침"). 주기 동기화·webhook 은 없다 — webhook(`events.watch`)은 일정 제목까지 읽는 스코프가 필요해 ADR-0009 D4 범위 밖이다.
 >
 > ✅ **freebusy 는 계획에 반영된다.** `POST /plans/generate` 와 **`POST /plans/replan`(v2.26)** 이 각자의 지평 전체 캘린더 일정을 **한 번** 조회해 스케줄러의 busy 소스로 넣는다(고정일정·시간정책·기존 블록과 나란히). 캘린더를 못 읽어도 계획 생성은 실패하지 않고, **연결해 둔 사용자에게만** `warnings` 한 줄로 알린다(연결 안 한 사용자에게는 아무 말도 하지 않는다). 토큰 갱신이 일시적으로 실패해도(네트워크·5xx) "캘린더 일정을 불러오지 못해서…" 로 알린다(v2.30 전에는 조용히 넘어갔다). **연결이 Google 쪽에서 끊겼으면**(권한 철회·refresh token 만료 — 갱신이 `invalid_grant`) 대신 "Google 캘린더 연결이 끊겨서 이번 계획에는 캘린더 일정을 반영하지 못했어요. 설정에서 다시 연결하면 다음 계획부터 반영돼요." 를 **맨 앞에** 싣는다(v2.30) — 사용자가 다시 연결하거나 `DELETE /calendar/connect` 로 정리할 때까지 매 계획에. ⚠️ 지금은 **겹치기 회피까지**다 — 앞뒤 이동 시간(전이 버퍼)과 직전 일정 길이에 따른 부하 감쇠는 아직 없다(ADR-0009 D4 ①②).
 >
@@ -816,7 +816,7 @@ CRUD 로 만다라 링크를 직접 걸거나 뗄 수는 없다(만다라 칸 �
     "겹침 없음" 이 **아니다** — FE 는 "캘린더를 확인하지 못했어요" 로 구분해 안내할 것. 화면 자체는 정상 응답
   - `not_connected` — 연결 안 함, 또는 서버에서 기능이 꺼짐. 아무 안내도 하지 않는다
   - `checkedAt` 은 `ok` 가 아니면 `null`
-- `WeeklyPlanDay.calendarBusy` (v2.31, 주간만) — 같은 조회로 읽은 약속 구간 자체. `ok` 일 때만 채우고
+- `WeeklyPlanDay.calendarBusy` (v2.34, 주간만) — 같은 조회로 읽은 약속 구간 자체. `ok` 일 때만 채우고
   아니면 빈 목록이다. 오늘 화면(`GET /today/agenda`)에는 없다
 - 연결·해제(`POST`/`DELETE /calendar/connect`) 직후에는 캐시를 비운다 — 바로 다음 화면부터 반영
 - **모닝 브리프**(06:00 cron)도 같은 판정으로 오늘 겹치는 카드를 `brief.adjustmentHints` **맨 앞**에
@@ -935,6 +935,8 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
   acceptedAttemptId?, editedActionText?, decisionReason?, reEngagementAnchorAt? }` — accepted 시
   나머지 pending 은 rejected. DOWNSCOPE/CARRY_OVER 수락 → 새 ActionItem(source=`recovery_downscope`/
   `recovery_carryover`, `parent_action_item_id` 혈통) 생성. RESCHEDULE/PARK 는 생성 없음.
+  **같은 실행에 결정이 겹쳐 와도 하나만 적힌다**(v2.32) — 뒤 요청은 앞 결정의 커밋을 기다렸다가
+  `RECOVERY_ALREADY_DECIDED`(409)를 받는다(순차 재호출과 같은 응답).
 - **새 회복 카드의 `title` = 원본 카드 제목 + 그룹 꼬리표**(v2.30-recovery) — DOWNSCOPE
   `"<원본> · 가볍게 다시"`, CARRY_OVER `"<원본> · 이어서"`(최대 300자, 회복을 또 회복해도
   꼬리표는 한 번만, 원본을 못 읽으면 `"다시 해보기"`). ⚠️ 그전에는 `suggestedActionText` 를
@@ -1024,7 +1026,8 @@ INSERT/SELECT 0곳인 채 남아 있는 게 "저장부터 하면 언젠가 읽�
 - `POST /replan/{executionId}/approve` (Idempotency-Key 필수) — 회복 ActionItem 을
   `scheduled_blocks`(source=`recovery`) 로 배치. 멱등: 이미 배치돼 있으면 같은 block 반환
   (중복 INSERT 방지). 응답 `{ executionId, scheduledBlockId, actionItemId, startAt, endAt,
-  isDraft=false }`. 원본 `action_item.status` 불변.
+  isDraft=false }`. 원본 `action_item.status` 불변. 이 멱등은 **동시 호출에도** 성립한다(v2.32)
+  — 겹친 요청은 모두 같은 `scheduledBlockId` 를 받는다.
   멱등·`alreadyApproved` 판정은 **블록 소스와 무관**하게 그 회복 카드의 미취소 블록 유무로
   한다 — S15 이동이 `source`를 `user_edit` 로 덮거나 주간 재계획이 `ai_plan` 으로 만들어도
   '이미 배치됨'이다. 소스로 거르면 CTA 가 되살아나 블록이 중복 생성된다.
@@ -1430,6 +1433,9 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 | --- | --- | --- |
 | GET | `/health` | `{ status, app, version, env, server_time }` — 인증 불필요 |
 
+- **HTTP 상태 코드(v2.33)**: `status: "ok"` 면 **200**, `status: "degraded"` 면 **503**. 본문 모양은
+  둘 다 같다(`ErrorResponse` 가 아니다). 상태 코드만 보는 외부 업타임 감시·Docker HEALTHCHECK 가
+  DB 장애를 잡게 하려는 것이다 — ⚠️ 그전에는 degraded 도 200 이었다.
 - `db` = `{ ok, latency_ms, error }`. DB 에 닿지 못하면 `status: "degraded"`, `db.error:
   "db_unavailable"` — **고정 값**이다(v2.30-auth). 공개 경로라 DB 예외 원문(내부 주소·DB 사용자
   이름)은 싣지 않고 서버 로그에만 남긴다. DB 미설정이면 종전대로 `"DATABASE_URL not configured"`.

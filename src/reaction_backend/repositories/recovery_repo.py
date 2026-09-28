@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy import Select, and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -110,6 +110,27 @@ _RECOVERY_OUTCOME_BUCKET = case(
 )
 
 
+def _attempts_stmt(user_id: UUID, execution_id: UUID) -> Select[tuple[RecoveryAttempt]]:
+    """`list_attempts`·`list_attempts_for_update` 가 공유하는 조회 — 순서 규칙은 `list_attempts`."""
+    return (
+        select(RecoveryAttempt)
+        .outerjoin(
+            RecoveryStrategyCatalog,
+            RecoveryStrategyCatalog.strategy_type == RecoveryAttempt.recovery_strategy_type,
+        )
+        .where(
+            RecoveryAttempt.execution_id == execution_id,
+            RecoveryAttempt.user_id == user_id,
+        )
+        .order_by(
+            RecoveryAttempt.created_at,
+            RecoveryAttempt.trigger_tag.is_(None),
+            RecoveryStrategyCatalog.display_priority,
+            RecoveryAttempt.id,
+        )
+    )
+
+
 class RecoveryRepo:
     """ExecutionEvent 조회 + RecoveryAttempt 영속화 + 전략 카탈로그."""
 
@@ -120,6 +141,41 @@ class RecoveryRepo:
         stmt = select(ExecutionEvent).where(
             ExecutionEvent.id == execution_id,
             ExecutionEvent.user_id == user_id,
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_execution_for_update(
+        self, user_id: UUID, execution_id: UUID
+    ) -> ExecutionEvent | None:
+        """회복 카드를 **만드는** 경로가 쓰는 잠금 읽기 — 같은 실행의 생성을 직렬화한다 (#481).
+
+        `generate` 는 "pending 이 있으면 그대로 반환" 이라는 멱등 계약을 갖지만, 그 계약이
+        **순차 호출에서만** 성립했다. 동시 요청 둘은 pending 조회를 나란히 통과한 뒤 각자
+        LLM 을 부르고 각자 세트를 INSERT 한다 — 실측(2026-09-16, main 358b231): 동시 2회 →
+        세트 2벌·LLM 2회, 동시 3회 → 3벌·3회. 오류는 안 난다(막을 제약이 없다).
+        브라우저에서도 dev StrictMode 재진입으로 pending 6행이 만들어졌고, prod 에서도
+        더블탭·여러 탭·재시도로 같은 교차가 난다.
+
+        그래서 **실행 행을 트랜잭션 동안 잠근다.** 뒤따르는 요청은 첫 트랜잭션이 커밋될
+        때까지 기다렸다가 pending 을 **다시 조회**해 그 세트를 그대로 반환한다
+        (serialize → re-check → reuse). 동시 요청에 새 409 를 만들지 않는 이유가 이것이다 —
+        사용자는 같은 세트를 받으면 되고, 회복 LLM 은 수 초가 걸려 짧은 타임아웃 잠금이면
+        정상 요청까지 실패로 만든다.
+
+        잠금 단위는 **실행 1건**이다. 같은 사용자의 다른 실패 실행은 서로 막지 않는다 —
+        `user_agent_lock`(user × agent, 짧은 타임아웃 후 409)을 그대로 쓰지 않는 이유다.
+
+        읽기 전용 조회(`get_execution`)에는 잠금을 붙이지 않는다 — 불필요한 잠금은 그 자체로
+        결함이다(`action_item_repo.get_by_id_for_update` 와 같은 관례, #368).
+        """
+        stmt = (
+            select(ExecutionEvent)
+            .where(
+                ExecutionEvent.id == execution_id,
+                ExecutionEvent.user_id == user_id,
+            )
+            .with_for_update()
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
@@ -429,22 +485,36 @@ class RecoveryRepo:
         3. `display_priority` — 카탈로그가 정한 순서. `select_strategies` 의 동점 처리와 같다.
         4. `id` — 위가 다 같아도 결과가 흔들리지 않게 하는 최종 고정핀.
         """
+        result = await self._session.execute(_attempts_stmt(user_id, execution_id))
+        return list(result.scalars().all())
+
+    async def list_attempts_for_update(
+        self, user_id: UUID, execution_id: UUID
+    ) -> list[RecoveryAttempt]:
+        """`list_attempts` + 카드 행 잠금 — 카드를 **결정하는** 경로(`/recovery/decisions`)가 쓴다.
+
+        결정은 "pending 이 남았나" 를 보고 채택·거절·스킵을 적는다. 잠금 없는 읽기면 동시
+        요청 둘이 같은 pending 을 나란히 보고 각자 적는다 — 수락 두 번이면 회복 ActionItem 이
+        두 개 생기고(`resulting_action_item_id` 는 뒤의 것만 가리켜 앞의 것은 고아 카드로 오늘
+        화면에 남는다), 수락과 「나중에」가 겹치면 **skipped 인데 회복 카드가 달린** 모순된
+        행이 커밋된다(ORM 은 바뀐 컬럼만 UPDATE 하므로 두 요청의 값이 행 안에서 섞인다).
+
+        `FOR UPDATE` 면 뒤 요청은 앞 트랜잭션이 커밋될 때까지 기다렸다가 **갱신된 행**을
+        받는다(READ COMMITTED). 그러면 pending 이 0건이라 기존 계약대로
+        `RECOVERY_ALREADY_DECIDED`(409)로 끝난다 — 새 에러 코드는 없다.
+
+        - 잠그는 건 **카드 행뿐**이다(`of=RecoveryAttempt`). 카탈로그 쪽은 외부 조인의
+          nullable 측이라 Postgres 가 잠금을 거부하고, 잠글 이유도 없다.
+        - 실행 행은 잠그지 않는다 — 그건 생성 잠금(`get_execution_for_update`, #481)이다.
+          결정이 그걸 잡으면 생성 중인 요청과 서로를 막는다.
+        - `populate_existing` — 같은 세션이 이 행들을 먼저 읽어 뒀더라도 identity map 의 옛
+          값이 아니라 잠근 뒤의 값으로 판정하게 한다. 이게 없으면 잠금은 걸려도 재확인이 무력하다.
+        - 행은 `list_attempts` 와 같은 순서로 잠긴다 — 동시 결정끼리 교착하지 않는다.
+        """
         stmt = (
-            select(RecoveryAttempt)
-            .outerjoin(
-                RecoveryStrategyCatalog,
-                RecoveryStrategyCatalog.strategy_type == RecoveryAttempt.recovery_strategy_type,
-            )
-            .where(
-                RecoveryAttempt.execution_id == execution_id,
-                RecoveryAttempt.user_id == user_id,
-            )
-            .order_by(
-                RecoveryAttempt.created_at,
-                RecoveryAttempt.trigger_tag.is_(None),
-                RecoveryStrategyCatalog.display_priority,
-                RecoveryAttempt.id,
-            )
+            _attempts_stmt(user_id, execution_id)
+            .with_for_update(of=RecoveryAttempt)
+            .execution_options(populate_existing=True)
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())

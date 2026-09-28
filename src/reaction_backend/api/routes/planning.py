@@ -743,7 +743,7 @@ async def get_weekly_plan(
     블록이 그 뒤 생긴 약속과 겹치면 `calendarConflict` 를 단다(5분 캐시·2초 상한). 이미 끝난
     블록은 표시하지 않는다 — 지난주 그리드에 배지가 차면 지금 볼 겹침이 묻힌다.
 
-    같은 조회로 읽은 약속 구간은 `days[].calendarBusy` 로도 싣는다(v2.31) — 예전엔 블록과 겹친
+    같은 조회로 읽은 약속 구간은 `days[].calendarBusy` 로도 싣는다(v2.34) — 예전엔 블록과 겹친
     약속만 배지로 드러나고, 빈 시간의 약속은 그리드 어디에도 없었다.
     """
     monday = _parse_week_start(week_start)

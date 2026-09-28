@@ -196,10 +196,18 @@ def _to_card(attempt: RecoveryAttempt, strategy: RecoveryStrategyCatalog | None)
 
 
 async def _get_execution_or_404(
-    user_id: UUID, raw_execution_id: str, repo: RecoveryRepo
+    user_id: UUID, raw_execution_id: str, repo: RecoveryRepo, *, for_update: bool = False
 ) -> ExecutionEvent:
+    """`for_update=True` 는 이 실행의 회복 생성을 트랜잭션 동안 직렬화한다 (#481).
+
+    카드를 **만드는** 경로(generate)만 잠근다 — 조회·결정·replan 은 읽기 그대로다.
+    """
     execution_id = _parse_id(raw_execution_id, _EXEC_PREFIX, _execution_not_found())
-    execution = await repo.get_execution(user_id, execution_id)
+    execution = (
+        await repo.get_execution_for_update(user_id, execution_id)
+        if for_update
+        else await repo.get_execution(user_id, execution_id)
+    )
     if execution is None:
         raise _execution_not_found()
     return execution
@@ -318,8 +326,14 @@ async def generate_recovery_proposals(
     """실패 컨텍스트 기반 회복 옵션 2~4개 생성 (LLM thinking 0 + 12s × 1회, 룰 fallback — ADR-0003 addendum).
 
     이미 pending 카드가 있으면 재생성하지 않고 그대로 반환한다 (중복 INSERT 방지).
+
+    ⚠️ **실행 행을 먼저 잠근다** (#481). 그 멱등이 순차 호출에서만 성립했다 — 동시 요청은
+    pending 조회를 나란히 통과해 각자 LLM 을 부르고 각자 세트를 INSERT 했다. 잠금은 pending
+    판정 **앞**이어야 하고(뒤면 이미 교차한다) 커밋까지 유지돼야 한다(INSERT 직전만 막으면
+    중복 LLM 호출과 rate 소비를 못 막는다). 뒤따르는 요청은 기다렸다가 pending 을 다시 보고
+    같은 세트를 반환한다 — 동시 호출도 멱등으로 수렴시키므로 새 409 는 만들지 않는다.
     """
-    execution = await _get_execution_or_404(user.id, body.execution_id, repo)
+    execution = await _get_execution_or_404(user.id, body.execution_id, repo, for_update=True)
     if execution.completion_status not in _ELIGIBLE_STATUSES:
         raise ApiError(
             ErrorCode.RECOVERY_NOT_ELIGIBLE,
@@ -764,9 +778,15 @@ async def decide_recovery(
       그룹이 DOWNSCOPE/CARRY_OVER 면 새 ActionItem(source=recovery_*) 생성 — 원본
       카드 status 는 변경하지 않는다 (혈통: parent_action_item_id).
     - `skipped` → 모든 pending 카드 skipped ("오늘은 쉬기").
+
+    ⚠️ **카드 행을 잠그고 읽는다.** 더블탭·재시도로 결정 두 개가 겹치면 둘 다 같은 pending
+    을 보고 각자 적었다 — 회복 ActionItem 이 두 개 생기거나, 수락과 「나중에」가 섞인 행이
+    커밋됐다. 뒤 요청은 앞 요청의 커밋을 기다렸다가 pending 0건을 보고 409 로 끝난다.
+    같은 Idempotency-Key 라도 미들웨어는 **끝난** 응답만 재생하므로 겹친 요청은 둘 다 여기
+    까지 온다. 실행 행(생성 잠금, #481)은 잡지 않는다 — 생성 중인 요청과 서로 막지 않게.
     """
     execution = await _get_execution_or_404(user.id, body.execution_id, repo)
-    attempts = await repo.list_attempts(user.id, execution.id)
+    attempts = await repo.list_attempts_for_update(user.id, execution.id)
     pending = [a for a in attempts if a.user_decision == "pending"]
     if not pending:
         raise ApiError(
@@ -964,8 +984,13 @@ async def _load_replan_context(
     raw_execution_id: str,
     repo: RecoveryRepo,
     action_repo: ActionItemRepo,
+    *,
+    lock_recovery_action: bool = False,
 ) -> tuple[ExecutionEvent, RecoveryAttempt, ActionItem, ActionItem]:
-    """(execution, 수락카드, 원본 ActionItem, 회복 ActionItem) 를 한 번에 로드."""
+    """(execution, 수락카드, 원본 ActionItem, 회복 ActionItem) 를 한 번에 로드.
+
+    `lock_recovery_action=True` 는 회복 카드 행을 잠근다 — 블록을 **만드는** approve 만 쓴다.
+    """
     execution = await _get_execution_or_404(user_id, raw_execution_id, repo)
     attempts = await repo.list_attempts(user_id, execution.id)
     attempt = _accepted_replan_attempt(attempts)
@@ -974,7 +999,11 @@ async def _load_replan_context(
     if original is None:
         raise _execution_not_found()
     assert attempt.resulting_action_item_id is not None  # _accepted_replan_attempt 보장
-    recovery_action = await action_repo.get_by_id(user_id, attempt.resulting_action_item_id)
+    recovery_action = (
+        await action_repo.get_by_id_for_update(user_id, attempt.resulting_action_item_id)
+        if lock_recovery_action
+        else await action_repo.get_by_id(user_id, attempt.resulting_action_item_id)
+    )
     if recovery_action is None:
         raise _no_replan()
     return execution, attempt, original, recovery_action
@@ -1055,9 +1084,13 @@ async def approve_replan(
     회복 ActionItem 을 `scheduled_block`(source='recovery') 으로 배치한다. 멱등:
     이미 배치돼 있으면 같은 block 을 반환(중복 INSERT 방지). 원본 `action_item.status`
     는 변경하지 않는다 (AGENTS.md §2 — Resilience 지표 전제).
+
+    ⚠️ 그 멱등은 **회복 카드 행을 잠근 뒤** 판정한다. 잠금 없이는 동시 요청 둘이 "블록
+    없음"을 나란히 보고 각자 INSERT 했다(`create_block` 은 겹침 검사를 안 한다). 뒤 요청은
+    앞 요청의 커밋을 기다렸다가 그 블록을 보고 같은 응답을 돌려준다 — 새 에러는 없다.
     """
     execution, _attempt, original, recovery_action = await _load_replan_context(
-        user.id, execution_id, repo, action_repo
+        user.id, execution_id, repo, action_repo, lock_recovery_action=True
     )
 
     block = await _existing_replan_block(user.id, recovery_action.id, block_repo)

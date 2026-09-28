@@ -466,7 +466,7 @@ class WeeklyFixedSchedule(CamelModel):
 
 
 class WeeklyCalendarBusy(CamelModel):
-    """그날의 Google 캘린더 일정 한 칸 — 바쁜 **구간만** (v2.31, additive).
+    """그날의 Google 캘린더 일정 한 칸 — 바쁜 **구간만** (v2.34, additive).
 
     제목·장소는 없다 — `calendar.freebusy` 스코프라 서버도 모른다(ADR-0009 D4). 블록과 겹치든
     안 겹치든 싣는다. 자정을 넘는 일정은 그날 안의 조각으로 나뉘어 온다(`fixedSchedules` 와 같다).
