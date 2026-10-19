@@ -25,7 +25,16 @@ def upgrade() -> None:
         sa.Column("first_step_encrypted", sa.Text()),
         *[
             sa.Column(name, sa.DateTime(timezone=True))
-            for name in ("viewed_at", "selected_at", "started_at", "step_completed_at", "ended_at")
+            for name in (
+                "viewed_at",
+                "selected_at",
+                "started_at",
+                "step_completed_at",
+                "ended_at",
+                "clicked_at",
+                "start_failed_at",
+                "left_at",
+            )
         ],
         sa.Column(
             "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()

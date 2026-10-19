@@ -182,7 +182,7 @@ async def start(
         settle_pause(execution, pause, now=now, resumed=True)
     if attempt.started_at is None:
         attempt.first_step_encrypted = encrypt_memo(text)
-        attempt.selected_at = now
+        attempt.selected_at = attempt.selected_at or now
         attempt.started_at = now
     if not attempt.first_step_encrypted:
         attempt.first_step_encrypted = encrypt_memo(text)
@@ -207,6 +207,14 @@ async def record(
     if body.event == "viewed":
         if not attempt.ended_at and await blocked(action, executions) is None:
             attempt.viewed_at = attempt.viewed_at or now
+    elif body.event in ("selected", "start_clicked", "start_failed"):
+        field = {
+            "selected": "selected_at",
+            "start_clicked": "clicked_at",
+            "start_failed": "start_failed_at",
+        }[body.event]
+        if not attempt.ended_at:
+            setattr(attempt, field, getattr(attempt, field) or now)
     elif body.event == "first_step_completed":
         if attempt.step_completed_at is None:
             execution = (
@@ -224,6 +232,7 @@ async def record(
             attempt.step_completed_at = now
         # No check-in, action status, recovery completion, or reward mutation.
     else:
+        attempt.left_at = attempt.left_at or now
         if attempt.execution_id:
             execution = await executions.get_by_id(user.id, attempt.execution_id)
             if (

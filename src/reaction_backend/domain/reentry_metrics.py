@@ -23,7 +23,7 @@ def summarize(
     rows: Iterable[Observation], *, as_of: datetime, window_minutes: int = 10
 ) -> dict[str, int]:
     first: dict[str, Observation] = {}
-    for row in sorted(rows, key=lambda r: (r["created_at"], r["attempt_id"])):
+    for row in sorted(rows, key=lambda r: (r["viewed_at"] or as_of, r["attempt_id"])):
         if row["entry_kind"] in ("restart", "resume") and row["viewed_at"]:
             first.setdefault(row["user_id"], row)
     eligible = starts = steps = pending = 0

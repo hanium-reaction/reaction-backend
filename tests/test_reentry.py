@@ -164,3 +164,24 @@ def test_existing_paused_execution_is_server_authority(setup_reentry):
     assert p["entryKind"] == "resume"
     assert p["executionStatus"] == "paused"
     assert start(client, p["attemptId"]).json()["executionId"] == s["executionId"]
+
+
+def test_client_events_are_distinct_and_idempotent(setup_reentry, fake_execution_repo):
+    client, action, repo = setup_reentry
+    aid = prepare(client, action).json()["attemptId"]
+    for name in ("viewed", "selected", "start_clicked", "start_failed", "leave"):
+        assert event(client, aid, name).status_code == 200
+    record = next(iter(repo.items.values()))
+    assert (
+        record.viewed_at
+        and record.selected_at
+        and record.clicked_at
+        and record.start_failed_at
+        and record.left_at
+    )
+    assert record.started_at is None
+    assert record.step_completed_at is None
+    assert len(fake_execution_repo._executions) == 0
+    clicked = record.clicked_at
+    assert event(client, aid, "start_clicked").status_code == 200
+    assert record.clicked_at == clicked

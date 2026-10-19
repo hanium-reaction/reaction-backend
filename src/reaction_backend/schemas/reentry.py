@@ -15,7 +15,9 @@ class ReentryStart(CamelModel):
 
 
 class ReentryEvent(CamelModel):
-    event: Literal["viewed", "first_step_completed", "leave"]
+    event: Literal[
+        "viewed", "selected", "start_clicked", "start_failed", "first_step_completed", "leave"
+    ]
 
 
 class ReentryState(CamelModel):

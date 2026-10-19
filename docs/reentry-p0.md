@@ -20,7 +20,7 @@
 
 ## 계측
 
-created_at은 준비 요청, viewed_at은 적격 실제 노출, selected_at/started_at은 서버에서 확인한 선택/시작이다.
+created_at은 준비 요청, viewed_at은 적격 실제 노출, selected_at은 선택 확인, clicked_at은 시작 클릭 수신, start_failed_at은 클라이언트 시작 오류 수신, left_at은 명시적 이탈 수신, started_at은 서버 실행 저장 성공이다. 사건 버전은 reentry.v1, 조건은 단일 파일럿이며 무작위 배정은 없다. 각 시도·사건의 최초 서버 수신 시각만 보관한다. 재전송 횟수와 자유 입력은 분석 로그에 넣지 않는다. 브라우저 강제 종료/완전한 오프라인 이탈은 관측할 수 없으며 성공으로 추정하지 않는다.
 step_completed_at은 자기 보고다. 기존 execution 결과에 연결해 전체 완료를 구분할 수 있다.
 `scripts/reentry_metrics.py`는 읽기 전용 기술 통계를 출력한다. 사용자별 최초 적격 노출,
 10분 관찰 창(분석용 초깃값), 미착수 포함, 관찰 창 미완료 분리를 실행 테스트로 검증한다.
