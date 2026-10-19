@@ -67,6 +67,7 @@ from reaction_backend.db.models.user import User
 from reaction_backend.db.models.user_consent import UserConsent
 
 __all__ = [
+    "ReentryAttempt",
     "ActionItem",
     "BehavioralProfile",
     "CalendarConnection",
@@ -101,3 +102,5 @@ __all__ = [
     "User",
     "UserConsent",
 ]
+
+from reaction_backend.db.models.reentry_attempt import ReentryAttempt

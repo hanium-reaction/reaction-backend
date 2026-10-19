@@ -28,6 +28,8 @@ _SRC = Path(reaction_backend.__file__).parent
 _ALLOWED_STATUS_WRITES = {
     # [▶시작] — 카드를 in_progress 로. 체크인 lifecycle 의 시작.
     ("api/routes/today.py", 'action.status = "in_progress"'),
+    # P0: explicit user-start lifecycle, never prepare/first-step reporting or a recovery decision.
+    ("api/routes/reentry.py", 'action.status = "in_progress"'),
     # Quick Check-in 4칩 — 사용자가 직접 고른 결과를 반영.
     ("api/routes/today.py", "action.status = body.completion_status"),
     # 저녁 일괄 회고 — check-in 과 동일 전이를 재현(사용자 입력 기반).
