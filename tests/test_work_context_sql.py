@@ -65,6 +65,7 @@ async def test_quick_resource_execution_note_full_flow(context_client):
     record = await db.get(ActionResource, UUID(a["actionId"].removeprefix("action_")))
     assert "private-notes" not in record.content_encrypted
     p = await c.post(f"/reentry/actions/{a['actionId']}/prepare", json={"requestId": str(uuid4())})
+    assert p.json()["estimatedMinutes"] == 10
     attempt = p.json()["attemptId"]
     started = await c.post(f"/reentry/attempts/{attempt}/start", json={"firstStep": "첫 문장"})
     eid = started.json()["executionId"]
@@ -138,3 +139,55 @@ async def test_other_user_cannot_read_or_modify_context(context_client):
         await c.put(path + "/resource", json={"url": "https://example.org", "label": "no"})
     ).status_code == 404
     assert (await c.post(path + "/resource/unlink")).status_code == 404
+
+
+async def test_evidence_window_and_deduplicated_completion(context_client):
+    from datetime import datetime, time, timedelta
+
+    from reaction_backend.db.models.execution_event import ExecutionEvent
+    from reaction_backend.db.models.reentry_attempt import ReentryAttempt
+    from reaction_backend.repositories.work_context_repo import WorkContextRepo
+    from reaction_backend.schemas.common import KST
+
+    c, db, user = context_client
+    a, _ = await quick(c)
+    prepared = (
+        await c.post(f"/reentry/actions/{a['actionId']}/prepare", json={"requestId": str(uuid4())})
+    ).json()
+    result = await c.post(
+        f"/reentry/attempts/{prepared['attemptId']}/start", json={"firstStep": "첫 문장"}
+    )
+    assert result.status_code == 200, result.text
+    eid = UUID(result.json()["executionId"].removeprefix("exec_"))
+    execution = await db.get(ExecutionEvent, eid)
+    start = datetime.combine(now_kst().date(), time.min, tzinfo=KST)
+    end = start + timedelta(days=7)
+    execution.completion_status = "done"
+    execution.actual_end_at = start + timedelta(hours=1)
+    for offset, kind in [
+        (0, "restart"),
+        (1, "resume"),
+        (7, "restart"),
+        (-1, "restart"),
+        (0, "initial"),
+    ]:
+        stamp = start + timedelta(days=offset)
+        db.add(
+            ReentryAttempt(
+                id=uuid4(),
+                user_id=user.id,
+                action_item_id=execution.action_item_id,
+                execution_id=eid,
+                entry_kind=kind,
+                viewed_at=stamp,
+                started_at=stamp,
+                step_completed_at=stamp,
+                ended_at=stamp,
+            )
+        )
+    await db.flush()
+    repo = WorkContextRepo(db)
+    assert await repo.evidence(user.id, start, end) == (2, 2, 2, 1)
+    execution.actual_end_at = end
+    await db.flush()
+    assert await repo.evidence(user.id, start, end) == (2, 2, 2, 0)

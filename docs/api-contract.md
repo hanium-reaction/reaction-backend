@@ -1529,3 +1529,5 @@ All endpoints require the existing authenticated user. Objects owned by another 
 - Recovery proposals optionally expose `strategyLevel` and `selectionBasis` from existing escalation logic; rejected suggestions are not treated as failed executions.
 
 Migration `ab1900100002` follows P0 `ab1900100001`. Adds action_resources and execution_notes only. Privacy anonymization clears both payloads. Downgrade refuses populated tables. Frontend activation remains gated by `VITE_REENTRY_P0=true`, after backend migration/API readiness. No payment, payout, ad SDK, or production deployment in this change.
+
+ReentryState additionally exposes `estimatedMinutes` from the stored action so the focus timer does not invent a fixed duration.

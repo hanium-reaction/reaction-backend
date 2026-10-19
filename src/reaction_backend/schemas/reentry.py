@@ -32,6 +32,7 @@ class ReentryState(CamelModel):
     started_at: KstDatetime | None
     step_completed_at: KstDatetime | None
     ended_at: KstDatetime | None
+    estimated_minutes: int | None = None
     elapsed_seconds: int
     can_start: bool
     blocked_reason: str | None
