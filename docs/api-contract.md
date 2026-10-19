@@ -1515,3 +1515,19 @@ elapsedSeconds, canStart, blockedReason. 시각은 KST, 없는 정보는 null이
 초기 prepare는 저장된 firstStep이 없으면 null을 준다. 행동 문구를 지어내지 않는다.
 404는 미존재/타 사용자/보관 과제, 409 COMMON_VALIDATION_ERROR는 현재 상태에서 수행 불가,
 422는 요청 형식 오류다. canStart는 표시용이며 서버가 쓰기 때 다시 검증한다.
+
+
+## Work context / P1 (2026-10-19)
+
+All endpoints require the existing authenticated user. Objects owned by another user or archived actions return 404. Errors use the existing envelope.
+
+- POST `/work-context/quick-action`: `{requestId: UUID, title, firstStep, attemptMinutes: 1..120, goalId?: UUID}` → ActionDetail. Per-user lock and deterministic action ID make retries idempotent; changed payload with the same request ID returns 409. Only explicitly chosen attempt duration is stored; no deadline, interview completion, or onboarding completion is inferred.
+- GET/PUT `/work-context/actions/{action_id}/resource`: `{resource: {url,label} | null}`. PUT body is `{url,label}`; only HTTP(S) URLs without credentials are allowed. Content is encrypted, never fetched by the server. POST suffix `/unlink` clears encrypted content without deleting the row or source material.
+- GET/PUT `/work-context/executions/{execution_id}/note`: `{memo: string | null}`. PUT takes `{memo: string}` (max 300); empty clears. Independent of failure tags, execution status, rewards, and completion. GET `/work-context/actions/{action_id}/last-note` reads the latest saved note for that action, including explicit clearing.
+- GET/PUT `/work-context/preference`: `{preference: smaller_step | context_first | rest | null}`. Saves explicit user preference only; null revokes. Never approves a schedule or claims learned efficacy.
+- GET `/work-context/evidence?week_start=YYYY-MM-DD`: seven KST calendar days, end-exclusive. Counts restart/resume attempts viewed in that window, their starts, first-step self-reports, and distinct completed executions within that window. Initial attempts excluded; cross-week completion is not credited to an earlier cohort. `evidenceKind=self_report`; these are not verified productivity or reward eligibility.
+- Recovery proposals optionally expose `strategyLevel` and `selectionBasis` from existing escalation logic; rejected suggestions are not treated as failed executions.
+
+Migration `ab1900100002` follows P0 `ab1900100001`. Adds action_resources and execution_notes only. Privacy anonymization clears both payloads. Downgrade refuses populated tables. Frontend activation remains gated by `VITE_REENTRY_P0=true`, after backend migration/API readiness. No payment, payout, ad SDK, or production deployment in this change.
+
+ReentryState additionally exposes `estimatedMinutes` from the stored action so the focus timer does not invent a fixed duration.

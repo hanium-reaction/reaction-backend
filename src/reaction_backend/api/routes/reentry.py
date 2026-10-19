@@ -64,6 +64,7 @@ async def state(a: ReentryAttempt, action: ActionItem, executions: ExecutionRepo
         attempt_id=a.id,
         action_id=f"action_{action.id}",
         title=action.title,
+        estimated_minutes=action.estimated_minutes,
         action_status=action.status,
         entry_kind=a.entry_kind,
         first_step=decrypt_memo(a.first_step_encrypted) if a.first_step_encrypted else None,

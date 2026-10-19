@@ -396,6 +396,8 @@ async def generate_recovery_proposals(
             execution_id=body.execution_id,
             cards=[_to_card(a, catalog.get(a.recovery_strategy_type)) for a in pending],
             ai_source=_ai_source(all(a.llm_fallback_used for a in pending)),
+            strategy_level=escalation_level,
+            selection_basis=_selection_basis(escalation_level),
             recovery_mode=recovery_mode,
             personalization_skipped=_personalization_skipped(escalation_level),
         )
@@ -543,6 +545,8 @@ async def generate_recovery_proposals(
         execution_id=body.execution_id,
         cards=[_to_card(a, catalog.get(a.recovery_strategy_type)) for a in attempts],
         ai_source=_ai_source(llm_fell_back),
+        strategy_level=escalation_level,
+        selection_basis=_selection_basis(escalation_level),
         recovery_mode=recovery_mode,
         personalization_skipped=_personalization_skipped(escalation_level),
     )
@@ -1123,3 +1127,11 @@ async def approve_replan(
         start_at=block.start_at,
         end_at=block.end_at,
     )
+
+
+def _selection_basis(level: EscalationLevel | None) -> str:
+    if level == "L3":
+        return "같은 목표의 실행 결과와 이전 제안 선택 기록을 바탕으로 범위·시간·보류를 함께 보여드려요. 제안 거절은 실행 실패와 별도 기록이에요."
+    if level == "L2":
+        return "저장된 실행·제안 이력을 바탕으로 다른 시작 단서도 제안해요. 상황에 맞지 않으면 다른 방법을 고르거나 쉬어도 괜찮아요."
+    return "현재 기록된 상황에 맞춘 선택지예요. 가장 효과적인 방법이라고 확정한 것은 아니에요."

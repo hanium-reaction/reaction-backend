@@ -40,6 +40,7 @@ from reaction_backend.api.routes import (
     settings,
     time_policies,
     today,
+    work_context,
 )
 from reaction_backend.config import get_settings
 from reaction_backend.observability.correlation import CorrelationMiddleware
@@ -151,6 +152,7 @@ def create_app() -> FastAPI:
         fixed_schedules.router,
         today.router,
         reentry.router,
+        work_context.router,
         reflection.router,
         recovery.router,
         review.router,
