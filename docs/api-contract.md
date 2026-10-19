@@ -1498,3 +1498,20 @@ share 합이 1.0 이 안 될 수 있다. 실패 태그가 하나도 없으면 �
 3. 기존 endpoint의 호환 깨는 변경은 `/v2/` prefix 신설 후 단계 deprecate
 4. 에러 코드 신설 시 §1.4 표 갱신
 5. 응답 envelope·에러·Idempotency·시간 규약 변경은 [ADR-0002](decisions/0002-api-contract-freeze.md) 수정 PR 경유
+
+
+## P0 사용자 주도 첫 행동 — 추가 계약
+
+기존 envelope/에러 코드 체계는 유지한다. 모든 경로는 인증·사용자 소유권을 확인한다.
+상세 상태/출시/검증은 [reentry-p0.md](reentry-p0.md)를 따른다.
+
+- `POST /reentry/actions/{action_id}/prepare`: `{requestId: UUID}`. 과제 잠금 아래 같은 요청/활성 시도를 재사용한다. 요청 ID는 작업별로 새로 만들고 재시도에서 유지한다.
+- `POST /reentry/attempts/{attempt_id}/start`: `{firstStep: string(1..500)}`. 명시적 선택 후 기존 실행을 재사용/생성한다. 이후 재전송은 최초 합의한 행동을 유지한다.
+- `POST /reentry/attempts/{attempt_id}/events`: `{event: viewed | first_step_completed | leave}`. 시각은 서버에서 기록하며 첫 행동 수행은 전체 과제 완료가 아니다.
+
+응답은 `ReentryState`: attemptId, actionId, title, actionStatus, entryKind,
+firstStep, executionId, executionStatus, startedAt, stepCompletedAt, endedAt,
+elapsedSeconds, canStart, blockedReason. 시각은 KST, 없는 정보는 null이다.
+초기 prepare는 저장된 firstStep이 없으면 null을 준다. 행동 문구를 지어내지 않는다.
+404는 미존재/타 사용자/보관 과제, 409 COMMON_VALIDATION_ERROR는 현재 상태에서 수행 불가,
+422는 요청 형식 오류다. canStart는 표시용이며 서버가 쓰기 때 다시 검증한다.

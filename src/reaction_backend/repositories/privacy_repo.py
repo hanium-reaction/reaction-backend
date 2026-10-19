@@ -60,6 +60,7 @@ from reaction_backend.db.models.notification_setting import NotificationSetting
 from reaction_backend.db.models.period_summary import PeriodSummary
 from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.recovery_attempt import RecoveryAttempt
+from reaction_backend.db.models.reentry_attempt import ReentryAttempt
 from reaction_backend.db.models.user import User
 from reaction_backend.db.session import get_db
 from reaction_backend.integrations.google_calendar import oauth, token_store
@@ -91,6 +92,11 @@ class PrivacyRepo:
     async def anonymize_user(self, user_id: UUID) -> int:
         """익명화 마스킹 — 암호화 컬럼 + 그 평문 사본 + 자유서술. 변경 행 수 반환."""
         masked = 0
+        masked += await self._run(
+            update(ReentryAttempt)
+            .where(ReentryAttempt.user_id == user_id)
+            .values(first_step_encrypted=None)
+        )
         masked += await self._run(
             update(CalendarConnection)
             .where(CalendarConnection.user_id == user_id)
