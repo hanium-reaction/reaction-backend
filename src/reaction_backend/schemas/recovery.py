@@ -99,6 +99,8 @@ class RecoveryProposalsResponse(DraftMixin):
 
     execution_id: str
     cards: list[RecoveryCard]
+    strategy_level: str | None = None
+    selection_basis: str | None = None
     recovery_mode: RecoveryMode = "standard"
     # 개인화(LLM 문구 다듬기)를 **일부러** 건너뛴 세트인가 — L2(단서 전환)·L3(재협상)는 제품
     # 규칙상 LLM 을 부르지 않는다(근거 대장 §5.2). 그래도 `aiSource` 는 계약 동결 값이라

@@ -104,3 +104,4 @@ __all__ = [
 ]
 
 from reaction_backend.db.models.reentry_attempt import ReentryAttempt
+from reaction_backend.db.models.work_context import ActionResource, ExecutionNote  # noqa: F401

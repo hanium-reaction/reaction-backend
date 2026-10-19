@@ -62,6 +62,7 @@ from reaction_backend.db.models.plan_draft import PlanDraft
 from reaction_backend.db.models.recovery_attempt import RecoveryAttempt
 from reaction_backend.db.models.reentry_attempt import ReentryAttempt
 from reaction_backend.db.models.user import User
+from reaction_backend.db.models.work_context import ActionResource, ExecutionNote
 from reaction_backend.db.session import get_db
 from reaction_backend.integrations.google_calendar import oauth, token_store
 from reaction_backend.safety.encryption import ANONYMIZED_SENTINEL
@@ -92,6 +93,16 @@ class PrivacyRepo:
     async def anonymize_user(self, user_id: UUID) -> int:
         """익명화 마스킹 — 암호화 컬럼 + 그 평문 사본 + 자유서술. 변경 행 수 반환."""
         masked = 0
+        masked += await self._run(
+            update(ActionResource)
+            .where(ActionResource.user_id == user_id)
+            .values(content_encrypted=None)
+        )
+        masked += await self._run(
+            update(ExecutionNote)
+            .where(ExecutionNote.user_id == user_id)
+            .values(memo_encrypted=None)
+        )
         masked += await self._run(
             update(ReentryAttempt)
             .where(ReentryAttempt.user_id == user_id)
