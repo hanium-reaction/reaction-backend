@@ -140,10 +140,14 @@ def build_ultimate_outcome(
 
     빈 필수 슬롯은 빈 문자열/빈 리스트로 두고 `unresolved_slots` 에 키를 남긴다 — `GoalCandidate`
     처럼 `min_length=1` 계약이 없어 placeholder sentinel 이 필요 없다(설계서 §5.4 근거 1).
+    사용자가 **스킵한** 슬롯도 같은 자리에 남는다(#499) — 값이 비었든 기본값이 채워졌든
+    "사용자가 말한 값이 아니다" 는 같다.
     """
     # 세는 규칙은 계획 인터뷰와 **같은 함수** — ultimate.* 9개엔 지금 유도 슬롯이 없어
     # 결과가 같지만, 판정이 갈릴 자리를 애초에 만들지 않는다(#weekly_time 이 그렇게 샜다).
-    unresolved = interview_adapter.open_required_keys(ULTIMATE_REQUIRED_SLOT_KEYS, slot_answers)
+    unresolved = interview_adapter.defaulted_required_keys(
+        ULTIMATE_REQUIRED_SLOT_KEYS, slot_answers
+    )
     return UltimateGoalOutcome(
         session_id=session_id,
         generated_at=now_kst(),
